@@ -43,6 +43,16 @@ diagnostics = importlib.util.module_from_spec(diagnostic_spec)
 diagnostic_spec.loader.exec_module(diagnostics)
 
 
+def copy_jolt_overlay_inputs(root):
+    # The fixture supplies its own vendor declarations; copy the other inputs
+    # hashed by the real Jolt overlay identity, including its Python imports.
+    for relative in ("tools/ci/jolt_startup.py", "tools/ci/path_safety.py", "cmake/jolt_startup.cmake",
+                     "cmake/patches/jolt-startup.json", "cmake/patches/jolt-startup.patch"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+
+
 class ContainmentTests(unittest.TestCase):
     def test_lexical_boundaries_match_explicit_table_and_pathlib(self):
         tables = (
@@ -354,13 +364,21 @@ class OfflineDependenciesTests(unittest.TestCase):
                    dest or self.root / "scratch/copied sources",
                    init or self.root / "scratch/initial cache.cmake")
 
-    def test_declared_lock_matches_all_eighteen_dependencies(self):
+    def test_declared_lock_matches_generic_dependencies_and_owned_rmlui(self):
         declared = deps.declarations(ROOT)
-        self.assertEqual(set(declared), set("entt glm glfw glad nlohmann_json joltphysics freetype rmlui soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream".split()))
+        self.assertEqual(set(declared), set("entt glm glfw glad nlohmann_json joltphysics freetype soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream".split()))
         committed = json.loads((ROOT / "tools/ci/deps-lock.json").read_text())
+        self.assertEqual(committed, deps.unresolved_lock(ROOT))
         for name, expected in declared.items():
             for key, value in expected.items():
                 self.assertEqual(committed["dependencies"][name][key], value)
+        manifest = json.loads((ROOT / "vendor/rmlui/rmlui-6.1-source.json").read_bytes())
+        cmake = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8")
+        self.assertIn(f'set(_rmlui_identity "{manifest["source_identity"]}")', cmake)
+        self.assertIn('vendor/rmlui/rmlui-6.1-source.json', cmake)
+        self.assertIn('tools/ci/rmlui_source.py', cmake)
+        self.assertIn('NOT "${FETCHCONTENT_SOURCE_DIR_RMLUI}" STREQUAL ""', cmake)
+        self.assertIn('preflight --root "${CMAKE_BINARY_DIR}" ${_rmlui_disconnected}', cmake)
 
     def test_unresolved_lock_refuses_verify_and_stage_without_writes(self):
         self.lock.write_text(json.dumps(deps.unresolved_lock(self.root)))
@@ -474,11 +492,7 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def test_stage_all_real_declaration_overrides(self):
         (self.root / "vendor/CMakeLists.txt").write_text((ROOT / "vendor/CMakeLists.txt").read_text())
-        for relative in ("tools/ci/jolt_startup.py", "tools/ci/path_safety.py", "cmake/jolt_startup.cmake",
-                         "cmake/patches/jolt-startup.json", "cmake/patches/jolt-startup.patch"):
-            target = self.root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / relative, target)
+        copy_jolt_overlay_inputs(self.root)
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
         for name in lock["dependencies"]:
@@ -489,7 +503,8 @@ class OfflineDependenciesTests(unittest.TestCase):
         with patch.object(deps, "verify", return_value=lock):
             self.stage()
         text = (self.root / "scratch/initial cache.cmake").read_text()
-        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 18)
+        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 17)
+        self.assertNotIn("FETCHCONTENT_SOURCE_DIR_RMLUI", text)
         for name in lock["dependencies"]:
             self.assertIn(f"FETCHCONTENT_SOURCE_DIR_{name.upper()} ", text)
 
@@ -1974,6 +1989,54 @@ class CachedGitSafetyTests(unittest.TestCase):
             self.assertEqual(self.lock.read_bytes(), lock)
             self.assertFalse((self.root / "scratch/staged").exists())
             self.assertFalse((self.root / "scratch/init.cmake").exists())
+
+    def test_generic_stage_cli_verifies_all_seventeen_sources_without_rmlui_override(self):
+        template = json.loads((ROOT / "tools/ci/deps-lock.json").read_bytes())
+        names = set(template["dependencies"])
+        self.assertEqual(names, set(deps.declarations(ROOT)))
+        self.assertEqual(len(names), 17)
+        declarations = []
+        for name in sorted(names):
+            source = self.cache / name
+            shutil.copytree(self.template_source, source)
+            declarations.append(f"FetchContent_Declare({name} GIT_REPOSITORY https://example.org/{name}.git GIT_TAG fixture)")
+            if name == "glad":
+                for relative in ("glad/__main__.py", "glad/files/gl.xml", "glad/files/khrplatform.h"):
+                    path = source / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("fixture\n")
+        (self.root / "vendor/CMakeLists.txt").write_text("\n".join(declarations))
+        copy_jolt_overlay_inputs(self.root)
+        lock = deps.unresolved_lock(self.root)
+        lock["status"] = "resolved"
+        for name, entry in lock["dependencies"].items():
+            entry.update(commit=deps.head(self.cache / name, self.cache),
+                         sha256=deps.source_digest(self.cache / name), submodules={})
+        self.lock.write_text(json.dumps(lock))
+        before = self.cache_state()
+        argv = [sys.executable, "-I", "-B", str(ROOT / "tools/ci/offline_deps.py"),
+                "stage", "--root", str(self.root), "--cache", str(self.cache), "--lock", str(self.lock)]
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = (self.root / "scratch/offline-init.cmake").read_text(encoding="utf-8")
+        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 17)
+        for name in names:
+            self.assertIn(f"FETCHCONTENT_SOURCE_DIR_{name.upper()} ", text)
+        self.assertNotIn("FETCHCONTENT_SOURCE_DIR_RMLUI", text)
+        self.assertEqual(self.cache_state(), before)
+        lock["dependencies"]["rmlui"] = dict(lock["dependencies"]["entt"])
+        self.lock.write_text(json.dumps(lock))
+        result = subprocess.run([*argv, "--dest", "scratch/refused", "--init", "scratch/refused.cmake"],
+                                capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lock dependency set differs", result.stderr)
+        result = subprocess.run([*argv[:4], "verify", *argv[5:]],
+                                capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lock dependency set differs", result.stderr)
+        self.assertFalse((self.root / "scratch/refused").exists())
+        self.assertFalse((self.root / "scratch/refused.cmake").exists())
+        self.assertEqual(self.cache_state(), before)
 
     def test_fixture_copies_are_independent_without_git_setup(self):
         # This fails if per-test setup starts Git again. The actual verifier
@@ -4685,7 +4748,6 @@ class CaseProgressRunner(_LifecycleRunner):
 
 # Keep launch-heavy Git cases and the real commit-boundary regression together,
 # leaving room for slower process launches in the remaining Windows partitions.
-OFFLINE_PARTITIONS = ("0", "1", "2")
 OFFLINE_CLASS_PARTITIONS = {
     "ContainmentTests": "0",
     "GitConfigScannerTests": "0",
@@ -4704,6 +4766,10 @@ OFFLINE_CASE_PARTITIONS = {
     "CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": "2",
     "CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": "2",
 }
+
+
+OFFLINE_PARTITIONS = tuple(sorted(set(OFFLINE_CLASS_PARTITIONS.values()) |
+                                  set(OFFLINE_CASE_PARTITIONS.values()), key=int))
 
 
 def offline_cases(suite):
@@ -4780,8 +4846,20 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         spec.loader.exec_module(shards)
         cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
             ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
-        names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
-        self.assertEqual(len(names), 21)
+        names = re.findall(r"NAME ((?:ChangedTranslationUnits|OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
+        # Routing tables, not the CMake names being checked, define the roster.
+        expected = []
+        for script, prefix, variable in (
+                ("test_changed_tus.py", "ChangedTranslationUnitsContract", "CHANGED_TUS_PARTITIONS"),
+                ("test_offline_deps.py", "OfflineDependenciesContract", "OFFLINE_PARTITIONS"),
+                ("test_workflow_policy.py", "WorkflowPolicyContract", "POLICY_PARTITIONS"),
+                ("test_ctest_shards.py", "CTestShardContract", "CTEST_SHARD_PARTITIONS")):
+            spec = importlib.util.spec_from_file_location("contract_roster", ROOT / "tools/ci" / script)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            expected.extend(prefix + ("" if part == "0" else "Part" + part)
+                            for part in getattr(module, variable))
+        self.assertCountEqual(names, expected)
         self.assertEqual(len(set(names)), len(names))
         for profile in shards.PROFILES:
             # The real inventory floor bounds this synthetic roster.
@@ -4832,7 +4910,7 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "3", "01", "0/3", None, 0):
+        for invalid in ("", "-1", str(max(map(int, OFFLINE_PARTITIONS)) + 1), "01", "0/3", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 offline_partition_suite(loader, module, invalid)
         complete = list(offline_cases(loader.loadTestsFromModule(module)))
@@ -4894,7 +4972,7 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
                 self.assertEqual(offline_main(["--partition", partition, "--list-tests"]), 0)
                 expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
-        for argv in (["--partition"], ["--partition", "3"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", str(max(map(int, OFFLINE_PARTITIONS)) + 1)], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "CachedGitSafetyTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:

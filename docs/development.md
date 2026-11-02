@@ -17,7 +17,8 @@ CMake 3.20.
 
 Linux builds require OpenGL, X11/Wayland development headers, FreeType, and the
 usual compiler and package-configuration tools. The exact Ubuntu package set is in
-`.github/workflows/ci.yml`. Windows CI validates both Visual C++ and MSYS2 UCRT64.
+`.github/workflows/ci.yml`. [Daily Windows](windows-daily-runner.md) validates
+both Visual C++ and MSYS2 UCRT64 through `.github/workflows/windows-build.yml`.
 
 ## Presets
 
@@ -32,7 +33,11 @@ usual compiler and package-configuration tools. The exact Ubuntu package set is 
 Configure, build, and test a preset with matching names:
 
 ```sh
-cmake --preset release
+if [ ! -e build/release ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/release || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/release || exit
+cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset release --parallel
 ctest --preset release -LE manual --no-tests=error --output-on-failure
 ```
@@ -71,24 +76,26 @@ ctest --preset release -L manual \
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
 Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 500M each. Qualification captures bypass the cache. Immutable save keys include
+use 1200M (1.2 GB) each on the daily runner's disk. Qualification captures bypass
+the cache. Hosted lanes' immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
 before saving, and cache-save failures cannot
-fail a job. Starting from the measured 1.55 GB devel generation, the two cap
-increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
-about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
-6 GB budget for other caches. At all seven lanes' configured caps, one generation
-per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
-package and analysis caches. These lanes use standard runners and the existing
-cache actions, with no paid cache service.
+fail a job. At the five hosted lanes' configured caps, one generation per branch totals
+400 + 600 + 250 + 250 + 250 = 1750 MB (1.75 GB), or 3.5 GB across
+main/devel, fitting within the 9.5 GB cleanup budget with 6 GB to spare. That
+leaves 6.5 GB of the repository's 10 GB cache limit for package and analysis
+caches, grace-window generations and saves in progress. Devel receives frequent pushes; main rarely
+does. Main's newest caches remain reserved even when old, so infrequent main
+pushes do not create more headroom. The hosted lanes use standard runners and the
+existing cache actions, with zero extra cache spend and no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
 only after CI, AddressSanitizer or Performance observations completes for a push
-to main/devel. CI saves the Linux, Diligent, Windows MSVC/UCRT64 compiler caches,
-clang-tidy shards and MSYS2 packages; AddressSanitizer saves its compiler cache;
+to main/devel. CI saves the Linux and Diligent compiler caches and
+clang-tidy shards; AddressSanitizer saves its compiler cache;
 Performance observations saves preview and paired compiler caches (its candidate
 cache save is also covered, though qualification capture currently runs manually).
 Documentation, game-assets, Blender authoring, release and UCRT attribution do not
@@ -103,15 +110,22 @@ even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE
 constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
 (whichever is later) falls within that window are never deleted, preserving caches
 for queued reruns and in-flight runs, including concurrent saves. It also
-limits total repository cache storage, including package and other caches, to
-6 GB, leaving room below GitHub's 10 GB cap for saves in progress. GitHub also
-evicts old keys, but routine cleanup prevents relying on eviction at the cap.
+targets 9.5 GB total repository cache storage, including package and other caches,
+when reserved caches fit that budget. Both branches' newest compiler generations
+at the hosted caps total 3.5 GB, leaving cleanup room to retire obsolete generations outside
+the grace window. Extra protected or grace-window caches can exceed the budget
+and force cleanup to skip deletion. The 6.5 GB margin below the 10 GB
+repository limit must accommodate all other caches and grace-window generations;
+GitHub's free least-recently-used eviction can still apply at that limit. Frequent
+devel saves and the six-hour grace window can retain multiple generations;
+eviction can remove reusable caches, including main's rarely refreshed caches.
+The margin is therefore not a guarantee against cache churn.
 Cleanup uses trusted inline workflow code with no checkout or PR triggers;
 `contents: read` applies throughout and only the deletion job gets `actions: write`.
 It rechecks branch heads before deletion and deletes by cache ID so concurrent
 replacements of the same key survive. Saves in progress can temporarily add
 storage until the next cleanup; protected and grace-window caches are never deleted
-to make room. If those caches alone exceed 6 GB, cleanup warns with their size and
+to make room. If those caches alone exceed 9.5 GB, cleanup warns with their size and
 budget, skips deletion, and exits successfully. Cleanup is best-effort:
 API/auth deletion errors warn and do not fail the run; malformed input is logged
 clearly and remaining cleanup is skipped.
@@ -257,26 +271,29 @@ non-C++ routes, preserving their existing rejection and successful path skip,
 respectively. Pushes to main/devel and manual dispatches skip the fast lane and
 retain their existing shard admission and full ASan build/test execution.
 
-The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
-`Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
-aggregates with valid dependencies; invalid dependencies still reach an explicit
-failure step. They reject drafts, missing draft metadata, cancellations and
-missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
-route; UCRT64 runs on ready native PR routes, every main/devel push, and every manual
-dispatch. Devel pushes seed its trusted compiler cache. The existing draft
-guard and job limit remain in place. Manual native qualification captures use a
-single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
-binary-bound manifests, report bytes and qualification artifact paths remain
-intact. Qualification validation checks both the full producer and its aggregate.
+The required `Linux / GCC` and `Linux / GCC ASan` checks are ordinary aggregates.
+Workflow cancellation stops aggregates with valid dependencies; invalid dependencies
+still reach an explicit failure step. They reject drafts, missing draft metadata,
+cancellations and missing or unsuccessful expected producers. GCC retains its
+Python-only route. Full Windows MSVC and MSYS2 UCRT64 validation, including the
+same shard unions and inventory checks, runs in [Daily Windows](windows-daily-runner.md)
+on the self-hosted runner. It reports failures through one tracking issue and
+gates the v0.3.1 tag, not landings. Manual native qualification captures use a
+single full-suite producer, explicitly distinguished from two-shard evidence.
+Their binary-bound manifests, report bytes and artifact paths remain intact.
+Qualification validation checks both the full producer and its aggregate.
 
 Native shard artifact names include lane, shard, SHA, run and attempt. Reports,
 inventories and partition evidence are retained for 30 days. An aggregate-only
 or failed-shard rerun selects the latest attempt of each producer within the same
 run, retaining evidence from successful earlier attempts. ASan retains its
 existing overwrite-per-shard artifact contract and the same 30-day retention.
-Only shard 1 saves each lane's compiler cache; only UCRT64 shard 1 enables the
-MSYS2 package cache. The cache caps and 6 GB cleanup budget described above apply
-per lane, shared by its test shards.
+Only shard 1 saves each hosted lane's compiler cache. Daily Windows keeps its
+compiler caches on the runner's disk and disables the MSYS2 package cache. The
+compiler-cache caps described above apply per lane, shared by its test shards;
+the 9.5 GB cleanup budget covers repository-hosted caches,
+leaving 0.5 GB of the 10 GB limit beyond the budget for other caches and grace-window
+generations, so free least-recently-used eviction can still apply.
 
 The GCC aggregate checks acceptance-matrix execution after merging and validating
 the exact selected JUnit union. It also consumes unfiltered discovery and serial NetSoak
@@ -341,7 +358,7 @@ cancellation stops them. Push, schedule, and manual routing is unchanged.
 Draft pull requests cannot merge. GitHub does not allow draft PRs to merge and
 may report jobs skipped by a condition as successful, so a draft skip alone does
 not block required checks. The guards keep the existing `Linux / GCC`,
-`Linux / GCC ASan`, `Windows / MSVC`, `Windows / MSYS2 UCRT64`, and
+`Linux / GCC ASan`, and
 `Preview frame / software OpenGL` check names and report
 failure on drafts. Their failure prevents a draft head from satisfying all
 required checks, including immediately after marking it ready while the new
@@ -354,8 +371,16 @@ No new required-check configuration is needed.
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
-branch and path filters still apply. Maintainers must not merge until the
-`ready_for_review` run's required checks are green on the current head, and must
+branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
+and `edited`. Only `edited` events with `github.event.changes.base` present run
+normal CI, so retargeting a ready PR to main runs Windows/UCRT64 validation even
+for confirmed non-C++ changes. Its aggregate requires successful native producers.
+Title/body edits skip every CI job before runner allocation, use unique
+non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
+suffix. This keeps their skipped results separate from required check names on
+the same SHA. A pre-job dependency skip alone would still emit skipped checks
+under those required names. Other workflows retain their existing event types.
+Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this
 repository) requires actual `SUCCESS` for required checks on the exact head,
@@ -363,8 +388,8 @@ with one routing exception: for non-draft engine PRs, it accepts `SKIPPED`
 heavy checks only when every same-head `Classify changed paths` check succeeded.
 Drafts and push/recovery validation remain `SUCCESS`-only. A routed skip is not
 evidence that native validation ran. No additional job runs on draft pushes
-to enforce this policy; the guards use existing required jobs. Windows/UCRT64
-also runs on devel pushes, and the paired server comparison still runs only for
+to enforce this policy; the guards use existing required jobs. The paired server
+comparison still runs only for
 main-bound ready PRs or eligible main/devel pushes.
 
 Rerunning a draft-era workflow reuses its stored event payload, including
@@ -379,13 +404,13 @@ on the current head rather than an old draft-event rerun. Persistent stale
 merge-ref checks require a fresh pull request event/ref, such as closing and
 reopening the pull request.
 
-The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
-When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
+The required `Linux / GCC` job always runs on ready PRs.
+When `needs_cpp=false`, it installs only numpy, Pillow and jsonschema
 and runs `ci_paths.py python-tests`, skipping native dependencies, compiler caches,
 configure/build/CTest, native qualification, packaging and native artifacts.
-Both jobs log and summarize `route: python-only (native build skipped by Classify
+The job logs and summarizes `route: python-only (native build skipped by Classify
 changed paths)` and expose a `route` job output of `python-only`. When `needs_cpp`
-is true or missing, they report and expose `native` and retain their full native
+is true or missing, it reports and exposes `native` and retains its full native
 path. Consumers requiring native qualification must check that output alongside
 the job conclusion; a successful Python route provides Python coverage.
 
@@ -393,7 +418,7 @@ The standalone plan also runs whenever `needs_python=true` or its output is
 missing, including mixed Python/native PRs and full push/manual runs, with numpy,
 Pillow and jsonschema installed. It includes `tools/ci/test_ci_paths.py` and cache
 retention regression tests. Python failures block merging through the existing
-required contexts on either route.
+required Linux contexts on either route; daily Windows failures are report-only for landings.
 
 The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
@@ -407,17 +432,18 @@ Native integrations such as `qualify_prefab_runtime.py`, its packaged service an
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.
 Extension helpers and viewport fixtures retain standalone and authoring mock
-coverage on Linux and Windows, alongside full native correctness in CI and ASan.
+coverage on Linux and Windows, alongside full native correctness in CI, ASan and Daily Windows.
 Executable authoring test entrypoints also retain native builds.
 Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
 CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
-Required job names and workflow PR triggers remain present for every PR. Native
-lanes depend directly on the always-running classifier. The clang-tidy aggregate
-also depends on the shards and reports their result, including routed skips.
+Required job names remain present for admitted validation events. CI metadata
+edits use the distinct skipped names described above. Native lanes depend
+directly on the classifier, which runs for every admitted validation event. The
+clang-tidy aggregate also depends on the shards and reports their result, including routed skips.
 Workflow cancellation stops aggregates with valid dependencies; invalid
-dependencies reach an explicit failure step. Linux/GCC and Windows/MSVC select their native or Python
+dependencies reach an explicit failure step. Linux/GCC selects its native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
 which GitHub accepts for required checks, rather than leaving a missing status
 pending. Public tree, Format, Doxygen, and runner contracts run independently
@@ -427,7 +453,6 @@ heavy-sensitive changes on ready devel-bound PRs (main-bound PRs require full):
 | Required check | Listed docs-only PR | Python tooling PR | C++ PR | Devel push |
 |---|---|---|---|---|
 | Linux / GCC | success (Python) | success (native) | success | success |
-| Windows / MSVC | success (Python) | success (native) | success | success |
 | Public tree / inventory honesty | success | success | success | success |
 | Format changed files | success | success | success | success |
 | Linux / GCC ASan | skipped | success | success | success |
@@ -445,8 +470,11 @@ does not grant a heavy exemption. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
 Windows/UCRT64 runs on main/devel pushes and every manual dispatch as well as
-ready native PR routes, retaining its draft and path gates. Devel pushes seed
-the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
+every ready PR into main; ready PRs into devel retain label and path admission.
+Every ready main-bound PR requires successful UCRT64 native producers. Other routes
+require C++ classification; unknown outputs run, and confirmed non-C++ changes skip
+even with the label or sensitive paths. Drafts retain their existing guards. Devel pushes
+seed the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
 cache also saves on these trusted pushes. It shares the workflow-wide devel
 push concurrency group described below. The paired server comparison retains
 its main-bound ready PR and eligible main/devel push routing, with the same path
@@ -468,7 +496,9 @@ pushes. Main pushes and manual dispatches, including qualification captures, hav
 non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
-runs. Authoring PR runs retain their independent, non-cancelling behaviour.
+runs. CI title/body edit events use isolated non-cancelling groups and leave
+in-flight validation untouched. Authoring PR runs retain their independent,
+non-cancelling behaviour.
 The authoring workflow keeps its existing path triggers. The diagnostic
 `ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
 retain their existing paths: the attribution workflow,
@@ -547,7 +577,11 @@ Run the preset that matches the affected platform and configuration. At minimum:
 
 ```sh
 scripts/lint.sh --format-only
-cmake --preset debug
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
+cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure
 ```

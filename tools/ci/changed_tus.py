@@ -1282,7 +1282,18 @@ def ci_tidy(root: Path, selected: list[dict], work: Path, jobs: int) -> None:
         print(output, end="")
 
 
+class _CiPublicationError(Exception):
+    """Internal exit-status signal, including when publication overrides cancellation."""
+
+
 def ci_checks(args, root: Path) -> int:
+    try:
+        return _ci_checks(args, root)
+    except _CiPublicationError:
+        return 1
+
+
+def _ci_checks(args, root: Path) -> int:
     report = {"status": "failed", "selected": {}, "command_variants": {},
               "scan_seconds": 0, "compile_seconds": 0, "tidy_seconds": 0,
               "warning_profile": "msvc-approx (fatal for helper targets; other targets use database flags; no calibration)",
@@ -1405,7 +1416,9 @@ def ci_checks(args, root: Path) -> int:
             publish_ci_evidence(args.evidence_file, report)
         except (ValueError, OSError, TypeError) as error:
             print(f"fast checks: evidence/summary publication failed: {error}", file=sys.stderr)
-            return 1
+            # Preserve the historical override of both return values and pending
+            # exceptions without a return in finally (which warns on Python 3.14).
+            raise _CiPublicationError from error
 
 
 def main(argv=None) -> int:

@@ -111,6 +111,15 @@ class PatchIntegrationTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), expected)
         self.assertIn("Jolt/Core/LockFreeHashMap.h", [entry["path"] for entry in manifest["files"]])
 
+    def test_default_pool_constructor_is_defined_only_in_library(self):
+        _, payload = MODULE.inputs()
+        edits = payload.decode("utf-8")
+        header = edits.split("+++ b/Jolt/Core/JobSystemThreadPool.h\n", 1)[1].split("--- a/", 1)[0]
+        implementation = edits.split("+++ b/Jolt/Core/JobSystemThreadPool.cpp\n", 1)[1].split("--- a/", 1)[0]
+        self.assertRegex(header, r"(?m)^-\s+JobSystemThreadPool\(\) = default;$")
+        self.assertRegex(header, r"(?m)^\+\s+JobSystemThreadPool\(\);$")
+        self.assertEqual(implementation.count("+JobSystemThreadPool::JobSystemThreadPool() = default;"), 1)
+
     def test_offline_lock_binds_overlay_and_refuses_changed_integration(self):
         spec = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
         offline = importlib.util.module_from_spec(spec)

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -24,6 +25,7 @@
 
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/net/NetworkSim.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
@@ -102,6 +104,47 @@ bool SendPeerHello(net::ILockstepTransport& peer, const net::LockstepConfig& con
     remote.local_client_id = config.peer_client_id;
     remote.peer_client_id = config.local_client_id;
     return peer.SendFrame(net::EncodeHello(net::MakeLockstepHello(remote)));
+}
+
+TEST(LockstepSessionTest, CursorOnlyDifferenceReportsWaterCursor) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::WorldStreamingState state;
+    for (const std::uint64_t peer_cursor : {std::uint64_t{0}, std::uint64_t{66}}) {
+        SCOPED_TRACE(peer_cursor);
+        auto [local, peer] = net::MakeLoopbackPair();
+        auto config = MakeConfig(0, 1);
+        config.hash_cadence_ticks = 1;
+        net::LockstepHooks hooks;
+        hooks.user = &state;
+        hooks.capture_hashes = [](std::uint64_t tick, net::HashMsg& out, void* user) {
+            const auto& chunks = *static_cast<Luminumbra::WorldStreamingState*>(user);
+            const auto sub = P::ComputeWorldStreamingStateSubHashes(chunks, 65);
+            out = {.tick = tick,
+                   .world_hash = P::ComputeWorldStreamingStateHash(chunks, 65),
+                   .terrain = sub.terrain,
+                   .water = sub.water,
+                   .entities = sub.entities};
+        };
+        net::LockstepSession session(config, local.get(), hooks);
+        session.SetDumpPath(
+            (LockstepTempDir() / ("water-cursor-" + std::to_string(peer_cursor) + ".lrec1"))
+                .string());
+        ASSERT_TRUE(SendPeerHello(*peer, config));
+        ASSERT_TRUE(session.Handshake());
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+        ASSERT_EQ(session.PumpTick(2).outcome, net::TickOutcome::Advanced);
+        const auto sub = P::ComputeWorldStreamingStateSubHashes(state, peer_cursor);
+        const net::HashMsg mismatch{.tick = 1,
+                                    .world_hash =
+                                        P::ComputeWorldStreamingStateHash(state, peer_cursor),
+                                    .terrain = sub.terrain,
+                                    .water = sub.water,
+                                    .entities = sub.entities};
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(mismatch)));
+        EXPECT_EQ(session.PumpTick(2).outcome, net::TickOutcome::Desync);
+        EXPECT_EQ(session.Status().desync_section, "water/cursor");
+        EXPECT_EQ(session.Status().desync_tick, 1u);
+    }
 }
 
 // Reject a selected message and report a disconnected peer. Buffered receive frames
@@ -3242,7 +3285,9 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     // At least one side must report the desync (the one that holds both hashes at tick 30).
     const bool a_desync = a.Status().desynced;
     const bool b_desync = b.Status().desynced;
-    EXPECT_TRUE(a_desync || b_desync) << "oracle is vacuous: a real divergence was not caught";
+    EXPECT_TRUE(a_desync || b_desync)
+        << "oracle is vacuous: a real divergence was not caught at ticks " << r.a_tick << ", "
+        << r.b_tick;
 
     // The catching side localizes to tick 30, section terrain, and wrote a dump.
     if (a_desync) {
@@ -3546,4 +3591,42 @@ TEST(LockstepSessionTest, ClosedTransportDuringPendingHelloIsTerminal) {
         EXPECT_EQ(world.tick, 0u);
         EXPECT_FALSE(session.Handshake());
     }
+}
+
+// Recorder setup is diagnostics only: a refused open never blocks the handshake
+// or the ticks, and the status names the failing step with its OS error.
+TEST(LockstepSessionTest, RecorderSetupRefusalNamesTheFailingStepInReplayError) {
+    const auto blocker = LockstepTempDir() / "recorder-refusal.parent";
+    {
+        std::ofstream file(blocker, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        file << "not a directory";
+        ASSERT_TRUE(file.good());
+    }
+    const auto dump = blocker / "sub" / "desync.lrec1";
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    std::error_code expected_error;
+    fs::create_directories(dump.parent_path(), expected_error);
+    ASSERT_TRUE(expected_error);
+    const std::string error = session.Status().replay_error;
+    EXPECT_TRUE(error.starts_with("recorder setup failed: create-parent: '")) << error;
+    EXPECT_NE(error.find("(" + std::string(expected_error.category().name()) + " " +
+                         std::to_string(expected_error.value()) + ")"),
+              std::string::npos)
+        << error;
+    EXPECT_LT(error.size(),
+              std::string("recorder setup failed: ").size() +
+                  replay::BoundedReplayRecorder::kOpenRefusalBytes);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    EXPECT_EQ(world.tick, 1u);
+    EXPECT_EQ(session.Status().replay_error, error);
+    EXPECT_FALSE(fs::exists(dump));
+    ASSERT_TRUE(fs::remove(blocker));
 }

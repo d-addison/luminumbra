@@ -365,7 +365,7 @@ class HarnessTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Explicit ownership prevents a finalizer from deleting files while an
         # undrained descendant may still hold them open.
-        self.root = Path(tempfile.mkdtemp(prefix="repeat-qualification-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="repeat-qualification-test-")).resolve(strict=True)
         self._fixture_cleanup_safe = True
         self.work = self.root / "work"
         self.work.mkdir()
@@ -1457,7 +1457,7 @@ if os.name == "posix":
 class RunDirectoryAndSnapshotTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-unit-")
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve(strict=True)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -1594,7 +1594,7 @@ class DumpSettleTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="dump-settle-unit-")
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve(strict=True)
         self.folder = self.root / "dumps"
         self.folder.mkdir()
         self.now = 0.0
@@ -2264,25 +2264,25 @@ class DumpSettleTest(unittest.TestCase):
                 self.assertTrue(before.scan_complete)
                 self.assertEqual(rq.changed_files({}, before), [str(known)])
                 after = rq.snapshot_files(self.folder, recursive, baseline=before)
-                self.assertEqual(rq.changed_files(before, after), [str(old)])
+                self.assertEqual(rq.changed_files(before, after), [])
                 self.assertEqual(rq.copy_changed_files(
                     self.folder, before, self.root / "collected", recursive=recursive,
                     after=after,
-                ), [str(self.root / "collected" / old.name)])
+                ), [])
                 new = self.dump("new.dmp", size=128)
                 settled = self.settle(before=before)
-                self.assertEqual(rq.changed_files(before, settled), sorted(map(str, (new, old))))
+                self.assertEqual(rq.changed_files(before, settled), [str(new)])
                 copies = rq.copy_changed_files(
                     self.folder, before, self.root / "collected", recursive=recursive,
                 )
                 self.assertEqual(copies, [str(self.root / "collected" / path.name)
-                                          for path in (new, old)])
+                                          for path in (new,)])
                 self.assertEqual([Path(copy).read_bytes() for copy in copies],
-                                 [new.read_bytes(), old.read_bytes()])
+                                 [new.read_bytes()])
                 self.assertFalse((self.root / "collected" / known.name).exists())
                 new.unlink()
 
-    def test_replaced_dump_with_unknown_baseline_metadata_is_collected(self) -> None:
+    def test_replaced_dump_with_unknown_baseline_metadata_is_excluded(self) -> None:
         old = self.dump("replaced.dmp", size=128)
         known = self.dump("stale.dmp", size=128)
         real_stat = Path.stat
@@ -2299,14 +2299,15 @@ class DumpSettleTest(unittest.TestCase):
                 old.unlink()
                 old.write_bytes(b"replacement dump")
                 after = self.settle(before=before)
-                self.assertTrue(rq.file_rewritten(before[str(old)], after[str(old)]))
-                self.assertEqual(rq.changed_files(before, after), [str(old)])
+                self.assertFalse(rq.file_rewritten(before[str(old)], after[str(old)]))
+                self.assertEqual(rq.changed_files(before, after), [])
                 copies = rq.copy_changed_files(
                     self.folder, before, self.root / "replacement", recursive=recursive,
                     after=after,
                 )
-                self.assertEqual(copies, [str(self.root / "replacement" / old.name)])
-                self.assertEqual(Path(copies[0]).read_bytes(), b"replacement dump")
+                self.assertEqual(copies, [])
+                self.assertEqual(old.read_bytes(), b"replacement dump")
+                self.assertFalse((self.root / "replacement").exists())
                 self.assertFalse((self.root / "replacement" / known.name).exists())
 
     def test_incomplete_baseline_scan_blocks_dump_and_core_attribution(self) -> None:
@@ -2389,6 +2390,13 @@ class DumpSettleTest(unittest.TestCase):
                     self.assertFalse((run_dir / "iter-1" / "core").exists())
                     probe.assert_not_called()
                     copy.assert_not_called()
+
+    def test_direct_change_detection_refuses_incomplete_baseline_even_when_empty(self) -> None:
+        before = rq.FileSnapshot()
+        before.scan_complete = False
+        for after in ({}, rq.snapshot_files(self.folder, recursive=False)):
+            with self.assertRaisesRegex(OSError, 'incomplete baseline directory scan'):
+                rq.changed_files(before, after)
 
     def test_coverage_change_does_not_copy_stale_dump_again(self) -> None:
         old = self.dump("old.dmp")
@@ -2608,13 +2616,12 @@ class DumpSettleTest(unittest.TestCase):
                 self.assertTrue(all(not stamp.read_complete for stamp in after.values()))
                 self.assertEqual(rq.changed_files(before, after), [])
                 self.assertEqual(rq.changed_files({}, after), [])
-                # Incomplete baseline reads retain readable candidates for full
-                # verification instead of silently claiming they are unchanged.
+                # Readability recovering alone cannot attribute either file.
                 recovered = rq.snapshot_files(self.folder, recursive, baseline=after)
-                self.assertEqual(rq.changed_files(after, recovered), sorted(map(str, (old, new))))
+                self.assertEqual(rq.changed_files(after, recovered), [])
                 new.unlink()
 
-    def test_failed_baseline_read_keeps_recovered_core_as_candidate(self) -> None:
+    def test_failed_baseline_read_requires_metadata_evidence_of_rewrite(self) -> None:
         path = self.dump("core.123", size=128)
         real_open = Path.open
 
@@ -2639,14 +2646,15 @@ class DumpSettleTest(unittest.TestCase):
                     after = rq.snapshot_files(self.folder, recursive, baseline=before)
                     self.assertEqual(before[str(path)].size != after[str(path)].size, rewrite)
                     self.assertTrue(after[str(path)].read_complete)
-                    self.assertEqual(rq.changed_files(before, after), [str(path)])
+                    self.assertEqual(rq.changed_files(before, after), [str(path)] if rewrite else [])
                     copies = rq.copy_changed_files(
                         self.folder, before, self.root / "collected", recursive=recursive,
                         errors=errors, clock=lambda: self.now, pause=self.pause,
                     )
                     self.assertEqual(len(errors), 1)
-                    self.assertEqual(copies, [str(self.root / "collected" / path.name)])
-                    self.assertEqual(rq.sha256_file(Path(copies[0])), rq.sha256_file(path))
+                    self.assertEqual(copies, [str(self.root / "collected" / path.name)] if rewrite else [])
+                    if rewrite:
+                        self.assertEqual(rq.sha256_file(Path(copies[0])), rq.sha256_file(path))
 
     def test_unequal_sample_ranges_do_not_establish_rewrite(self) -> None:
         path = self.dump("old.dmp", size=128)
@@ -2934,10 +2942,42 @@ class DumpSettleTest(unittest.TestCase):
 class DumpCopyTest(unittest.TestCase):
     """Copy races and Windows handle ownership with an injected clock and opener."""
 
+    def test_copy_budget_contract_with_an_aliased_allocation_spelling(self) -> None:
+        allocation = tempfile.TemporaryDirectory
+
+        class AliasedDirectory(allocation):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.allocated = self.name
+                alias = Path(self.name) / 'spelling'
+                alias.mkdir()
+                self.name = str(alias / '..')
+
+            def cleanup(self):
+                self.name = self.allocated
+                super().cleanup()
+
+        # Keep the original budget assertions and real snapshot/collection
+        # boundaries; vary only the allocator's spelling of the same directory.
+        case = DumpCopyTest('test_copy_budget_scales_with_size_and_has_a_floor_and_cap')
+        result = unittest.TestResult()
+        enumerate_directory = Path.iterdir
+
+        def resolved_entries(path):
+            # Native enumeration may return a resolved namespace spelling.
+            for entry in enumerate_directory(path):
+                yield entry.resolve(strict=True)
+
+        with mock.patch.object(tempfile, 'TemporaryDirectory', AliasedDirectory), \
+                mock.patch.object(Path, 'iterdir', resolved_entries):
+            case.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="dump-copy-unit-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve(strict=True)
         self.folder = self.root / "dumps"
         self.folder.mkdir()
         self.destination = self.root / "collected"
@@ -3511,7 +3551,7 @@ class WindowsDumpLockTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="rq-windows-lock-test-")
         self.addCleanup(self.temp.cleanup)
-        self.folder = Path(self.temp.name)
+        self.folder = Path(self.temp.name).resolve(strict=True)
         self.guard = threading.Lock()
         self.owner = None
         self.second_lock_attempted = threading.Event()
@@ -4280,7 +4320,7 @@ class QualificationSafetyTest(HarnessTestCase):
 class WerPreflightTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-wer-")
-        self.folder = Path(self._tmp.name) / "dumps"
+        self.folder = Path(self._tmp.name).resolve(strict=True) / "dumps"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -4347,7 +4387,7 @@ class WerPreflightTest(unittest.TestCase):
         self.assertFalse(receipt["environment"]["allow_no_dumps"])
 
     def exe_path(self) -> Path:
-        path = Path(self._tmp.name) / "world.exe"
+        path = Path(self._tmp.name).resolve(strict=True) / "world.exe"
         path.write_bytes(b"placeholder")
         return path
 
@@ -4428,7 +4468,7 @@ class WerPreflightTest(unittest.TestCase):
 class CorePatternTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-core-")
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve(strict=True)
         self.work = self.root / "work"
         self.work.mkdir()
 

@@ -7,7 +7,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
 ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
 Windows qualification exhausted the suite's 30-second CTest deadline without
-per-case timings. Ten disjoint registrations isolate those workloads and keep
+per-case timings. Disjoint registrations isolate those workloads and keep
 each 30-second deadline. Each selected case reports elapsed time so a slow case
 remains visible. Native per-case qualification is still required; local timings
 do not establish that every Windows case fits its deadline. Direct invocation
@@ -18,7 +18,7 @@ import argparse
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing
-from itertools import islice
+from itertools import islice, product
 import fnmatch
 import hashlib
 import importlib.util
@@ -40,16 +40,51 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shell as shell
+import ctest_shards as shards
 
 
 BASH = shell.bash_executable()
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def write_bash_script(path, script):
+    path.write_bytes(script.replace("\r\n", "\n").encode("utf-8"))
+    return path.as_posix()
+
+
+def run_bash_script(script, *, flags=("-e", "-o", "pipefail"), executable=BASH, arguments=(), **kwargs):
+    # Close the LF-only file before Bash opens it; keep scripts out of Windows argv.
+    with tempfile.TemporaryDirectory(prefix="workflow shell ") as directory:
+        path = write_bash_script(Path(directory) / "script.sh", script)
+        return subprocess.run([executable, "--noprofile", "--norc", *flags, path, *arguments], **kwargs)
+
+
 GUARDED = {
     "ci.yml": ("linux-result", "Linux / GCC"),
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
+CI_ACTIVE_EVENT = (
+    "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base"
+)
+CI_METADATA_SUFFIX = (
+    "${{ github.event_name == 'pull_request' && github.event.action == 'edited' && "
+    "!github.event.changes.base && ' (metadata edit)' || '' }}"
+)
+
+
+def ci_event_condition(condition=None):
+    return "${{ " + (f"({CI_ACTIVE_EVENT}) && ({condition})" if condition else CI_ACTIVE_EVENT) + " }}"
+
+
+def render_edit_context(expression, action="synchronize", changes=None):
+    # Actions treats objects (including {}) as truthy; missing properties are ''.
+    base = changes.get("base", "") if isinstance(changes, dict) else ""
+    return expression.replace("github.event.action", repr(action)).replace(
+        "github.event.changes.base", repr(True if isinstance(base, dict) else base))
+
+
 ASAN_MINIMUM_TESTS = 2320
 ASAN_REQUIRED_TESTS = (
     "ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows",
@@ -59,8 +94,10 @@ ASAN_REQUIRED_TESTS = (
 ASAN_MERGE_COMMAND = ('python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards '
                       '--output build/debug-asan/ctest.junit.xml --needs-heavy "$CI_NEEDS_HEAVY" '
                       '--reason "$CI_HEAVY_REASON"')
+WINDOWS_GUARD = ("github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == "
+                 "github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))")
 UCRT_ROUTE = (
-    "github.event_name == 'pull_request' || github.event_name == 'push' || "
+    "github.event_name == 'pull_request' || github.event_name == 'schedule' || "
     "github.event_name == 'workflow_dispatch'"
 )
 SERVER_ROUTE = (
@@ -169,7 +206,7 @@ class WorkflowShellTests(unittest.TestCase):
 
     def test_overrides_require_absolute_regular_executable_files_without_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             for candidate in ("", "relative/bash", str(root / "missing"), str(root)):
                 with self.subTest(candidate=candidate), patch.object(shell, "_absolute_which") as which, patch.object(
                         shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
@@ -207,20 +244,52 @@ class WorkflowShellTests(unittest.TestCase):
 
     def test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status(self):
         with tempfile.TemporaryDirectory(prefix="shell contract ") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             (root / "input with spaces.txt").write_bytes(b"first\r\nsecond\r\n")
             script = ('[[ "$1" == \'C:/directory with spaces/file\' && "$2" == \'a "quote"\' && -z "$3" ]]\n'
                       '[[ "$CONTRACT_VALUE" == kept ]]\n'
                       'IFS= read -r line < "input with spaces.txt"\n'
                       '[[ "$line" == $\'first\\r\' ]]\n'
                       'printf \'contract passed\\n\'\nexit 7')
-            result = subprocess.run([shell.bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
-                                     "contract", "C:/directory with spaces/file", 'a "quote"', ""],
+            result = run_bash_script(script, executable=shell.bash_executable(),
+                                    arguments=("C:/directory with spaces/file", 'a "quote"', ""),
                                     cwd=root, env=dict(os.environ, CONTRACT_VALUE="kept"),
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
             self.assertEqual(result.stdout, "contract passed\n")
             self.assertEqual(result.stderr, "")
+
+    def test_script_files_preserve_bytes_and_cleanup_after_process_failures(self):
+        script = 'while read -r value; do\r\n  printf \'%s\\n\' \'a "quote" [path]\\tail\'\r\ndone\r\n'
+        expected = script.replace("\r\n", "\n").encode("utf-8")
+        for response in (subprocess.CompletedProcess([], 0, b"", b""),
+                         subprocess.CompletedProcess([], 7, b"partial", b"\xfferror"),
+                         PermissionError("denied"),
+                         subprocess.TimeoutExpired([BASH], 10, output=b"partial", stderr=b"\xfferror")):
+            paths = []
+            def launch(command, **kwargs):
+                self.assertEqual(command[:6], [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail"])
+                self.assertEqual(len(command), 7)
+                self.assertNotIn("\\", command[-1])
+                path = Path(command[-1])
+                paths.append(path)
+                self.assertEqual(path.read_bytes(), expected)
+                # Windows refuses to rename a file that the parent left open.
+                moved = path.with_suffix(".moved")
+                path.rename(moved)
+                moved.rename(path)
+                self.assertEqual(kwargs, dict(capture_output=True, timeout=10))
+                if isinstance(response, Exception):
+                    raise response
+                return response
+            with self.subTest(response=response), patch.object(subprocess, "run", side_effect=launch):
+                if isinstance(response, Exception):
+                    with self.assertRaises(type(response)):
+                        run_bash_script(script, capture_output=True, timeout=10)
+                else:
+                    self.assertIs(run_bash_script(script, capture_output=True, timeout=10), response)
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(paths[0].parent.exists())
 
 
 class WorkflowShellDiagnosticTests(unittest.TestCase):
@@ -694,7 +763,7 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
     evaluation it is the current job's cancellation, which can still be false
     when a job condition kept it running during workflow cancellation.
     """
-    expression = (expression or "success()").removeprefix("${{ ").removesuffix(" }}")
+    expression = render_edit_context(expression or "success()").removeprefix("${{ ").removesuffix(" }}")
     if failed is None:
         failed = "failure" in dependencies.values()
     status = {"always": True, "cancelled": cancelled, "failure": failed,
@@ -704,10 +773,23 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
                                lambda match: repr(status[match[1]]), expression)
     expression = re.sub(r"needs\.([\w-]+)\.result",
                         lambda match: repr(dependencies[match[1]]), expression)
+    expression = expression.replace("github.event_name", repr("pull_request"))
     expression = re.sub(r"!(?!=)", "not ", expression)
-    expression = expression.replace("&&", " and ").replace("||", " or ")
+    expression = expression.replace("== false", "== False").replace("&&", " and ").replace("||", " or ")
     return bool((count or status["success"]) and
-                eval(expression, {"__builtins__": {}}, {}))
+                eval(expression, {"__builtins__": {}, "contains": lambda items, item:
+                                  item.lower() in [entry.lower() for entry in items]}, {}))
+
+
+def native_jobs(workflows):
+    ci = jobs(workflows["ci.yml"])
+    daily = jobs(workflows["windows-build.yml"])
+    return {**ci, **{key: value for key, value in daily.items() if key.startswith("windows-")}}
+
+
+def windows_condition(expression):
+    """Assume an authorized event while exercising the existing route/cancellation grid."""
+    return expression.replace("(" + WINDOWS_GUARD + ") && (", "(")
 
 
 def guarded_jobs(workflows):
@@ -716,10 +798,7 @@ def guarded_jobs(workflows):
     yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/3",
            jobs(workflows["asan.yml"])["asan-shard"])
     ci = jobs(workflows["ci.yml"])
-    for job_id, name in (("linux", value(ci["linux"], "name", 4)),
-                         ("windows-msvc-result", "Windows / MSVC"),
-                         ("windows-ucrt64-result", "Windows / MSYS2 UCRT64")):
-        yield "ci.yml", job_id, name, ci[job_id]
+    yield "ci.yml", "linux", value(ci["linux"], "name", 4), ci["linux"]
 
 
 def status_function_violations(workflow):
@@ -790,13 +869,316 @@ class WorkflowExpressionPolicyTests(unittest.TestCase):
         self.assertEqual(status_function_violations(""), [])
 
 
-class WorkflowDraftPolicyTests(unittest.TestCase):
+class WorkflowPolicyFixture:
     @classmethod
     def setUpClass(cls):
         cls.workflows = {
             filename: (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
-            for filename in GUARDED
+            for filename in (*GUARDED, "windows-build.yml")
         }
+
+
+class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
+    def test_daily_windows_trigger_security_permissions_and_concurrency(self):
+        daily = (ROOT / ".github/workflows/windows-daily.yml").read_text(encoding="utf-8")
+        reusable = self.workflows["windows-build.yml"]
+        ci = jobs(self.workflows["ci.yml"])
+        moved = {"windows-msvc", "windows-ucrt64", "windows-msvc-result", "windows-ucrt64-result"}
+        self.assertTrue(moved.isdisjoint(ci))
+        for job in ci.values():
+            self.assertTrue(moved.isdisjoint(re.findall(r"[\w-]+", value(job, "needs", 4) or "")))
+        triggers = daily.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(re.findall(r"^  ([\w_]+):", triggers, re.MULTILINE),
+                         ["schedule", "workflow_dispatch", "pull_request"])
+        self.assertEqual(re.findall(r"cron: '([^']+)'", triggers), ["17 10 * * *"])
+        self.assertIn("types: [labeled, synchronize, reopened, ready_for_review]", triggers)
+        self.assertNotIn("pull_request_target", daily + reusable)
+        self.assertNotRegex(daily + reusable, r"secrets[.:]|registration.token|RUNNER_TOKEN")
+        self.assertEqual(value(daily.split("\njobs:", 1)[0], "contents", 2), "read")
+        self.assertNotIn("write", daily.split("\njobs:", 1)[0])
+        self.assertNotIn("write", reusable.split("\njobs:", 1)[0])
+        self.assertEqual(value(reusable.split("\njobs:", 1)[0], "CTEST_PARALLEL_LEVEL", 2), '"4"')
+        build, report = jobs(daily)["build"], jobs(daily)["report"]
+        self.assertEqual(value(build, "uses", 4), "./.github/workflows/windows-build.yml")
+        self.assertEqual(value(build, "runner", 6), '\'["self-hosted", "windows", "x64", "lum-windows"]\'')
+        self.assertEqual(value(report, "runs-on", 4), "[self-hosted, windows, x64, lum-windows]")
+        self.assertEqual(value(report, "needs", 4), "build")
+        self.assertEqual(value(report, "issues", 6), "write")
+        self.assertEqual(value(report, "actions", 6), "read")
+        self.assertEqual(value(report, "GH_TOKEN", 10), "${{ github.token }}")
+        self.assertEqual(value(report, "BUILD_RESULT", 10), "${{ needs.build.result }}")
+        self.assertIn("windows_daily_report.py", report)
+        # The token-bearing reporter comes from the workflow's own ref, never the tested candidate.
+        self.assertEqual(value(report, "ref", 10), "${{ github.sha }}")
+        self.assertEqual(value(report, "persist-credentials", 10), "false")
+        source = jobs(reusable)["changes"]
+        self.assertIn("ref: ${{ github.event_name == 'schedule' && 'devel' || github.sha }}", source)
+        self.assertIn('"head_sha=$sha" >> $env:GITHUB_OUTPUT', source)
+        self.assertIn("head_sha: ${{ steps.source.outputs.head_sha }}", source)
+        self.assertIn("value: ${{ jobs.changes.outputs.head_sha }}", reusable)
+        self.assertEqual(value(report, "WINDOWS_HEAD_SHA", 10), "${{ needs.build.outputs.head_sha || github.sha }}")
+        # Issue-write access on the runner is limited to trusted refs; other-branch dispatches only build.
+        report_if = value(report, "if", 4).removeprefix("${{ ").removesuffix(" }}")
+        self.assertIn("(github.ref == 'refs/heads/devel' || github.ref == 'refs/heads/main')", report_if)
+        for ref in ("refs/heads/devel", "refs/heads/main", "refs/heads/feature", "refs/remotes/origin/devel", "refs/tags/v1"):
+            for event in ("schedule", "workflow_dispatch"):
+                condition = report_if.replace("github.ref", repr(ref)).replace("github.event_name", repr(event))
+                condition = condition.replace("always()", "True")
+                condition = condition.replace("&&", " and ").replace("||", " or ")
+                condition = re.sub(r"github\.event\.pull_request\.head\.repo\.full_name", "''", condition)
+                condition = condition.replace("github.repository", "'x'").replace(
+                    "contains(github.event.pull_request.labels.*.name, 'windows-proof')", "False")
+                with self.subTest(ref=ref, event=event):
+                    self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                                     ref in ("refs/heads/devel", "refs/heads/main"))
+        self.assertEqual(value(daily, "group", 2),
+                         "windows-daily-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}")
+        self.assertEqual(value(daily, "cancel-in-progress", 2), "${{ github.event_name == 'pull_request' }}")
+        for workflow in (daily, reusable):
+            for job_id, job in jobs(workflow).items():
+                condition = value(job, "if", 4)
+                self.assertIn("(" + WINDOWS_GUARD + ")", condition, job_id)
+                if workflow == reusable:
+                    self.assertEqual(value(job, "runs-on", 4), "${{ fromJSON(inputs.runner) }}")
+                for event in ("pull_request", "schedule", "workflow_dispatch"):
+                    for head_repo in ("owner/repo", "fork/repo", ""):
+                        for labels in ([], ["windows-proof"], ["unrelated"]):
+                            for classification, head_sha in (("success", "a" * 40), ("success", ""), ("failure", ""), ("cancelled", ""), ("skipped", "")):
+                                expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                                for key, replacement in (
+                                        ("contains(github.event.pull_request.labels.*.name, 'windows-proof')", "windows-proof" in labels),
+                                        ("github.event.pull_request.head.repo.full_name", head_repo),
+                                        ("github.event.pull_request.draft", False),
+                                        ("github.repository", "owner/repo"), ("github.event_name", event),
+                                        ("github.ref", "refs/heads/devel"),
+                                        ("needs.changes.outputs.head_sha", head_sha)):
+                                    expression = expression.replace(key, repr(replacement))
+                                expression = re.sub(r"needs\.[\w-]+\.outputs\.needs_cpp", repr("true"), expression)
+                                expression = re.sub(r"needs\.[\w-]+\.result", repr(classification), expression)
+                                expression = expression.replace("always()", "True").replace("cancelled()", "False")
+                                expression = re.sub(r"!(?!=)", "not ", expression).replace("&&", " and ").replace("||", " or ").replace("== false", "== False")
+                                expected = event != "pull_request" or (head_repo == "owner/repo" and "windows-proof" in labels)
+                                if job_id in ("windows-msvc", "windows-ucrt64"):
+                                    expected = expected and classification == "success" and bool(head_sha)
+                                if job_id == "report" and event == "pull_request":
+                                    expected = False
+                                with self.subTest(job=job_id, event=event, head=head_repo, labels=labels, classification=classification, head_sha=head_sha):
+                                    self.assertEqual(bool(eval(expression, {"__builtins__": {}}, {})), expected)
+
+    def test_daily_windows_checkout_prerequisites_and_local_caches(self):
+        reusable = self.workflows["windows-build.yml"]
+        self.assertIn("  workflow_call:", reusable)
+        self.assertNotIn("actions/cache", reusable)
+        for job_id, job in jobs(reusable).items():
+            if job_id == "changes":
+                for output in ("needs_cpp=true", "needs_python=true", "needs_heavy=true"):
+                    self.assertIn(output, job)
+                continue
+            checkout = next(step for step in steps(job) if "uses: actions/checkout@" in step)
+            self.assertEqual(value(checkout, "clean", 10), "true")
+            self.assertEqual(value(checkout, "ref", 10), "${{ needs.changes.outputs.head_sha }}")
+            preflight = next(step for step in steps(job) if "--lane host-" in step or "--lane aggregate" in step)
+            self.assertIsNone(value(preflight, "continue-on-error", 8))
+            self.assertIsNone(value(preflight, "if", 8))
+            if job_id.endswith("-result"):
+                self.assertEqual(value(job, "shell", 8), "bash")
+            else:
+                self.assertIn("$env:LOCALAPPDATA", job)
+                self.assertEqual(value(job, "CCACHE_MAXSIZE", 6), "1200M")
+                self.assertLess(job.index(preflight), job.index("      - name: Stage software OpenGL"))
+                self.assertIn("try { Remove-Item -Recurse -Force $mesaRoot -ErrorAction Stop }", job)
+        ucrt = jobs(reusable)["windows-ucrt64"]
+        self.assertIn("--lane ucrt64", ucrt)
+        self.assertIn("cache: false", ucrt)
+        msvc = jobs(reusable)["windows-msvc"]
+        self.assertIn("--lane msvc", msvc)
+        self.assertIn("try { Remove-Item -Recurse -Force $ccacheRoot -ErrorAction Stop }", msvc)
+
+    def test_windows_aggregates_expose_selected_python_to_bash_and_preserve_failures(self):
+        for job_id in ("windows-msvc-result", "windows-ucrt64-result"):
+            job = jobs(self.workflows["windows-build.yml"])[job_id]
+            blocks = steps(job)
+            shim = next(step for step in blocks if "name: Expose selected Python to Bash" in step)
+            selector = next(step for step in blocks if "uses: actions/setup-python@" in step)
+            preflight = next(step for step in blocks if "name: Verify runner prerequisites" in step)
+            self.assertLess(blocks.index(selector), blocks.index(shim))
+            self.assertLess(blocks.index(shim), blocks.index(preflight))
+            self.assertEqual(value(shim, "CI_PYTHON_EXECUTABLE", 10), "${{ steps.python.outputs.python-path }}")
+            self.assertEqual(value(shim, "shell", 8), "bash")
+            self.assertIsNone(value(shim, "if", 8))
+            self.assertIsNone(value(shim, "continue-on-error", 8))
+            script = value(shim, "run", 8)
+            with self.subTest(job=job_id), tempfile.TemporaryDirectory(prefix="selected runtime ") as directory:
+                root = Path(directory)
+                selected = root / "selected Python [literal]"
+                selected.write_bytes(b'#!/usr/bin/env bash\nprintf "%s\\n" "$@"\nexit 7\n')
+                selected.chmod(0o755)
+                environment = dict(os.environ, RUNNER_TEMP=root.as_posix(),
+                                   CI_PYTHON_EXECUTABLE=selected.as_posix(), GITHUB_PATH=(root / "path").as_posix())
+                conversion = "" if sys.platform == "win32" else 'cygpath() { printf "%s\\n" "$2"; }\n'
+                execute = ('\nshim_path="$(tail -n 1 "$GITHUB_PATH")"\n'
+                           'export PATH="$(cygpath -u "$shim_path"):$PATH"\n'
+                           'python3 "argument with spaces" \'literal $value;\'\n')
+                result = run_bash_script(conversion + script + execute, env=environment, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [b"argument with spaces", b"literal $value;"])
+                for refusal in ('cygpath() { return 1; }\n', 'mktemp() { return 1; }\n'):
+                    (root / "path").unlink()
+                    refused = run_bash_script(conversion + refusal + script, env=environment,
+                                              capture_output=True, timeout=10)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertFalse((root / "path").exists())
+                    # Keep the next failure independent without deleting an open file on Windows.
+                    (root / "path").touch()
+
+    def test_daily_report_reuses_one_issue_comments_failures_and_closes_on_recovery(self):
+        spec = importlib.util.spec_from_file_location("daily_report", ROOT / "tools/ci/windows_daily_report.py")
+        report = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(report)
+        environment = {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "17", "GITHUB_RUN_ATTEMPT": "2",
+                       "GITHUB_SHA": "b" * 40, "WINDOWS_HEAD_SHA": "a" * 40, "GITHUB_SERVER_URL": "https://github.com", "BUILD_RESULT": "failure"}
+        job_pages = [{"jobs": [{"name": "build / MSVC shard 1", "status": "completed", "conclusion": "failure"}]},
+                     {"jobs": [{"name": "build / UCRT shard 2", "status": "completed", "conclusion": "cancelled"},
+                               {"name": "report", "status": "in_progress", "conclusion": None}]}]
+        issue = {"number": 3, "title": report.TITLE, "labels": [{"name": report.LABEL}]}
+        for existing, labels in (([], []), ([], [{"name": report.LABEL}]), ([issue], []),
+                                 ([issue, {**issue, "number": 4}], [])):
+            distractions = [{"title": "Daily Windows run - other", "number": 1, "labels": []},
+                            {"title": report.TITLE, "number": 2, "pull_request": {}, "labels": [{"name": report.LABEL}]},
+                            {"title": report.TITLE, "number": 5, "labels": [{"name": "unrelated"}]}]
+            needs_label = not existing
+            responses = [job_pages, [distractions, existing]]
+            if needs_label:
+                responses.append([[], labels])
+            with self.subTest(existing=existing, labels=labels), patch.object(report, "pages", side_effect=responses), patch.object(report, "gh", return_value="https://github.com/owner/repo/issues/3\n") as gh:
+                report.report(environment)
+                calls = [call.args for call in gh.call_args_list]
+                comments = [args for args in calls if args[:2] == ("issue", "comment")]
+                self.assertEqual(len(comments), 1)
+                body = comments[0][-1]
+                for expected in ("actions/runs/17/attempts/2", "a" * 40, "build / MSVC shard 1", "build / UCRT shard 2"):
+                    self.assertIn(expected, body)
+                self.assertEqual(sum(args[:2] == ("issue", "create") for args in calls), int(not existing))
+                self.assertEqual(sum(args[:2] == ("label", "create") for args in calls), int(needs_label and not labels))
+                self.assertEqual(sum(args[:2] == ("issue", "edit") for args in calls), 0)
+                if existing:
+                    self.assertEqual(comments[0][2], "3")
+        for existing in ([], [issue]):
+            with self.subTest(recovery=existing), patch.object(report, "pages", side_effect=[[{"jobs": []}], [existing]]), patch.object(report, "gh") as gh:
+                report.report({**environment, "BUILD_RESULT": "success"})
+                self.assertEqual(gh.call_count, int(bool(existing)))
+                if existing:
+                    self.assertEqual(gh.call_args.args[:3], ("issue", "close", "3"))
+                    self.assertIn("--comment", gh.call_args.args)
+        # Empty/skipped builds fail closed, and malformed/partial API reads cause no writes.
+        with patch.object(report, "pages", side_effect=[[{"jobs": []}], [[issue]]]), patch.object(report, "gh") as gh:
+            report.report({**environment, "BUILD_RESULT": "skipped"})
+            self.assertIn("Windows build (skipped)", gh.call_args.args[-1])
+        for failure in (ValueError("partial JSON"), subprocess.TimeoutExpired("gh", 120), OSError("unreadable response")):
+            with self.subTest(failure=failure), patch.object(report, "pages", side_effect=failure), patch.object(report, "gh") as gh:
+                with self.assertRaises(type(failure)):
+                    report.report(environment)
+                gh.assert_not_called()
+        with patch.object(report, "gh", return_value='[[{"name":"first"}],[],[{"name":"last"}]]') as gh:
+            self.assertEqual(report.pages("endpoint"), [[{"name": "first"}], [], [{"name": "last"}]])
+            gh.assert_called_once_with("api", "--paginate", "--slurp", "endpoint")
+        for response in ("{}", "partial JSON"):
+            with self.subTest(response=response), patch.object(report, "gh", return_value=response), self.assertRaises(ValueError):
+                report.pages("endpoint")
+
+    def test_windows_preflight_names_missing_tools_and_preserves_literal_paths(self):
+        spec = importlib.util.spec_from_file_location("runner_preflight", ROOT / "tools/ci/windows_runner_preflight.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        executable = str(ROOT / "tools with spaces/tool")
+        with patch.object(runner.os, "get_exec_path", return_value=["", ".", "relative", str(ROOT)]), patch.object(runner.shutil, "which", return_value=executable) as which, patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "tool 1\r\n", "")) as run:
+            self.assertEqual(runner.probe("tool", "literal $value;"), "tool 1")
+            which.assert_called_once_with("tool", path=str(ROOT))
+            self.assertEqual(run.call_args.args[0], [executable, "literal $value;"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 30)
+        for location in (None, "relative/tool"):
+            with self.subTest(location=location), patch.object(runner.shutil, "which", return_value=location), self.assertRaisesRegex(ValueError, "Missing required tool: cmake"):
+                runner.probe("cmake", "--version")
+        for response in (subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 1, "partial", "")):
+            with patch.object(runner.shutil, "which", return_value=executable), patch.object(runner.subprocess, "run", return_value=response), self.assertRaisesRegex(ValueError, "Required tool cmake failed"):
+                runner.probe("cmake", "--version")
+        for error in (OSError("denied"), subprocess.TimeoutExpired("cmake", 30)):
+            with patch.object(runner.shutil, "which", return_value=executable), patch.object(runner.subprocess, "run", side_effect=error), self.assertRaisesRegex(ValueError, "cmake could not run"):
+                runner.probe("cmake", "--version")
+        import ntpath
+        for windows_path in (r"C:\Tool runtime\tool.exe", r"C:\PROGRA~1\tool.exe"):
+            with self.subTest(windows_path=windows_path), patch.object(runner.os, "path", ntpath), patch.object(runner.os, "pathsep", ";"), patch.object(runner.os, "get_exec_path", return_value=["", ".", "relative", r"C:\Tools"]), patch.object(runner.shutil, "which", return_value=windows_path), patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "tool 1\r\n", "")) as run:
+                self.assertEqual(runner.probe("tool", "--version"), "tool 1")
+                self.assertEqual(run.call_args.args[0], [windows_path, "--version"])
+        versions = {"cmake": "cmake version 3.21.0", "ctest": "ctest version 3.21.0", "ccache": "ccache version 4.14.1", "pwsh": "7.4.0"}
+        def output(name, *_):
+            self.assertNotEqual(name, "python3")
+            return versions.get(name, "available")
+        with patch.object(runner.sys, "platform", "win32"), patch.object(runner.sys, "version_info", (3, 14, 8)), patch.object(runner.struct, "calcsize", return_value=8), patch.object(runner, "probe", side_effect=output), patch.dict(os.environ, {"MSYSTEM": "UCRT64", "ProgramFiles(x86)": str(ROOT)}), patch.object(runner, "__import__", create=True) as imports, patch.object(sys, "stdout", new_callable=io.StringIO):
+            for lane in ("host-msvc", "host-ucrt64", "msvc", "ucrt64", "aggregate", "native"):
+                runner.verify(lane)
+            self.assertEqual([call.args[0] for call in imports.call_args_list], ["numpy", "PIL"])
+            for tool in ("cmake", "ctest", "ccache", "pwsh"):
+                old = versions[tool]
+                versions[tool] = "unknown version"
+                with self.subTest(tool=tool), self.assertRaises(ValueError):
+                    runner.verify("msvc" if tool == "ccache" else "host-ucrt64" if tool == "pwsh" else "aggregate")
+                versions[tool] = old
+            for tool, bad_version in (("cmake", "cmake version 3.20.9"), ("ctest", "ctest version 3.20.9"), ("pwsh", "7.3.9")):
+                old = versions[tool]
+                versions[tool] = bad_version
+                with self.subTest(boundary=bad_version), self.assertRaises(ValueError):
+                    runner.verify("host-ucrt64")
+                versions[tool] = old
+            with patch.object(runner.sys, "version_info", (3, 14, 7)), self.assertRaisesRegex(ValueError, "3.14.8"):
+                runner.verify("aggregate")
+            with patch.object(runner.struct, "calcsize", return_value=4), self.assertRaisesRegex(ValueError, "64-bit"):
+                runner.verify("aggregate")
+            with patch.dict(os.environ, {"MSYSTEM": "MINGW64"}), self.assertRaisesRegex(ValueError, "UCRT64"):
+                runner.verify("ucrt64")
+            for location in ("", "relative"):
+                with self.subTest(location=location), patch.dict(os.environ, {"ProgramFiles(x86)": location}), self.assertRaisesRegex(ValueError, "Visual Studio Installer"):
+                    runner.verify("host-msvc")
+            for lane, missing, message in (("host-msvc", "vswhere.exe", "MSVC x64 C[+][+] tools"),
+                                           ("native", "cl", "Missing required tool: cl")):
+                def missing_tool(name, *arguments):
+                    if name.endswith(missing):
+                        raise ValueError("Missing required tool: " + name)
+                    return output(name, *arguments)
+                with self.subTest(lane=lane), patch.object(runner, "probe", side_effect=missing_tool), self.assertRaisesRegex(ValueError, message):
+                    runner.verify(lane)
+        with patch.object(runner.sys, "platform", "linux"), self.assertRaisesRegex(ValueError, "Windows x64"):
+            runner.verify("aggregate")
+
+
+    def test_profile_source_checker_requires_complete_ordered_configuration(self):
+        spec = importlib.util.spec_from_file_location(
+            "profile_contract", ROOT / "test/tools/check_profiler_contract.py")
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        contract.check_enabled_compile()
+        original_read = contract.read
+        workflow = self.workflows["ci.yml"]
+        init = "          python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe\n"
+        binding = "\"-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')\""
+        flags = "-DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON"
+        mutations = [
+            workflow.replace(init, ""),
+            workflow.replace(init, "").replace(flags + "\n", flags + "\n" + init),
+            workflow.replace(init, init.replace("gns-probe", "wrong-root")),
+            workflow.replace(binding, ""),
+            workflow.replace(binding, binding.replace("python3 -I -B -c", "python3 -c")),
+            workflow.replace("-DBUILD_TESTING=ON", "-DBUILD_TESTING=OFF"),
+            workflow.replace("-DBUILD_TESTING=ON", ""),
+            workflow.replace("-DLUMINUMBRA_ENABLE_GNS=ON", ""),
+        ]
+        for index, mutated in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.assertNotEqual(mutated, workflow)
+                with patch.object(contract, "read", side_effect=lambda path:
+                                  mutated if path == ".github/workflows/ci.yml" else original_read(path)):
+                    with self.assertRaisesRegex(AssertionError, "CI must configure the enabled profile preset"):
+                        contract.check_enabled_compile()
 
     def test_performance_apt_install_steps_have_bounded_updates_and_retries(self):
         install_jobs = []
@@ -821,10 +1203,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
-        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
+        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy" + CI_METADATA_SUFFIX)
         self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
         self.assertEqual(value(fast, "timeout-minutes", 4), "20")
-        self.assertIsNone(value(fast, "if", 4))
+        self.assertEqual(value(fast, "if", 4), ci_event_condition())
         self.assertIsNone(value(fast, "needs", 4))
         self.assertNotIn("draft", fast)
         self.assertNotIn("continue-on-error", fast)
@@ -886,28 +1268,50 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
             self.assertIn("tools/ci/" + suite, inventory)
 
+    def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
+        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
+        # embeds symbols through its own global flags.
+        ci = jobs(self.workflows["ci.yml"])
+        msvc, = [step for step in steps(jobs(self.workflows["windows-build.yml"])["windows-msvc"])
+                 if step.startswith("      - name: Configure, build, and test\n")]
+        run = value(msvc, "run", 8)
+        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
+        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
+        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        for name in ("linux", "tidy-shard", "fast-compile"):
+            self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
+
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
-        # Freeze existing routing, limits, required names and authoritative gates.
+        # Pin base-edit admission and check names along with existing limits and gates.
         expected = {
-            "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
+            "changes": "a0f410921dde3b73c324ac7a624eaf11a4fcab9537c200d72647d9ef8bf0fac9",
             # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "7cde77f3fe42f008c11ed036f89577fff71bc77076b13353a1f9cf1072f4aaad",
-            "gns-compile-probe": "7c0b1c6387113510ed76ffc66108cbf9efc3fa01617a68ca79b112fc3998a642",
-            "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            # Pin Python 3.14.8 across consumers and require partitioned local-check evidence.
-            "windows-msvc": "763218a207e024d39c82df14c933c89ac1d090342d7f4a794baa046a7a8d10f5",
-            # Pin Python 3.14.8 and pass the selected runtime to UCRT64 configuration.
-            "windows-ucrt64": "00890b97a7e49d22c50d046972b2f272fe0a63ca8ff90fb132f99fb410797eb1",
-            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
-            "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
-            "windows-ucrt64-result": "18837c580d266e30a72b2889a503e066f17498b757d4dc23878af779e3552a56",
-            "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
-            "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
-            "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
-            "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
+            "linux": "306cf8a35ba0bf836205559a40ea0d9d1da3bdd08b28f2b0291787b698223494",
+            "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
+            "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
+            "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
+            "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
+            "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
+            "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
+            "public-tree": "3881fa6241605c5bb5b7cfe57b8edee404e08ca2451f7f252093d3cc668d9b70",
         }
         actual = jobs(self.workflows["ci.yml"])
+        self.assertTrue(all(not key.startswith("windows-") for key in actual))
         self.assertEqual(set(actual), set(expected) | {"fast-compile"})
+        for name, digest in expected.items():
+            self.assertEqual(hashlib.sha256(actual[name].encode()).hexdigest(), digest, name)
+
+    def test_relocated_windows_job_definitions_are_pinned(self):
+        # Retain whole-job pins after moving the full Windows coverage out of CI.
+        expected = {
+            "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
+            "windows-msvc": "3fdfaa2bee1bcd937ee43d5ec74166429c2d581f165d17f04cc859bbbe0b94fb",
+            "windows-ucrt64": "07ce40560092c19c83a9beffff552eb1176077b9a087faa3011b6d98742d3c58",
+            "windows-msvc-result": "b7ac3a695046fb6674f05e8cade0ada71e6265cf38e6c50ed9a3dc9b17cf4871",
+            "windows-ucrt64-result": "9a918a89c4b910387a63f276bfc917757c2c884147ac44dfa165994454fe3061",
+        }
+        actual = jobs(self.workflows["windows-build.yml"])
+        self.assertEqual(set(actual), set(expected))
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256(actual[name].encode()).hexdigest(), digest, name)
 
@@ -915,7 +1319,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         with patch.object(shutil, "which", return_value=None):
             self.assertEqual(bash_executable(), "bash")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             with patch.object(shutil, "which", return_value=str(root / "cmd/git.exe")):
                 self.assertEqual(bash_executable(), "bash")
                 bash = root / "bin/bash.exe"
@@ -930,7 +1334,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertEqual(len(selectors), 1)
             selector = selectors[0]
             self.assertEqual(value(selector, "uses", 8),
-                             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                             "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0")
             self.assertIsNone(value(selector, "if", 8))
             self.assertEqual(value(selector, "python-version", 10), "'3.14.8'")
             self.assertEqual(value(selector, "architecture", 10), "x64")
@@ -943,6 +1347,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             configures = 0
             for step in blocks:
                 script = value(step, "run", 8) or ""
+                if "windows_runner_preflight.py" in script and "--lane native" not in script:
+                    self.assertIn('& "${{ steps.python.outputs.python-path }}" -I -B', script)
                 configure = re.findall(r"(?m)^cmake (?:-S |--preset )[^\n]*", script)
                 commands = [line.strip() for line in script.splitlines()
                             if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_EXECUTABLE" )',
@@ -977,7 +1383,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertEqual(consumers, 8)
             self.assertEqual(configures, 4)
 
-        producer = jobs(self.workflows["ci.yml"])["windows-msvc"]
+        producer = jobs(self.workflows["windows-build.yml"])["windows-msvc"]
         check(producer)
         # Exercise producer/configure disagreements, including the PATH reset
         # between dependency installation and native inventory generation.
@@ -999,17 +1405,22 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_ready_and_draft_transitions_trigger_existing_pr_routes(self):
         for filename, workflow in self.workflows.items():
             with self.subTest(workflow=filename):
+                if filename == "windows-build.yml":
+                    self.assertIn("  workflow_call:", workflow)
+                    continue
                 pr = re.split(r"\n  (?=\S)", workflow.split("  pull_request:\n", 1)[1], maxsplit=1)[0]
                 self.assertEqual(
                     value(pr, "types", 4),
-                    "[opened, synchronize, reopened, ready_for_review, converted_to_draft]",
+                    ("[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]"
+                     if filename == "ci.yml" else
+                     "[opened, synchronize, reopened, ready_for_review, converted_to_draft]"),
                 )
                 self.assertEqual(value(pr, "branches", 4), "[main, devel]")
 
     def test_guard_runs_first_under_existing_check_name_without_draft_job_skip(self):
         for filename, job_id, check_name, job in guarded_jobs(self.workflows):
             with self.subTest(workflow=filename, job=job_id):
-                self.assertEqual(value(job, "name", 4), check_name)
+                self.assertEqual(value(job, "name", 4), check_name + (CI_METADATA_SUFFIX if filename == "ci.yml" and job_id != "linux" else ""))
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
                 self.assertEqual(value(job, "needs", 4),
                                  "[changes, fast-lane, asan-shard]" if job_id == "asan" else
@@ -1030,7 +1441,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         "toJSON(github.event.pull_request.draft) != 'false' || "
                         "needs.fast-lane.result == 'success')"
                     )
-                self.assertEqual(value(job, "if", 4), "${{ " + condition + " }}")
+                self.assertEqual(value(job, "if", 4), ci_event_condition(condition) if filename == "ci.yml" else "${{ " + condition + " }}")
                 self.assertIsNone(value(job, "continue-on-error", 4))
                 guard = steps(job)[0]
                 self.assertTrue(guard.startswith("      - name: Reject draft pull requests\n"))
@@ -1056,8 +1467,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIsNotNone(script)
                 for event, draft, expected in cases:
                     with self.subTest(workflow=filename, job=job_id, event=event, draft=draft):
-                        result = subprocess.run(
-                            [BASH, "--noprofile", "--norc", "-e", "-c", script],
+                        result = run_bash_script(
+                            script, flags=("-e",),
                             cwd=directory,
                             env=dict(os.environ, CI_EVENT_NAME=event, CI_PR_DRAFT=draft),
                             capture_output=True,
@@ -1107,17 +1518,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("Build", str(result.failures[0][0]))
 
     def test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         for job_id in ("gns-compile-probe", "diligent-rhi", "tidy-shard"):
             with self.subTest(job=job_id):
                 self.assertEqual(value(ci[job_id], "needs", 4), "changes")
                 self.assertEqual(value(ci[job_id], "if", 4),
-                                 "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") }}")
+                                 ci_event_condition("!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ")"))
         self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
-        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
+        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ (" + WINDOWS_GUARD + ") && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && (needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') && (" + READY + ")) }}")
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
-        self.assertEqual(value(ci["tidy"], "if", 4), "${{ (!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ") }}")
-        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
+        self.assertEqual(value(ci["tidy"], "if", 4), ci_event_condition("(!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ")"))
+        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ (" + WINDOWS_GUARD + ") && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + ") }}")
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
@@ -1126,7 +1537,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}",
         )
         for job in (ci["lint"], ci["public-tree"]):
-            self.assertIsNone(value(job, "if", 4))
+            self.assertEqual(value(job, "if", 4), ci_event_condition())
 
     def test_asan_fast_lane_runs_exact_registered_stdlib_contracts(self):
         fast = jobs(self.workflows["asan.yml"])["fast-lane"]
@@ -1135,7 +1546,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(fast, "timeout-minutes", 4), "5")
         self.assertIsNone(value(fast, "continue-on-error", 4))
         registered = (ROOT / "tools/ci/local_check_contracts.cmake").read_text(encoding="utf-8")
-        # The offline-dependency suite is registered once per partition; the fast lane runs the whole script once.
+        # Both local suites are registered once per partition; the fast lane runs each complete script once.
         scripts = list(dict.fromkeys(re.findall(
             r'COMMAND "\$\{Python3_EXECUTABLE\}" -I -B "\$\{_local_check_source_dir\}/([^"\n]+)"', registered)))
         self.assertEqual(scripts, ["test_changed_tus.py", "test_offline_deps.py"])
@@ -1212,17 +1623,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         dependencies = {"changes": "success", "fast-lane": fast, "asan-shard": "skipped"}
                         refuses = evaluate_condition(value(refusal, "if", 8), dependencies)
                         script = (value(refusal, "run", 8) + "\n" if refuses else "") + value(route, "run", 8)
-                        process = subprocess.run(
-                            [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                        process = run_bash_script(
+                            script,
                             env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT="skipped",
-                                     CI_PATHS_RESULT="success", GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
+                                     CI_PATHS_RESULT="success", GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
                             capture_output=True, text=True, timeout=10)
                         self.assertEqual(process.returncode == 0,
                                          cpp == "false" and fast in ("success", "skipped"), process.stderr)
 
     def test_required_check_names_stay_unchanged(self):
         expected = {
-            "ci.yml": {"linux-result": "Linux / GCC", "windows-msvc-result": "Windows / MSVC",
+            "ci.yml": {"linux-result": "Linux / GCC",
                        "public-tree": "Public tree / inventory honesty", "lint": "Format changed files",
                        "tidy": "Static analysis / clang-tidy", "gns-compile-probe": "GNS transport / compile probe",
                        "diligent-rhi": "Diligent RHI / software GL"},
@@ -1235,7 +1646,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for job_id, name in names.items():
                 with self.subTest(workflow=filename, job=job_id):
-                    self.assertEqual(value(jobs(workflow)[job_id], "name", 4), name)
+                    self.assertEqual(value(jobs(workflow)[job_id], "name", 4),
+                                     name + (CI_METADATA_SUFFIX if filename == "ci.yml" else ""))
 
     def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
         workflow = self.workflows["asan.yml"]
@@ -1312,8 +1724,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", upload)
         diagnostics = shard_steps["Upload sanitizer evidence"]
         self.assertEqual(value(diagnostics, "name", 10),
-                         "asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}")
-        self.assertEqual(value(diagnostics, "overwrite", 10), "true")
+                         "asan-test-evidence-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+        self.assertIsNone(value(diagnostics, "overwrite", 10))
         self.assertEqual(value(shard_steps["Bind manual qualification shard evidence"], "QUALIFICATION_PRODUCERS", 10),
                          "'{\"identity\":\"${{ steps.identity.outcome }}\",\"configure\":\"${{ steps.configure.outcome }}\",\"build\":\"${{ steps.build.outcome }}\",\"tests\":\"${{ steps.tests.outcome }}\"}'")
         for name in ("identity", "configure", "build", "tests"):
@@ -1341,12 +1753,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertFalse(result.errors)
 
     def test_native_matrices_aggregates_limits_and_full_qualification_route(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         matrix = "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}"
         for job_id, profile, title, runner, limit, floor in (
                 ("linux", "gcc", "Linux / GCC", "ubuntu-24.04", "60", "2340"),
-                ("windows-msvc", "msvc", "Windows / MSVC", "windows-2025", "90", "2320"),
-                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "windows-2025", "85", "2320")):
+                ("windows-msvc", "msvc", "Windows / MSVC", "${{ fromJSON(inputs.runner) }}", "90", "2320"),
+                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "${{ fromJSON(inputs.runner) }}", "85", "2320")):
             with self.subTest(job=job_id):
                 producer, aggregate = ci[job_id], ci[job_id + "-result"]
                 self.assertEqual(value(producer, "shard", 8), matrix)
@@ -1355,11 +1767,13 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(producer, "runs-on", 4), runner)
                 self.assertIn(title + " full qualification", value(producer, "name", 4))
                 self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
-                self.assertEqual(value(aggregate, "name", 4), title)
-                self.assertEqual(value(aggregate, "if", 4), "${{ !cancelled() || " + aggregate_invalid_expression(job_id) + " }}")
+                self.assertEqual(value(aggregate, "name", 4), title + ("" if job_id.startswith("windows-") else CI_METADATA_SUFFIX))
+                self.assertEqual(windows_condition(value(aggregate, "if", 4)),
+                                 "${{ (!cancelled() || " + aggregate_invalid_expression(job_id) + ") }}" if job_id.startswith("windows-") else
+                                 ci_event_condition("!cancelled() || " + aggregate_invalid_expression(job_id)))
                 self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
                 self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
-                self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + "\n"), 1)
+                self.assertEqual(self.workflows["windows-build.yml" if job_id.startswith("windows-") else "ci.yml"].count("    name: " + title + ("" if job_id.startswith("windows-") else CI_METADATA_SUFFIX) + "\n"), 1)
                 self.assertIsNone(value(producer, "continue-on-error", 4))
                 self.assertIsNone(value(aggregate, "continue-on-error", 4))
                 for command in ("plan", "run"):
@@ -1372,7 +1786,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 for key, expression in (("NEEDS_CPP", "needs.changes.outputs.needs_cpp"),
                                         ("CI_EVENT", "github.event_name"),
                                         ("CI_DRAFT", "github.event.pull_request.draft")):
-                    self.assertEqual(value(gate, key, 10), "${{ " + expression + " }}")
+                    self.assertEqual(value(gate, key, 10),
+                                     "${{ " + expression + " }}")
                 self.assertEqual(value(gate, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
                 self.assertIn('--classification "$CI_PATHS_RESULT"', gate)
                 self.assertEqual(value(gate, "CI_CANCELLED", 10), '"false"')
@@ -1416,8 +1831,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_heavy_policy_inputs_reach_every_producer_and_required_aggregate(self):
         for filename, producers, aggregates in (
-                ("ci.yml", ("linux", "windows-msvc", "windows-ucrt64"),
-                 ("linux-result", "windows-msvc-result", "windows-ucrt64-result")),
+                ("ci.yml", ("linux",), ("linux-result",)),
+                ("windows-build.yml", ("windows-msvc", "windows-ucrt64"),
+                 ("windows-msvc-result", "windows-ucrt64-result")),
                 ("asan.yml", ("asan-shard",), ("asan",))):
             blocks = jobs(self.workflows[filename])
             classifier = blocks["changes"]
@@ -1470,7 +1886,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertNotIn("git fetch", script)
             for event, base_ref, outputs, full, repo, head_repo in cases:
                 with self.subTest(workflow=filename, event=event, base_ref=base_ref, outputs=outputs), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve(strict=True)
                     fixtures = (
                         'git() { case "$1" in\n'
                         'diff) return 0;;\nshow) cat "$FAKE_BASE_SCRIPT";;\n'
@@ -1491,16 +1907,16 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                RUNNER_TEMP=root.as_posix(), GITHUB_WORKSPACE=root.as_posix(),
                                GITHUB_OUTPUT=output.as_posix(), FAKE_BASE_SCRIPT=base.as_posix(),
                                FAKE_PYTHON=Path(sys.executable).as_posix())
-                    result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script],
+                    result = run_bash_script(fixtures + script,
                                             env=env, capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     actual = dict(line.split("=", 1) for line in output.read_text().splitlines())
                     self.assertEqual(actual, fallback if full else light)
 
     def test_ucrt64_producer_and_aggregate_enable_all_push_and_manual_routes(self):
-        blocks = jobs(self.workflows["ci.yml"])
+        blocks = jobs(self.workflows["windows-build.yml"])
         expression = UCRT_ROUTE.replace("||", "or")
-        for event in ("push", "workflow_dispatch", "pull_request"):
+        for event in ("schedule", "workflow_dispatch", "pull_request"):
             self.assertTrue(eval(expression.replace("github.event_name", repr(event)), {"__builtins__": {}}))
         self.assertIn("(" + UCRT_ROUTE + ")", value(blocks["windows-ucrt64"], "if", 4))
         aggregate = next(step for step in steps(blocks["windows-ucrt64-result"])
@@ -1509,7 +1925,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(blocks["windows-ucrt64"], "timeout-minutes", 4), "85")
 
     def test_windows_python_selection_is_exact_and_precedes_every_consumer(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         for job_id in ("windows-msvc", "windows-ucrt64"):
             with self.subTest(job=job_id):
                 producer = ci[job_id]
@@ -1517,7 +1933,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(len(selected), 1)
                 setup = selected[0]
                 self.assertEqual(value(setup, "uses", 8),
-                                 "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                                 "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0")
                 self.assertEqual(value(setup, "id", 8), "python")
                 self.assertEqual(dict(re.findall(r"^          ([\w-]+): (.*)$", setup, re.MULTILINE)), {
                     "python-version": "'3.14.8'", "architecture": "x64", "check-latest": "false",
@@ -1537,7 +1953,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                  "&& fromJSON('[0]') || fromJSON('[1,2]') }}")
 
     def test_windows_cmake_discovery_binds_the_selected_python_on_every_route(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         expected = {
             ("windows-msvc", "Run registered local-check deadlines"): (1, "bash", None),
             ("windows-msvc", "Configure, build, and test"): (
@@ -1568,7 +1984,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
     def test_windows_bash_configure_preserves_python_path_as_one_literal_argument(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         for job_id, name in (("windows-msvc", "Run registered local-check deadlines"),
                              ("windows-ucrt64", "Configure")):
             step = next(step for step in steps(ci[job_id]) if step.startswith("      - name: " + name + "\n"))
@@ -1581,7 +1997,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          r"D:\Python runtime\3.14.8\python.exe",
                          "C:/PROGRA~1/Python/python.exe", "C:/Python $literal; value/python.exe"):
                 with self.subTest(job=job_id, path=path), tempfile.TemporaryDirectory() as directory:
-                    result = subprocess.run([BASH, "--noprofile", "--norc", "-e", "-c", script],
+                    result = run_bash_script(script, flags=("-e",),
                                             cwd=directory, env=dict(os.environ, CI_PYTHON_EXECUTABLE=path),
                                             capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -1591,23 +2007,29 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                      ["-DPython3_EXECUTABLE=" + path])
 
     def test_native_cache_writers_and_attempt_specific_retained_evidence(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         for job_id, profile in (("linux", "gcc"), ("windows-msvc", "msvc"), ("windows-ucrt64", "ucrt64")):
             producer, aggregate = ci[job_id], ci[job_id + "-result"]
             producer_steps = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(producer)}
-            for step in ("Clean compiler cache before saving", "Save compiler cache"):
-                self.assertTrue(value(producer_steps[step], "if", 8).startswith("${{ matrix.shard == 1 && "))
-            self.assertNotIn("matrix.shard", producer_steps["Restore compiler cache"])
+            if profile == "gcc":
+                for step in ("Clean compiler cache before saving", "Save compiler cache"):
+                    self.assertTrue(value(producer_steps[step], "if", 8).startswith("${{ matrix.shard == 1 && "))
+                self.assertNotIn("matrix.shard", producer_steps["Restore compiler cache"])
+            else:
+                self.assertNotIn("actions/cache", producer)
+                self.assertIn("$env:LOCALAPPDATA", producer_steps["Locate compiler cache"])
+                self.assertIn("ccache --cleanup", producer_steps["Clean compiler cache on disk"])
             upload = producer_steps["Upload shard JUnit"]
             self.assertEqual(value(upload, "retention-days", 10), "30")
             self.assertEqual(value(upload, "if-no-files-found", 10), "error")
             self.assertEqual(value(upload, "path", 10).splitlines(), [
                 "build/release/ctest.junit.xml", "build/release/ctest.inventory.json", "build/release/ctest.partition.json",
                 *(["build/release/ctest-discovery.json", "build/release/netsoak.junit.xml"] if profile == "gcc" else [])])
-            self.assertEqual(value(upload, "name", 10), profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
-            self.assertIn("pattern: " + profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*", aggregate)
+            head = "github.sha" if profile == "gcc" else "needs.changes.outputs.head_sha"
+            self.assertEqual(value(upload, "name", 10), profile + "-junit-${{ " + head + " }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+            self.assertIn("pattern: " + profile + "-junit-${{ " + head + " }}-${{ github.run_id }}-shard-*-attempt-*", aggregate)
             self.assertIn("--attempt ${{ github.run_attempt }}", aggregate)
-        self.assertIn("cache: ${{ matrix.shard == 1 && github.event_name == 'push'", ci["windows-ucrt64"])
+        self.assertIn("cache: false", ci["windows-ucrt64"])
 
     def test_gcc_preserves_prefab_netsoak_packaging_and_diagnostics(self):
         linux = jobs(self.workflows["ci.yml"])["linux"]
@@ -1631,14 +2053,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         registrations = re.findall(
             r'add_test\(\s*NAME (AcceptanceMatrixContract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
-        self.assertEqual(len(registrations), 225)
+        spec = importlib.util.spec_from_file_location("acceptance_roster", ROOT / "tools/ci/test_check_acceptance_matrix.py")
+        acceptance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(acceptance)
+        self.assertEqual(len(registrations), acceptance._CONTRACT_PARTITIONS)
         self.assertEqual({int(re.search(r'--contract-partition ([0-9]+)', command)[1])
-                          for _, command in registrations}, set(range(225)))
+                          for _, command in registrations}, set(range(acceptance._CONTRACT_PARTITIONS)))
         self.assertNotIn("NAME AcceptanceRecoveryContract", cmake)
         for name, command in registrations:
             self.assertIn('ci/test_check_acceptance_matrix.py', command)
             self.assertRegex(cmake, rf'set_tests_properties\({name}\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         producer, aggregate = ci["linux"], ci["linux-result"]
         self.assertNotIn("check_acceptance_matrix.py", producer)
         self.assertIn("ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json", producer)
@@ -1674,15 +2099,15 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for full, owner in (("false", 1), ("true", 0)):
             for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):
                 with self.subTest(full=full, missing=missing), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve(strict=True)
                     (root / "build/release").mkdir(parents=True)
                     source = root / f"build/gcc-shards/shard-{owner}"
                     source.mkdir(parents=True)
                     for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
                         if filename != missing:
                             (source / filename).write_text(f"owner-{owner}-{filename}", encoding="utf-8")
-                    result = subprocess.run(
-                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                    result = run_bash_script(
+                        prepare,
                         cwd=root, env=dict(os.environ, CI_QUALIFICATION=full),
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode == 0, missing is None, result.stderr)
@@ -1692,9 +2117,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                              (source / filename).read_bytes())
 
     def test_ci_and_asan_bash_scripts_parse_without_executing_native_commands(self):
-        for filename in ("ci.yml", "asan.yml"):
+        for filename in ("ci.yml", "asan.yml", "windows-build.yml"):
             for job_id, job in jobs(self.workflows[filename]).items():
-                windows = value(job, "runs-on", 4).startswith("windows-")
+                windows = filename == "windows-build.yml" and not job_id.endswith("-result")
                 for step in steps(job):
                     script = value(step, "run", 8)
                     shell = value(step, "shell", 8) or ("pwsh" if windows else "bash")
@@ -1702,7 +2127,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         continue
                     script = re.sub(r"\$\{\{.*?\}\}", "1", script)
                     with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
-                        result = subprocess.run([BASH, "--noprofile", "--norc", "-n", "-c", script],
+                        result = run_bash_script(script, flags=("-n",),
                                                 capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1710,8 +2135,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for filename, job, directory, floor in (
                 ("asan.yml", "asan", "build/debug-asan", 2320),
                 ("ci.yml", "linux-result", "build/release", 2340),
-                ("ci.yml", "windows-msvc-result", "build/release", 2320),
-                ("ci.yml", "windows-ucrt64-result", "build/release", 2320)):
+                ("windows-build.yml", "windows-msvc-result", "build/release", 2320),
+                ("windows-build.yml", "windows-ucrt64-result", "build/release", 2320)):
             aggregate = jobs(self.workflows[filename])[job]
             step = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
             commands = value(step, "run", 8).splitlines()
@@ -1720,9 +2145,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             script = "\n".join(commands[start:end + 1])
             for needs_heavy in ("false", "true", "", "False", "0", "unknown"):
                 with self.subTest(job=job, needs_heavy=needs_heavy):
-                    result = subprocess.run(
-                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                         'python3() { printf "%s\\n" "$@"; }\n' + script],
+                    result = run_bash_script(
+                        'python3() { printf "%s\\n" "$@"; }\n' + script,
                         env=dict(os.environ, CI_NEEDS_HEAVY=needs_heavy), capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     arguments = result.stdout.splitlines()
@@ -1909,14 +2333,14 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertNotIn("ctest_shards.py", prepare)
         for omitted in (None, 3):
             with self.subTest(omitted=omitted), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve(strict=True)
                 for name, (attempt, shard) in selected.items():
                     if shard != omitted:
                         source = root / "build/asan-shards" / name
                         source.mkdir(parents=True)
                         (source / "producer").write_text(str(attempt), encoding="utf-8")
-                result = subprocess.run(
-                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                result = run_bash_script(
+                    prepare,
                     cwd=root, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 for _, (attempt, shard) in selected.items():
@@ -1960,18 +2384,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         continue
                     with self.subTest(workflow=filename, job=job_id, condition=condition):
                         self.assertLessEqual(set(re.findall(r"needs\.([\w-]+)\.", condition)), declared)
-                        functions = set(re.findall(r"\b(\w+)\(", condition))
+                        functions = set(re.findall(r"\b(\w+)\(", windows_condition(condition)))
                         self.assertLessEqual(functions, {"always", "cancelled", "failure", "success"})
                         self.assertNotIn("steps.", value(job, "if", 4))
 
     def test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies(self):
         aggregates = [("asan-shard", jobs(self.workflows["asan.yml"])["asan"])]
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         aggregates += [(producer, ci[producer + "-result"])
                        for producer in ("linux", "windows-msvc", "windows-ucrt64")]
         aggregates.append(("tidy-shard", ci["tidy"]))
         for producer, aggregate in aggregates:
-            condition = value(aggregate, "if", 4).replace(READY, "True")
+            condition = windows_condition(value(aggregate, "if", 4)).replace(READY, "True")
             refusal = next(step for step in steps(aggregate)
                            if step.startswith("      - name: Reject invalid dependencies\n"))
             self.assertIsNone(value(refusal, "continue-on-error", 8))
@@ -1993,8 +2417,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                                              failed=earlier_step_failed)
                                 self.assertEqual(refuses, invalid)
                             if admitted and invalid:
-                                process = subprocess.run(
-                                    [BASH, "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
+                                process = run_bash_script(
+                                    value(refusal, "run", 8), flags=("-e",),
                                     capture_output=True, text=True, timeout=10)
                                 self.assertNotEqual(process.returncode, 0)
             # Re-evaluate admission after each actual step, including download,
@@ -2026,11 +2450,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             ("", "false", "push", "", "false", "false", False),
             ("unknown", "false", "push", "", "false", "false", False),
         ])
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         with tempfile.TemporaryDirectory() as directory:
             for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
                 aggregate_steps = steps(ci[job])
-                refusal, gate = aggregate_steps[2:4]
+                refusal = next(step for step in aggregate_steps if step.startswith("      - name: Reject invalid dependencies\n"))
+                gate = aggregate_steps[aggregate_steps.index(refusal) + 1]
                 self.assertTrue(refusal.startswith("      - name: Reject invalid dependencies\n"))
                 self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression(job.removesuffix("-result")) + ") }}")
                 self.assertIsNone(value(refusal, "continue-on-error", 8))
@@ -2049,9 +2474,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         for result, cpp, event, draft, qualification, enabled, accepted in cases:
                             script = 'python3() { "$POLICY_PYTHON" -I -B "$@"; }\n'
                             script += (refusal_script + "\n" if classification != "success" or result not in ("success", "skipped") else "") + gate_script
+                            path = write_bash_script(Path(directory) / f"route-{job}-{index}.sh", script)
                             yield PolicyRouteCase(
                                 (classification, result, cpp, event, draft, qualification, enabled), accepted,
-                                (BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script),
+                                (BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", path),
                                 str(ROOT),
                                 tuple(dict(environment, POLICY_PYTHON=Path(sys.executable).as_posix(),
                                            CI_PATHS_RESULT=classification, CI_CANCELLED="false", SHARD_RESULT=result, NEEDS_CPP=cpp, CI_EVENT=event, CI_DRAFT=draft,
@@ -2071,111 +2497,6 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                              process.stdout + process.stderr)
                             if classification != "success" or result not in ("success", "skipped"):
                                 self.assertIn("Aggregate dependencies did not pass", process.stderr)
-
-    def test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies(self):
-        # At job level cancelled() reads workflow cancellation. At step level
-        # it reads the current job status, which can still be successful while
-        # the server re-evaluates the job's condition during artifact download.
-        # Read both conditions from the workflow and never treat a job skip as
-        # an acceptable substitute for an explicit dependency refusal.
-        aggregates = (("asan.yml", "asan", "asan-shard"),
-                      ("ci.yml", "tidy", "tidy-shard"),
-                      ("ci.yml", "linux-result", "linux"),
-                      ("ci.yml", "windows-msvc-result", "windows-msvc"),
-                      ("ci.yml", "windows-ucrt64-result", "windows-ucrt64"))
-        self.check_required_aggregates(aggregates)
-
-    def check_required_aggregates(self, aggregates):
-        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
-        for filename, job_id, shard_id in aggregates:
-            aggregate = jobs(self.workflows[filename])[job_id]
-            self.assertEqual(value(aggregate, "needs", 4),
-                             "[changes, fast-lane, asan-shard]" if shard_id == "asan-shard"
-                             else f"[changes, {shard_id}]")
-            self.assertIsNone(value(aggregate, "continue-on-error", 4))
-            refusal = next(step for step in steps(aggregate)
-                           if step.startswith("      - name: Reject invalid dependencies\n"))
-            self.assertIsNone(value(refusal, "continue-on-error", 8))
-            # This must be an unconditional failure whenever the refusal runs.
-            process = subprocess.run(
-                [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                 value(refusal, "run", 8)], capture_output=True, text=True, timeout=10,
-            )
-            self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
-            for cancelled in (False, True):
-                for changes in results:
-                    for shard in results:
-                        with self.subTest(job=job_id, cancelled=cancelled, changes=changes, shard=shard):
-                            dependency_invalid = changes != "success" or shard not in ("success", "skipped")
-                            # Ready PRs and pushes retain their existing routing.
-                            for event in ("pull_request", "push", "workflow_dispatch"):
-                                self.assertEqual(
-                                    self.aggregate_condition(value(aggregate, "if", 4), shard_id,
-                                                             cancelled, changes, shard, event),
-                                    not cancelled or dependency_invalid,
-                                )
-                            # Even if the current job is still successful, any
-                            # invalid dependency must run the failure step.
-                            for job_cancelled in (False, True):
-                                self.assertEqual(
-                                    self.aggregate_condition(value(refusal, "if", 8), shard_id,
-                                                             job_cancelled, changes, shard, step=True),
-                                    dependency_invalid,
-                                )
-
-    @staticmethod
-    def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
-        expression = expression.removeprefix("${{ ").removesuffix(" }}")
-        status = {"always": True, "cancelled": cancelled,
-                  "success": not cancelled and (step or changes == shard == "success"),
-                  "failure": not step and "failure" in (changes, shard)}
-        rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
-                                 lambda match: str(status[match[1]]), expression)
-        for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
-                          ("needs.fast-lane.result", "success"),
-                          ("github.event_name", event), ("github.event.pull_request.draft", False)):
-            rendered = rendered.replace(key, repr(item))
-        rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
-        rendered = rendered.replace("&&", " and ").replace("||", " or ")
-        return bool((count > 0 or status["success"]) and eval(rendered, {"__builtins__": {}}, {}))
-
-    def test_required_aggregate_graph_rejects_cancellation_regressions(self):
-        method = "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies"
-        for filename, job_id, shard_id in (("asan.yml", "asan", "asan-shard"),
-                                           ("ci.yml", "tidy", "tidy-shard"),
-                                           ("ci.yml", "linux-result", "linux"),
-                                           ("ci.yml", "windows-msvc-result", "windows-msvc"),
-                                           ("ci.yml", "windows-ucrt64-result", "windows-ucrt64")):
-            workflow = self.workflows[filename]
-            aggregate = jobs(workflow)[job_id]
-            job_if = value(aggregate, "if", 4)
-            refusal = next(step for step in steps(aggregate)
-                           if step.startswith("      - name: Reject invalid dependencies\n"))
-            for mutation, original, replacement in (
-                ("uncancellable-job", job_if, "${{ always() }}"),
-                ("skipped-cancelled-dependencies", job_if, "${{ !cancelled() }}"),
-                ("implicit-success", job_if, "${{ github.event_name == 'pull_request' }}"),
-                ("missed-classifier-cancellation", job_if,
-                 "${{ !cancelled() || needs." + shard_id + ".result == 'cancelled' }}"),
-                ("missed-shard-cancellation", job_if,
-                 "${{ !cancelled() || needs.changes.result == 'cancelled' }}"),
-                ("job-status-refusal", value(refusal, "if", 8), "${{ cancelled() }}"),
-                ("implicit-success-refusal", value(refusal, "if", 8),
-                 "${{ needs.changes.result == 'cancelled' || needs." + shard_id + ".result == 'cancelled' }}"),
-                ("successful-refusal", "          exit 1", "          exit 0"),
-            ):
-                with self.subTest(job=job_id, mutation=mutation):
-                    # Apply only inside this job, not the classifier or shards.
-                    mutated = aggregate.replace(original, replacement)
-                    self.assertNotEqual(mutated, aggregate)
-                    case = WorkflowDraftPolicyTests(method)
-                    case.workflows = {**self.workflows, filename: workflow.replace(aggregate, mutated, 1)}
-                    result = unittest.TestResult()
-                    unittest.FunctionTestCase(
-                        lambda: case.check_required_aggregates(((filename, job_id, shard_id),))
-                    ).run(result)
-                    self.assertEqual(result.errors, [], result.errors)
-                    self.assertTrue(result.failures)
 
     def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
@@ -2213,9 +2534,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     self.assertIn(result, ("success", "skipped"))
                                     continue
                                 refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
-                                process = subprocess.run(
-                                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                                     (refusal_script + "\n" if refuses else "") + script],
+                                process = run_bash_script(
+                                    (refusal_script + "\n" if refuses else "") + script,
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
                                              CI_PATHS_RESULT=classification,
                                              GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
@@ -2229,7 +2549,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     self.assertIn("Aggregate dependencies did not pass", process.stderr)
 
     def test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
             with self.subTest(job=job):
                 aggregate = ci[job]
@@ -2242,11 +2562,198 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIsNone(value(gate, "if", 8))
                 self.assertIsNone(value(gate, "continue-on-error", 8))
                 self.assertLess(aggregate.index(refusal), aggregate.index(gate))
-                result = subprocess.run(
-                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                     value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
+                result = run_bash_script(
+                    value(refusal, "run", 8), capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
+
+    def test_ucrt64_configure_changes_only_debug_information_level(self):
+        job = native_jobs(self.workflows)["windows-ucrt64"]
+        configure, = [step for step in steps(job) if step.startswith("      - name: Configure\n")]
+        self.assertEqual(value(configure, "run", 8),
+                         'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
+                         '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
+                         '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
+                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
+
+    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
+        job = jobs(self.workflows["windows-build.yml"])["windows-ucrt64"]
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
+        trusted_push = (
+            "github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
+        )
+        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
+        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10), "false")
+        disable = named["Disable compiler cache for qualification captures"]
+        self.assertEqual(value(disable, "if", 8), capture)
+        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
+        self.assertNotIn("actions/cache", job)
+        self.assertIn("$env:LOCALAPPDATA", named["Locate compiler cache"])
+        cleanup = named["Clean compiler cache on disk"]
+        self.assertEqual(value(cleanup, "if", 8),
+                         "${{ matrix.shard == 1 && always() && !(" + capture + ") }}")
+        self.assertEqual(value(cleanup, "run", 8), "ccache --cleanup || true")
+
+    def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
+        group = (
+            "${{ github.event_name == 'workflow_dispatch' && "
+            "format('{0}-manual-{1}', github.workflow, github.run_id) || "
+            "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+            "format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || "
+            "github.event_name == 'push' && github.ref == 'refs/heads/devel' && "
+            "format('{0}-{1}-push', github.workflow, github.ref) || "
+            "format('{0}-{1}', github.workflow, github.ref) }}"
+        )
+        cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
+        workflows = {key: val for key, val in self.workflows.items() if key != "windows-build.yml"}
+        workflows["ucrt-attribution.yml"] = (
+            ROOT / ".github/workflows/ucrt-attribution.yml"
+        ).read_text(encoding="utf-8")
+        for filename, workflow in workflows.items():
+            with self.subTest(workflow=filename):
+                expected_group = group
+                expected_cancellation = cancellation
+                if filename == "ci.yml":
+                    expected_group = group.replace("${{ ", "${{ (github.event_name == 'pull_request' && "
+                                                   "github.event.action == 'edited' && !github.event.changes.base) && "
+                                                   "format('{0}-metadata-{1}', github.workflow, github.run_id) || ", 1)
+                    expected_cancellation = cancellation.replace(
+                        "${{ ", "${{ !(github.event_name == 'pull_request' && github.event.action == 'edited' && "
+                        "!github.event.changes.base) && ", 1)
+                self.assertEqual(value(workflow, "group", 2), expected_group)
+                self.assertEqual(value(workflow, "cancel-in-progress", 2), expected_cancellation)
+
+    def test_policy_suite_is_part_of_cheap_inventory_check(self):
+        inventory = jobs(self.workflows["ci.yml"])["public-tree"]
+        self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
+
+    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
+        expected = {
+            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
+            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
+        }
+        comments = {}
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            matches = re.findall(
+                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
+                r"(?=  # Main pushes)", workflow, re.MULTILINE,
+            )
+            with self.subTest(workflow=path.name):
+                if path.name in expected:
+                    self.assertEqual(len(matches), 1)
+                if matches:
+                    self.assertEqual(len(matches), 1)
+                    comments[path.name] = matches[0]
+        self.assertEqual(set(comments), expected)
+        self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowRequiredAggregatePolicyTests(WorkflowPolicyFixture, unittest.TestCase):
+    def test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies(self):
+        # At job level cancelled() reads workflow cancellation. At step level
+        # it reads the current job status, which can still be successful while
+        # the server re-evaluates the job's condition during artifact download.
+        # Read both conditions from the workflow and never treat a job skip as
+        # an acceptable substitute for an explicit dependency refusal.
+        aggregates = (("asan.yml", "asan", "asan-shard"),
+                      ("ci.yml", "tidy", "tidy-shard"),
+                      ("ci.yml", "linux-result", "linux"),
+                      ("windows-build.yml", "windows-msvc-result", "windows-msvc"),
+                      ("windows-build.yml", "windows-ucrt64-result", "windows-ucrt64"))
+        self.check_required_aggregates(aggregates)
+
+    def check_required_aggregates(self, aggregates):
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        for filename, job_id, shard_id in aggregates:
+            aggregate = jobs(self.workflows[filename])[job_id]
+            self.assertEqual(value(aggregate, "needs", 4),
+                             "[changes, fast-lane, asan-shard]" if shard_id == "asan-shard"
+                             else f"[changes, {shard_id}]")
+            self.assertIsNone(value(aggregate, "continue-on-error", 4))
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            self.assertIsNone(value(refusal, "continue-on-error", 8))
+            # This must be an unconditional failure whenever the refusal runs.
+            process = run_bash_script(
+                value(refusal, "run", 8), capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
+            for cancelled in (False, True):
+                for changes in results:
+                    for shard in results:
+                        with self.subTest(job=job_id, cancelled=cancelled, changes=changes, shard=shard):
+                            dependency_invalid = changes != "success" or shard not in ("success", "skipped")
+                            # Ready PRs and pushes retain their existing routing.
+                            for event in ("pull_request", "push", "workflow_dispatch"):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(aggregate, "if", 4), shard_id,
+                                                             cancelled, changes, shard, event),
+                                    not cancelled or dependency_invalid,
+                                )
+                            # Even if the current job is still successful, any
+                            # invalid dependency must run the failure step.
+                            for job_cancelled in (False, True):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(refusal, "if", 8), shard_id,
+                                                             job_cancelled, changes, shard, step=True),
+                                    dependency_invalid,
+                                )
+
+    @staticmethod
+    def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
+        expression = render_edit_context(windows_condition(expression)).removeprefix("${{ ").removesuffix(" }}")
+        status = {"always": True, "cancelled": cancelled,
+                  "success": not cancelled and (step or changes == shard == "success"),
+                  "failure": not step and "failure" in (changes, shard)}
+        rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
+                                 lambda match: str(status[match[1]]), expression)
+        for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
+                          ("needs.fast-lane.result", "success"),
+                          ("github.event_name", event), ("github.event.pull_request.draft", False)):
+            rendered = rendered.replace(key, repr(item))
+        rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
+        rendered = rendered.replace("&&", " and ").replace("||", " or ")
+        return bool((count > 0 or status["success"]) and eval(rendered, {"__builtins__": {}}, {}))
+
+    def test_required_aggregate_graph_rejects_cancellation_regressions(self):
+        method = "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies"
+        for filename, job_id, shard_id in (("asan.yml", "asan", "asan-shard"),
+                                           ("ci.yml", "tidy", "tidy-shard"),
+                                           ("ci.yml", "linux-result", "linux"),
+                                           ("windows-build.yml", "windows-msvc-result", "windows-msvc"),
+                                           ("windows-build.yml", "windows-ucrt64-result", "windows-ucrt64")):
+            workflow = self.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            job_if = value(aggregate, "if", 4)
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            for mutation, original, replacement in (
+                ("uncancellable-job", job_if, "${{ always() }}"),
+                ("skipped-cancelled-dependencies", job_if, "${{ !cancelled() }}"),
+                ("implicit-success", job_if, "${{ github.event_name == 'pull_request' }}"),
+                ("missed-classifier-cancellation", job_if,
+                 "${{ !cancelled() || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("missed-shard-cancellation", job_if,
+                 "${{ !cancelled() || needs.changes.result == 'cancelled' }}"),
+                ("job-status-refusal", value(refusal, "if", 8), "${{ cancelled() }}"),
+                ("implicit-success-refusal", value(refusal, "if", 8),
+                 "${{ needs.changes.result == 'cancelled' || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("successful-refusal", "          exit 1", "          exit 0"),
+            ):
+                with self.subTest(job=job_id, mutation=mutation):
+                    # Apply only inside this job, not the classifier or shards.
+                    mutated = aggregate.replace(original, replacement)
+                    self.assertNotEqual(mutated, aggregate)
+                    case = type(self)(method)
+                    case.workflows = {**self.workflows, filename: workflow.replace(aggregate, mutated, 1)}
+                    result = unittest.TestResult()
+                    unittest.FunctionTestCase(
+                        lambda: case.check_required_aggregates(((filename, job_id, shard_id),))
+                    ).run(result)
+                    self.assertEqual(result.errors, [], result.errors)
+                    self.assertTrue(result.failures)
 
     def test_required_aggregate_verdicts_run_after_failure_and_cancellation(self):
         results = ("success", "failure", "cancelled", "skipped", "", "unknown")
@@ -2323,7 +2830,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     cases.append((classification, shard, cpp, cancelled, key))
                 # Use a file, rather than -c, to stay below Windows argv limits.
                 path = Path(directory) / f"{job_id}.sh"
-                path.write_text("\n".join(driver) + "\n", encoding="utf-8", newline="\n")
+                write_bash_script(path, "\n".join(driver) + "\n")
                 process = subprocess.run([BASH, "--noprofile", "--norc", path.as_posix()],
                                          cwd=directory, capture_output=True, text=True, timeout=10)
                 self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
@@ -2367,7 +2874,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 with self.subTest(job=job_id, mutation=mutation):
                     mutated = verdict.replace(original, replacement, 1)
                     self.assertNotEqual(mutated, verdict)
-                    case = WorkflowDraftPolicyTests(method)
+                    case = type(self)(method)
                     case.workflows = {
                         **self.workflows,
                         filename: workflow.replace(aggregate, aggregate.replace(verdict, mutated, 1), 1),
@@ -2381,7 +2888,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_required_aggregate_verdict_grid_keeps_bounded_launches_and_step_isolation(self):
         method = "test_required_aggregate_verdicts_run_after_failure_and_cancellation"
-        case = WorkflowDraftPolicyTests(method)
+        case = type(self)(method)
         case.workflows = dict(self.workflows)
         for filename, job_id in (("asan.yml", "asan"), ("ci.yml", "tidy")):
             workflow = case.workflows[filename]
@@ -2421,7 +2928,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             subprocess.TimeoutExpired([BASH], 10, output=b"0\n"),
         ):
             with self.subTest(response=response):
-                case = WorkflowDraftPolicyTests(method)
+                case = type(self)(method)
                 case.workflows = self.workflows
                 result = unittest.TestResult()
                 options = ({"side_effect": response} if isinstance(response, Exception)
@@ -2430,15 +2937,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     case.run(result)
                 self.assertTrue(result.failures or result.errors)
 
+
+class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
-        ci = jobs(self.workflows["ci.yml"])
+        ci = native_jobs(self.workflows)
         job = ci["windows-ucrt64"]
         self.assertEqual(value(job, "needs", 4), "changes")
         gate = next(step for step in steps(ci["windows-ucrt64-result"])
                     if step.startswith("      - name: Require expected producers and route\n"))
         self.assertEqual(value(gate, "CI_ENABLED", 10),
                          "${{ needs.changes.outputs.needs_cpp != 'false' && (" + UCRT_ROUTE + ") }}")
-        expression = value(job, "if", 4).removeprefix("${{ ").removesuffix(" }}")
+        expression = windows_condition(value(job, "if", 4)).removeprefix("${{ ").removesuffix(" }}")
         for event in ("pull_request", "push", "workflow_dispatch", "schedule"):
             for branch in ("main", "devel", "feature"):
                 for draft in (True, False, None):
@@ -2448,7 +2957,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                 expected = (
                                     not cancelled and cpp != "false"
                                     and (event != "pull_request" or draft is False)
-                                    and event in ("pull_request", "push", "workflow_dispatch")
+                                    and event in ("pull_request", "schedule", "workflow_dispatch")
                                 )
                                 actual = expression.replace("!cancelled()", repr(not cancelled))
                                 for key, replacement in (
@@ -2456,6 +2965,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     ("github.ref", f"refs/heads/{branch}"),
                                     ("github.event.pull_request.draft", draft),
                                     ("needs.changes.outputs.needs_cpp", cpp),
+                                    ("needs.changes.result", "success"),
+                                    ("needs.changes.outputs.head_sha", "a" * 40),
                                     ("inputs.qualification_capture", capture),
                                 ):
                                     actual = actual.replace(key, repr(replacement))
@@ -2466,75 +2977,165 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                                   cpp=cpp, cancelled=cancelled, capture=capture):
                                     self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
-    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
-        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
-        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
-        trusted_push = (
-            "github.event_name == 'push' && "
-            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
-        )
-        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
-        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
-                         "${{ matrix.shard == 1 && " + trusted_push + " }}")
-        disable = named["Disable compiler cache for qualification captures"]
-        self.assertEqual(value(disable, "if", 8), capture)
-        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
-        self.assertEqual(value(named["Restore compiler cache"], "if", 8),
-                         "${{ !(" + capture + ") }}")
-        for name in ("Clean compiler cache before saving", "Save compiler cache"):
-            with self.subTest(step=name):
-                self.assertEqual(
-                    value(named[name], "if", 8),
-                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
-                    "steps.compiler-cache.outcome == 'success' && "
-                    "steps.compiler-cache.outputs.cache-hit != 'true' }}",
-                )
+    def test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty(self):
+        ci = native_jobs(self.workflows)
+        for job_id in ("windows-msvc", "windows-ucrt64"):
+            gate = next(step for step in steps(ci[job_id + "-result"])
+                        if "name: Require expected producers and route" in step)
+            self.assertEqual(value(gate, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
+            self.assertEqual(value(gate, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
+            for classification, cpp, python, result in product(
+                    ("success", "failure", "cancelled", "skipped", "", "unknown"),
+                    ("true", "false", "", "unknown"), ("true", "false", ""),
+                    ("success", "skipped", "failure", "cancelled", "", "unknown")):
+                expression = value(gate, "CI_ENABLED", 10).replace(
+                    "needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                    "needs.changes.outputs.needs_python", repr(python))
+                enabled = str(evaluate_condition(expression, {})).lower()
+                expected_enabled = cpp != "false" or (job_id == "windows-msvc" and python != "false")
+                self.assertEqual(enabled, str(expected_enabled).lower())
+                args = (result, cpp, "false", "pull_request", "false", "false", enabled, classification)
+                accepted = classification == "success" and result == ("success" if expected_enabled else "skipped")
+                with self.subTest(job=job_id, inputs=args):
+                    if accepted:
+                        expected = "skipped" if not expected_enabled else "python-only" if cpp == "false" else "sharded"
+                        self.assertEqual(shards.gate(*args), expected)
+                    else:
+                        with self.assertRaises(ValueError):
+                            shards.gate(*args)
 
-    def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
-        group = (
-            "${{ github.event_name == 'workflow_dispatch' && "
-            "format('{0}-manual-{1}', github.workflow, github.run_id) || "
-            "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
-            "format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || "
-            "github.event_name == 'push' && github.ref == 'refs/heads/devel' && "
-            "format('{0}-{1}-push', github.workflow, github.ref) || "
-            "format('{0}-{1}', github.workflow, github.ref) }}"
-        )
-        cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
-        workflows = dict(self.workflows)
-        workflows["ucrt-attribution.yml"] = (
-            ROOT / ".github/workflows/ucrt-attribution.yml"
-        ).read_text(encoding="utf-8")
-        for filename, workflow in workflows.items():
-            with self.subTest(workflow=filename):
-                self.assertEqual(value(workflow, "group", 2), group)
-                self.assertEqual(value(workflow, "cancel-in-progress", 2), cancellation)
+    def test_windows_standalone_contract_step_runs_once_on_shard_two_and_full_capture(self):
+        ci = native_jobs(self.workflows)
+        step = next(step for step in steps(ci["windows-msvc"])
+                    if "name: Run standalone Python contracts" in step)
+        script = value(step, "run", 8)
+        self.assertEqual(value(step, "shell", 8), "pwsh")
+        configure = next(item for item in steps(ci["windows-msvc"])
+                         if "name: Configure, build, and test" in item)
+        environment = value(configure, "run", 8).split("python -I -B tools/ci/windows_runner_preflight.py", 1)[0]
+        self.assertTrue(script.startswith(environment))
+        self.assertTrue(script.endswith('python -B tools/ci/ci_paths.py python-tests'))
+        self.assertLess(script.index("Enter-VsDevShell "), script.index("Set-Alias -Name python"))
+        self.assertLess(script.index("Set-Alias -Name python"), script.index("python -B tools/ci/ci_paths.py"))
+        for shard in (0, 1, 2):
+            for cpp, python in (("true", "true"), ("true", "false"), ("", "")):
+                condition = value(step, "if", 8).replace("matrix.shard", repr(shard)).replace(
+                    "needs.changes.outputs.needs_cpp", repr(cpp)).replace("needs.changes.outputs.needs_python", repr(python))
+                with self.subTest(shard=shard, cpp=cpp, python=python):
+                    self.assertEqual(evaluate_condition(condition, {}), python != "false" and shard != 1)
+        linux_step = next(step for step in steps(ci["linux"]) if "name: Run standalone Python contracts" in step)
+        self.assertEqual(value(linux_step, "run", 8), "python3 -B tools/ci/ci_paths.py python-tests")
 
-    def test_policy_suite_is_part_of_cheap_inventory_check(self):
-        inventory = jobs(self.workflows["ci.yml"])["public-tree"]
-        self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
+class WorkflowBaseEditPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        cls.blocks = jobs(cls.workflow)
 
-    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
-        expected = {
-            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
-            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
+    @staticmethod
+    def context(*, event="pull_request", action="edited", changes=None, base="main",
+                draft=False, labels=(), paths="false", cpp="true", result="success", run_id=1):
+        # Fixed workflow contexts only; no filesystem, clock or external service.
+        return {
+            "github.event_name": event, "github.event.action": action,
+            "github.event.changes.base": (True if isinstance(changes, dict)
+                                          and isinstance(changes.get("base"), dict)
+                                          else (changes or {}).get("base", "")),
+            "github.base_ref": base, "github.event.pull_request.draft": draft,
+            "github.event.pull_request.labels.*.name": labels,
+            "github.ref": "refs/pull/example/merge" if event == "pull_request" else f"refs/heads/{base}",
+            "github.workflow": "CI", "github.run_id": run_id, "github.sha": "same-sha",
+            "matrix.shard": 1, "inputs.qualification_capture": False,
+            "needs.changes.outputs.needs_cpp": cpp,
+            "needs.changes.outputs.needs_python": "false",
+            **{f"needs.{job}.result": result for job in (
+                "changes", "linux", "windows-msvc", "windows-ucrt64", "tidy-shard")},
         }
-        comments = {}
-        for path in (ROOT / ".github/workflows").glob("*.yml"):
-            workflow = path.read_text(encoding="utf-8")
-            matches = re.findall(
-                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
-                r"(?=  # Main pushes)", workflow, re.MULTILINE,
-            )
-            with self.subTest(workflow=path.name):
-                if path.name in expected:
-                    self.assertEqual(len(matches), 1)
-                if matches:
-                    self.assertEqual(len(matches), 1)
-                    comments[path.name] = matches[0]
-        self.assertEqual(set(comments), expected)
-        self.assertEqual(len(set(comments.values())), 1, comments)
 
+    @staticmethod
+    def render(expression, context):
+        # Match whole property paths, so github.ref cannot consume github.ref_name.
+        return re.sub(r"\b(?:github|needs|matrix|inputs)\.[\w.*-]+",
+                      lambda match: repr(context[match[0]]), expression)
+
+    @classmethod
+    def expression(cls, expression, context):
+        expression = cls.render(expression.removeprefix("${{ ").removesuffix(" }}"), context)
+        expression = re.sub(r"!(?!=)", "not ", expression)
+        expression = expression.replace("== false", "== False")
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        return eval(expression, {"__builtins__": {}, "format": str.format,
+                                 "contains": lambda items, item: item.lower() in
+                                 [entry.lower() for entry in items]})
+
+    @classmethod
+    def name(cls, job, context):
+        return re.sub(r"\$\{\{ .*? \}\}",
+                      lambda match: str(cls.expression(match[0], context)), value(job, "name", 4))
+
+    @classmethod
+    def admitted(cls, job, context, cancelled=False):
+        rendered = cls.render(value(job, "if", 4) or "success()", context)
+        return evaluate_condition(rendered, {}, cancelled=cancelled)
+
+    def test_edited_without_base_change_skips_every_job_and_uses_distinct_names(self):
+        ignored = (None, {}, {"title": {"from": "old"}}, {"body": {"from": ""}},
+                   {"unknown": {}}, {"base": None}, {"base": ""}, {"base": False})
+        # At most 14 jobs x 8 payloads x 6 dependency results x 2 cancellations.
+        # Even failed/unknown dependencies must not revive an aggregate on edits.
+        normal = self.context(action="synchronize")
+        for changes, result, cancelled in product(
+                ignored, ("success", "failure", "cancelled", "skipped", "", "unknown"), (False, True)):
+            context = self.context(changes=changes, result=result)
+            for job_id, job in self.blocks.items():
+                with self.subTest(job=job_id, changes=changes, result=result, cancelled=cancelled):
+                    self.assertFalse(self.admitted(job, context, cancelled))
+                    self.assertNotEqual(self.name(job, context), self.name(job, normal))
+                    self.assertTrue(self.name(job, context).endswith(" (metadata edit)"))
+
+    def test_edited_base_change_preserves_normal_ready_draft_and_path_routing(self):
+        pr = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertIn("edited", value(pr, "types", 4).strip("[]").split(", "))
+        # 14 jobs x 2 base payloads x 2 bases x 3 drafts x 3 path outputs x 2 cancellations.
+        for changes, base, draft, paths, cancelled in product(
+                ({"base": {}}, {"base": {"ref": {"from": "devel"}}}),
+                ("main", "devel"), (False, True, None), ("true", "false", ""), (False, True)):
+            context = self.context(changes=changes, base=base, draft=draft, paths=paths)
+            normal = {**context, "github.event.action": "synchronize"}
+            for job_id, job in self.blocks.items():
+                with self.subTest(job=job_id, changes=changes, base=base, draft=draft,
+                                  paths=paths, cancelled=cancelled):
+                    self.assertEqual(self.admitted(job, context, cancelled), self.admitted(job, normal, cancelled))
+                    self.assertEqual(self.name(job, context), self.name(job, normal))
+        context = self.context(changes={"base": {}}, paths="true")
+        self.assertEqual([job_id for job_id, job in self.blocks.items() if self.admitted(job, context)],
+                         list(self.blocks))
+
+    def test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation(self):
+        group = value(self.workflow, "group", 2)
+        cancellation = value(self.workflow, "cancel-in-progress", 2)
+        normal = self.context(action="synchronize")
+        normal_group = self.expression(group, normal)
+        self.assertEqual(normal_group, "CI-refs/pull/example/merge")
+        self.assertIs(self.expression(cancellation, normal), True)
+        for changes in (None, {}, {"title": {}}, {"body": {}}, {"base": None}, {"base": ""}):
+            groups = []
+            for run_id in (1, 2):
+                context = self.context(changes=changes, run_id=run_id)
+                groups.append(self.expression(group, context))
+                self.assertNotEqual(groups[-1], normal_group)
+                self.assertIs(self.expression(cancellation, context), False)
+            self.assertNotEqual(*groups)
+        for changes in ({"base": {}}, {"base": {"ref": {"from": "devel"}}}):
+            context = self.context(changes=changes)
+            self.assertEqual(self.expression(group, context), normal_group)
+            self.assertIs(self.expression(cancellation, context), True)
+        for event, base, expected in (("push", "devel", "CI-refs/heads/devel-push"),
+                                      ("push", "main", "CI-refs/heads/main-same-sha-1"),
+                                      ("workflow_dispatch", "main", "CI-manual-1")):
+            context = self.context(event=event, base=base)
+            self.assertEqual(self.expression(group, context), expected)
+            self.assertIs(self.expression(cancellation, context), False)
 
 class WorkflowCacheCleanupPolicyTests(unittest.TestCase):
     @classmethod
@@ -2623,6 +3224,14 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             classifier = jobs(workflow)["changes"]
             with self.subTest(workflow=filename):
+                # CI guards metadata edits; its shared trusted classifier
+                # must still match every sibling exactly.
+                if filename == "ci.yml":
+                    self.assertNotIn("      - name: Classify UCRT64 paths\n", classifier)
+                    self.assertEqual(value(classifier, "name", 4), "Classify changed paths" + CI_METADATA_SUFFIX)
+                    self.assertEqual(value(classifier, "if", 4), ci_event_condition())
+                    classifier = classifier.replace(CI_METADATA_SUFFIX, "", 1).replace(
+                        "    if: " + ci_event_condition() + "\n", "", 1)
                 # The layout reader includes comments preceding the next job.
                 self.assertEqual(classifier.split("\n  #", 1)[0].strip(), reference.strip())
                 for output in ("needs_cpp", "needs_python"):
@@ -2684,10 +3293,11 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
                      *self.input_paths, "tools/CMakeLists.txt", "test/CMakeLists.txt", "new-tool"):
             with self.subTest(path=path):
                 self.assertTrue(ci_paths.needs_cpp(path))
-        for path in ("docs/development.md", "README.md", "docs/diagram.svg"):
+        for path, python_lane in (("docs/development.md", True), ("README.md", True),
+                                  ("docs/diagram.svg", False)):
             with self.subTest(path=path):
                 self.assertFalse(ci_paths.needs_cpp(path))
-                self.assertFalse(ci_paths.needs_python(path))
+                self.assertEqual(ci_paths.needs_python(path), python_lane)
         # Covered performance modules can skip native work but must retain the
         # runner's Python contract coverage on every OS.
         self.assertFalse(ci_paths.needs_cpp("tools/perf/render_budget.py"))
@@ -2785,7 +3395,6 @@ def policy_route_results(cases, workers):
 
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
-POLICY_PARTITIONS = tuple(str(index) for index in range(10))
 POLICY_ROUTE_CASE = "WorkflowDraftPolicyTests.test_native_aggregates_preserve_route_checks"
 POLICY_CASE_PARTITIONS = {
     "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
@@ -2795,9 +3404,13 @@ POLICY_CASE_PARTITIONS = {
     "WorkflowShellDiagnosticTests.test_actual_windows_probe_refuses_other_identities_despite_msystem": "7",
     "WorkflowDraftPolicyTests.test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs": "8",
     POLICY_ROUTE_CASE: "9",
+    "WorkflowUcrtClassifierPolicyTests.test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty": "12",
 }
 POLICY_CLASS_PARTITIONS = {
+    "WorkflowBaseEditPolicyTests": "0",
     "WorkflowDraftPolicyTests": "0",
+    "WorkflowRequiredAggregatePolicyTests": "10",
+    "WorkflowUcrtClassifierPolicyTests": "11",
     "WorkflowExpressionPolicyTests": "0",
     "WorkflowCacheCleanupPolicyTests": "0",
     "WorkflowAttributionPolicyTests": "0",
@@ -2805,6 +3418,10 @@ POLICY_CLASS_PARTITIONS = {
     "WorkflowShellTests": "4",
     "WorkflowShellDiagnosticTests": "5",
 }
+
+
+POLICY_PARTITIONS = tuple(sorted(set(POLICY_CLASS_PARTITIONS.values()) |
+                                 set(POLICY_CASE_PARTITIONS.values()), key=int))
 
 
 def policy_cases(suite):
@@ -2818,6 +3435,9 @@ def policy_cases(suite):
 def policy_partition_suite(loader, module, partition):
     if partition not in POLICY_PARTITIONS:
         raise ValueError("unknown policy partition")
+    if any(value not in POLICY_PARTITIONS for value in (
+            *POLICY_CLASS_PARTITIONS.values(), *POLICY_CASE_PARTITIONS.values())):
+        raise ValueError("invalid policy partition mapping")
     cases = list(policy_cases(loader.loadTestsFromModule(module)))
     seen = set()
     selected = []
@@ -2957,7 +3577,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             yield from collect(current, workers)
         case = WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks")
         case.workflows = {filename: (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
-                          for filename in GUARDED}
+                          for filename in (*GUARDED, "windows-build.yml")}
         case.route_case_workers = 2
         environment = dict(os.environ)
         cwd = Path.cwd()
@@ -3204,15 +3824,24 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_asan_rerun_evidence_retained_for_full_30_day_window",
                 "test_aggregate_status_conditions_use_valid_contexts",
                 "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies",
-                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
-                "test_required_aggregate_graph_rejects_cancellation_regressions",
                 "test_asan_aggregate_accepts_only_success_or_the_original_path_skip",
                 "test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate",
-                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
                 "test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures",
                 "test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes",
                 "test_policy_suite_is_part_of_cheap_inventory_check",
                 "test_freeze_audit_comment_is_identical_in_every_workflow",
+            ),
+            "WorkflowRequiredAggregatePolicyTests": (
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+            ),
+            "WorkflowUcrtClassifierPolicyTests": (
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
+            ),
+            "WorkflowBaseEditPolicyTests": (
+                "test_edited_without_base_change_skips_every_job_and_uses_distinct_names",
+                "test_edited_base_change_preserves_normal_ready_draft_and_path_routing",
+                "test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation",
             ),
             "WorkflowCacheCleanupPolicyTests": (
                 "test_only_cache_writer_completions_trigger_serialized_cleanup",
@@ -3231,7 +3860,8 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         for name, methods in expected.items():
             with self.subTest(test_class=name):
                 self.assertLessEqual(set(methods), set(unittest.defaultTestLoader.getTestCaseNames(getattr(module, name))))
-        self.assertEqual(sum(map(len, expected.values())), 72)
+        # Historical baseline: future cases are covered by discovery below.
+        self.assertEqual(sum(map(len, expected.values())), 75)
 
     def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
         module = sys.modules[__name__]
@@ -3245,6 +3875,8 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         self.assertEqual(len(selected), len(set(selected)))
         self.assertCountEqual(selected, complete)
         self.assertTrue(any("WorkflowPartitionSelectionTests." in name for name in selected))
+        self.assertEqual(set(POLICY_CLASS_PARTITIONS),
+                         {type(case).__name__ for case in policy_cases(loader.loadTestsFromModule(module))})
         # New methods in known classes enter the same exhaustive selection.
         class Extended(WorkflowShellTests):
             def test_added_case(self):
@@ -3259,7 +3891,7 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
     def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
-        for invalid in ("", "-1", "10", "01", "0/10", None, 0):
+        for invalid in ("", "-1", str(max(map(int, POLICY_PARTITIONS)) + 1), "01", f"0/{len(POLICY_PARTITIONS)}", None, 0):
             with self.subTest(partition=invalid), self.assertRaises(ValueError):
                 policy_partition_suite(loader, module, invalid)
         complete = list(policy_cases(loader.loadTestsFromModule(module)))
@@ -3278,6 +3910,49 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     policy_partition_suite(loader, module, partition)
 
+    def test_selection_refuses_unassigned_classes_and_invalid_mapping_targets(self):
+        module = sys.modules[__name__]
+        for mapping in (POLICY_CLASS_PARTITIONS, POLICY_CASE_PARTITIONS):
+            for invalid in ("", str(max(map(int, POLICY_PARTITIONS)) + 1), "unknown", None, 0):
+                with self.subTest(mapping=list(mapping), invalid=invalid), patch.dict(
+                        mapping, {next(iter(mapping)): invalid}):
+                    with self.assertRaisesRegex(ValueError, "invalid policy partition mapping"):
+                        policy_partition_suite(unittest.TestLoader(), module, "0")
+        for name in POLICY_CLASS_PARTITIONS:
+            remaining = {key: value for key, value in POLICY_CLASS_PARTITIONS.items() if key != name}
+            with self.subTest(missing_class=name), patch.dict(POLICY_CLASS_PARTITIONS, remaining, clear=True):
+                with self.assertRaisesRegex(ValueError, "unregistered policy class: " + name):
+                    policy_partition_suite(unittest.TestLoader(), module, "0")
+
+    def test_remaining_behavioural_groups_have_separate_complete_partitions(self):
+        module = sys.modules[__name__]
+        groups = {
+            "10": ("WorkflowRequiredAggregatePolicyTests", {
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+                "test_required_aggregate_verdicts_run_after_failure_and_cancellation",
+                "test_required_aggregate_verdict_policy_rejects_weakened_conditions",
+                "test_required_aggregate_verdict_grid_keeps_bounded_launches_and_step_isolation",
+            }),
+            "11": ("WorkflowUcrtClassifierPolicyTests", {
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
+                "test_windows_standalone_contract_step_runs_once_on_shard_two_and_full_capture",
+            }),
+            "12": ("WorkflowUcrtClassifierPolicyTests", {
+                "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty",
+            }),
+        }
+        for partition, (name, methods) in groups.items():
+            with self.subTest(partition=partition):
+                cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
+                self.assertEqual({type(case).__name__ for case in cases}, {name})
+                self.assertLessEqual(methods, {case._testMethodName for case in cases})
+                discovered = unittest.TestLoader().getTestCaseNames(getattr(module, name))
+                expected = {method for method in discovered
+                            if POLICY_CASE_PARTITIONS.get(name + "." + method,
+                                                          POLICY_CLASS_PARTITIONS[name]) == partition}
+                self.assertEqual({case._testMethodName for case in cases}, expected)
+
     def test_launch_heavy_cases_keep_individual_partitions(self):
         module = sys.modules[__name__]
         for partition, method in (
@@ -3288,13 +3963,16 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             ("7", "test_actual_windows_probe_refuses_other_identities_despite_msystem"),
             ("8", "test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs"),
             ("9", "test_native_aggregates_preserve_route_checks"),
+            ("12", "test_windows_intentional_skip_gate_uses_real_workflow_inputs_and_refuses_uncertainty"),
         ):
             with self.subTest(partition=partition):
                 cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
                 self.assertEqual([case._testMethodName for case in cases], [method])
 
     def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
-        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assert_policy_registrations((ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8"))
+
+    def assert_policy_registrations(self, cmake):
         registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
         actual = [(name, " ".join(command.split())) for name, command in registrations
                   if "ci/test_workflow_policy.py" in command]
@@ -3309,6 +3987,41 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                              + (' PROCESSORS 2' if partition == POLICY_CASE_PARTITIONS[POLICY_ROUTE_CASE] else '')])
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
+
+    def test_registration_growth_and_removed_duplicate_or_misrouted_parts(self):
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        part = str(max(map(int, POLICY_PARTITIONS)) + 1)
+        name = "WorkflowPolicyContractPart" + part
+        extra = ('add_test(NAME ' + name + ' COMMAND "${Python3_EXECUTABLE}" -I -B '
+                 '"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition ' + part + ')\n'
+                 'set_tests_properties(' + name + ' PROPERTIES LABELS "ci;tools" TIMEOUT 30)\n')
+        # Evaluate the real routing declarations with one more dedicated case.
+        # This fails if the partition universe is replaced by a fixed range.
+        source = Path(__file__).read_text(encoding="utf-8")
+        routing = source.split("POLICY_ROUTE_CASE =", 1)[1].split("def policy_cases", 1)[0]
+        method = "test_added_partition_case"
+        key = "WorkflowShellTests." + method
+        routing = ("POLICY_ROUTE_CASE =" + routing).replace(
+            "POLICY_CASE_PARTITIONS = {", "POLICY_CASE_PARTITIONS = {" + repr(key) + ": " + repr(part) + ",")
+        namespace = {}
+        exec(compile(routing, "policy routing", "exec"), namespace)
+        self.assertEqual(set(namespace["POLICY_PARTITIONS"]), {*POLICY_PARTITIONS, part})
+        with patch.object(WorkflowShellTests, method, lambda self: None, create=True), \
+                patch.object(sys.modules[__name__], "POLICY_PARTITIONS", namespace["POLICY_PARTITIONS"]), \
+                patch.dict(POLICY_CASE_PARTITIONS, {key: part}):
+            cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], part)))
+            self.assertEqual([case._testMethodName for case in cases], [method])
+            self.assert_policy_registrations(cmake + extra)
+            for changed in (cmake, cmake + extra + extra,
+                            cmake + extra.replace("--partition " + part, "--partition 0")):
+                with self.subTest(changed=changed[-len(extra):]), self.assertRaises(AssertionError):
+                    self.assert_policy_registrations(changed)
+        with patch.object(WorkflowRequiredAggregatePolicyTests, "test_added_case", lambda self: None, create=True):
+            self.test_remaining_behavioural_groups_have_separate_complete_partitions()
+        # Existing partitions may not disappear even if the total is unchanged.
+        block = re.search(r'add_test\(\s*NAME WorkflowPolicyContractPart1\s+COMMAND [^)]*\)', cmake)[0]
+        with self.assertRaises(AssertionError):
+            self.assert_policy_registrations(cmake.replace(block, ""))
 
     def test_direct_workflow_discovery_and_path_routes_keep_complete_suite(self):
         import ci_paths
@@ -3335,12 +4048,12 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
             self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
 
     def test_cli_listing_and_refusals_use_actual_selection(self):
-        for partition in ("0", "7", "8", "9"):
+        for partition in POLICY_PARTITIONS:
             with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
                 expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
-        for argv in (["--partition"], ["--partition", "10"], ["--partition", "01"],
+        for argv in (["--partition"], ["--partition", str(max(map(int, POLICY_PARTITIONS)) + 1)], ["--partition", "01"],
                      ["--partition", "0", "--partition", "1"], ["--list-tests"],
                      ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
             with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:

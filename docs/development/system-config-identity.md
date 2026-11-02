@@ -9,16 +9,16 @@ Missing identities on either side always fail compatibility, including two empty
 
 The fields are the simulation keys and owned parameters in `ConfigSchema.json`, plus
 `render.circadian` amplitude, which reaches `RunCircadianOnTick`, and the session options
-for finite hydrology, weather rain scale and region scheduler configuration. The five
-registry gates are hydrology weather, weather events, aether state, water resolution and
-active regions.
+for finite hydrology, weather rain scale, region scheduler configuration and the resolved
+calendar. The five registry gates are hydrology weather, weather events, aether state,
+water resolution and active regions.
 Other key slots are normalized to enabled: their config flags select compiled fallback
 tuning rather than disable the session system; erosion has no session gate. Disabling
 such an override with default tuning therefore leaves the effective identity unchanged.
 Parameters come from current session storage, including clamped plant mutation and the
 integer reproduction counts resolved by `ApplySystemConfig`. Scheduler values come
-directly from the live active-region ledger's effective `config()`. Presentation and user
-settings are excluded. This contract covers effective session rules, rather than world
+directly from the live active-region ledger's effective `config()`. Other presentation and
+user settings are excluded. This contract covers effective session rules, rather than world
 content, initial rosters or per-tick inputs.
 
 Canonical bytes start with ASCII `system-config:v4:`. In generated schema order, each
@@ -37,6 +37,14 @@ revision (u32, currently 4). All six values are included even when their associa
 adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
 The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
 `0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
+Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
+`dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator` and
+`lunarCycleDays`. Epoch v1 means tick zero is midnight on day zero in midwinter,
+with lunar phase zero. This epoch is fixed by WorldClock, rather than configurable in
+metadata. A future epoch change must change the tag. All resolved calendar fields enter
+the identity, including presentation calendars when active regions are disabled. The
+current simulation tick is mutable state and is excluded. Calendar encoding versions
+are excluded: equivalent resolved legacy/v2 calendars identify equally.
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
@@ -45,7 +53,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **301 bytes → `2a0d6f2dc4028dda`** for revision 4.
+to **339 bytes → `2f2a9405252345a8`** for revision 4.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
@@ -54,8 +62,10 @@ SystemConfig does, applies effective fallback/clamping/count conversion, encodes
 
 ## Setter audit and pins
 
-`GameSession` supplies the current finite-hydrology boolean, signed rain scale, and all
-three live ledger `RegionSchedulerConfig` fields to the core encoder. The scheduler's work limit,
+`GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
+three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
+With active regions enabled, the clock supplies the calendar; otherwise a render marker
+supplies it, falling back to the legacy calendar when absent. The scheduler's work limit,
 hold ticks and reduced shift affect which regions tick or freeze; the server can override
 them through `--sim-budget-profile`. Runtime Hello construction and replay boot apply the
 same scheduler override as the runner. High-resolution water, weather rain/events,
@@ -86,13 +96,20 @@ revision 4 of the simulation authority rules for every current live session with
 validation covers loopback, TCP replication, TCP lockstep and replay; the Hello
 protocol version and wire layout are unchanged. Hardening codec fixtures use
 arbitrary matching identity strings and retain their existing literal values.
-The current historical-defaults-off configuration has identity `2cecd744f35f6695`.
+The current historical-defaults-off configuration has identity `25078e8b112a6ebd`.
 Its explicit legacy revision-3 identity remains `74f285c5fa387d66`.
 The revision-3 shipping identity `60ab3c242d54ce89` is refused by current admission,
 and a legacy peer likewise refuses a current identity before ticks or writes.
 Neither admission nor playback retries with the legacy projection after a mismatch.
 Legacy encoders and chunk projections remain available for explicit historical inspection.
 The independent Python encoder pins both profiles without relying on runtime qualification.
+
+The current identity includes both authority revision 4 and the resolved calendar.
+Before world boot, disabled active regions use the unmarked legacy presentation
+calendar. Newly created worlds record the new render calendar even when active
+regions are disabled, so identity follows that marker. The prior calendar-only
+shipping identity `49f694fd70645bcc` is distinct from the current shipping identity
+`2f2a9405252345a8`. Revision-3 inspection retains its frozen byte layout.
 
 Restoring persisted region scheduler configuration does not itself change profile pins: compiled/default schedulers
 still encode the same bytes, and setter-only nondefault identities already encode their

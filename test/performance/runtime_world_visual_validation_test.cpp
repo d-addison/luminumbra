@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include "nlohmann/json.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>

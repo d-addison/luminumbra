@@ -38,6 +38,7 @@ using namespace luminumbra::core;
 ResolvedGraphics Resolve(GraphicsPreset preset, const GraphicsOverrides& overrides = {}) {
     GraphicsSettings settings;
     EXPECT_TRUE(SelectGraphicsPreset(settings, preset));
+    settings.preset_revision = 1; // Exercise the retained visual reductions and resource changes.
     ResolvedGraphics resolved;
     std::string error;
     EXPECT_TRUE(ResolveGraphics(settings, overrides, resolved, error)) << error;
@@ -427,6 +428,23 @@ TEST_F(GraphicsRuntime, EveryPresetReachesPassesAndUnchangedApplicationDoesNotAl
     EXPECT_EQ(state().allocations, 0);
 }
 
+TEST_F(GraphicsRuntime, NewSelectionsRetainUltraPassValuesPendingVisualApproval) {
+    RenderPipeline pipeline;
+    for (const auto preset : {GraphicsPreset::Low,
+                              GraphicsPreset::Medium,
+                              GraphicsPreset::High,
+                              GraphicsPreset::Ultra}) {
+        GraphicsSettings settings;
+        ASSERT_TRUE(SelectGraphicsPreset(settings, preset));
+        ResolvedGraphics resolved;
+        std::string error;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error));
+        ASSERT_TRUE(pipeline.apply_graphics(resolved));
+        EXPECT_EQ(pipeline.graphics_runtime_config(), GraphicsRuntimeConfig{});
+    }
+    EXPECT_EQ(state().allocations, 0);
+}
+
 TEST_F(GraphicsRuntime, SessionOverridesWinAcrossLivePresetChangesWithoutMutatingSavedSettings) {
     auto config = SystemConfig::Defaults();
     config.user().graphics.overrides["render_scale"] = .9;
@@ -691,7 +709,9 @@ TEST(GraphicsRuntimePure, ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRej
     EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
     EXPECT_GT(before->region_authority_revision, 0u); // Adoption published authority.
     EXPECT_EQ(before->entries.front().provenance, Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
-    EXPECT_EQ(before->entries.front().sdf_data.front(), 1);
+    ASSERT_TRUE(before->entries.front().payload);
+    ASSERT_FALSE(before->entries.front().as_reduction_snapshot().sdf_data.empty());
+    EXPECT_EQ(before->entries.front().as_reduction_snapshot().sdf_data.front(), 1);
     FarLodSystem far;
     far.set_horizon(1500, 1550);
     EXPECT_FALSE(far.region_admission(3, 0, glm::vec3(0)).wanted);
@@ -715,12 +735,15 @@ TEST(GraphicsRuntimePure, ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRej
         ASSERT_EQ(current->entries.size(), 1u);
         EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*current));
         EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*before));
-        EXPECT_EQ(before->entries.front().sdf_data.front(), 1); // The capture owns its bytes.
+        EXPECT_EQ(before->entries.front().as_reduction_snapshot().sdf_data.front(),
+                  1); // The capture owns its bytes.
         EXPECT_EQ(current->entries.front().coords, chunk->get_coords());
         EXPECT_EQ(current->entries.front().provenance,
                   Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
         EXPECT_FALSE(current->entries.front().authority_durable);
-        EXPECT_EQ(current->entries.front().sdf_data.front(), -1);
+        ASSERT_TRUE(current->entries.front().payload);
+        ASSERT_FALSE(current->entries.front().as_reduction_snapshot().sdf_data.empty());
+        EXPECT_EQ(current->entries.front().as_reduction_snapshot().sdf_data.front(), -1);
         EXPECT_GT(current->entries.front().voxel_revision, before->entries.front().voxel_revision);
         // Direct chunk edits advance the local revision. World/region counters
         // track world-owned authority publication, independently of the horizon.

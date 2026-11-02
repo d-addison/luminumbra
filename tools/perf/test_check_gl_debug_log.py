@@ -4,7 +4,10 @@ import codecs
 import contextlib
 import io
 import json
+import os
+import stat
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -59,6 +62,24 @@ class GlDebugLogTest(unittest.TestCase):
         self.assertEqual(document['notification_count'], 1)
         self.assertEqual(document['errors'], [])
 
+    def test_stdin_subprocess_preserves_decoding_refusals_and_bounds(self):
+        for payload, expected in (
+                ((MARKER + INFO).encode(), 0),
+                ((MARKER + BAD_TYPE).encode(), 1),
+                ((MARKER + BAD_SEVERITY).encode(), 1),
+                (MARKER.replace('\n', '\r\n').encode('utf-16'), 0),
+                (b'', 3), (b'no installation\n', 3),
+                (b'\xff\n', 2), (MARKER.encode() + b'\0\n', 2),
+                ((b'x' * 1023 + b'\n') * (checker.MAX_FILE_BYTES // 1024) + b'x', 2)):
+            with self.subTest(size=len(payload), expected=expected):
+                result = subprocess.run([sys.executable, '-I', '-B', checker.__file__, '--stdin'],
+                                        input=payload, capture_output=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if len(payload) > checker.MAX_FILE_BYTES:
+                    self.assertIn(b'byte cap', result.stderr)
+                if expected != 2:
+                    self.assertEqual(json.loads(result.stdout)['schema'], checker.SCHEMA)
+
     def test_verified_sources_are_never_reopened_or_closed_by_readers(self):
         path = self.root / 'handle-only'
         for reader, payload, expected in (
@@ -71,6 +92,118 @@ class GlDebugLogTest(unittest.TestCase):
                                        side_effect=AssertionError('source reopened')):
                     self.assertEqual(reader(path, source=source), expected)
                 self.assertFalse(source.closed)
+
+    def test_replaced_input_refuses_for_both_log_and_artifact_readers(self):
+        original_stat = Path.lstat
+        for reader in (checker.bounded_bytes, lambda path: list(checker.read_log(path))):
+            with self.subTest(reader=reader):
+                path = self.write_log(MARKER)
+                retired = self.root / 'retired.log'
+                retired.unlink(missing_ok=True)
+                observed = []
+
+                def replace(candidate, *args, **kwargs):
+                    info = original_stat(candidate, *args, **kwargs)
+                    if candidate == path and not observed:
+                        observed.append(candidate)
+                        path.replace(retired)
+                        path.write_bytes(b'replacement bytes')
+                    return info
+
+                with mock.patch.object(Path, 'lstat', replace):
+                    with self.assertRaises(checker.InputError):
+                        reader(path)
+                self.assertEqual(observed, [path])
+                self.assertEqual(path.read_bytes(), b'replacement bytes')
+
+    def test_input_open_cannot_block_on_a_replacement_fifo(self):
+        path = self.write_log(MARKER)
+        original_open = os.open
+        flags_seen = []
+
+        def opened(candidate, flags, *args, **kwargs):
+            flags_seen.append(flags)
+            return original_open(candidate, flags, *args, **kwargs)
+
+        with mock.patch.object(checker.os, 'open', opened):
+            self.assertEqual(checker.bounded_bytes(path), MARKER.encode())
+        self.assertEqual(len(flags_seen), 1)
+        for name in ('O_NONBLOCK', 'O_NOFOLLOW', 'O_BINARY'):
+            flag = getattr(os, name, 0)
+            self.assertEqual(flags_seen[0] & flag, flag)
+
+    def test_invalid_opened_metadata_refuses_and_closes_descriptor(self):
+        path = self.write_log(MARKER)
+        original_fstat = os.fstat
+        for changes in ({'st_mode': stat.S_IFIFO}, {'st_ino': 0},
+                        {'st_size': checker.MAX_FILE_BYTES + 1}):
+            with self.subTest(changes=changes):
+                descriptors = []
+
+                def metadata(descriptor):
+                    descriptors.append(descriptor)
+                    info = original_fstat(descriptor)
+                    return mock.Mock(**{name: changes.get(name, getattr(info, name))
+                                        for name in ('st_mode', 'st_ino', 'st_dev', 'st_size')})
+
+                with mock.patch.object(checker.os, 'fstat', metadata):
+                    with self.assertRaises(checker.InputError):
+                        checker.bounded_bytes(path)
+                self.assertEqual(len(descriptors), 1)
+                with self.assertRaises(OSError):
+                    original_fstat(descriptors[0])
+
+    def test_failed_stream_creation_closes_descriptor(self):
+        path = self.write_log(MARKER)
+        original_open = os.open
+        descriptors = []
+
+        def opened(*args, **kwargs):
+            descriptor = original_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(checker.os, 'open', opened), mock.patch.object(
+                checker.os, 'fdopen', side_effect=OSError('unreadable stream')):
+            with self.assertRaises(checker.InputError):
+                checker.bounded_bytes(path)
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[0])
+
+    def test_link_metadata_refuses_before_open_without_symlink_privilege(self):
+        path = self.write_log(MARKER)
+        for mode, attributes in ((stat.S_IFLNK, 0),
+                                 (stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT)):
+            with self.subTest(mode=mode, attributes=attributes):
+                info = mock.Mock(st_mode=mode, st_file_attributes=attributes)
+                with mock.patch.object(Path, 'lstat', return_value=info), mock.patch.object(
+                        checker.os, 'open') as opened:
+                    with self.assertRaises(checker.InputError):
+                        checker.bounded_bytes(path)
+                    opened.assert_not_called()
+
+    def test_unknown_original_identity_refuses_and_stat_failure_closes_stream(self):
+        path = self.write_log(MARKER)
+        info = path.lstat()
+        unknown = mock.Mock(st_mode=info.st_mode, st_file_attributes=0,
+                            st_ino=0, st_dev=info.st_dev)
+        with mock.patch.object(Path, 'lstat', return_value=unknown):
+            with self.assertRaises(checker.InputError):
+                checker.bounded_bytes(path)
+        original_fstat = os.fstat
+        descriptors = []
+
+        def unreadable(descriptor):
+            descriptors.append(descriptor)
+            raise OSError('metadata unavailable')
+
+        with mock.patch.object(checker.os, 'fstat', unreadable):
+            with self.assertRaises(checker.InputError):
+                checker.bounded_bytes(path)
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError):
+            original_fstat(descriptors[0])
 
     def test_fail_by_error_type(self):
         code, document = self.verdict(MARKER + INFO + BAD_TYPE)

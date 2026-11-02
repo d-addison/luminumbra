@@ -1,4 +1,6 @@
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/rendering/PixelIo.h"
+#include "luminumbra_common/game/PhotoMode.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -13,9 +15,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <imgui.h>
+#include <imgui_internal.h>
 #include <ios>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -24,6 +29,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -37,11 +43,14 @@
 
 #include "audio/NullAudioManager.h"
 #include "core/FilesystemPath.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "ui/Rml_UIManager.h"
+#include "ui/UiLayout.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
 #include "ui/components/common/Panel.h"
@@ -49,6 +58,7 @@
 #include "ui/core/UIComponent.h"
 #include "ui/core/UIHotReload.h"
 #include "ui/core/UIStateManager.h"
+#include "world/WorldEntry.h"
 #include "world/WorldgenOverride.h"
 
 namespace fs = std::filesystem;
@@ -195,6 +205,42 @@ TEST_F(UserPresetPersistence, InvalidSourceAndPublicationFailurePreserveExisting
     ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, blocked, ""));
     EXPECT_EQ(nlohmann::json::parse(Read(blocked)).at("name"), "Custom");
     EXPECT_FALSE(fs::exists(source));
+}
+
+TEST_F(UserPresetPersistence, RenameAdmitsInputAndOutputBeforePublication) {
+    using namespace Luminumbra::Persistence;
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    const auto nested = [](std::size_t depth) {
+        return R"({"extension":)" + std::string(depth - 1, '[') + "0" +
+               std::string(depth - 1, ']') + "}";
+    };
+    ASSERT_NO_FATAL_FAILURE(Write(source, nested(SavedInputLimits::kJsonNestingDepth)));
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Accepted"));
+    EXPECT_FALSE(fs::exists(source));
+    const auto before = Read(destination);
+    auto oversized = std::string("{}");
+    oversized.resize(SavedInputLimits::kPresetBytes + 1, ' ');
+    for (const auto& bytes : {nested(SavedInputLimits::kJsonNestingDepth + 1), oversized}) {
+        ASSERT_NO_FATAL_FAILURE(Write(source, bytes));
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, "Refused"));
+        EXPECT_EQ(Read(source), bytes);
+        EXPECT_EQ(Read(destination), before);
+        ExpectNoStaging();
+    }
+    const auto overhead = nlohmann::json{{"name", ""}}.dump(2).size();
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Original"})"));
+    std::string display_name(SavedInputLimits::kPresetBytes - overhead, 'x');
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    EXPECT_EQ(Read(source).size(), SavedInputLimits::kPresetBytes);
+    const auto accepted = Read(source);
+    display_name += 'x';
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    display_name.resize(SavedInputLimits::kPresetBytes + 1, 'x');
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, source, display_name));
+    EXPECT_EQ(Read(source), accepted);
+    EXPECT_EQ(Read(destination), before);
+    ExpectNoStaging();
 }
 
 TEST_F(UserPresetPersistence, AliasedDestinationKeepsThePublishedPreset) {
@@ -531,6 +577,20 @@ void WriteUiInteractionArtifact(const fs::path& path,
 
 } // namespace
 
+class ScopedUiShutdown {
+public:
+    explicit ScopedUiShutdown(Luminumbra::Client::Rml_UIManager& ui)
+        : m_ui(ui) {}
+    ~ScopedUiShutdown() {
+        m_ui.Shutdown();
+    }
+    ScopedUiShutdown(const ScopedUiShutdown&) = delete;
+    ScopedUiShutdown& operator=(const ScopedUiShutdown&) = delete;
+
+private:
+    Luminumbra::Client::Rml_UIManager& m_ui;
+};
+
 TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -541,6 +601,7 @@ TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
     const fs::path capture_root = ArtifactRoot() / "screenshots";
     Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
     ui.Init(context.window(), nullptr);
+    const ScopedUiShutdown shutdown(ui);
     ASSERT_NE(ui.GetContext(), nullptr);
 
     struct CaptureSpec {
@@ -561,10 +622,520 @@ TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
         const fs::path output = capture_root / (std::string(spec.view) + ".png");
         ASSERT_TRUE(CaptureUiPng(ui, context.window(), output)) << output.string();
         ASSERT_GT(fs::file_size(output), 128u);
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(context.window(), &width, &height);
+        const auto layout = Luminumbra::Client::UI::CollectUiLayout(
+            ui.GetContext(), nullptr, spec.view, width, height);
+        const auto required =
+            std::find_if(layout.rml_elements.begin(),
+                         layout.rml_elements.end(),
+                         [&](const auto& element) { return element.id == spec.required_id; });
+        ASSERT_NE(required, layout.rml_elements.end()) << spec.view;
+        EXPECT_GT(required->rect.w, 0);
+        EXPECT_GT(required->rect.h, 0);
+        EXPECT_GE(required->rect.x, 0);
+        EXPECT_GE(required->rect.y, 0);
+        EXPECT_LE(required->rect.x + required->rect.w, width);
+        EXPECT_LE(required->rect.y + required->rect.h, height);
+        if (std::string(spec.view) == "world_creation") {
+            const auto input =
+                std::find_if(layout.rml_elements.begin(),
+                             layout.rml_elements.end(),
+                             [](const auto& element) { return element.id == "world_name"; });
+            ASSERT_NE(input, layout.rml_elements.end());
+            EXPECT_EQ(input->text, "New World");
+        }
+        const auto bytes = Luminumbra::Client::UI::SerializeUiLayout(layout);
+        ui.Render();
+        EXPECT_EQ(bytes,
+                  Luminumbra::Client::UI::SerializeUiLayout(Luminumbra::Client::UI::CollectUiLayout(
+                      ui.GetContext(), nullptr, spec.view, width, height)));
+        auto sidecar = output;
+        sidecar.replace_extension(".layout.json");
+        ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(sidecar, bytes));
+        EXPECT_EQ(ReadTextFile(sidecar), bytes);
         captures.emplace_back(spec.view, output);
     }
     WriteUiScreenshotArtifact(ArtifactRoot() / "ui_screenshots.json", captures);
-    ui.Shutdown();
+}
+
+class ScopedLayoutImGuiContext {
+public:
+    ScopedLayoutImGuiContext()
+        : m_previous(ImGui::GetCurrentContext())
+        , m_context(ImGui::CreateContext()) {
+        ImGui::SetCurrentContext(m_context);
+        auto& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.LogFilename = nullptr;
+        io.DisplaySize = ImVec2(800, 600);
+        io.DisplayFramebufferScale = ImVec2(2, 1.5f);
+        io.DeltaTime = 1.0f / 60.0f;
+        unsigned char* pixels = nullptr;
+        int width = 0, height = 0;
+        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    }
+    ~ScopedLayoutImGuiContext() {
+        ImGui::DestroyContext(m_context);
+        ImGui::SetCurrentContext(m_previous);
+    }
+    ScopedLayoutImGuiContext(const ScopedLayoutImGuiContext&) = delete;
+    ScopedLayoutImGuiContext& operator=(const ScopedLayoutImGuiContext&) = delete;
+
+private:
+    ImGuiContext* m_previous;
+    ImGuiContext* m_context;
+};
+
+TEST(UiLayoutCollection, NullContextsAndInvalidFramebufferNeedNoGl) {
+    using namespace Luminumbra::Client::UI;
+    const auto empty = CollectUiLayout(nullptr, nullptr, "empty", 800, 600);
+    EXPECT_EQ(empty.screen, "empty");
+    EXPECT_EQ(empty.width, 800);
+    EXPECT_EQ(empty.height, 600);
+    EXPECT_TRUE(empty.rml_elements.empty());
+    EXPECT_TRUE(empty.imgui_windows.empty());
+    for (const int dimension : {0, -1}) {
+        EXPECT_THROW(CollectUiLayout(nullptr, nullptr, "empty", dimension, 600),
+                     std::invalid_argument);
+        EXPECT_THROW(CollectUiLayout(nullptr, nullptr, "empty", 800, dimension),
+                     std::invalid_argument);
+    }
+    EXPECT_THROW(
+        CollectUiLayout(nullptr, nullptr, std::string(kUiLayoutMaxStringBytes + 1, 'x'), 800, 600),
+        std::length_error);
+}
+
+TEST(UiLayoutCollection, ImGuiWindowsUseDisplayOrderAndFramebufferScaleWithoutGl) {
+    const ScopedLayoutImGuiContext context;
+    ImGui::NewFrame();
+    // Create the tooltip first: its layer must still paint after ordinary windows.
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted("layout tooltip");
+    ImGui::EndTooltip();
+    ImGui::SetNextWindowPos(ImVec2(10, 20), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(200, 100), ImGuiCond_Always);
+    ImGui::Begin("layout_first", nullptr, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::BeginChild("layout_child", ImVec2(80, 40));
+    ImGui::EndChild();
+    ImGui::End();
+    ImGui::SetNextWindowPos(ImVec2(40, 60), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(150, 90), ImGuiCond_Always);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_Always);
+    ImGui::Begin("layout_second", nullptr, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::End();
+    ImGui::Render();
+    using namespace Luminumbra::Client::UI;
+    const auto layout = CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900);
+    const auto find = [&](const std::string& title) {
+        return std::find_if(layout.imgui_windows.begin(),
+                            layout.imgui_windows.end(),
+                            [&](const auto& window) { return window.title == title; });
+    };
+    const auto first = find("layout_first");
+    const auto second = find("layout_second");
+    const auto child = std::find_if(
+        layout.imgui_windows.begin(), layout.imgui_windows.end(), [](const auto& window) {
+            return window.title.find("layout_child") != std::string::npos;
+        });
+    const auto tooltip =
+        std::find_if(layout.imgui_windows.begin(),
+                     layout.imgui_windows.end(),
+                     [](const auto& window) { return window.title.starts_with("##Tooltip"); });
+    ASSERT_NE(first, layout.imgui_windows.end());
+    ASSERT_NE(second, layout.imgui_windows.end());
+    ASSERT_NE(child, layout.imgui_windows.end());
+    ASSERT_NE(tooltip, layout.imgui_windows.end());
+    EXPECT_LT(first, second);
+    EXPECT_LT(first, child);
+    EXPECT_LT(child, second);
+    EXPECT_LT(second, tooltip);
+    EXPECT_DOUBLE_EQ(first->rect.x, 20);
+    EXPECT_DOUBLE_EQ(first->rect.y, 30);
+    EXPECT_DOUBLE_EQ(first->rect.w, 400);
+    EXPECT_DOUBLE_EQ(first->rect.h, 150);
+    EXPECT_FALSE(first->collapsed);
+    EXPECT_TRUE(first->visible);
+    EXPECT_TRUE(second->collapsed);
+    EXPECT_TRUE(second->visible);
+    EXPECT_EQ(SerializeUiLayout(layout),
+              SerializeUiLayout(
+                  CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900)));
+    // Unsubmitted windows remain in the current context and must not be filtered out.
+    ImGui::NewFrame();
+    ImGui::Render();
+    EXPECT_EQ(CollectUiLayout(nullptr, ImGui::GetCurrentContext(), "imgui", 1600, 900)
+                  .imgui_windows.size(),
+              layout.imgui_windows.size());
+}
+
+TEST(UiLayoutCollection, ImGuiNavigationAndHiddenWindowsUseCurrentContextStateWithoutGl) {
+    const ScopedLayoutImGuiContext context;
+    ImGui::NewFrame();
+    for (const auto* title : {"layout_back", "layout_front"}) {
+        ImGui::SetNextWindowSize(ImVec2(200, 100), ImGuiCond_Always);
+        ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoSavedSettings);
+        ImGui::End();
+    }
+    ImGui::Render();
+    auto* imgui = ImGui::GetCurrentContext();
+    auto* back = ImGui::FindWindowByName("layout_back");
+    auto* front = ImGui::FindWindowByName("layout_front");
+    ASSERT_NE(back, nullptr);
+    ASSERT_NE(front, nullptr);
+    using namespace Luminumbra::Client::UI;
+    const auto ordered_before =
+        [](const UiLayout& layout, const std::string& left, const std::string& right) {
+            const auto find = [&](const std::string& title) {
+                return std::find_if(layout.imgui_windows.begin(),
+                                    layout.imgui_windows.end(),
+                                    [&](const auto& window) { return window.title == title; });
+            };
+            const auto first = find(left);
+            const auto second = find(right);
+            return first != layout.imgui_windows.end() && second != layout.imgui_windows.end() &&
+                   first < second;
+        };
+    imgui->NavWindowingTarget = back;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_front", "layout_back"));
+    imgui->NavWindowingListWindow = front;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_back", "layout_front"));
+    imgui->NavWindowingListWindow = nullptr;
+    back->Flags |= ImGuiWindowFlags_NoBringToFrontOnFocus;
+    EXPECT_TRUE(ordered_before(
+        CollectUiLayout(nullptr, imgui, "nav", 1600, 900), "layout_back", "layout_front"));
+    front->Hidden = true;
+    const auto hidden = CollectUiLayout(nullptr, imgui, "hidden", 1600, 900);
+    const auto retained =
+        std::find_if(hidden.imgui_windows.begin(),
+                     hidden.imgui_windows.end(),
+                     [](const auto& window) { return window.title == "layout_front"; });
+    ASSERT_NE(retained, hidden.imgui_windows.end());
+    EXPECT_FALSE(retained->visible);
+    imgui->NavWindowingTarget = nullptr;
+    front->Hidden = false;
+}
+
+void AppendHiddenLayoutText(Rml::ElementDocument& document) {
+    auto* direct_text = document.GetElementById("direct_text");
+    ASSERT_NE(direct_text, nullptr);
+    for (const auto& [property, value] :
+         {std::pair{"visibility", "hidden"}, std::pair{"display", "none"}}) {
+        for (const bool non_dom : {false, true}) {
+            auto omitted_text = document.CreateTextNode("omitted");
+            ASSERT_NE(omitted_text, nullptr);
+            omitted_text->SetId(std::string(property) + (non_dom ? "_generated" : "_dom"));
+            ASSERT_TRUE(omitted_text->SetProperty(property, value));
+            direct_text->AppendChild(std::move(omitted_text), !non_dom);
+        }
+    }
+}
+
+void ExpectLocalVisibilityOverrides(Rml::ElementDocument& document,
+                                    Rml::ElementDocument& hidden_document) {
+    // IsVisible() is local. RmlUi's stacking traversal still prunes at the ancestor.
+    for (const auto* id : {"hidden_child", "visible_override", "nested_override"}) {
+        auto* overridden = document.GetElementById(id);
+        ASSERT_NE(overridden, nullptr);
+        EXPECT_TRUE(overridden->IsVisible()) << id;
+        EXPECT_FALSE(overridden->IsVisible(true)) << id;
+    }
+    auto* hidden_document_child = hidden_document.GetElementById("hidden_document_child");
+    ASSERT_NE(hidden_document_child, nullptr);
+    EXPECT_TRUE(hidden_document_child->IsVisible());
+    EXPECT_FALSE(hidden_document_child->IsVisible(true));
+}
+
+void ExpectLayoutVisibilityRecords(const Luminumbra::Client::UI::UiLayout& layout) {
+    const auto find = [&](const std::string& id) {
+        return std::find_if(layout.rml_elements.begin(),
+                            layout.rml_elements.end(),
+                            [&](const auto& element) { return element.id == id; });
+    };
+    const auto recorded_direct_text = find("direct_text");
+    ASSERT_NE(recorded_direct_text, layout.rml_elements.end());
+    EXPECT_EQ(recorded_direct_text->text, "kept");
+    const auto transparent = find("transparent");
+    const auto opaque_override = find("opaque_override");
+    const auto zero_size = find("zero_size");
+    ASSERT_NE(transparent, layout.rml_elements.end());
+    ASSERT_NE(opaque_override, layout.rml_elements.end());
+    ASSERT_NE(zero_size, layout.rml_elements.end());
+    EXPECT_EQ(opaque_override->parent,
+              std::optional<std::size_t>(
+                  static_cast<std::size_t>(transparent - layout.rml_elements.begin())));
+    EXPECT_EQ(opaque_override->depth, transparent->depth + 1);
+    EXPECT_DOUBLE_EQ(zero_size->rect.w, 0);
+    EXPECT_DOUBLE_EQ(zero_size->rect.h, 0);
+}
+
+void ExpectOffscreenLayout(Luminumbra::Client::Rml_UIManager& ui,
+                           Rml::ElementDocument& document,
+                           int width,
+                           int height) {
+    using namespace Luminumbra::Client::UI;
+    auto* offscreen_element = document.GetElementById("unclipped");
+    ASSERT_NE(offscreen_element, nullptr);
+    ASSERT_TRUE(offscreen_element->SetProperty("left", "-50px"));
+    ASSERT_TRUE(offscreen_element->SetProperty("top", "-60px"));
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto offscreen = CollectUiLayout(ui.GetContext(), nullptr, "offscreen", width, height);
+    const auto offscreen_record =
+        std::find_if(offscreen.rml_elements.begin(),
+                     offscreen.rml_elements.end(),
+                     [](const auto& element) { return element.id == "unclipped"; });
+    ASSERT_NE(offscreen_record, offscreen.rml_elements.end());
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.x, -50);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.y, -60);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.w, 30);
+    EXPECT_DOUBLE_EQ(offscreen_record->rect.h, 40);
+    EXPECT_NO_THROW(SerializeUiLayout(offscreen));
+}
+
+void ExpectLayoutVisitedBudget(Luminumbra::Client::Rml_UIManager& ui,
+                               Rml::ElementDocument& document,
+                               int width,
+                               int height) {
+    using namespace Luminumbra::Client::UI;
+    // Each hidden leaf is visited, even though it produces no record. Distribute
+    // them across two branches so a per-parent child limit cannot replace the
+    // aggregate visited budget. The other (hidden) documents each cost one node.
+    document.SetInnerRML("<div id=\"budget_left\"/><div id=\"budget_right\"/>");
+    auto* budget_left = document.GetElementById("budget_left");
+    auto* budget_right = document.GetElementById("budget_right");
+    ASSERT_NE(budget_left, nullptr);
+    ASSERT_NE(budget_right, nullptr);
+    const auto document_nodes = static_cast<std::size_t>(ui.GetContext()->GetNumDocuments());
+    ASSERT_LT(document_nodes + 2, kUiLayoutMaxElements);
+    const auto hidden_leaves = kUiLayoutMaxElements - document_nodes - 2;
+    for (std::size_t index = 0; index < hidden_leaves; ++index) {
+        auto leaf = document.CreateElement("div");
+        ASSERT_NE(leaf, nullptr);
+        ASSERT_TRUE(leaf->SetProperty("visibility", "hidden"));
+        (index < hidden_leaves / 2 ? budget_left : budget_right)->AppendChild(std::move(leaf));
+    }
+    document.Show();
+    ui.Render();
+    const auto at_limit = CollectUiLayout(ui.GetContext(), nullptr, "budget", width, height);
+    ASSERT_EQ(at_limit.rml_elements.size(), 3u);
+    EXPECT_EQ(at_limit.rml_elements[0].id, "first");
+    EXPECT_EQ(at_limit.rml_elements[1].id, "budget_left");
+    EXPECT_EQ(at_limit.rml_elements[2].id, "budget_right");
+    auto extra_leaf = document.CreateElement("div");
+    ASSERT_NE(extra_leaf, nullptr);
+    ASSERT_TRUE(extra_leaf->SetProperty("visibility", "hidden"));
+    budget_right->AppendChild(std::move(extra_leaf));
+    document.UpdateDocument();
+    ui.Render();
+    EXPECT_THROW(CollectUiLayout(ui.GetContext(), nullptr, "budget", width, height),
+                 std::length_error);
+    document.Hide();
+    // A pruned document costs one visited node; its oversized subtree is not visited.
+    EXPECT_TRUE(
+        CollectUiLayout(ui.GetContext(), nullptr, "hidden", width, height).rml_elements.empty());
+}
+
+void ExpectLayoutGeometryAndText(const Luminumbra::Client::UI::UiLayout& layout,
+                                 Rml::Element& input_element) {
+    using namespace Luminumbra::Client::UI;
+    const auto find = [&](const std::string& id) {
+        return std::find_if(layout.rml_elements.begin(),
+                            layout.rml_elements.end(),
+                            [&](const auto& element) { return element.id == id; });
+    };
+    for (const auto* id : {"hidden",
+                           "hidden_child",
+                           "invisible",
+                           "visible_override",
+                           "nested_hidden",
+                           "nested_override",
+                           "hidden_document",
+                           "hidden_document_child",
+                           "visibility_dom",
+                           "visibility_generated",
+                           "display_dom",
+                           "display_generated"})
+        EXPECT_EQ(find(id), layout.rml_elements.end()) << id;
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutVisibilityRecords(layout));
+    const auto text = find("text");
+    const auto clip = find("clip");
+    const auto unclipped = find("unclipped");
+    const auto second_child = find("second_child");
+    const auto input = find("input");
+    const auto empty_input = find("empty_input");
+    ASSERT_NE(text, layout.rml_elements.end());
+    ASSERT_NE(clip, layout.rml_elements.end());
+    ASSERT_NE(unclipped, layout.rml_elements.end());
+    ASSERT_NE(second_child, layout.rml_elements.end());
+    ASSERT_NE(input, layout.rml_elements.end());
+    ASSERT_NE(empty_input, layout.rml_elements.end());
+    EXPECT_EQ(input->text, "New World");
+    EXPECT_TRUE(empty_input->text.empty());
+    const auto input_index = static_cast<std::size_t>(input - layout.rml_elements.begin());
+    for (int index = 0; index < input_element.GetNumChildren(true); ++index) {
+        const auto child = find("input_child_" + std::to_string(index));
+        ASSERT_NE(child, layout.rml_elements.end());
+        EXPECT_EQ(child->parent, std::optional<std::size_t>(input_index));
+        EXPECT_EQ(child->depth, input->depth + 1);
+        EXPECT_EQ(static_cast<std::size_t>(child - layout.rml_elements.begin()),
+                  input_index + 1 + static_cast<std::size_t>(index));
+    }
+    EXPECT_EQ(find("input_child_0")->text, "New World");
+    EXPECT_LT(text, second_child) << "context document order";
+    EXPECT_EQ(text->text, "before  after");
+    EXPECT_EQ(text->tag, "div");
+    ASSERT_TRUE(text->parent.has_value());
+    EXPECT_EQ(
+        text->parent,
+        std::optional<std::size_t>(static_cast<std::size_t>(clip - layout.rml_elements.begin())));
+    EXPECT_EQ(text->depth, clip->depth + 1);
+    ASSERT_TRUE(text->clip.has_value());
+    const auto clip_rect = text->clip.value_or(UiLayoutRect{});
+    EXPECT_DOUBLE_EQ(clip_rect.x, 10);
+    EXPECT_DOUBLE_EQ(clip_rect.y, 20);
+    EXPECT_DOUBLE_EQ(clip_rect.w, 100);
+    EXPECT_DOUBLE_EQ(clip_rect.h, 80);
+    EXPECT_FALSE(text->clip_masked);
+    EXPECT_FALSE(unclipped->clip.has_value());
+    EXPECT_FALSE(unclipped->z.has_value()) << "raw CSS z-index is not effective paint order";
+    for (const auto& element : layout.rml_elements) {
+        EXPECT_GE(element.rect.x, 0);
+        EXPECT_GE(element.rect.y, 0);
+        EXPECT_LE(element.rect.x + element.rect.w, layout.width);
+        EXPECT_LE(element.rect.y + element.rect.h, layout.height);
+    }
+}
+
+TEST(UiSmokeTest, LayoutIncludesVisibleDocumentsDirectTextClipsAndTree) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    // Shut RmlUi down before its interfaces and the GL context, even on ASSERT failure.
+    const ScopedUiShutdown shutdown(ui);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    auto* first = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>
+        body, div { display: block; }
+        body { width: 700px; height: 500px; font-family: Lora; font-size: 16px; }
+        #clip { position: absolute; left: 10px; top: 20px;
+                width: 100px; height: 80px; overflow: hidden; }
+        #text { width: 120px; height: 90px; }
+        input { display: inline-block; width: 180px; height: 24px; }
+        </style></head><body id="first">
+        <div id="clip"><div id="text">  before <span>nested</span> after  </div></div>
+        <div id="hidden" style="display: none">
+            <div id="hidden_child" style="visibility: visible" /></div>
+        <div id="invisible" style="visibility: hidden; width: 40px; height: 30px;
+                                   overflow: hidden">
+            <div id="visible_override" style="visibility: visible; width: 80px">
+                <div id="nested_hidden" style="visibility: hidden">
+                    <div id="nested_override" style="visibility: visible">omitted</div>
+                </div>
+            </div>
+        </div>
+        <div id="direct_text">kept</div>
+        <div id="transparent" style="opacity: 0">
+            <div id="opaque_override" style="opacity: 1">opaque</div></div>
+        <div id="zero_size" style="width: 0px; height: 0px" />
+        <div id="unclipped" style="position: absolute; left: 200px; top: 20px;
+                                   width: 30px; height: 40px; z-index: 7" />
+        <input id="input" type="text" value="New World" />
+        <input id="empty_input" type="text" value="" />
+        </body></rml>)");
+    auto* second = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>
+        body, div { display: block; }
+        body { width: 600px; height: 400px; font-family: Lora; font-size: 16px; }
+        </style></head>
+        <body id="second"><div id="second_child" /></body></rml>)");
+    // RmlUi initializes document visibility in ProcessHeader, on closing <head>.
+    auto* hidden_document = ui.GetContext()->LoadDocumentFromMemory(
+        "<rml><head></head><body id=\"hidden_document\">"
+        "<div id=\"hidden_document_child\" style=\"visibility: visible\" /></body></rml>");
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_NE(hidden_document, nullptr);
+    EXPECT_FALSE(hidden_document->IsVisible());
+    ASSERT_NO_FATAL_FAILURE(AppendHiddenLayoutText(*first));
+    auto* input_element = first->GetElementById("input");
+    ASSERT_NE(input_element, nullptr);
+    ASSERT_EQ(input_element->GetNumChildren(), 0);
+    ASSERT_EQ(input_element->GetNumChildren(true), 3);
+    // The text, selected text and selection nodes are all non-DOM children.
+    for (int index = 0; index < input_element->GetNumChildren(true); ++index) {
+        auto* child = input_element->GetChild(index);
+        ASSERT_NE(child, nullptr);
+        child->SetId("input_child_" + std::to_string(index));
+    }
+    first->Show();
+    second->Show();
+    ui.GetContext()->Update();
+    ui.Render();
+    ASSERT_NO_FATAL_FAILURE(ExpectLocalVisibilityOverrides(*first, *hidden_document));
+    using namespace Luminumbra::Client::UI;
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(context.window(), &width, &height);
+    const auto layout = CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height);
+    ASSERT_EQ(layout.width, width);
+    ASSERT_EQ(layout.height, height);
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutGeometryAndText(layout, *input_element));
+    const auto bytes = SerializeUiLayout(layout);
+    ui.Render();
+    EXPECT_EQ(
+        bytes,
+        SerializeUiLayout(CollectUiLayout(ui.GetContext(), nullptr, "fixture", width, height)));
+    auto* clipping_element = first->GetElementById("clip");
+    ASSERT_NE(clipping_element, nullptr);
+    clipping_element->SetProperty("border-radius", "8px");
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto masked = CollectUiLayout(ui.GetContext(), nullptr, "masked", width, height);
+    const auto masked_text = std::find_if(masked.rml_elements.begin(),
+                                          masked.rml_elements.end(),
+                                          [](const auto& element) { return element.id == "text"; });
+    ASSERT_NE(masked_text, masked.rml_elements.end());
+    EXPECT_TRUE(masked_text->clip_masked);
+    EXPECT_TRUE(masked_text->clip.has_value());
+    clipping_element->SetProperty("transform", "translateX(5px)");
+    ui.GetContext()->Update();
+    ui.Render();
+    const auto transformed = CollectUiLayout(ui.GetContext(), nullptr, "masked", width, height);
+    const auto transformed_text =
+        std::find_if(transformed.rml_elements.begin(),
+                     transformed.rml_elements.end(),
+                     [](const auto& element) { return element.id == "text"; });
+    ASSERT_NE(transformed_text, transformed.rml_elements.end());
+    EXPECT_TRUE(transformed_text->clip_masked);
+    EXPECT_FALSE(transformed_text->clip.has_value()) << "transformed mask has no scissor";
+    ASSERT_NO_FATAL_FAILURE(ExpectOffscreenLayout(ui, *first, width, height));
+    // The context also owns debugger documents, including its visible render hook.
+    // Hide every document before requiring an empty sidecar; Hide updates visibility immediately.
+    // Snapshot the fixture's documents because hiding can reorder them through focus changes.
+    std::vector<Rml::ElementDocument*> documents;
+    const int document_count = ui.GetContext()->GetNumDocuments();
+    for (int index = 0; index < document_count; ++index) {
+        auto* document = ui.GetContext()->GetDocument(index);
+        ASSERT_NE(document, nullptr);
+        documents.push_back(document);
+    }
+    for (auto* document : documents) {
+        document->Hide();
+        EXPECT_FALSE(document->IsVisible()) << document->GetId();
+    }
+    const auto empty = CollectUiLayout(ui.GetContext(), nullptr, "hidden", width, height);
+    std::ostringstream remaining_ids;
+    for (const auto& element : empty.rml_elements)
+        remaining_ids << " [" << element.id << "]";
+    EXPECT_TRUE(empty.rml_elements.empty()) << "Remaining element ids:" << remaining_ids.str();
+
+    ASSERT_NO_FATAL_FAILURE(ExpectLayoutVisitedBudget(ui, *first, width, height));
 }
 
 static Luminumbra::Persistence::SavedWorldCatalog SavedWorldFixture() {
@@ -1550,6 +2121,58 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ui.Shutdown();
 }
 
+TEST(UiSmokeTest, CreateThenBackInOneEventPumpCancelsBeforeOpeningWorld) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Client::WorldEntry<std::string> entry;
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    ui.SetNavigationAwayCallback([&] { entry.cancel_input(true); });
+    ui.SetWorldCreationCallback([&](const std::string& name,
+                                    const std::string&,
+                                    const std::string&,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>&) {
+        EXPECT_TRUE(entry.request(name));
+    });
+    auto* document = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
+    ASSERT_NE(document, nullptr);
+    auto* create = document->GetElementById("create_btn");
+    auto* back = document->GetElementById("back_btn");
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(back, nullptr);
+    // No host advance or UI update between these two events.
+    create->Click();
+    ASSERT_EQ(entry.state(), Luminumbra::Client::WorldEntryState::Requested);
+    back->Click();
+    unsigned stages = 0;
+    unsigned opens = 0;
+    unsigned drains = 0;
+    entry.loading_painted();
+    for (std::size_t frame = 0;
+         frame <= static_cast<std::size_t>(Luminumbra::Client::WorldEntryStage::Count);
+         ++frame) {
+        entry.advance(
+            [&](Luminumbra::Client::WorldEntryStage stage, const std::string&) {
+                ++stages;
+                if (stage == Luminumbra::Client::WorldEntryStage::OpenWorld)
+                    ++opens;
+                return Luminumbra::Client::WorldEntryResult::Complete;
+            },
+            [&] {
+                ++drains;
+                return Luminumbra::Client::WorldEntryResult::Complete;
+            });
+    }
+    EXPECT_EQ(entry.state(), Luminumbra::Client::WorldEntryState::Cancelled);
+    EXPECT_EQ(stages, 0u);
+    EXPECT_EQ(opens, 0u);
+    EXPECT_EQ(drains, 1u);
+    ui.Update();
+    EXPECT_NE(FindDocumentByElementId(ui.GetContext(), "main_menu"), nullptr);
+    ui.Shutdown();
+}
+
 // Save-as-named-preset: create-world lists saved user presets as selectable chips, and the
 // "save preset" control hands the current config (name + base + params) to the saver.
 TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
@@ -1691,6 +2314,160 @@ TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
         << "gallery back arrow must navigate to main_menu.rml";
 
     ui.Shutdown();
+}
+
+namespace {
+
+void CheckCaptureGalleryContentPolicy() {
+    class GalleryRoot {
+    public:
+        GalleryRoot() {
+            // At most 32 exclusive attempts.
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                const auto candidate =
+                    fs::temp_directory_path() /
+                    ("gallery-content-" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(attempt));
+                if (fs::create_directory(candidate)) {
+                    m_path = candidate;
+                    break;
+                }
+            }
+        }
+        ~GalleryRoot() {
+            std::error_code error;
+            fs::remove_all(m_path, error);
+        }
+        const fs::path& path() const {
+            return m_path;
+        }
+
+    private:
+        fs::path m_path;
+    };
+    const GalleryRoot root;
+    // Six thumbnails and four bounded metadata payloads plus one
+    // unreadable directory exercise the optional rating inputs.
+    ASSERT_FALSE(root.path().empty());
+    for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees)
+        fs::create_directories(root.path() / tree);
+    for (const auto* file : {"gallery.rml", "base.rcss", "game_theme.rcss", "pages.rcss"}) {
+        fs::create_directories(root.path() / "data/ui");
+        fs::copy_file(SourceRoot() / "data/ui" / file, root.path() / "data/ui" / file);
+    }
+    const auto thumbs = root.path() / "data/ui/captures";
+    fs::create_directories(thumbs);
+    fs::create_directories(root.path() / "photos");
+    int id = 0;
+    for (const auto* payload : {"{\"stars\":5}", "", "{\"stars\":", "{\"other\":1}"}) {
+        ++id;
+        std::ofstream output(root.path() / "photos" /
+                             ("photo-" + std::to_string(id) + ".photo.json"));
+        output << payload;
+        output.close();
+        ASSERT_TRUE(output);
+    }
+    fs::create_directory(root.path() / "photos/photo-5.photo.json");
+    for (int number = 1; number <= 6; ++number)
+        fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga",
+                      thumbs / ("cap_" + std::to_string(number) + ".tga"));
+
+    for (const auto* name : {"cap_0.tga", "cap_01.tga", "cap_3junk.tga", "cap_2147483648.tga"})
+        fs::copy_file(SourceRoot() / "data/ui/fixtures/captures/cap_1.tga", thumbs / name);
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Client::Rml_UIManager ui(root.path().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    auto inspect = [&](std::size_t expected_cards, std::size_t expected_favorites) {
+        ui.RequestLoadDocument("gallery.rml");
+        ui.Update();
+        ui.ReloadActiveDocument();
+        auto* gallery = FindDocumentByElementId(ui.GetContext(), "gallery");
+        ASSERT_NE(gallery, nullptr);
+        Rml::ElementList cards;
+        gallery->GetElementsByClassName(cards, "photo-card");
+        EXPECT_EQ(cards.size(), expected_cards);
+        Rml::ElementList favorites;
+        gallery->GetElementsByClassName(favorites, "photo-fav");
+        EXPECT_EQ(favorites.size(), expected_favorites);
+    };
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-1.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-1.photo.json",
+                                                        "{\"stamp\":\"photo-1\",\"stars\":5}"));
+    // Admit complete historical photos as well as published captures; partial
+    // legacy artifacts stay hidden.
+    luminumbra::game::PhotoSidecar side;
+    side.verdict.stars = 5;
+    ASSERT_EQ(Luminumbra::Rendering::PersistPhotoCapture(root.path(), 7, 1, 1, {1, 2, 3}, side), 7);
+    // A duplicate legacy id must not displace the published photo or its rating.
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-7.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-7.photo.json",
+                                                        "{\"stamp\":\"photo-7\",\"stars\":0}"));
+    fs::copy_file(thumbs / "cap_1.tga", thumbs / "cap_7.tga");
+    fs::create_directory(thumbs / "cap_8"); // Unpublished newer capture stays hidden.
+    inspect(2, 2);
+    // A restarted session must place its shutter result ahead of historical ids.
+    ASSERT_TRUE(Luminumbra::Rendering::WritePixelBufferPpm(
+        root.path() / "photos/photo-100.ppm", 1, 1, {1, 2, 3}));
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(root.path() / "photos/photo-100.photo.json",
+                                                        "{\"stamp\":\"photo-100\",\"stars\":5}"));
+    fs::copy_file(thumbs / "cap_1.tga", thumbs / "cap_100.tga");
+    Luminumbra::Rendering::PhotoCaptureAllocator restarted_session;
+    ASSERT_EQ(restarted_session.Persist(root.path(), 1, 1, {1, 2, 3}, side), 101);
+    inspect(4, 4);
+    auto* ordered_gallery = FindDocumentByElementId(ui.GetContext(), "gallery");
+    ASSERT_NE(ordered_gallery, nullptr);
+    Rml::ElementList ordered_thumbnails;
+    ordered_gallery->GetElementsByClassName(ordered_thumbnails, "photo-thumb");
+    ASSERT_EQ(ordered_thumbnails.size(), 4u);
+    EXPECT_EQ(ordered_thumbnails.front()->GetAttribute<Rml::String>("src", ""),
+              "captures/cap_101/thumbnail.tga");
+    // Discovery is bounded even when almost every entry is unrelated. Keep
+    // exactly 65536 entries first, then refuse an incomplete 65537-entry scan.
+    constexpr std::size_t kGalleryEntryBound = 65536;
+    const auto present = static_cast<std::size_t>(
+        std::distance(fs::directory_iterator(thumbs), fs::directory_iterator{}));
+    for (std::size_t entry = present; entry < kGalleryEntryBound; ++entry) {
+        std::ofstream output(thumbs / ("unrelated-" + std::to_string(entry)));
+        ASSERT_TRUE(Luminumbra::Rendering::CloseCaptureFile(output));
+    }
+    inspect(4, 4);
+    ASSERT_TRUE(Luminumbra::Rendering::WriteCaptureText(thumbs / "overflow", "unrelated"));
+    inspect(0, 0);
+    ASSERT_TRUE(fs::remove(thumbs / "overflow"));
+    for (std::size_t entry = present; entry < kGalleryEntryBound; ++entry)
+        ASSERT_TRUE(fs::remove(thumbs / ("unrelated-" + std::to_string(entry))));
+    ASSERT_TRUE(fs::remove(thumbs / "cap_100.tga"));
+    auto& policy = Luminumbra::Filesystem::capture_content_paths();
+    policy.enable(root.path());
+    inspect(7, 0);
+    EXPECT_FALSE(policy.refused());
+    fs::remove_all(thumbs);
+    fs::create_directory(thumbs);
+    inspect(0, 0);
+    EXPECT_FALSE(policy.refused());
+    // The optional rating omission must never bypass content checks.
+    ui.SetGalleryCaptureSource(root.path() / "photos", "captures/");
+    inspect(8, 1); // Refusal preserves the authored fallback cards.
+    EXPECT_TRUE(policy.refused());
+    ui.Shutdown();
+}
+
+} // namespace
+
+// A subprocess owns the process-wide capture policy, so other UI cases retain
+// their normal interactive mode even when the entire test binary runs at once.
+TEST(UiSmokeDeathTest, CaptureGalleryOmitsPersonalRatingsAndRetainsContentRefusals) {
+    ASSERT_EXIT(([] {
+                    CheckCaptureGalleryContentPolicy();
+                    std::exit(::testing::Test::HasFailure() ? 1 : 0);
+                })(),
+                ::testing::ExitedWithCode(0),
+                "");
 }
 
 //  world-select load button must NOT fire the load callback with no selection, and the

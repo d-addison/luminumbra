@@ -29,6 +29,8 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/ProcgenPalettes.h"
 #include "app/RegisterDeveloperWidgets.h"
 #include "app/RenderBenchmarkReport.h"
+#include "app/RenderConfiguration.h"
+#include "app/RenderWorkload.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
 #include "app/SessionExit.h"
@@ -46,6 +48,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
+#include "core/PresentationClock.h"
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
@@ -79,10 +82,13 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
+#include "luminumbra_common/core/WaterAttribution.h"
 #include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -103,8 +109,11 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "nlohmann/json.hpp"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
+#include "rendering/CaptureManifestLive.h"
 #include "rendering/ExposureModel.h" //  rendering: lens EV -> render exposure multiplier
 #include "rendering/FarLodSystem.h"
+#include "rendering/FarWorldDiagnostics.h"
+#include "rendering/FarWorldSelection.h"
 #include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
@@ -128,6 +137,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIDataStream.h"
 #include "ui/core/UIHotReload.h"
+#include "world/WorldEntry.h"
 #include "world/WorldgenOverride.h"
 #include "world/WorldgenPreview.h"
 #include <algorithm>
@@ -153,6 +163,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -243,7 +254,7 @@ static std::string KeyDisplayLabel(int key) {
 // the cheap half). Capture/scenario runs compute synchronously so frame-1
 // content is unchanged. TEARDOWN CONTRACT: the job's callbacks hold a raw
 // SHIELD_WorldSystem* — every world transition (CreateWorld / session reset)
-// MUST DrainWorldDressing first, exactly like DrainBackgroundWorldScan above.
+// MUST wait for the dressing job first; discard its results only after adoption.
 struct WorldDressingPending {
     const void* world = nullptr; // identity guard: consume only for the world computed
     Luminumbra::Client::WorldDressingResult result;
@@ -828,6 +839,7 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
                                   GameState currentState,
                                   Luminumbra::world::GameSession* gameSession,
                                   Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                                  const luminumbra::core::ResolvedGraphics& graphics,
                                   ProcgenPlantState& g_procgen) {
     // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
     // for the next one. Pair with --no-ui so no overlay is baked into the frame.
@@ -841,14 +853,28 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
             glfwGetFramebufferSize(window, &vw, &vh);
             std::size_t pixel_bytes = 0;
             if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
-                std::vector<unsigned char> px(pixel_bytes);
-                glReadBuffer(GL_BACK);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                 char nm[32];
                 std::snprintf(nm, sizeof(nm), "frame_%04d.ppm", g_app.capture.timelapse_captured);
-                if (glGetError() != GL_NO_ERROR ||
-                    !WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px))
+                const bool captured = Luminumbra::Rendering::WithCaptureManifest(
+                    g_app.capture.timelapse_dir / nm,
+                    Luminumbra::Rendering::ObserveCaptureManifest(*gameSession,
+                                                                  renderPipeline,
+                                                                  vw,
+                                                                  vh,
+                                                                  graphics,
+                                                                  g_app.overlay.wireframe_mode,
+                                                                  g_app.overlay.imgui_enabled),
+                    [&] {
+                        std::vector<unsigned char> px(pixel_bytes);
+                        glReadBuffer(GL_BACK);
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                        glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                        if (glGetError() != GL_NO_ERROR ||
+                            !WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px))
+                            return false;
+                        return true;
+                    });
+                if (!captured)
                     return false;
                 ++g_app.capture.timelapse_captured;
             } else {
@@ -1006,6 +1032,18 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
     return true;
 }
 
+// Fixed capture windows must not depend on worker scheduling. Complete
+// preparation also bypasses the synchronous fallback's four-column cap.
+static bool CompleteFoliagePreparation(const ClientAppContext& app,
+                                       const RuntimeScenarioConfig& scenario_config,
+                                       bool photo_mode_active) {
+    const auto& capture = app.capture;
+    return (scenario_config.active() && !capture.play_paths) || capture.scene_active ||
+           !capture.render_benchmark_path.empty() || capture.frame_scan_active ||
+           capture.render_parity_active || capture.timelapse_frames > 0 || capture.survey_active ||
+           photo_mode_active;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void UpdateFoliageScatter(ClientAppContext& g_app,
                                  const std::filesystem::path& root_dir,
@@ -1013,6 +1051,7 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
                                  Luminumbra::Rendering::Camera* g_camera,
                                  Luminumbra::world::GameSession* gameSession,
                                  Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                                 bool photo_mode_active,
                                  double& rb_scatter_ms,
                                  double& rb_foliage_ms) {
     // FOLIAGE in normal play: the GPU grass scatter was previously only
@@ -1142,10 +1181,15 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
                                 std::chrono::steady_clock::now() - _rb_scatter_t0)
                                 .count();                             //
             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); //
-            foliage->rebuild_instances(chunk_scatter,
-                                       &Luminumbra::Rendering::FoliageSurfaceQuery,
-                                       &fol_ctx,
-                                       g_camera->Position);
+            const bool complete =
+                CompleteFoliagePreparation(g_app, scenario_config, photo_mode_active);
+            foliage->rebuild_instances(
+                chunk_scatter,
+                &Luminumbra::Rendering::FoliageSurfaceQuery,
+                &fol_ctx,
+                g_camera->Position,
+                complete ? Luminumbra::Rendering::FoliagePass::Preparation::Complete
+                         : Luminumbra::Rendering::FoliagePass::Preparation::Deferred);
             rb_foliage_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - _rb_fol_t0)
                                 .count(); //
@@ -1368,6 +1412,7 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
 // Grandfathered monolith: main() currently scores 1281 against the gate's 250 threshold.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
+    const auto benchmark_process_start = std::chrono::steady_clock::now();
     ClientRuntimeState runtime;
     auto& g_camera = runtime.camera;
     auto& g_playerController = runtime.playerController;
@@ -1397,6 +1442,19 @@ int main(int argc, char* argv[]) {
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
+    const bool benchmark_v4 =
+        GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2") == "v4";
+    if (benchmark_v4) {
+        try {
+            if (HasCommandLineOption(argc, argv, "--scene-config"))
+                throw std::invalid_argument("schema v4 refuses --scene-config; the workload owns "
+                                            "scene configuration");
+            Luminumbra::Filesystem::capture_content_paths().enable(root_dir);
+        } catch (const std::exception& error) {
+            LUMINUMBRA_CORE_ERROR("Render benchmark content refused: {}", error.what());
+            return 2;
+        }
+    }
     RuntimeScenarioConfig scenario_config;
     try {
         scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
@@ -1405,9 +1463,7 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     std::string override_error;
-    if (!scenario_config.systems_config_path.empty() ||
-        HasCommandLineFlag(argc, argv, "--systems-config") ||
-        HasCommandLineFlag(argc, argv, "--systems-config=")) {
+    if (HasCommandLineOption(argc, argv, "--systems-config")) {
         luminumbra::core::SystemConfig config;
         if (!luminumbra::core::SystemConfig::TryLoadFromFile(
                 scenario_config.systems_config_path, config, override_error)) {
@@ -1416,9 +1472,7 @@ int main(int argc, char* argv[]) {
         }
         scenario_config.systems_config_override = std::move(config);
     }
-    if (!scenario_config.preset_json_path.empty() ||
-        HasCommandLineFlag(argc, argv, "--preset-json") ||
-        HasCommandLineFlag(argc, argv, "--preset-json=")) {
+    if (HasCommandLineOption(argc, argv, "--preset-json")) {
         std::string json_text;
         if (!Luminumbra::world::LoadTerrainPresetOverride(
                 scenario_config.preset_json_path, root_dir / "data", json_text, override_error)) {
@@ -1513,7 +1567,7 @@ int main(int argc, char* argv[]) {
     namespace Measurement = Luminumbra::Client::Measurement;
     const std::string benchmark_schema =
         GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2");
-    const bool benchmark_v3 = benchmark_schema == "v3";
+    const bool benchmark_v3 = benchmark_schema == "v3" || benchmark_v4;
     const std::string capture_size = GetCommandLineOption(argc, argv, "--capture-size", "");
     const std::string perf_profile = GetCommandLineOption(argc, argv, "--perf-profile", "");
     const std::string traversal_path = GetCommandLineOption(argc, argv, "--traversal", "");
@@ -1521,19 +1575,40 @@ int main(int argc, char* argv[]) {
     std::string traversal_text;
     int capture_width = 0, capture_height = 0;
     nlohmann::json declared_overrides = nlohmann::json::object();
+    nlohmann::json benchmark_content;
+    const auto capture_content = [&]() {
+        auto content = Measurement::workload_content(root_dir);
+        if (!scenario_config.systems_config_path.empty())
+            content["inputs/systems_config.json"] =
+                Measurement::content_digest(scenario_config.systems_config_path);
+        if (!scenario_config.preset_json_path.empty())
+            content["inputs/preset.json"] =
+                Measurement::content_digest(scenario_config.preset_json_path);
+        const auto user_settings_path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+        if (!user_settings_path.empty() && std::filesystem::exists(user_settings_path))
+            content["inputs/user_settings.json"] = Measurement::content_digest(user_settings_path);
+        return content;
+    };
     try {
         for (int index = 1; index < argc; ++index) {
-            const std::string option = argv[index];
+            const std::string argument = argv[index];
+            const auto assignment = argument.find('=');
+            const std::string option = argument.substr(0, assignment);
             if (option == "--render-benchmark-schema" || option == "--capture-size" ||
                 option == "--perf-profile" || option == "--traversal" ||
                 option == "--declare-render-overrides") {
-                if (index + 1 >= argc || std::string(argv[index + 1]).empty() ||
-                    std::string(argv[index + 1]).rfind("--", 0) == 0)
+                if (assignment != std::string::npos
+                        ? assignment + 1 == argument.size()
+                        : index + 1 >= argc || std::string(argv[index + 1]).empty() ||
+                              std::string(argv[index + 1]).rfind("--", 0) == 0)
                     throw std::invalid_argument("missing value for " + option);
             }
         }
         if (benchmark_schema != "v2" && !benchmark_v3)
             throw std::invalid_argument("unsupported render benchmark schema");
+        if (HasCommandLineOption(argc, argv, "--load-world"))
+            Measurement::require_workload_world_load(
+                benchmark_v4, GetCommandLineOption(argc, argv, "--load-world", ""), {});
         if (benchmark_v3 && scenario_config.active())
             throw std::invalid_argument(
                 "schema v3 cannot share a scenario-owned measurement window");
@@ -1571,28 +1646,45 @@ int main(int argc, char* argv[]) {
         }
         if (!traversal_path.empty()) {
             if (!benchmark_v3 || scenario_config.active() ||
-                HasCommandLineFlag(argc, argv, "--cam-pos") ||
-                HasCommandLineFlag(argc, argv, "--scene-config") ||
-                HasCommandLineFlag(argc, argv, "--debug-goto") ||
-                HasCommandLineFlag(argc, argv, "--profile-fly") ||
+                HasCommandLineOption(argc, argv, "--cam-pos") ||
+                HasCommandLineOption(argc, argv, "--cam-yaw") ||
+                HasCommandLineOption(argc, argv, "--cam-pitch") ||
+                HasCommandLineOption(argc, argv, "--scene-config") ||
+                HasCommandLineOption(argc, argv, "--debug-goto") ||
+                HasCommandLineOption(argc, argv, "--profile-fly") ||
+                HasCommandLineOption(argc, argv, "--timelapse-frames") ||
                 HasCommandLineFlag(argc, argv, "--timelapse"))
                 throw std::invalid_argument(
                     "traversal requires v3 and exclusive camera/world ownership");
-            if (std::filesystem::file_size(traversal_path) > 1024u * 1024u)
+            const auto script_size = std::filesystem::file_size(traversal_path);
+            // Read exactly the checked size (at most 1 MiB); a changing file refuses.
+            if (script_size > 1024u * 1024u)
                 throw std::invalid_argument("traversal manifest exceeds 1 MiB");
             std::ifstream input(traversal_path, std::ios::binary);
             if (!input)
                 throw std::invalid_argument("cannot read traversal manifest");
-            traversal_text.assign(std::istreambuf_iterator<char>(input),
-                                  std::istreambuf_iterator<char>());
+            traversal_text.resize(static_cast<std::size_t>(script_size));
+            input.read(traversal_text.data(), static_cast<std::streamsize>(script_size));
+            if (input.gcount() != static_cast<std::streamsize>(script_size) || input.bad() ||
+                input.peek() != std::char_traits<char>::eof())
+                throw std::invalid_argument("traversal manifest changed while reading");
             std::istringstream manifest(traversal_text);
             traversal = Measurement::Traversal::read(manifest);
+            if ((traversal->kind != "traversal") != benchmark_v4)
+                throw std::invalid_argument(
+                    "scripted workloads require schema v4; v1 traversal requires v3");
             if (!scenario_config.world_preset.empty() &&
                 scenario_config.world_preset != traversal->preset)
                 throw std::invalid_argument("traversal preset disagrees with --world-preset");
             scenario_config.world_preset = traversal->preset;
             scenario_config.auto_create_world = true;
             scenario_config.auto_enter_world = true;
+        }
+        if (benchmark_v4 && !traversal)
+            throw std::invalid_argument("schema v4 requires a workload traversal");
+        if (benchmark_v4) {
+            benchmark_content = capture_content();
+            Luminumbra::Client::presentation_clock.set_capture_tick(0, traversal->tickRate);
         }
     } catch (const std::exception& error) {
         LUMINUMBRA_CORE_ERROR("Render benchmark: {}", error.what());
@@ -1626,13 +1718,13 @@ int main(int argc, char* argv[]) {
     g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
     if (traversal) {
-        if (HasCommandLineFlag(argc, argv, "--render-benchmark-frames") ||
-            !GetCommandLineOption(argc, argv, "--render-benchmark-frames", "").empty()) {
+        if (HasCommandLineOption(argc, argv, "--render-benchmark-frames")) {
             LUMINUMBRA_CORE_ERROR(
                 "Traversal owns the measured duration; omit --render-benchmark-frames");
             return 2;
         }
-        g_app.capture.render_benchmark_frames = static_cast<int>(Measurement::kMaxFrames);
+        g_app.capture.render_benchmark_frames =
+            benchmark_v4 ? traversal->expectedTicks : static_cast<int>(Measurement::kMaxFrames);
     }
     if (!g_app.capture.render_benchmark_path.empty() &&
         (g_app.capture.render_benchmark_frames < 1 ||
@@ -2141,6 +2233,9 @@ int main(int argc, char* argv[]) {
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
+    if (traversal && traversal->kind == "region_crossing")
+        gameSession->SetRegionSchedulerConfig(
+            {.work_limit = 0, .hold_ticks = 30, .reduced_shift = 1});
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to
@@ -2273,7 +2368,11 @@ int main(int argc, char* argv[]) {
     luminumbra::core::ResolvedGraphics resolved_graphics;
     std::string graphics_error;
     bool graphics_ready = luminumbra::core::ResolveGraphics(
-        graphics_state.Settings(), graphics_session_overrides, resolved_graphics, graphics_error);
+        graphics_state.Settings(),
+        graphics_session_overrides,
+        resolved_graphics,
+        graphics_error,
+        {.vsync = g_systemConfig.user().vsync, .frame_cap = g_systemConfig.user().frame_cap});
     if (graphics_ready) {
         graphics_ready = renderPipeline.apply_graphics(resolved_graphics);
         g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
@@ -2282,7 +2381,7 @@ int main(int argc, char* argv[]) {
     } else {
         LUMINUMBRA_CORE_ERROR("Invalid graphics configuration: {}", graphics_error);
     }
-    if (graphics_first_launch || graphics_detect_requested)
+    if (graphics_ready && (graphics_first_launch || graphics_detect_requested))
         graphics_state.ScheduleSave(glfwGetTime());
     const auto save_graphics = [&] {
         const bool saved = g_systemConfig.SaveUserOverlay(
@@ -2302,8 +2401,12 @@ int main(int argc, char* argv[]) {
             return true;
         luminumbra::core::ResolvedGraphics candidate;
         const bool applied =
-            luminumbra::core::ResolveGraphics(
-                *graphics_state.Pending(), graphics_session_overrides, candidate, graphics_error) &&
+            luminumbra::core::ResolveGraphics(*graphics_state.Pending(),
+                                              graphics_session_overrides,
+                                              candidate,
+                                              graphics_error,
+                                              {.vsync = g_systemConfig.user().vsync,
+                                               .frame_cap = g_systemConfig.user().frame_cap}) &&
             renderPipeline.apply_graphics(candidate);
         graphics_state.Applied(applied, glfwGetTime());
         if (applied) {
@@ -2362,7 +2465,7 @@ int main(int argc, char* argv[]) {
         }
         glfwDestroyWindow(window);
         glfwTerminate();
-        return -1;
+        return Luminumbra::Filesystem::capture_content_paths().refused() ? 2 : -1;
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
@@ -2428,7 +2531,19 @@ int main(int argc, char* argv[]) {
         g_loading_visualizer->Startup(root_dir, framebufferWidth, framebufferHeight);
     }
 
+    bool entry_save_allowed = true;
+    bool entry_previous_save_allowed = true;
     bool scenario_failed = false;
+    int exit_code = 0;
+    // All persistence entry points share this decision. In particular, digest
+    // refusal leaves the previous session loaded but must not rewrite its save.
+    const auto session_persistence_allowed = [&]() {
+        return entry_save_allowed && Luminumbra::Client::SessionPersistenceAllowed(
+                                         benchmark_v4,
+                                         exit_code,
+                                         scenario_failed,
+                                         Luminumbra::Filesystem::capture_content_paths().refused());
+    };
     std::string scenario_failure_reason;
     bool scenario_ready = false;
     uint64_t scenario_frame_count = 0;
@@ -2441,17 +2556,33 @@ int main(int argc, char* argv[]) {
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     };
 
+    auto wait_for_world_entry_readers = [&]() {
+        renderPipeline.wait_for_world_readers();
+        WaitForBackgroundWorldScan(jobSystem);
+        jobSystem.wait(s_worldDressingHandle);
+    };
+
+    auto entry_world_revision = gameSession->WorldRevision();
+    auto finish_world_replacement = [&]() {
+        // An open can refuse before adoption. Preserve the still-live world's visuals/results.
+        if (gameSession->WorldRevision() != entry_world_revision)
+            prepare_world_entry();
+    };
+    std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
         const auto& detail = gameSession->GetWorldOpenError();
         const std::string error = !use_world_error || detail.empty() ? fallback : detail;
+        world_entry_error = error;
         LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
         if (g_uiManager)
             g_uiManager->ShowMessage(error);
-        g_app.menu.menu_backdrop_active = false;
-        g_playerController.reset();
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            g_app.menu.menu_backdrop_active = false;
+            g_playerController.reset();
+        }
         scenario_failed = benchmark_v3 || runtime_boot_recorder.enabled() ||
                           scenario_config.active() ||
-                          HasCommandLineFlag(argc, argv, "--load-world") ||
+                          HasCommandLineOption(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
         runtime_state_recorder.capture("world_open_refused",
@@ -2462,11 +2593,13 @@ int main(int argc, char* argv[]) {
                                        {});
     };
 
-    auto game_content_error = [&]() -> std::string {
+    auto game_content_error = [&](bool assets_verified = false) -> std::string {
         if (!game_asset_startup_error.empty())
             return game_asset_startup_error;
-        if (const auto error = VerifyGameAssets(root_dir); !error.empty())
-            return error;
+        if (!assets_verified) {
+            if (const auto error = VerifyGameAssets(root_dir); !error.empty())
+                return error;
+        }
         for (const std::string part : {"trunk", "branches", "leaves"}) {
             if (!renderPipeline.static_model_tex(std::string(kTreeMeshPrefix) + part + ".lmesh"))
                 return "Required tree materials could not be loaded by the renderer. Check the "
@@ -2480,7 +2613,7 @@ int main(int argc, char* argv[]) {
         return {};
     };
 
-    auto finish_world_entry = [&]() {
+    auto finish_world_entry = [&](bool staged_entry = false) {
         g_playerController.reset();
         g_procgen = {};
         g_app.worldDressing = {};
@@ -2494,20 +2627,27 @@ int main(int argc, char* argv[]) {
         // rendering with the (now game-owned) camera/world.
         g_app.menu.menu_backdrop_active = false;
         if (auto* world_system = gameSession->GetWorldSystem()) {
-            // bake the live waterfall dressing once for this
-            // world. Detection is a pure function of the generated world
-            // (river course x steep height drop), so it is valid here even
-            // before chunks stream in; the sheets +  spray are render-only
-            // (never hashed). Covers both the runtime-scenario bypass path and
-            // the interactive loading path below.
-            renderPipeline.prepare_waterfalls(*world_system);
-            LUMINUMBRA_CORE_INFO("Waterfall dressing prepared: {} site(s).",
-                                 renderPipeline.waterfall_sites(*world_system).size());
+            // Apply to both creation and reload before any entry/streaming work.
+            // Explicit capture overrides bind this diagnostic to render identity.
+            if (benchmark_v4)
+                world_system->debug_set_streaming_radius_cap(
+                    scenario_config.benchmark_stream_radius);
+            if (!staged_entry) {
+                // bake the live waterfall dressing once for this
+                // world. Detection is a pure function of the generated world
+                // (river course x steep height drop), so it is valid here even
+                // before chunks stream in; the sheets +  spray are render-only
+                // (never hashed). Covers both the runtime-scenario bypass path and
+                // the interactive loading path below.
+                renderPipeline.prepare_waterfalls(*world_system);
+                LUMINUMBRA_CORE_INFO("Waterfall dressing prepared: {} site(s).",
+                                     renderPipeline.waterfall_sites(*world_system).size());
+            }
         }
 
         const bool bypass_loading_ui =
-            runtime_boot_recorder.enabled() ||
-            (scenario_config.active() && scenario_config.auto_enter_world);
+            !staged_entry && (benchmark_v4 || runtime_boot_recorder.enabled() ||
+                              (scenario_config.active() && scenario_config.auto_enter_world));
         if (bypass_loading_ui) {
             LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
             const bool horizon_ready = gameSession->EnsureWorldEntryReady(
@@ -2535,6 +2675,8 @@ int main(int argc, char* argv[]) {
             }
             g_app.loading.world_render_data_initialized = true;
             SetGameState(window, gameStateManager, GameState::IN_GAME);
+            if (benchmark_v4 && g_uiManager)
+                g_uiManager->RequestLoadDocument("hud.rml");
             last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
             if (!horizon_ready || !last_readiness_report.ready) {
                 scenario_failed = true;
@@ -2570,8 +2712,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 2. Switch to the loading state
-        SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
+        // Staged entry already owns the loading state and its input routing.
+        if (!staged_entry)
+            SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
 
         // 3. Get the list of chunks to generate and start the visualizer
         auto* world_system = gameSession->GetWorldSystem();
@@ -2584,32 +2727,37 @@ int main(int argc, char* argv[]) {
         }
 
         g_app.loading.generation_dispatch_index = 0;
-        if (g_loading_visualizer) {
+        if (g_loading_visualizer && !staged_entry) {
             g_loading_visualizer->BeginVisualization(g_app.loading.initial_chunks_to_load);
         }
     };
 
-    auto start_world_creation = [&](const std::string& name,
-                                    const std::string& seed,
-                                    const std::string& worldType,
-                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
-        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
-            Luminumbra::Client::Attribution::Phase::WorldCreateCallback);
+    std::string benchmark_created_world_id;
+    std::string benchmark_saved_world_digest;
+    // Region freezes keep reading durable authority after the load callback returns.
+    std::unique_ptr<Measurement::VerifiedSaveSnapshot> benchmark_loaded_snapshot;
+    auto build_world_preset = [&](const std::string& name,
+                                  const std::string& worldType,
+                                  const std::vector<Luminumbra::Client::WorldGenParam>& params) {
         // If the customize form changed any param from the base preset, build a resolved preset
         // (base + only the real deltas) and hand it to CreateWorld, which embeds it in THIS world's
         // own save dir. No global custom files, no collisions, no dangling references. If nothing
         // changed, customPtr stays null and the curated base preset is used unchanged.
         std::string customPresetJson;
-        const std::string* customPtr = nullptr;
         if (!params.empty()) {
             try {
                 const std::filesystem::path base_path = std::filesystem::path(root_path_str) /
                                                         "worlds" / "atlas" / "presets" /
                                                         (worldType + ".json");
-                std::ifstream in(base_path);
-                if (in) {
-                    nlohmann::json base;
-                    in >> base;
+                nlohmann::json base;
+                bool missing = false;
+                if (Luminumbra::Persistence::ReadSavedJson(
+                        base_path,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        base,
+                        missing,
+                        false) &&
+                    !missing) {
                     //  the form carries semantic-knob entries
                     // ("knob.<id>"/type "knob") alongside any advanced raw
                     // overrides. If knobs are present, resolve through the engine
@@ -2628,7 +2776,6 @@ int main(int argc, char* argv[]) {
                         if (kr.changed) {
                             kr.json["name"] = name;
                             customPresetJson = kr.json.dump(2);
-                            customPtr = &customPresetJson;
                             LUMINUMBRA_CORE_INFO("World knob layer: {} knob(s), {} override(s)",
                                                  kr.knob_count,
                                                  kr.override_count);
@@ -2639,7 +2786,6 @@ int main(int argc, char* argv[]) {
                         if (merged.changed) {
                             merged.json["name"] = name;
                             customPresetJson = merged.json.dump(2);
-                            customPtr = &customPresetJson;
                             LUMINUMBRA_CORE_INFO(
                                 "World customized: {} override(s) applied, {} skipped",
                                 merged.applied,
@@ -2655,15 +2801,30 @@ int main(int argc, char* argv[]) {
 
         if (scenario_config.preset_json_override) {
             customPresetJson = *scenario_config.preset_json_override;
-            customPtr = &customPresetJson;
         }
+        return customPresetJson;
+    };
+
+    auto start_world_creation = [&](const std::string& name,
+                                    const std::string& seed,
+                                    const std::string& worldType,
+                                    const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+            Luminumbra::Client::Attribution::Phase::WorldCreateCallback);
+        entry_world_revision = gameSession->WorldRevision();
+        const auto customPresetJson = build_world_preset(name, worldType, params);
+        const auto* customPtr = customPresetJson.empty() && !scenario_config.preset_json_override
+                                    ? nullptr
+                                    : &customPresetJson;
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
             return;
         }
-        prepare_world_entry();
-        if (!gameSession->CreateWorld(name, seed, worldType, customPtr)) {
+        wait_for_world_entry_readers();
+        const bool created = gameSession->CreateWorld(name, seed, worldType, customPtr);
+        finish_world_replacement();
+        if (!created) {
             refuse_world_entry("Could not create this world. Check the save location and preset.");
             return;
         }
@@ -2677,28 +2838,86 @@ int main(int argc, char* argv[]) {
             refuse_world_entry("Could not restore saved world state.");
             return;
         }
+        if (benchmark_v4)
+            benchmark_created_world_id = gameSession->GetMetadata().worldId;
         finish_world_entry();
     };
 
     auto start_world_load = [&](const std::string& id) {
         const Luminumbra::Client::Attribution::PhaseScope callback_phase(
             Luminumbra::Client::Attribution::Phase::WorldLoadCallback);
+        try {
+            Measurement::require_workload_world_load(benchmark_v4, id, benchmark_created_world_id);
+        } catch (const std::exception& error) {
+            refuse_world_entry(error.what(), false);
+            return;
+        }
+        entry_world_revision = gameSession->WorldRevision();
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
             return;
         }
-        // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
-        prepare_world_entry();
-        if (!gameSession->LoadWorld(id)) {
+        std::unique_ptr<Measurement::VerifiedSaveSnapshot> snapshot;
+        if (benchmark_v4) {
+            try {
+                snapshot = std::make_unique<Measurement::VerifiedSaveSnapshot>(
+                    gameSession->GetWorldSaveDir(), benchmark_saved_world_digest, id);
+            } catch (const std::exception& error) {
+                refuse_world_entry(error.what(), false);
+                return;
+            }
+        }
+        // Verify the snapshot before waiting for readers or changing the current world.
+        wait_for_world_entry_readers();
+        const bool loaded = snapshot ? gameSession->LoadWorldFrom(id, snapshot->root())
+                                     : gameSession->LoadWorld(id);
+        finish_world_replacement();
+        if (!loaded) {
             refuse_world_entry("Could not load this world.");
             return;
         }
+        // Keep the verified directory alive for later region freezes. Replace it only after
+        // the new session has loaded successfully; refusal retains the previous authority.
+        benchmark_loaded_snapshot = std::move(snapshot);
         // LoadWorld restores saved authority before this shared entry path starts generation.
         finish_world_entry();
     };
 
+    struct EntryRequest {
+        bool create = false;
+        std::string name;
+        std::string seed;
+        std::string world_type;
+        std::vector<Luminumbra::Client::WorldGenParam> params;
+        std::string id;
+    };
+    Luminumbra::Client::WorldEntry<EntryRequest> world_entry;
+    Luminumbra::Persistence::CreatedWorldArtifacts entry_artifacts;
+    // GLFW callbacks cannot capture main's locals. These point to the entry
+    // owner and last painted button bounds for this window's lifetime.
+    static auto* entry_input = &world_entry;
+    static ImVec4 entry_cancel_bounds{};
+    static bool entry_cancel_visible = false;
+    static double entry_cursor_x = 0.0;
+    static double entry_cursor_y = 0.0;
+    std::string entry_preset;
+    std::unique_ptr<Measurement::VerifiedSaveSnapshot> entry_load_snapshot;
+    std::shared_ptr<Luminumbra::world::GameSession::WorldPreparation> entry_prepared_world;
+    std::stop_source entry_stop;
+    Luminumbra::JobHandle entry_cpu_job;
+    std::optional<Luminumbra::Rendering::WaterfallPass::PreparedGeometry> entry_geometry;
+    std::string entry_worker_error;
+    bool entry_validation_started = false;
+    bool entry_validation_complete = false;
+    bool entry_restore_started = false;
+    bool entry_worker_started = false;
+    bool entry_adoption_started = false;
+    std::chrono::steady_clock::time_point entry_stage_started{};
+    double entry_stage_main_ms = 0.0;
+
     if (g_uiManager) {
+        g_uiManager->SetNavigationAwayCallback([&] { world_entry.cancel_input(true); });
         //  startup invariant — every semantic-knob spline endpoint
         // must lie within its mapped param's declared range (and splines be
         // monotone with neutral==default). A violation is a programming error in
@@ -2712,8 +2931,26 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("KnobLayer endpoint validation failed (see log)");
             }
         }
-        g_uiManager->SetWorldCreationCallback(start_world_creation);
-        g_uiManager->SetLoadWorldCallback(start_world_load);
+        g_uiManager->SetWorldCreationCallback(
+            [&](const std::string& name,
+                const std::string& seed,
+                const std::string& type,
+                const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+                const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+                    Luminumbra::Client::Attribution::Phase::WorldCreateCallback);
+                world_entry.request(EntryRequest{.create = true,
+                                                 .name = name,
+                                                 .seed = seed,
+                                                 .world_type = type,
+                                                 .params = params,
+                                                 .id = {}});
+            });
+        g_uiManager->SetLoadWorldCallback([&](const std::string& id) {
+            const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+                Luminumbra::Client::Attribution::Phase::WorldLoadCallback);
+            world_entry.request(EntryRequest{
+                .create = false, .name = {}, .seed = {}, .world_type = {}, .params = {}, .id = id});
+        });
         g_uiManager->SetSavedWorldList([save_root = gameSession->GetSaveRootPath(),
                                         root_path_str](const std::stop_token& stop) {
             return Luminumbra::Persistence::EnumerateSavedWorlds(save_root, root_path_str, stop);
@@ -2724,11 +2961,16 @@ int main(int argc, char* argv[]) {
             try {
                 const std::filesystem::path pf = std::filesystem::path(root_path_str) / "worlds" /
                                                  "atlas" / "presets" / (worldType + ".json");
-                std::ifstream in(pf);
-                if (!in)
-                    return "";
                 nlohmann::json j;
-                in >> j;
+                bool missing = false;
+                if (!Luminumbra::Persistence::ReadSavedJson(
+                        pf,
+                        Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                        j,
+                        missing,
+                        false) ||
+                    missing)
+                    return "";
                 j = Luminumbra::world::ResolveTerrainPresetDefaults(j);
                 //  seed a semantic knob from the preset's persisted
                 // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
@@ -2783,17 +3025,21 @@ int main(int argc, char* argv[]) {
                        const std::string& baseType,
                        const std::vector<Luminumbra::Client::WorldGenParam>& params,
                        bool overwrite_confirmed) -> std::string {
+                if (displayName.size() > Luminumbra::Persistence::SavedInputLimits::kPresetBytes)
+                    return "";
                 try {
                     const std::filesystem::path presets_dir =
                         root_dir / "worlds" / "atlas" / "presets";
-                    std::ifstream in(presets_dir / (baseType + ".json"));
-                    if (!in)
-                        return "";
-                    const auto base = nlohmann::json::parse(in);
-                    // The base may be the preset being overwritten. Release its
-                    // read handle before atomic replacement on Windows.
-                    in.close();
-                    if (in.fail())
+                    nlohmann::json base;
+                    bool missing = false;
+                    // ReadSavedJson releases the base handle before replacement on Windows.
+                    if (!Luminumbra::Persistence::ReadSavedJson(
+                            presets_dir / (baseType + ".json"),
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            base,
+                            missing,
+                            false) ||
+                        missing)
                         return "";
                     //  persist BOTH the knob layer (knob vector +
                     // baseline + override diff) AND the resolved params, so reloading
@@ -2814,7 +3060,14 @@ int main(int argc, char* argv[]) {
                     const std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
                     const auto destination = presets_dir / (worldType + ".json");
-                    const auto bytes = saved.dump(2);
+                    std::string bytes;
+                    if (!Luminumbra::Persistence::BoundedJsonDump(
+                            saved,
+                            Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                            bytes,
+                            2,
+                            false))
+                        return "";
                     using Writer = Luminumbra::Persistence::WorldSaveService;
                     const bool published = overwrite_confirmed
                                                ? Writer::write_file_durably(destination, bytes)
@@ -2845,10 +3098,16 @@ int main(int argc, char* argv[]) {
                             continue;
                         std::string name = stem;
                         try {
-                            std::ifstream f(entry.path());
                             nlohmann::json j;
-                            f >> j;
-                            name = j.value("name", stem);
+                            bool missing = false;
+                            if (Luminumbra::Persistence::ReadSavedJson(
+                                    entry.path(),
+                                    Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                                    j,
+                                    missing,
+                                    false) &&
+                                !missing)
+                                name = j.value("name", stem);
                         } catch (...) {}
                         out.emplace_back(name, stem);
                     }
@@ -2916,6 +3175,8 @@ int main(int argc, char* argv[]) {
         Luminumbra::Client::SettingsBridge sb;
         sb.GetGraphics = [&] {
             auto display = graphics_state.Display();
+            display.effective.frame_pacing = {.vsync = g_systemConfig.user().vsync,
+                                              .frame_cap = g_systemConfig.user().frame_cap};
             const auto& recovery = g_systemConfig.settings_load_report().recovery_reason;
             if (!recovery.empty())
                 display.status += " | Settings recovery: " + recovery + "; original file preserved";
@@ -3069,11 +3330,14 @@ int main(int argc, char* argv[]) {
             if (act == "resume") {
                 SetGamePaused(window, false);
             } else if (act == "quit") {
+                if (!session_persistence_allowed())
+                    return;
                 if (g_camera)
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
-                // Synchronous main-thread save; shutdown cannot overlap this callback.
+                // Complete accepted cache writes without dismantling the live world.
+                renderPipeline.wait_for_accepted_far_tile_writes();
                 if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3226,7 +3490,7 @@ int main(int argc, char* argv[]) {
                 worldAvailable().available && !scenario_config.active() && DeveloperUiAllowed(g_app)
                     ? gameSession->GetWorldSystem()
                     : nullptr;
-            worldGenViewer->DrawContents(liveWorld);
+            worldGenViewer->DrawContents(liveWorld, renderPipeline);
         }};
     widgetServices["client.settings"] = {playerAvailable,
                                          [&](Developer::DeveloperFrameAdapter&) {
@@ -3365,6 +3629,30 @@ int main(int argc, char* argv[]) {
     developerConsole.Widgets().changed = std::move(visibilityChanged);
     developerBindings.changed = std::move(bindingChanged);
     InstallInputCallbacks(window);
+    glfwSetKeyCallback(
+        window, [](GLFWwindow* callback_window, int key, int scancode, int action, int mods) {
+            if (key == GLFW_KEY_ESCAPE)
+                entry_input->cancel_input(action == GLFW_PRESS);
+            key_callback(callback_window, key, scancode, action, mods);
+        });
+    glfwSetWindowCloseCallback(window, [](GLFWwindow*) { entry_input->cancel_input(true); });
+    glfwSetCursorPosCallback(window, [](GLFWwindow* callback_window, double xpos, double ypos) {
+        entry_cursor_x = xpos;
+        entry_cursor_y = ypos;
+        mouse_callback(callback_window, xpos, ypos);
+    });
+    glfwSetMouseButtonCallback(
+        window, [](GLFWwindow* callback_window, int button, int action, int mods) {
+            if (entry_input->active() && entry_cancel_visible && button == GLFW_MOUSE_BUTTON_LEFT) {
+                const bool inside = entry_cursor_x >= entry_cancel_bounds.x &&
+                                    entry_cursor_y >= entry_cancel_bounds.y &&
+                                    entry_cursor_x < entry_cancel_bounds.z &&
+                                    entry_cursor_y < entry_cancel_bounds.w;
+                entry_input->cancel_input(inside && action == GLFW_PRESS);
+            }
+            mouse_button_callback(callback_window, button, action, mods);
+        });
+
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
@@ -3475,6 +3763,7 @@ int main(int argc, char* argv[]) {
                              wrote_metrics ? "written" : "failed",
                              runtime_boot_frames,
                              runtime_boot_output.string());
+        prepare_world_entry();
         if (auto* world_system = gameSession->GetWorldSystem()) {
             world_system->clear_world(nullptr);
         }
@@ -3494,15 +3783,14 @@ int main(int argc, char* argv[]) {
                                    !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
                                    gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
         if (want_backdrop) {
-            renderPipeline.prepare_world_swap();
             // Use a deterministic golden-hour mountain vista behind the menu:
             // fixed seed, camera, dusk time-of-day, and cloud cover.
-            // drain any in-flight  scan before replacing the world.
-            DrainBackgroundWorldScan(jobSystem);
-            // same contract for the world-dressing placement job.
-            DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-            if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
-                gameSession->LoadWorldState()) {
+            entry_world_revision = gameSession->WorldRevision();
+            wait_for_world_entry_readers();
+            const bool created =
+                gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains");
+            finish_world_replacement();
+            if (created && gameSession->LoadWorldState()) {
                 // Prepare the fixed vantage before publishing the backdrop as ready.
                 if (auto* ws = gameSession->GetWorldSystem();
                     ws && gameSession->GetPhysicsSystem() &&
@@ -3532,7 +3820,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    int exit_code = 0;
+    entry_world_revision = gameSession->WorldRevision();
     float lastFrame = 0.0f;
     double previousObservedFrame = glfwGetTime();
     // Scenario driving/capture seam (core/ScenarioRunner.h): the runner is
@@ -3590,9 +3878,43 @@ int main(int argc, char* argv[]) {
     nlohmann::json benchmark_world_identity;
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
-    nlohmann::json traversal_camera_samples = nlohmann::json::array();
+    // Each buffer is allocated before warmup: at most 18000 frames/camera poses,
+    // 64 actions and 65536 transitions across the entire capture.
+    const auto observation_capacity =
+        benchmark_v3 ? static_cast<std::size_t>(g_app.capture.render_benchmark_frames) : 0;
+    Measurement::ObservationRecords<Measurement::CameraObservation, Measurement::kMaxFrames>
+        traversal_camera_records(observation_capacity);
+    std::size_t workload_action_index = 0;
+    Measurement::ObservationRecords<Measurement::ActionObservation, 64> workload_action_records(
+        benchmark_v4 ? 64 : 0);
+    Measurement::ObservationRecords<Measurement::WorkloadObservation, Measurement::kMaxFrames>
+        workload_frame_records(benchmark_v4 ? observation_capacity : 0);
+    Measurement::TransitionRecords workload_transition_records(
+        benchmark_v4 ? Measurement::kMaxCaptureTransitions : 0);
+    nlohmann::json workload_windows = nlohmann::json::object();
+    Measurement::ReloadInterval reload_interval;
+    std::uint64_t reload_settling_passes = 0;
+    bool reload_settling_pending = false;
+    // Warmup and measurement are each bounded by kMaxFrames.
+    std::vector<double> workload_warmup_wall;
+    if (benchmark_v4)
+        workload_warmup_wall.reserve(
+            static_cast<std::size_t>(g_app.capture.render_benchmark_warmup));
+    const auto observe_workload_window = [&]() {
+        const auto* foliage = renderPipeline.foliage();
+        const auto counts = foliage ? foliage->observe_counts()
+                                    : Luminumbra::Rendering::FoliagePass::CountObservation{};
+        return nlohmann::json{{"instances", counts.instances},
+                              {"candidates", counts.candidates},
+                              {"candidate_slots", counts.candidate_slots},
+                              {"backend", counts.gpu ? "gpu" : "cpu"},
+                              {"observation", "window_end"}};
+    };
     auto active_overrides =
         benchmark_v3 ? Measurement::render_overrides(argc, argv) : nlohmann::json::object();
+    bool observed_wireframe = false;
+    std::optional<int> observed_debug_view;
+    std::optional<float> observed_time_scale;
     if (!g_app.capture.render_benchmark_path.empty()) {
         measured_samples =
             std::make_unique<Measurement::SampleRing>(g_app.capture.render_benchmark_frames);
@@ -3603,6 +3925,427 @@ int main(int argc, char* argv[]) {
         benchmark_queries->initialize();
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
+    using Luminumbra::Client::WorldEntryResult;
+    using Luminumbra::Client::WorldEntryStage;
+    using Luminumbra::Client::WorldEntryState;
+    auto activate_loaded_world = [&]() {
+        LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
+        g_camera =
+            std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
+        g_camera->MouseSensitivity =
+            g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
+        g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
+        if (g_app.loading.world_render_data_initialized) {
+            renderPipeline.clear_all_chunk_data();
+        }
+        g_app.loading.world_render_data_initialized = true;
+
+        audioManager->StopMusic();
+        audioManager->PlayOneShot2D("ui_world_loaded",
+                                    Luminumbra::Client::BusId::Ui); // Play a sound on completion
+        // Start the constant ambient soundscape (zen atmosphere): a gentle
+        // forest-rustle bed + soft birdsong, centred at spawn with a huge radius so it
+        // stays audible as the player roams (the listener follows the player each
+        // frame). Volumes in the bank.
+        {
+            const auto& sp = gameSession->GetMetadata().spawnPoint;
+            const glm::vec3 ambPos(sp.x, sp.y, sp.z);
+            audioManager->PlayAmbientLoop("ambient_forest", ambPos, 1.0e6f);
+            // the birdsong bed is now OWNED by EnvironmentalAudioSystem
+            // (day-gated + crossfaded with the night bed) — no 24/7 birds.
+            audioManager->PlayAmbientLoop("ambient_wind", ambPos, 1.0e6f);
+        }
+        // Under the ambient bed, a soft in-game music bed picked by the time of day
+        // (day = exploration, night = dusk). The dawn/dusk detector swaps it at the
+        // horizon crossings. PlayMusic is a no-op if that track is already playing.
+        audioManager->PlayMusic(-renderPipeline.sun_direction().y > 0.0f ? "music_exploration"
+                                                                         : "music_dusk");
+        // first-feed SNAP — a midnight load starts on the night bed
+        // instead of crossfading from the day default.
+        envAudio->SetSunElevation(-renderPipeline.sun_direction().y);
+        if (g_loading_visualizer) {
+            g_loading_visualizer->EndVisualization();
+        }
+        g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
+            window,
+            g_camera.get(),
+            gameSession->GetPhysicsSystem(),
+            gameSession->ActiveRegionsEnabled() && gameSession->GetActiveRegionLedger().tick() > 0
+                ? gameSession->GetActiveRegionLedger().local_anchor()
+                : std::nullopt);
+        g_playerController->ApplyKeyBindings(g_systemConfig); // user.controls.* (rebindable)
+        // (camera created + chunk data cleared + upload backlog drained above, before
+        // entry)
+        SetGameState(window, gameStateManager, GameState::IN_GAME);
+        // show the diegetic HUD during normal play. Skipped in headless
+        // scenario capture so the visual gates stay overlay-free.
+        if ((!scenario_config.active() || benchmark_v4) && g_uiManager) {
+            g_uiManager->RequestLoadDocument("hud.rml");
+        }
+        if (scenario_config.active() || benchmark_v4 || runtime_boot_recorder.enabled()) {
+            last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
+            if (!last_readiness_report.ready) {
+                scenario_failed = true;
+                scenario_failure_reason = "world_readiness_failed";
+                runtime_state_recorder.capture("world_readiness_failed",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               &renderPipeline,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            } else {
+                scenario_ready = true;
+                scenario_play_started_at = std::chrono::steady_clock::now();
+                runtime_state_recorder.capture("world_entered",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               &renderPipeline,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            }
+        }
+        lastFrame = static_cast<float>(glfwGetTime());
+    };
+    auto dispatch_entry_chunks = [&]() {
+        // Bound each loading-frame batch to 512 chunk requests.
+        const int JOBS_PER_FRAME = 512;
+        if (runtime_boot_recorder.enabled()) {
+            g_app.loading.generation_dispatch_index =
+                static_cast<int>(g_app.loading.initial_chunks_to_load.size());
+        }
+
+        if (static_cast<size_t>(g_app.loading.generation_dispatch_index) <
+            g_app.loading.initial_chunks_to_load.size()) {
+            std::vector<Luminumbra::IVec3> batch_to_generate;
+            const int batch_start_index = g_app.loading.generation_dispatch_index;
+            while (static_cast<size_t>(batch_start_index +
+                                       static_cast<int>(batch_to_generate.size())) <
+                       g_app.loading.initial_chunks_to_load.size() &&
+                   static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
+                batch_to_generate.push_back(
+                    g_app.loading.initial_chunks_to_load[static_cast<std::size_t>(
+                        batch_start_index + static_cast<int>(batch_to_generate.size()))]);
+            }
+            if (!batch_to_generate.empty()) {
+                gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
+                if (g_loading_visualizer && !world_entry.active()) {
+                    for (const auto& coords : batch_to_generate) {
+                        g_loading_visualizer->UpdateChunkState(
+                            coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
+                    }
+                }
+                // An empty handle means every requested chunk already carries saved
+                // authority. The batch is complete and must still advance the loader.
+                g_app.loading.generation_dispatch_index +=
+                    static_cast<int>(batch_to_generate.size());
+            }
+        }
+
+        return static_cast<std::size_t>(g_app.loading.generation_dispatch_index) >=
+                       g_app.loading.initial_chunks_to_load.size()
+                   ? WorldEntryResult::Complete
+                   : WorldEntryResult::Pending;
+    };
+    auto prepare_entry_horizon = [&]() {
+        const bool capture_horizon = benchmark_v4 || runtime_boot_recorder.enabled() ||
+                                     (scenario_config.active() && scenario_config.auto_enter_world);
+        if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem())
+            return gameSession->EnsureWorldEntryReady(
+                capture_horizon ? scenario_config.horizon_radius : 12,
+                capture_horizon ? scenario_config.collision_radius : 4);
+        return true;
+    };
+    auto drain_entry = [&]() {
+        const auto drain_started = std::chrono::steady_clock::now();
+        entry_save_allowed = false;
+        // The worker owns references into the pass and world until completion.
+        // Keep the existing reader drains before clearing/replacing either owner.
+        entry_stop.request_stop();
+        jobSystem.wait(entry_cpu_job);
+        entry_cpu_job = {};
+        entry_prepared_world.reset();
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            prepare_world_entry();
+            renderPipeline.cancel_waterfall_adoption();
+            if (auto* world = gameSession->GetWorldSystem())
+                world->clear_world(gameSession->GetPhysicsSystem());
+            g_app.menu.menu_backdrop_active = false;
+            g_playerController.reset();
+        }
+        const auto rollback_error = entry_artifacts.rollback();
+        if (!rollback_error.empty()) {
+            LUMINUMBRA_CORE_ERROR("{}", rollback_error);
+            if (!world_entry_error.empty())
+                world_entry_error += "\n";
+            world_entry_error += rollback_error;
+        }
+        // Preflight refusal and cancellation before adoption preserve the old
+        // session's save eligibility. Fatal reader refusals also change revision.
+        entry_save_allowed =
+            entry_previous_save_allowed && gameSession->WorldRevision() == entry_world_revision;
+        entry_geometry.reset();
+        entry_load_snapshot.reset();
+        entry_worker_started = false;
+        entry_adoption_started = false;
+        entry_worker_error.clear();
+        entry_preset.clear();
+        if (g_loading_visualizer)
+            g_loading_visualizer->EndVisualization();
+        const auto drained = std::chrono::steady_clock::now();
+        if (entry_stage_started != std::chrono::steady_clock::time_point{}) {
+            LUMINUMBRA_CORE_INFO(
+                "World entry stage: {} ms={:.3f} interrupted=true",
+                Luminumbra::Client::WorldEntryStageName(world_entry.stage()),
+                std::chrono::duration<double, std::milli>(drained - entry_stage_started).count());
+            entry_stage_started = {};
+        }
+        LUMINUMBRA_CORE_INFO(
+            "World entry stage: Entry cleanup ms={:.3f}",
+            std::chrono::duration<double, std::milli>(drained - drain_started).count());
+        return WorldEntryResult::Complete;
+    };
+    auto return_entry_to_menu = [&]() {
+        SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+        if (g_uiManager)
+            g_uiManager->RequestLoadDocument("main_menu.rml");
+    };
+    auto run_entry_stage = [&](WorldEntryStage stage, const EntryRequest& request) {
+        switch (stage) {
+            case WorldEntryStage::Validate: {
+                if (!entry_validation_started) {
+                    if (!request.create) {
+                        try {
+                            Measurement::require_workload_world_load(
+                                benchmark_v4, request.id, benchmark_created_world_id);
+                        } catch (const std::exception& error) {
+                            refuse_world_entry(error.what(), false);
+                            return WorldEntryResult::Failed;
+                        }
+                    }
+                    entry_validation_started = true;
+                    // The state machine retains this owned request through the
+                    // worker and cancellation drain; no form or DOM references.
+                    // Snapshot inputs are copied before dispatch; the worker never
+                    // reads session authority or a mutable saved-digest string.
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          entry_request = &request,
+                          save_directory = gameSession->GetWorldSaveDir(),
+                          saved_digest = benchmark_saved_world_digest,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          stop = entry_stop.get_token()]() mutable {
+                            const auto started = std::chrono::steady_clock::now();
+                            try {
+                                entry_preset = entry_request->create
+                                                   ? build_world_preset(entry_request->name,
+                                                                        entry_request->world_type,
+                                                                        entry_request->params)
+                                                   : std::string{};
+                                entry_worker_error = game_asset_startup_error.empty()
+                                                         ? VerifyGameAssets(root_dir)
+                                                         : game_asset_startup_error;
+                                if (entry_worker_error.empty() && benchmark_v4 &&
+                                    !entry_request->create)
+                                    entry_load_snapshot =
+                                        std::make_unique<Measurement::VerifiedSaveSnapshot>(
+                                            save_directory, saved_digest, entry_request->id, stop);
+                                if (entry_worker_error.empty() && !stop.stop_requested()) {
+                                    if (entry_request->create) {
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldCreation(
+                                                options,
+                                                entry_request->name,
+                                                entry_request->seed,
+                                                entry_request->world_type,
+                                                entry_preset.empty() &&
+                                                        !scenario_config.preset_json_override
+                                                    ? nullptr
+                                                    : &entry_preset,
+                                                Luminumbra::world::TerrainPresetUse::NewWorld,
+                                                {},
+                                                stop);
+                                    } else {
+                                        if (entry_load_snapshot)
+                                            options.save_root = entry_load_snapshot->root();
+                                        entry_prepared_world =
+                                            Luminumbra::world::GameSession::PrepareWorldLoad(
+                                                options, entry_request->id, stop);
+                                    }
+                                    entry_worker_error =
+                                        Luminumbra::world::GameSession::WorldPreparationError(
+                                            *entry_prepared_world);
+                                }
+                            } catch (const std::exception& error) {
+                                entry_worker_error = error.what();
+                            } catch (...) {
+                                entry_worker_error = "Could not validate world content.";
+                            }
+                            entry_validation_complete = true;
+                            LUMINUMBRA_CORE_INFO(
+                                "World entry stage: Validate content worker_ms={:.3f}",
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count());
+                        }});
+                    return WorldEntryResult::Pending;
+                }
+                if (entry_cpu_job.counter &&
+                    entry_cpu_job.counter->load(std::memory_order_acquire) != 0)
+                    return WorldEntryResult::Pending;
+                jobSystem.wait(entry_cpu_job);
+                entry_cpu_job = {};
+                const auto error = !entry_validation_complete
+                                       ? std::string("Could not schedule world validation.")
+                                       : (entry_worker_error.empty() ? game_content_error(true)
+                                                                     : entry_worker_error);
+                if (!error.empty()) {
+                    refuse_world_entry(error, false);
+                    return WorldEntryResult::Failed;
+                }
+                break;
+            }
+            case WorldEntryStage::DrainReaders:
+                wait_for_world_entry_readers();
+                break;
+            case WorldEntryStage::OpenWorld: {
+                const bool opened = gameSession->AdoptPreparedWorld(
+                    entry_prepared_world, request.create ? &entry_artifacts : nullptr);
+                entry_prepared_world.reset();
+                finish_world_replacement();
+                if (!opened) {
+                    refuse_world_entry(
+                        request.create
+                            ? "Could not create this world. Check the save location and preset."
+                            : "Could not load this world.");
+                    return WorldEntryResult::Failed;
+                }
+                if (!request.create)
+                    benchmark_loaded_snapshot = std::move(entry_load_snapshot);
+                break;
+            }
+            case WorldEntryStage::RestoreState: {
+                if (!request.create)
+                    break; // Loaded worlds already adopted their prepared state.
+                if (!entry_restore_started) {
+                    entry_restore_started = true;
+                    const auto save_directory =
+                        scenario_config.persistence_roundtrip_smoke() &&
+                                scenario_config.persistence_phase == "load" &&
+                                !scenario_config.persistence_session_dir.empty()
+                            ? scenario_config.persistence_session_dir
+                            : gameSession->GetWorldSaveDir();
+                    entry_cpu_job = jobSystem.dispatch_batch(
+                        {[&,
+                          options = gameSession->CaptureWorldPreparationOptions(),
+                          save_directory,
+                          stop = entry_stop.get_token()] {
+                            const auto started = std::chrono::steady_clock::now();
+                            try {
+                                entry_prepared_world =
+                                    Luminumbra::world::GameSession::PrepareWorldState(
+                                        options, save_directory, stop);
+                            } catch (const std::exception& error) {
+                                entry_worker_error = error.what();
+                            } catch (...) {
+                                entry_worker_error = "Could not restore saved world state.";
+                            }
+                            LUMINUMBRA_CORE_INFO(
+                                "World entry stage: Restore state worker_ms={:.3f}",
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count());
+                        }});
+                    return WorldEntryResult::Pending;
+                }
+                if (entry_cpu_job.counter &&
+                    entry_cpu_job.counter->load(std::memory_order_acquire) != 0)
+                    return WorldEntryResult::Pending;
+                jobSystem.wait(entry_cpu_job);
+                entry_cpu_job = {};
+                if (!entry_worker_error.empty()) {
+                    refuse_world_entry(entry_worker_error, false);
+                    return WorldEntryResult::Failed;
+                }
+                const bool restored = gameSession->AdoptPreparedWorld(entry_prepared_world);
+                entry_prepared_world.reset();
+                if (!restored) {
+                    refuse_world_entry("Could not restore saved world state.");
+                    return WorldEntryResult::Failed;
+                }
+                break;
+            }
+            case WorldEntryStage::PrepareWaterfalls:
+                if (!entry_worker_started) {
+                    entry_worker_started = true;
+                    entry_cpu_job = jobSystem.dispatch_batch({[&] {
+                        const auto started = std::chrono::steady_clock::now();
+                        try {
+                            entry_geometry = renderPipeline.build_waterfall_geometry(
+                                *gameSession->GetWorldSystem());
+                        } catch (const std::exception& error) {
+                            entry_worker_error = error.what();
+                        } catch (...) {
+                            entry_worker_error = "Could not prepare waterfall geometry.";
+                        }
+                        LUMINUMBRA_CORE_INFO(
+                            "World entry stage: Prepare waterfall geometry worker_ms={:.3f}",
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - started)
+                                .count());
+                    }});
+                    return WorldEntryResult::Pending;
+                }
+                if (entry_cpu_job.counter &&
+                    entry_cpu_job.counter->load(std::memory_order_acquire) != 0)
+                    return WorldEntryResult::Pending;
+                jobSystem.wait(entry_cpu_job);
+                entry_cpu_job = {};
+                if (!entry_worker_error.empty() || !entry_geometry) {
+                    refuse_world_entry(entry_worker_error.empty()
+                                           ? "Could not prepare waterfall geometry."
+                                           : entry_worker_error,
+                                       false);
+                    return WorldEntryResult::Failed;
+                }
+                break;
+            case WorldEntryStage::AdoptWaterfalls:
+                if (!entry_adoption_started) {
+                    if (!entry_geometry.has_value()) {
+                        refuse_world_entry("Prepared waterfall geometry is unavailable.", false);
+                        return WorldEntryResult::Failed;
+                    }
+                    renderPipeline.begin_waterfall_adoption(std::move(entry_geometry.value()));
+                    entry_geometry.reset();
+                    entry_adoption_started = true;
+                }
+                if (!renderPipeline.adopt_waterfalls())
+                    return WorldEntryResult::Pending;
+                break;
+            case WorldEntryStage::PrepareChunks:
+                finish_world_entry(true);
+                break;
+            case WorldEntryStage::GenerateChunks:
+                return dispatch_entry_chunks();
+            case WorldEntryStage::PrepareHorizon:
+                if (!prepare_entry_horizon()) {
+                    refuse_world_entry("Surface preparation exceeds the supported work budget.",
+                                       false);
+                    return WorldEntryResult::Failed;
+                }
+                break;
+            case WorldEntryStage::Activate:
+                activate_loaded_world();
+                if (benchmark_v4 && request.create)
+                    benchmark_created_world_id = gameSession->GetMetadata().worldId;
+                entry_artifacts.release();
+                entry_preset.clear();
+                entry_save_allowed = true;
+                break;
+            case WorldEntryStage::Count:
+                break;
+        }
+        return WorldEntryResult::Complete;
+    };
     namespace Attribution = Luminumbra::Client::Attribution;
     const bool frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv");
     const bool frame_attribution_enabled =
@@ -3658,8 +4401,29 @@ int main(int argc, char* argv[]) {
     };
     Luminumbra::Client::FrameLimiter frame_limiter;
     Luminumbra::Client::SteadyFrameTiming frame_timing;
+    if (benchmark_v4 && graphics_state.SavePending()) {
+        try {
+            if (!save_graphics())
+                throw std::runtime_error("cannot persist benchmark graphics settings");
+            benchmark_content =
+                Measurement::content_after_settings_save(benchmark_content, capture_content());
+        } catch (const std::exception& error) {
+            LUMINUMBRA_CORE_ERROR("Benchmark settings refused: {}", error.what());
+            exit_code = 2;
+            glfwSetWindowShouldClose(window, true);
+        }
+    }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
+            LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
+            exit_code = 2;
+            break;
+        }
+        if (benchmark_v4 && scenario_failed) {
+            exit_code = 2;
+            break;
+        }
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         apply_pending_graphics();
         if (graphics_state.SavePending() && graphics_state.SaveDue(glfwGetTime()))
@@ -3671,7 +4435,8 @@ int main(int argc, char* argv[]) {
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         LUMIN_PROFILE_ZONE_N("Client frame");
         const auto _frameStart = std::chrono::steady_clock::now();
-        Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
@@ -3679,13 +4444,15 @@ int main(int argc, char* argv[]) {
         float currentFrame = (float)observedFrame;
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
-        deltaTime = std::min(deltaTime, 1.0f / 20.0f);
+        deltaTime = benchmark_v4 ? 1.0f / 30.0f : std::min(deltaTime, 1.0f / 20.0f);
         //  CPU-submit clock starts at frame top when benchmarking.
         const bool g_rb_active = !g_app.capture.render_benchmark_path.empty();
         if (g_rb_active)
             g_rb_frame_start = std::chrono::steady_clock::now();
         const bool measuring_v3 =
-            benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
+            benchmark_v3 &&
+            (gameStateManager.GetCurrentState() == GameState::IN_GAME ||
+             (benchmark_v4 && benchmark_world_checked)) &&
             gameSession && upload_warmup_complete &&
             g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
@@ -3700,8 +4467,7 @@ int main(int argc, char* argv[]) {
                                                                gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
-                std::ifstream input(saved.preset_path, std::ios::binary);
-                const auto preset = nlohmann::json::parse(input);
+                const auto preset = nlohmann::json::parse(saved.preset_json);
                 const auto* world = gameSession->GetWorldSystem();
                 benchmark_world_identity = {
                     {"seed", static_cast<std::uint32_t>(world->get_seed())},
@@ -3720,17 +4486,35 @@ int main(int argc, char* argv[]) {
                     throw std::runtime_error(
                         "traversal world seed, preset or content identity mismatch");
                 benchmark_world_checked = true;
+                if (benchmark_v4) {
+                    if (traversal->kind == "region_crossing" &&
+                        !gameSession->ActiveRegionsEnabled())
+                        throw std::runtime_error("region crossing requires active regions");
+                    if (traversal->kind == "menu_entry" && !g_uiManager)
+                        throw std::runtime_error("menu entry requires the gameplay UI");
+                }
             } catch (const std::exception& error) {
                 LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
                 exit_code = 2;
                 break;
             }
         }
+        const auto frame_presentation = Luminumbra::Client::select_frame_presentation(
+            benchmark_v4,
+            benchmark_world_checked,
+            static_cast<std::uint32_t>(g_app.benchmark.warmupFrames),
+            static_cast<std::uint32_t>(g_app.benchmark.measuredFrames),
+            static_cast<std::uint32_t>(g_app.capture.render_benchmark_warmup),
+            traversal ? static_cast<std::uint32_t>(traversal->expectedTicks) : 0u,
+            traversal ? traversal->tickRate : 30u);
+        if (frame_presentation.tick)
+            Luminumbra::Client::presentation_clock.set_capture_tick(*frame_presentation.tick,
+                                                                    traversal->tickRate);
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
         }
-        if (traversal && gameSession) {
+        if (traversal && gameSession && (!benchmark_v4 || benchmark_world_checked)) {
             if (measuring_v3) {
                 const auto now = std::chrono::steady_clock::now();
                 if (traversal_start.time_since_epoch().count() == 0)
@@ -3738,12 +4522,114 @@ int main(int argc, char* argv[]) {
                 // One fixed simulation tick per measured frame. Wall time is observation only.
                 traversal_target_tick = static_cast<int>(traversal_ticks) + 1;
             }
+            if (benchmark_v4) {
+                const bool succeeded = Measurement::dispatch_actions(
+                    traversal->actions,
+                    workload_action_index,
+                    traversal_target_tick,
+                    [&](const Measurement::Traversal::Action& action, bool fill) {
+                        const Luminumbra::Vec3 position(static_cast<float>(action.position[0]),
+                                                        static_cast<float>(action.position[1]),
+                                                        static_cast<float>(action.position[2]));
+                        auto* world = gameSession->GetWorldSystem();
+                        try {
+                            if (!world->PrepareTerrainVoxelEdit(position,
+                                                                static_cast<float>(action.radius)))
+                                return Measurement::ActionResult{false, 0};
+                            const int modified =
+                                world->EditTerrainVoxel(position,
+                                                        static_cast<float>(action.radius),
+                                                        fill,
+                                                        gameSession->GetPhysicsSystem());
+                            if (modified > 0)
+                                gameSession->NotifyGroundObjectEdit(position);
+                            // Tick-zero tunnel preparation may encounter already-carved air.
+                            return Measurement::ActionResult{modified > 0 || action.tick == 0,
+                                                             modified};
+                        } catch (const std::exception& error) {
+                            LUMINUMBRA_CORE_ERROR("Benchmark terrain refused: {}", error.what());
+                            return Measurement::ActionResult{false, 0};
+                        }
+                    },
+                    [&](bool main_menu) {
+                        if (!session_persistence_allowed())
+                            return Measurement::ActionResult{false, 0};
+                        renderPipeline.wait_for_accepted_far_tile_writes();
+                        const bool saved = gameSession->SaveWorld();
+                        if (saved) {
+                            benchmark_loaded_snapshot.reset();
+                            try {
+                                benchmark_saved_world_digest =
+                                    Measurement::saved_world_digest(gameSession->GetWorldSaveDir());
+                            } catch (const std::exception& error) {
+                                LUMINUMBRA_CORE_ERROR("Benchmark save refused: {}", error.what());
+                                return Measurement::ActionResult{false, 0};
+                            }
+                        }
+                        if (saved && main_menu) {
+                            prepare_world_entry();
+                            g_playerController.reset();
+                            SetGamePaused(window, false);
+                            SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                            g_uiManager->RequestLoadDocument("main_menu.rml");
+                        }
+                        return Measurement::ActionResult{saved, 0};
+                    },
+                    [&](bool reload) {
+                        if (reload)
+                            reload_interval.request(measured_frame_id,
+                                                    std::chrono::steady_clock::now());
+                        const std::string id = gameSession->GetMetadata().worldId;
+                        start_world_load(id);
+                        if (g_uiManager)
+                            g_uiManager->RequestLoadDocument("hud.rml");
+                        reload_settling_pending = reload && !scenario_failed;
+                        return Measurement::ActionResult{!scenario_failed, 0};
+                    },
+                    [&](bool open) {
+                        SetGamePaused(window, open);
+                        return Measurement::ActionResult{};
+                    },
+                    [&](bool open) {
+                        g_uiManager->RequestLoadDocument(open ? "settings.rml" : "pause.rml");
+                        return Measurement::ActionResult{};
+                    },
+                    [&](const Measurement::Traversal::Action& action,
+                        const Measurement::ActionResult& result) {
+                        workload_action_records.append(
+                            {action.tick, action.name, result.succeeded, result.modified_chunks});
+                        if (!result.succeeded)
+                            LUMINUMBRA_CORE_ERROR("Benchmark action failed: {}", action.name);
+                    });
+                if (!succeeded) {
+                    exit_code = 2;
+                    glfwSetWindowShouldClose(window, true);
+                    break;
+                }
+            }
             const auto pose = traversal->sample(traversal_target_tick);
+            if (benchmark_v4 && g_camera) {
+                g_camera->Position =
+                    glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
+                g_camera->Yaw = static_cast<float>(pose.yaw);
+                g_camera->Pitch = static_cast<float>(pose.pitch);
+                g_camera->updateCameraVectors();
+            }
             g_app.capture.fixed_cam = true;
             g_app.capture.fixed_cam_pos =
                 glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
             g_app.capture.fixed_cam_yaw = static_cast<float>(pose.yaw);
             g_app.capture.fixed_cam_pitch = static_cast<float>(pose.pitch);
+            if (benchmark_v4 && workload_windows.empty()) {
+                workload_windows["startup"] = {
+                    {"elapsed_ms",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                               benchmark_process_start)
+                         .count()},
+                    {"foliage", observe_workload_window()}};
+                g_rb_frame_start = std::chrono::steady_clock::now();
+                g_app.benchmark.previousFrameEnd = g_rb_frame_start;
+            }
         }
         // runtime telemetry ( implementation note): always-on frame wall to localize
         // slideshow-on-move frames.
@@ -3855,14 +4741,91 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        bool entry_activated_this_frame = false;
+        if (world_entry.state() == WorldEntryState::Requested) {
+            entry_previous_save_allowed = entry_save_allowed;
+            entry_save_allowed = false;
+            entry_world_revision = gameSession->WorldRevision();
+            // A prior rollback failure was reported and its leftovers retained
+            // on disk. They must never become artifacts of a subsequent load.
+            entry_artifacts.release();
+            entry_cancel_visible = false;
+            world_entry_error.clear();
+            entry_worker_error.clear();
+            entry_stop = std::stop_source{};
+            entry_prepared_world.reset();
+            entry_validation_started = false;
+            entry_validation_complete = false;
+            entry_restore_started = false;
+            entry_worker_started = false;
+            entry_adoption_started = false;
+            entry_stage_started = {};
+            entry_stage_main_ms = 0.0;
+            SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
+            if (g_uiManager && g_uiManager->GetContext()) {
+                auto* context = g_uiManager->GetContext();
+                for (int i = 0; i < context->GetNumDocuments(); ++i)
+                    if (auto* document = context->GetDocument(i))
+                        document->Hide();
+                if (auto* focused = context->GetFocusElement())
+                    focused->Blur();
+            }
+        }
+        if (world_entry.active()) {
+            world_entry.advance(
+                [&](WorldEntryStage stage, const EntryRequest& request) {
+                    const auto started = std::chrono::steady_clock::now();
+                    if (entry_stage_started == std::chrono::steady_clock::time_point{})
+                        entry_stage_started = started;
+                    WorldEntryResult result = WorldEntryResult::Failed;
+                    try {
+                        result = run_entry_stage(stage, request);
+                    } catch (const std::exception& error) {
+                        refuse_world_entry(error.what(), false);
+                    }
+                    const auto ended = std::chrono::steady_clock::now();
+                    entry_stage_main_ms +=
+                        std::chrono::duration<double, std::milli>(ended - started).count();
+                    if (result != WorldEntryResult::Pending) {
+                        LUMINUMBRA_CORE_INFO(
+                            "World entry stage: {} ms={:.3f} main_ms={:.3f}",
+                            Luminumbra::Client::WorldEntryStageName(stage),
+                            std::chrono::duration<double, std::milli>(ended - entry_stage_started)
+                                .count(),
+                            entry_stage_main_ms);
+                        entry_stage_started = {};
+                        entry_stage_main_ms = 0.0;
+                    }
+                    return result;
+                },
+                drain_entry);
+            entry_activated_this_frame = world_entry.state() == WorldEntryState::Ready;
+            if (world_entry.state() == WorldEntryState::Failed) {
+                drain_entry();
+                return_entry_to_menu();
+            } else if (world_entry.state() == WorldEntryState::Cancelled) {
+                LUMINUMBRA_CORE_INFO("World entry cancelled.");
+                return_entry_to_menu();
+            }
+        }
+
         audioManager->Update();
 
         if (g_uiManager) {
             g_uiManager->Update();
+            if ((world_entry.state() == WorldEntryState::Failed ||
+                 world_entry.state() == WorldEntryState::Cancelled) &&
+                !world_entry_error.empty()) {
+                g_uiManager->ShowMessage(world_entry_error);
+                world_entry_error.clear();
+            }
         }
         uiHotReload.Update(); // No-op unless --ui-hot-reload enabled it; throttled to 1 second.
 
-        GameState currentState = gameStateManager.GetCurrentState();
+        // Match the original loading case: activation resets lastFrame and
+        // simulation starts on the following frame, never with a loading delta.
+        GameState currentState = entry_activated_this_frame ? GameState::WORLD_LOADING
+                                                            : gameStateManager.GetCurrentState();
 
         // The create-world view shares the foliage pass. Restore the resolved
         // gameplay configuration on every exit, including cancellation to the
@@ -4005,155 +4968,75 @@ int main(int argc, char* argv[]) {
         if (g_app.overlay.imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
+            if (frame_presentation.imgui_delta)
+                ImGui::GetIO().DeltaTime = *frame_presentation.imgui_delta;
             ImGui::NewFrame();
             RefreshInputOwnership(window);
         }
 
+        const bool simulate_frame = Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                          traversal.has_value(),
+                                                                          measuring_v3,
+                                                                          g_app.hud.paused,
+                                                                          g_app.capture.timeScale);
+        // Preserve the historical frame-driven behavior outside benchmark capture.
+        const bool advance_frame_simulation = !g_rb_active || simulate_frame;
         switch (currentState) {
             case GameState::WORLD_LOADING: {
-                const int JOBS_PER_FRAME = 512;
-                if (runtime_boot_recorder.enabled()) {
-                    g_app.loading.generation_dispatch_index =
-                        static_cast<int>(g_app.loading.initial_chunks_to_load.size());
-                }
-
-                if (static_cast<size_t>(g_app.loading.generation_dispatch_index) <
-                    g_app.loading.initial_chunks_to_load.size()) {
-                    std::vector<Luminumbra::IVec3> batch_to_generate;
-                    const int batch_start_index = g_app.loading.generation_dispatch_index;
-                    while (static_cast<size_t>(batch_start_index +
-                                               static_cast<int>(batch_to_generate.size())) <
-                               g_app.loading.initial_chunks_to_load.size() &&
-                           static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
-                        batch_to_generate.push_back(
-                            g_app.loading.initial_chunks_to_load[static_cast<std::size_t>(
-                                batch_start_index + static_cast<int>(batch_to_generate.size()))]);
-                    }
-                    if (!batch_to_generate.empty()) {
-                        gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
-                        if (g_loading_visualizer) {
-                            for (const auto& coords : batch_to_generate) {
-                                g_loading_visualizer->UpdateChunkState(
-                                    coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
-                            }
-                        }
-                        // An empty handle means every requested chunk already carries saved
-                        // authority. The batch is complete and must still advance the loader.
-                        g_app.loading.generation_dispatch_index +=
-                            static_cast<int>(batch_to_generate.size());
-                    }
-                }
-
-                float progress =
-                    g_app.loading.initial_chunks_to_load.empty()
-                        ? 1.0f
-                        : static_cast<float>(g_app.loading.generation_dispatch_index) /
-                              static_cast<float>(g_app.loading.initial_chunks_to_load.size());
-
-                glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
+                glClearColor(0.01f, 0.02f, 0.05f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                if (g_loading_visualizer) {
-                    g_loading_visualizer->UpdateAndRender(
-                        deltaTime,
-                        "CONSTRUCTING WORLD GEOMETRY...",
-                        progress,
-                        g_app.loading.generation_dispatch_index,
-                        g_app.loading.initial_chunks_to_load.size());
-                }
-
-                if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
-                    g_app.loading.initial_chunks_to_load.size()) {
-                    const bool horizon_ready = gameSession->EnsureWorldEntryReady(12, 4);
-                    if (!horizon_ready) {
-                        refuse_world_entry("World collision horizon could not be prepared.", false);
-                        if (g_loading_visualizer)
-                            g_loading_visualizer->EndVisualization();
-                        if (g_uiManager)
-                            g_uiManager->RequestLoadDocument("main_menu.rml");
-                        SetGameState(window, gameStateManager, GameState::MAIN_MENU);
-                        break;
+                if (entry_activated_this_frame)
+                    break;
+                if (world_entry.active()) {
+                    Luminumbra::Client::DrawLoadingOverlay(
+                        Luminumbra::Client::WorldEntryStageName(world_entry.stage()),
+                        world_entry.progress(),
+                        static_cast<int>(world_entry.stage()),
+                        static_cast<std::size_t>(Luminumbra::Client::WorldEntryStage::Count),
+                        "Stages complete");
+                    if (g_app.overlay.imgui_enabled) {
+                        ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f));
+                        ImGui::Begin("World entry controls",
+                                     nullptr,
+                                     ImGuiWindowFlags_AlwaysAutoResize |
+                                         ImGuiWindowFlags_NoSavedSettings);
+                        if (ImGui::Button("Return to menu (Esc)"))
+                            world_entry.cancel_input(true);
+                        const auto button_min = ImGui::GetItemRectMin();
+                        const auto button_max = ImGui::GetItemRectMax();
+                        entry_cancel_bounds =
+                            ImVec4(button_min.x, button_min.y, button_max.x, button_max.y);
+                        entry_cancel_visible = ImGui::IsItemVisible();
+                        ImGui::End();
                     }
-                    LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
-                    g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
-                        gameSession->GetMetadata().spawnPoint);
-                    g_camera->MouseSensitivity =
-                        g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
-                    g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
-                    if (g_app.loading.world_render_data_initialized) {
-                        renderPipeline.clear_all_chunk_data();
-                    }
-                    g_app.loading.world_render_data_initialized = true;
-
-                    audioManager->StopMusic();
-                    audioManager->PlayOneShot2D(
-                        "ui_world_loaded",
-                        Luminumbra::Client::BusId::Ui); // Play a sound on completion
-                    // Start the constant ambient soundscape (zen atmosphere): a gentle
-                    // forest-rustle bed + soft birdsong, centred at spawn with a huge radius so it
-                    // stays audible as the player roams (the listener follows the player each
-                    // frame). Volumes in the bank.
-                    {
-                        const auto& sp = gameSession->GetMetadata().spawnPoint;
-                        const glm::vec3 ambPos(sp.x, sp.y, sp.z);
-                        audioManager->PlayAmbientLoop("ambient_forest", ambPos, 1.0e6f);
-                        // the birdsong bed is now OWNED by EnvironmentalAudioSystem
-                        // (day-gated + crossfaded with the night bed) — no 24/7 birds.
-                        audioManager->PlayAmbientLoop("ambient_wind", ambPos, 1.0e6f);
-                    }
-                    // Under the ambient bed, a soft in-game music bed picked by the time of day
-                    // (day = exploration, night = dusk). The dawn/dusk detector swaps it at the
-                    // horizon crossings. PlayMusic is a no-op if that track is already playing.
-                    audioManager->PlayMusic(-renderPipeline.sun_direction().y > 0.0f
-                                                ? "music_exploration"
-                                                : "music_dusk");
-                    // first-feed SNAP — a midnight load starts on the night bed
-                    // instead of crossfading from the day default.
-                    envAudio->SetSunElevation(-renderPipeline.sun_direction().y);
-                    if (g_loading_visualizer) {
-                        g_loading_visualizer->EndVisualization();
-                    }
-                    g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                        window,
-                        g_camera.get(),
-                        gameSession->GetPhysicsSystem(),
-                        gameSession->ActiveRegionsEnabled() &&
-                                gameSession->GetActiveRegionLedger().tick() > 0
-                            ? gameSession->GetActiveRegionLedger().local_anchor()
-                            : std::nullopt);
-                    g_playerController->ApplyKeyBindings(
-                        g_systemConfig); // user.controls.* (rebindable)
-                    // (camera created + chunk data cleared + upload backlog drained above, before
-                    // entry)
-                    SetGameState(window, gameStateManager, GameState::IN_GAME);
-                    // show the diegetic HUD during normal play. Skipped in headless
-                    // scenario capture so the visual gates stay overlay-free.
-                    if (!scenario_config.active() && g_uiManager) {
-                        g_uiManager->RequestLoadDocument("hud.rml");
-                    }
-                    if (scenario_config.active()) {
-                        last_readiness_report =
-                            EvaluateReadiness(scenario_config, gameSession.get());
-                        if (!horizon_ready || !last_readiness_report.ready) {
-                            scenario_failed = true;
-                            scenario_failure_reason = "world_readiness_failed";
-                            runtime_state_recorder.capture("world_readiness_failed",
-                                                           &jobSystem,
-                                                           gameSession.get(),
-                                                           &renderPipeline,
-                                                           scenario_frame_count,
-                                                           last_readiness_report);
-                        } else {
-                            scenario_ready = true;
-                            scenario_play_started_at = std::chrono::steady_clock::now();
-                            runtime_state_recorder.capture("world_entered",
-                                                           &jobSystem,
-                                                           gameSession.get(),
-                                                           &renderPipeline,
-                                                           scenario_frame_count,
-                                                           last_readiness_report);
+                } else {
+                    // Automated boot callers retain their existing loading path.
+                    const auto dispatched = dispatch_entry_chunks();
+                    const float progress =
+                        g_app.loading.initial_chunks_to_load.empty()
+                            ? 1.0f
+                            : static_cast<float>(g_app.loading.generation_dispatch_index) /
+                                  static_cast<float>(g_app.loading.initial_chunks_to_load.size());
+                    if (g_loading_visualizer)
+                        g_loading_visualizer->UpdateAndRender(
+                            deltaTime,
+                            "CONSTRUCTING WORLD GEOMETRY...",
+                            progress,
+                            g_app.loading.generation_dispatch_index,
+                            g_app.loading.initial_chunks_to_load.size());
+                    if (dispatched == Luminumbra::Client::WorldEntryResult::Complete) {
+                        if (!prepare_entry_horizon()) {
+                            if (g_loading_visualizer)
+                                g_loading_visualizer->EndVisualization();
+                            SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                            if (g_uiManager)
+                                g_uiManager->RequestLoadDocument("main_menu.rml");
+                            refuse_world_entry(
+                                "Surface preparation exceeds the supported work budget.", false);
+                            break;
                         }
+                        activate_loaded_world();
                     }
-                    lastFrame = static_cast<float>(glfwGetTime());
                 }
                 break;
             }
@@ -4170,7 +5053,8 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                    g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera) {
+                    g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera &&
+                    advance_frame_simulation) {
                     // runtime telemetry (--profile-fly): drive the player FORWARD at a constant
                     // noclip speed in normal-play mode so the SLOWFRAME logger captures a
                     // representative MOVING cost without the time-based scenario camera's
@@ -4195,7 +5079,7 @@ int main(int argc, char* argv[]) {
                     if (elapsed > g_app.capture.profile_fly_seconds)
                         glfwSetWindowShouldClose(window, true);
                 } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                           g_playerController) {
+                           g_playerController && !benchmark_v4 && advance_frame_simulation) {
                     g_playerController->SetLiveInputGate(
                         [&](int key) { return uiInputRouter.GameplayKeyAllowed(key); });
                     g_playerController->Update(deltaTime); // live input uses current ownership
@@ -4342,8 +5226,10 @@ int main(int argc, char* argv[]) {
                         g_camera->updateCameraVectors();
                     }
                 }
-                if (auto* physics = gameSession->GetPhysicsSystem())
-                    physics->update(deltaTime * g_app.capture.timeScale);
+                if (advance_frame_simulation) {
+                    if (auto* physics = gameSession->GetPhysicsSystem())
+                        physics->update(deltaTime * g_app.capture.timeScale);
+                }
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
                 // physics, and scenario paths above remain variable-dt.
@@ -4354,39 +5240,47 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
-                    if (g_playerController)
-                        gameSession->SetLocalPlayerSimulationPosition(
-                            g_playerController->GetPosition(),
-                            g_playerController->GetMovementMode() ==
-                                Luminumbra::Client::MovementMode::Walking);
-                    if (traversal) {
-                        while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
-                               traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
-                            traversal_ticks +=
-                                gameSession->TickSimulation(1.0 / traversal->tickRate);
-                    } else if (g_app.capture.timeScale == 1.0f) {
-                        gameSession->TickSimulation(static_cast<double>(
-                            deltaTime)); // byte-identical default (gates run here)
-                    } else if (g_app.capture.timeScale > 0.0f) {
-                        // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps so a
-                        // high scale isn't dropped by the catch-up clamp, capped per frame to keep
-                        // spiral protection. Determinism holds (fixed dt per tick).
-                        double simDt = static_cast<double>(deltaTime) *
-                                       static_cast<double>(g_app.capture.timeScale);
-                        const double kFourTicks = (1.0 / 30.0) * 4.0;
-                        const int budget = static_cast<int>(
-                            std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
-                        int ran = 0;
-                        while (simDt > 1e-9 && ran < budget) {
-                            const double step = std::min(simDt, kFourTicks);
-                            const std::uint32_t t = gameSession->TickSimulation(step);
-                            simDt -= step;
-                            if (t == 0u)
-                                break; // accumulator < 1 tick this frame
-                            ran += static_cast<int>(t);
+                    if (advance_frame_simulation) {
+                        if (benchmark_v4 && g_camera)
+                            gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
+                        else if (g_playerController)
+                            gameSession->SetLocalPlayerSimulationPosition(
+                                g_playerController->GetPosition(),
+                                g_playerController->GetMovementMode() ==
+                                    Luminumbra::Client::MovementMode::Walking);
+                    }
+                    if (simulate_frame) {
+                        if (benchmark_v4) {
+                            gameSession->TickSimulation(1.0 / traversal->tickRate);
+                        } else if (traversal) {
+                            while (!gameSession->GetRegionSchedulerFault() &&
+                                   traversal_ticks <
+                                       static_cast<std::uint64_t>(traversal_target_tick))
+                                traversal_ticks +=
+                                    gameSession->TickSimulation(1.0 / traversal->tickRate);
+                        } else if (g_app.capture.timeScale == 1.0f) {
+                            gameSession->TickSimulation(static_cast<double>(
+                                deltaTime)); // byte-identical default (gates run here)
+                        } else if (g_app.capture.timeScale > 0.0f) {
+                            // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps
+                            // so a high scale isn't dropped by the catch-up clamp, capped per frame
+                            // to keep spiral protection. Determinism holds (fixed dt per tick).
+                            double simDt = static_cast<double>(deltaTime) *
+                                           static_cast<double>(g_app.capture.timeScale);
+                            const double kFourTicks = (1.0 / 30.0) * 4.0;
+                            const int budget = static_cast<int>(
+                                std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
+                            int ran = 0;
+                            while (simDt > 1e-9 && ran < budget) {
+                                const double step = std::min(simDt, kFourTicks);
+                                const std::uint32_t t = gameSession->TickSimulation(step);
+                                simDt -= step;
+                                if (t == 0u)
+                                    break; // accumulator < 1 tick this frame
+                                ran += static_cast<int>(t);
+                            }
                         }
-                    } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
-                      // continue)
+                    } // Paused captures still render and stream without simulation steps.
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
@@ -4440,7 +5334,8 @@ int main(int argc, char* argv[]) {
                         }
                         gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
                                                               streaming_position,
-                                                              gameSession->GetPhysicsSystem());
+                                                              gameSession->GetPhysicsSystem(),
+                                                              advance_frame_simulation);
                     }
                     rb_stream_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - _rb_stream_t0)
@@ -4454,6 +5349,81 @@ int main(int argc, char* argv[]) {
                 break;
             default:
                 break;
+        }
+
+        const auto settle_workload_reload = [&]() {
+            // Restream at the reload pose before advancing the script. All
+            // work remains inside this request frame's CPU/wall/GPU interval.
+            const auto pose = traversal->sample(traversal_target_tick);
+            g_camera->Position = glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
+            g_camera->Yaw = static_cast<float>(pose.yaw);
+            g_camera->Pitch = static_cast<float>(pose.pitch);
+            g_camera->updateCameraVectors();
+            auto* world = gameSession->GetWorldSystem();
+            const Measurement::ReloadWaterPause water_pause(*world);
+            Measurement::ReloadSettlingWatchdog watchdog;
+            for (;;) {
+                if (glfwWindowShouldClose(window) ||
+                    Luminumbra::Filesystem::capture_content_paths().refused() ||
+                    gameSession->GetRegionSchedulerFault() ||
+                    reload_settling_passes == std::numeric_limits<std::uint64_t>::max())
+                    return false;
+                ++reload_settling_passes;
+                world->update(gameSession->GetRegistry(),
+                              g_camera->Position,
+                              gameSession->GetPhysicsSystem(),
+                              /*advance_simulation=*/false);
+                double scatter_ms = 0, foliage_ms = 0;
+                UpdateFoliageScatter(g_app,
+                                     root_dir,
+                                     scenario_config,
+                                     g_camera.get(),
+                                     gameSession.get(),
+                                     renderPipeline,
+                                     g_playerController && g_playerController->photo_mode_active(),
+                                     scatter_ms,
+                                     foliage_ms);
+                renderPipeline.render_frame(gameSession->GetRegistry(),
+                                            *world,
+                                            *g_camera,
+                                            0.0f,
+                                            g_app.overlay.wireframe_mode);
+                benchmark_queries->checkpoint_passes();
+                glfwPollEvents();
+                MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                const auto& budget = world->get_last_streaming_budget_stats();
+                const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                const auto* foliage = renderPipeline.foliage();
+                const bool settled =
+                    gameStateManager.GetCurrentState() == GameState::IN_GAME && scenario_ready &&
+                    !scenario_failed &&
+                    Measurement::reload_residency_observed(reload_settling_passes,
+                                                           budget.update_interval_frames) &&
+                    streaming.quiescent() && uploads.terrain_upload_candidates == 0 &&
+                    uploads.water_upload_candidates == 0 && (!foliage || !foliage->build_pending());
+                if (!watchdog.waiting(settled,
+                                      {budget.active_chunks_after,
+                                       budget.ready_chunks,
+                                       streaming.cumulative_scheduled_meshing,
+                                       foliage ? foliage->build_generation() : 0})) {
+                    if (watchdog.failed()) {
+                        LUMINUMBRA_CORE_ERROR("Reload streaming made no progress");
+                        return false;
+                    }
+                    break;
+                }
+            }
+            return true;
+        };
+        if (reload_settling_pending) {
+            reload_settling_pending = false;
+            if (!settle_workload_reload()) {
+                scenario_failed = true;
+                exit_code = 2;
+                glfwSetWindowShouldClose(window, true);
+                break;
+            }
         }
 
         if (currentState != GameState::WORLD_LOADING) {
@@ -4641,6 +5611,7 @@ int main(int argc, char* argv[]) {
                         if (gameSession->ActiveRegionsEnabled()) {
                             renderPipeline.set_world_clock(gameSession->GetWorldClock());
                         } else {
+                            renderPipeline.set_render_calendar(gameSession->GetRenderCalendar());
                             renderPipeline.set_season_tick(sim_tick);
                             renderPipeline.set_time_of_day_tick(sim_tick);
                         }
@@ -4886,6 +5857,8 @@ int main(int argc, char* argv[]) {
                                              g_camera.get(),
                                              gameSession.get(),
                                              renderPipeline,
+                                             g_playerController &&
+                                                 g_playerController->photo_mode_active(),
                                              rb_scatter_ms,
                                              rb_foliage_ms);
                     }
@@ -4894,15 +5867,7 @@ int main(int argc, char* argv[]) {
                     // each frame so the motes are always present as you explore.
                     {
                         if (auto* particles = renderPipeline.particles()) {
-                            if (g_app.foliage.ambientMotes ==
-                                Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
-                                g_app.foliage.ambientMotes = particles->add_emitter(
-                                    root_dir / "data/common/particles/ambient_motes.json",
-                                    g_camera->Position);
-                            } else {
-                                particles->set_emitter_origin(g_app.foliage.ambientMotes,
-                                                              g_camera->Position);
-                            }
+                            particles->update_ambient_motes(root_dir, g_camera->Position);
                         }
                     }
                     //  re-bake the LIVE sim plant roster each frame so player-seeded
@@ -4981,13 +5946,26 @@ int main(int argc, char* argv[]) {
                             glfwGetFramebufferSize(window, &vw, &vh);
                             std::size_t pixel_bytes = 0;
                             if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
-                                std::vector<unsigned char> px(pixel_bytes);
-                                glReadBuffer(GL_BACK);
-                                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                scene_capture_complete =
-                                    glGetError() == GL_NO_ERROR &&
-                                    WritePixelBufferPpm(g_app.capture.scene_shot, vw, vh, px);
+                                scene_capture_complete = Luminumbra::Rendering::WithCaptureManifest(
+                                    g_app.capture.scene_shot,
+                                    Luminumbra::Rendering::ObserveCaptureManifest(
+                                        *gameSession,
+                                        renderPipeline,
+                                        vw,
+                                        vh,
+                                        resolved_graphics,
+                                        g_app.overlay.wireframe_mode,
+                                        false),
+                                    [&] {
+                                        std::vector<unsigned char> px(pixel_bytes);
+                                        glReadBuffer(GL_BACK);
+                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                        glReadPixels(
+                                            0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                                        return glGetError() == GL_NO_ERROR &&
+                                               WritePixelBufferPpm(
+                                                   g_app.capture.scene_shot, vw, vh, px);
+                                    });
                                 if (scene_capture_complete)
                                     LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})",
                                                          g_app.capture.scene_shot.string(),
@@ -5021,6 +5999,7 @@ int main(int argc, char* argv[]) {
                                     *g_camera,
                                     std::filesystem::path(g_app.capture.survey_dir),
                                     root_dir / "data/common/materials.json",
+                                    resolved_graphics,
                                     g_app.overlay.wireframe_mode)) {
                                 exit_code = 2;
                                 const nlohmann::json failure{
@@ -5061,6 +6040,23 @@ int main(int argc, char* argv[]) {
                     }
                     if (g_app.capture.frame_scan_active && currentState == GameState::IN_GAME &&
                         gameSession && !glfwWindowShouldClose(window)) {
+                        int vw = 0, vh = 0;
+                        Luminumbra::Rendering::CaptureManifestInput frame_scan_manifest;
+                        if (g_app.capture.frame_scan_settle >=
+                            g_app.capture.frame_scan_settle_target) {
+                            // Observe this rendered frame before the setters below prepare
+                            // the next one. In particular, zero settle must retain the
+                            // time of day and camera that actually produced the pixels.
+                            glfwGetFramebufferSize(window, &vw, &vh);
+                            frame_scan_manifest = Luminumbra::Rendering::ObserveCaptureManifest(
+                                *gameSession,
+                                renderPipeline,
+                                vw,
+                                vh,
+                                resolved_graphics,
+                                g_app.overlay.wireframe_mode,
+                                false);
+                        }
                         if (g_camera) {
                             // Eye-level ground-inspection pose: low + a gentle down-pitch so
                             // the near-field grass/rock/terrain fill the lower frame (card
@@ -5078,165 +6074,206 @@ int main(int argc, char* argv[]) {
                         } else if (wait_for_uploads(scan_upload_wait,
                                                     "frame_scan",
                                                     g_app.capture.frame_scan_path)) {
-                            bool capture_ok = true;
-                            if (g_app.capture.render_parity_active) {
-                                bool parity_ok = false;
-                                if (g_app.capture.render_parity_pass == "ssao" && g_camera)
-                                    parity_ok = renderPipeline.capture_ssao_parity(
-                                        g_app.capture.render_parity_dir, *g_camera);
-                                else if (g_app.capture.render_parity_pass == "upscale_seam" &&
-                                         g_camera)
-                                    parity_ok = renderPipeline.capture_upscale_seam_parity(
-                                        *g_camera, g_app.capture.render_parity_dir);
-                                else if (g_app.capture.render_parity_pass == "frame" && g_camera)
-                                    // whole-frame A/B — dispatch the settled
-                                    // prepared frame twice, in-process FLIP must be 0.0.
-                                    parity_ok = renderPipeline.capture_frame_parity(
-                                        *g_camera, g_app.capture.render_parity_dir);
-                                else
-                                    parity_ok = false;
-                                if (parity_ok)
-                                    LUMINUMBRA_CORE_INFO("{} parity captured -> {}",
-                                                         g_app.capture.render_parity_pass,
-                                                         g_app.capture.render_parity_dir.string());
-                                else {
-                                    LUMINUMBRA_CORE_ERROR("{} parity capture FAILED",
-                                                          g_app.capture.render_parity_pass);
-                                    capture_ok = false;
-                                }
-                            }
-                            int vw = 0, vh = 0;
-                            glfwGetFramebufferSize(window, &vw, &vh);
-                            const Luminumbra::Rendering::FrameScanReport rep =
-                                Luminumbra::Rendering::ScanFrame(renderPipeline,
-                                                                 vw,
-                                                                 vh,
-                                                                 root_dir /
-                                                                     "data/common/materials.json");
-                            if (rep.ok) {
-                                LUMINUMBRA_CORE_INFO(
-                                    "Frame-scan measured -> {} ({}x{}): {} materials, water "
-                                    "{:.1f}%, foliage {} inst (capacity {}), mean luma {:.3f}",
-                                    g_app.capture.frame_scan_path,
-                                    rep.width,
-                                    rep.height,
-                                    rep.materials.size(),
-                                    rep.water_coverage * 100.0,
-                                    rep.foliage_instance_count_known
-                                        ? std::to_string(rep.foliage_instances)
-                                        : "unknown",
-                                    rep.foliage_instance_capacity,
-                                    rep.mean_frame_luminance);
-                                // Also dump the scanned back buffer as a PPM next to the JSON,
-                                // so the scan is a full diagnostic (numbers + the exact image
-                                // they describe).
-                                std::size_t pixel_bytes = 0;
-                                if (Luminumbra::Rendering::CapturePixelBytes(
-                                        vw, vh, 3, pixel_bytes)) {
-                                    std::vector<unsigned char> px(pixel_bytes);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                    std::filesystem::path img(g_app.capture.frame_scan_path);
-                                    img.replace_extension(".ppm");
-                                    const bool image_written = glGetError() == GL_NO_ERROR &&
-                                                               WritePixelBufferPpm(img, vw, vh, px);
-                                    capture_ok = image_written && capture_ok;
-                                    if (image_written)
-                                        LUMINUMBRA_CORE_INFO("Frame-scan image -> {}",
-                                                             img.string());
-
-                                    // Frame-HEALTH verdict on the SAME settled frame (reuses
-                                    // px; render-only, no sim). Auto-flags
-                                    // black/unlit/blown/NaN so a broken frame is caught WITHOUT
-                                    // a human eyeballing the PPM — the 'detect what's wrong'
-                                    // capability.
-                                    std::vector<float> pos_rgb16f;
-                                    std::vector<unsigned char> albedo_rgb8;
-                                    const auto& gb_h = renderPipeline.gbuffer();
-                                    if (gb_h.position_texture != 0 &&
-                                        renderPipeline.internal_width() ==
-                                            static_cast<std::uint32_t>(vw) &&
-                                        renderPipeline.internal_height() ==
-                                            static_cast<std::uint32_t>(vh)) {
-                                        pos_rgb16f.resize(static_cast<std::size_t>(vw) *
-                                                          static_cast<std::size_t>(vh) * 3u);
-                                        glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
-                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                        glGetTextureSubImage(
-                                            gb_h.position_texture,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            vw,
-                                            vh,
-                                            1,
-                                            GL_RGB,
-                                            GL_FLOAT,
-                                            static_cast<GLsizei>(pixel_bytes * sizeof(float)),
-                                            pos_rgb16f.data());
-                                        if (gb_h.albedo_texture != 0) {
-                                            albedo_rgb8.resize(static_cast<std::size_t>(vw) *
-                                                               static_cast<std::size_t>(vh) * 3u);
-                                            glBindTexture(GL_TEXTURE_2D, gb_h.albedo_texture);
-                                            glGetTextureSubImage(gb_h.albedo_texture,
-                                                                 0,
-                                                                 0,
-                                                                 0,
-                                                                 0,
-                                                                 vw,
-                                                                 vh,
-                                                                 1,
-                                                                 GL_RGB,
-                                                                 GL_UNSIGNED_BYTE,
-                                                                 static_cast<GLsizei>(pixel_bytes),
-                                                                 albedo_rgb8.data());
+                            const bool capture_finished =
+                                Luminumbra::Rendering::WithCaptureManifest(
+                                    std::filesystem::path(g_app.capture.frame_scan_path),
+                                    frame_scan_manifest,
+                                    [&] {
+                                        bool capture_ok = true;
+                                        if (g_app.capture.render_parity_active) {
+                                            bool parity_ok = false;
+                                            if (g_app.capture.render_parity_pass == "ssao" &&
+                                                g_camera)
+                                                parity_ok = renderPipeline.capture_ssao_parity(
+                                                    g_app.capture.render_parity_dir, *g_camera);
+                                            else if (g_app.capture.render_parity_pass ==
+                                                         "upscale_seam" &&
+                                                     g_camera)
+                                                parity_ok =
+                                                    renderPipeline.capture_upscale_seam_parity(
+                                                        *g_camera, g_app.capture.render_parity_dir);
+                                            else if (g_app.capture.render_parity_pass == "frame" &&
+                                                     g_camera)
+                                                // whole-frame A/B — dispatch the settled
+                                                // prepared frame twice, in-process FLIP must be
+                                                // 0.0.
+                                                parity_ok = renderPipeline.capture_frame_parity(
+                                                    *g_camera, g_app.capture.render_parity_dir);
+                                            else
+                                                parity_ok = false;
+                                            if (parity_ok)
+                                                LUMINUMBRA_CORE_INFO(
+                                                    "{} parity captured -> {}",
+                                                    g_app.capture.render_parity_pass,
+                                                    g_app.capture.render_parity_dir.string());
+                                            else {
+                                                LUMINUMBRA_CORE_ERROR(
+                                                    "{} parity capture FAILED",
+                                                    g_app.capture.render_parity_pass);
+                                                capture_ok = false;
+                                            }
                                         }
-                                        glBindTexture(GL_TEXTURE_2D, 0);
-                                    }
-                                    const auto health = Luminumbra::Rendering::AnalyzeFrameHealth(
-                                        vw, vh, px, pos_rgb16f, albedo_rgb8);
-                                    {
-                                        std::filesystem::path hp(g_app.capture.frame_scan_path);
-                                        hp.replace_extension(".health.json");
-                                        std::ofstream hf(hp, std::ios::binary | std::ios::trunc);
-                                        const std::string j =
-                                            Luminumbra::Rendering::FrameHealthToJson(health);
-                                        hf.write(j.data(), static_cast<std::streamsize>(j.size()));
-                                        const bool health_written =
-                                            Luminumbra::Rendering::CloseCaptureFile(hf);
-                                        capture_ok = health_written && capture_ok;
-                                    }
-                                    if (health.verdict.anomalous) {
-                                        LUMINUMBRA_CORE_ERROR("Frame-health ANOMALY: {} (mean "
-                                                              "luma {:.4f}, coverage "
-                                                              "{:.1f}%, black {:.1f}%)",
-                                                              health.verdict.reason,
-                                                              health.mean_luminance,
-                                                              health.gbuffer_coverage * 100.0,
-                                                              health.black_fraction * 100.0);
-                                    } else {
-                                        LUMINUMBRA_CORE_INFO("Frame-health OK (mean luma "
-                                                             "{:.4f}, coverage {:.1f}%)",
-                                                             health.mean_luminance,
-                                                             health.gbuffer_coverage * 100.0);
-                                    }
-                                    capture_ok = glGetError() == GL_NO_ERROR && capture_ok;
-                                } else {
-                                    capture_ok = false;
-                                }
-                            } else {
-                                capture_ok = false;
-                                LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
-                                                      g_app.capture.frame_scan_path);
-                            }
-                            // Publish the scan only after every required sibling artifact.
-                            if (capture_ok)
-                                capture_ok = Luminumbra::Rendering::WriteFrameScanReport(
-                                    rep, std::filesystem::path(g_app.capture.frame_scan_path));
-                            frame_scan_complete = capture_ok;
-                            if (!capture_ok)
+                                        const Luminumbra::Rendering::FrameScanReport rep =
+                                            Luminumbra::Rendering::ScanFrame(
+                                                renderPipeline,
+                                                vw,
+                                                vh,
+                                                root_dir / "data/common/materials.json");
+                                        if (rep.ok) {
+                                            LUMINUMBRA_CORE_INFO(
+                                                "Frame-scan measured -> {} ({}x{}): {} materials, "
+                                                "water "
+                                                "{:.1f}%, foliage {} inst (capacity {}), mean luma "
+                                                "{:.3f}",
+                                                g_app.capture.frame_scan_path,
+                                                rep.width,
+                                                rep.height,
+                                                rep.materials.size(),
+                                                rep.water_coverage * 100.0,
+                                                rep.foliage_instance_count_known
+                                                    ? std::to_string(rep.foliage_instances)
+                                                    : "unknown",
+                                                rep.foliage_instance_capacity,
+                                                rep.mean_frame_luminance);
+                                            // Also dump the scanned back buffer as a PPM next to
+                                            // the JSON, so the scan is a full diagnostic (numbers +
+                                            // the exact image they describe).
+                                            std::size_t pixel_bytes = 0;
+                                            if (Luminumbra::Rendering::CapturePixelBytes(
+                                                    vw, vh, 3, pixel_bytes)) {
+                                                std::vector<unsigned char> px(pixel_bytes);
+                                                glReadBuffer(GL_BACK);
+                                                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                                glReadPixels(0,
+                                                             0,
+                                                             vw,
+                                                             vh,
+                                                             GL_RGB,
+                                                             GL_UNSIGNED_BYTE,
+                                                             px.data());
+                                                std::filesystem::path img(
+                                                    g_app.capture.frame_scan_path);
+                                                img.replace_extension(".ppm");
+                                                const bool image_written =
+                                                    glGetError() == GL_NO_ERROR &&
+                                                    WritePixelBufferPpm(img, vw, vh, px);
+                                                capture_ok = image_written && capture_ok;
+                                                if (image_written)
+                                                    LUMINUMBRA_CORE_INFO("Frame-scan image -> {}",
+                                                                         img.string());
+
+                                                // Frame-HEALTH verdict on the SAME settled frame
+                                                // (reuses px; render-only, no sim). Auto-flags
+                                                // black/unlit/blown/NaN so a broken frame is caught
+                                                // WITHOUT a human eyeballing the PPM — the 'detect
+                                                // what's wrong' capability.
+                                                std::vector<float> pos_rgb16f;
+                                                std::vector<unsigned char> albedo_rgb8;
+                                                const auto& gb_h = renderPipeline.gbuffer();
+                                                if (gb_h.position_texture != 0 &&
+                                                    renderPipeline.internal_width() ==
+                                                        static_cast<std::uint32_t>(vw) &&
+                                                    renderPipeline.internal_height() ==
+                                                        static_cast<std::uint32_t>(vh)) {
+                                                    pos_rgb16f.resize(static_cast<std::size_t>(vw) *
+                                                                      static_cast<std::size_t>(vh) *
+                                                                      3u);
+                                                    glBindTexture(GL_TEXTURE_2D,
+                                                                  gb_h.position_texture);
+                                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                                    glGetTextureSubImage(
+                                                        gb_h.position_texture,
+                                                        0,
+                                                        0,
+                                                        0,
+                                                        0,
+                                                        vw,
+                                                        vh,
+                                                        1,
+                                                        GL_RGB,
+                                                        GL_FLOAT,
+                                                        static_cast<GLsizei>(pixel_bytes *
+                                                                             sizeof(float)),
+                                                        pos_rgb16f.data());
+                                                    if (gb_h.albedo_texture != 0) {
+                                                        albedo_rgb8.resize(
+                                                            static_cast<std::size_t>(vw) *
+                                                            static_cast<std::size_t>(vh) * 3u);
+                                                        glBindTexture(GL_TEXTURE_2D,
+                                                                      gb_h.albedo_texture);
+                                                        glGetTextureSubImage(
+                                                            gb_h.albedo_texture,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            vw,
+                                                            vh,
+                                                            1,
+                                                            GL_RGB,
+                                                            GL_UNSIGNED_BYTE,
+                                                            static_cast<GLsizei>(pixel_bytes),
+                                                            albedo_rgb8.data());
+                                                    }
+                                                    glBindTexture(GL_TEXTURE_2D, 0);
+                                                }
+                                                const auto health =
+                                                    Luminumbra::Rendering::AnalyzeFrameHealth(
+                                                        vw, vh, px, pos_rgb16f, albedo_rgb8);
+                                                {
+                                                    std::filesystem::path hp(
+                                                        g_app.capture.frame_scan_path);
+                                                    hp.replace_extension(".health.json");
+                                                    std::ofstream hf(
+                                                        hp, std::ios::binary | std::ios::trunc);
+                                                    const std::string j =
+                                                        Luminumbra::Rendering::FrameHealthToJson(
+                                                            health);
+                                                    hf.write(
+                                                        j.data(),
+                                                        static_cast<std::streamsize>(j.size()));
+                                                    const bool health_written =
+                                                        Luminumbra::Rendering::CloseCaptureFile(hf);
+                                                    capture_ok = health_written && capture_ok;
+                                                }
+                                                if (health.verdict.anomalous) {
+                                                    LUMINUMBRA_CORE_ERROR(
+                                                        "Frame-health ANOMALY: {} (mean "
+                                                        "luma {:.4f}, coverage "
+                                                        "{:.1f}%, black {:.1f}%)",
+                                                        health.verdict.reason,
+                                                        health.mean_luminance,
+                                                        health.gbuffer_coverage * 100.0,
+                                                        health.black_fraction * 100.0);
+                                                } else {
+                                                    LUMINUMBRA_CORE_INFO(
+                                                        "Frame-health OK (mean luma "
+                                                        "{:.4f}, coverage {:.1f}%)",
+                                                        health.mean_luminance,
+                                                        health.gbuffer_coverage * 100.0);
+                                                }
+                                                capture_ok =
+                                                    glGetError() == GL_NO_ERROR && capture_ok;
+                                            } else {
+                                                capture_ok = false;
+                                            }
+                                        } else {
+                                            capture_ok = false;
+                                            LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
+                                                                  g_app.capture.frame_scan_path);
+                                        }
+                                        // Publish the scan only after every required sibling
+                                        // artifact.
+                                        if (capture_ok)
+                                            capture_ok =
+                                                Luminumbra::Rendering::WriteFrameScanReport(
+                                                    rep,
+                                                    std::filesystem::path(
+                                                        g_app.capture.frame_scan_path));
+                                        return capture_ok;
+                                    });
+                            frame_scan_complete = capture_finished;
+                            if (!capture_finished)
                                 capture_failure(g_app.capture.frame_scan_path,
                                                 "frame_capture_incomplete");
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -5426,10 +6463,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (!CaptureTimelapseFrame(
-                g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen))
-            capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
-                            "timelapse_capture_incomplete");
+        if (g_app.capture.timelapse_frames > 0) {
+            if (!CaptureTimelapseFrame(g_app,
+                                       window,
+                                       currentState,
+                                       gameSession.get(),
+                                       renderPipeline,
+                                       resolved_graphics,
+                                       g_procgen))
+                capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                                "timelapse_capture_incomplete");
+        }
         //  CPU-submit ends here (all GL work for the frame is
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.
@@ -5450,6 +6494,8 @@ int main(int argc, char* argv[]) {
             applied_swap_interval = swap_interval;
         }
         LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
+        if (currentState == GameState::WORLD_LOADING)
+            world_entry.loading_painted();
         const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
                                                         : std::chrono::steady_clock::time_point{};
         report_far_transition();
@@ -5486,7 +6532,8 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.generated_count,
                                            foliage_frame.count_generation,
                                            phase_scope.snapshot(),
-                                           foliage_frame.uploads))
+                                           foliage_frame.uploads,
+                                           water_scope.snapshot()))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
@@ -5542,6 +6589,20 @@ int main(int argc, char* argv[]) {
                             "  phase {}={:.3f}ms",
                             Attribution::phase_name(static_cast<Attribution::Phase>(index)),
                             phases.milliseconds()[index]);
+                    const auto& water = water_scope.snapshot();
+                    LUMINUMBRA_CORE_WARN(
+                        "  water-split: selection={:.3f} seed_inputs={:.3f} "
+                        "initialization={:.3f} sim={:.3f} seam={:.3f} bookkeeping={:.3f} "
+                        "precomputed={} fallback={} stale={}",
+                        water.selection_ms,
+                        water.seed_inputs_ms,
+                        water.initialization_ms,
+                        water.sim_ms,
+                        water.seam_ms,
+                        water.bookkeeping_ms,
+                        water.precomputed_columns,
+                        water.fallback_columns,
+                        water.stale_columns);
                 }
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(
@@ -5550,7 +6611,9 @@ int main(int argc, char* argv[]) {
                         "dispatch={:.3f} cpu_fallback={:.3f} rebuild_calls={} reason_mask={} "
                         "admitted={} "
                         "misses={} deferred={} copied_bytes={} hashed_bytes={} uploaded_bytes={} "
-                        "scratch_bytes={} backlog={} path={} fallback={} dirty_columns={}",
+                        "scratch_bytes={} backlog={} path={} fallback={} dirty_columns={} "
+                        "worker_dispatched={} worker_completed={} worker_stale_rejected={} "
+                        "worker_queue_age_frames={}",
                         foliage_attribution.signature_ms,
                         foliage_attribution.sort_ms,
                         foliage_attribution.surface_ms,
@@ -5572,7 +6635,11 @@ int main(int argc, char* argv[]) {
                         foliage_attribution.backlog,
                         Attribution::path_name(foliage_attribution.path),
                         Attribution::fallback_name(foliage_attribution.fallback),
-                        foliage_attribution.dirty_columns);
+                        foliage_attribution.dirty_columns,
+                        foliage_attribution.worker_dispatched,
+                        foliage_attribution.worker_completed,
+                        foliage_attribution.worker_stale_rejected,
+                        foliage_attribution.worker_queue_age_frames);
                 if (gameSession && gameSession->GetWorldSystem()) {
                     const auto& st = gameSession->GetWorldSystem()->dbg_stream_timings();
                     LUMINUMBRA_CORE_WARN(
@@ -5592,7 +6659,9 @@ int main(int argc, char* argv[]) {
         // GPU_work) + present. The old benchmark summed per-pass GPU timers ONLY
         // and was blind to the CPU-submit win this path provides; it also ran at idle
         // clock, so it now reports NVML power+clock to prove the GPU is at boost.
-        if (g_rb_active && currentState == GameState::IN_GAME && gameSession) {
+        if (g_rb_active &&
+            (currentState == GameState::IN_GAME || (benchmark_v4 && benchmark_world_checked)) &&
+            gameSession) {
             const auto rb_now =
                 benchmark_v3 ? benchmark_present_end : std::chrono::steady_clock::now();
             const double cpu_submit_ms =
@@ -5611,21 +6680,119 @@ int main(int argc, char* argv[]) {
                 sample.cpu = cpu_submit_ms;
                 sample.present = present_ms;
                 if (traversal && g_camera) {
-                    traversal_camera_samples.push_back(
-                        {{"tick", traversal_target_tick},
-                         {"position",
-                          {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z}},
-                         {"yaw", g_camera->Yaw},
-                         {"pitch", g_camera->Pitch}});
+                    traversal_camera_records.append(
+                        {traversal_target_tick,
+                         {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z},
+                         g_camera->Yaw,
+                         g_camera->Pitch});
                 }
                 if (g_app.overlay.wireframe_mode)
-                    active_overrides["runtime:wireframe"] = "true";
+                    observed_wireframe = true;
                 if (g_app.overlay.debug_view_mode != 0)
-                    active_overrides["runtime:debug_view"] =
-                        std::to_string(g_app.overlay.debug_view_mode);
+                    observed_debug_view = g_app.overlay.debug_view_mode;
                 if (g_app.capture.timeScale != 1.0f)
-                    active_overrides["runtime:time_scale"] =
-                        std::to_string(g_app.capture.timeScale);
+                    observed_time_scale = g_app.capture.timeScale;
+            }
+            if (benchmark_v4 && measuring_v3) {
+                traversal_ticks = static_cast<std::uint64_t>(traversal_target_tick);
+                const auto selection = renderPipeline.far_world_selection();
+                const auto cave = renderPipeline.far_world_renderer().CavePolicy(selection);
+                const auto* world = gameSession->GetWorldSystem();
+                const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                const auto* foliage = renderPipeline.foliage();
+                const bool in_game = currentState == GameState::IN_GAME;
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                const bool region_scheduler_fault =
+                    gameSession->GetRegionSchedulerFault().has_value();
+                const bool settled = in_game && !region_scheduler_fault && streaming.quiescent() &&
+                                     uploads.terrain_upload_candidates == 0 &&
+                                     uploads.water_upload_candidates == 0 &&
+                                     (!foliage || !foliage->build_pending()) && scenario_ready &&
+                                     !scenario_failed;
+                const auto region =
+                    Luminumbra::world::ActiveRegionLedger::region_at(g_camera->Position);
+                bool camera_in_air = false;
+                if (traversal->kind == "cave" && in_game) {
+                    const auto coords = world->world_to_chunk_coords(g_camera->Position);
+                    const auto chunk = world->find_streamed_chunk(coords);
+                    constexpr std::size_t size_x = Luminumbra::CHUNK_SIZE_X + 1;
+                    constexpr std::size_t size_y = Luminumbra::CHUNK_SIZE_Y + 1;
+                    constexpr std::size_t size_z = Luminumbra::CHUNK_SIZE_Z + 1;
+                    // Read one nearest lattice sample only after checking the exact fixed bound.
+                    if (chunk && chunk->get_state() == Luminumbra::ChunkState::Ready &&
+                        chunk->sdf_data.size() == size_x * size_y * size_z) {
+                        const auto local =
+                            g_camera->Position -
+                            glm::vec3(coords * Luminumbra::IVec3(Luminumbra::CHUNK_SIZE_X,
+                                                                 Luminumbra::CHUNK_SIZE_Y,
+                                                                 Luminumbra::CHUNK_SIZE_Z));
+                        const auto x = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.x), 0L, static_cast<long>(size_x - 1)));
+                        const auto y = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.y), 0L, static_cast<long>(size_y - 1)));
+                        const auto z = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.z), 0L, static_cast<long>(size_z - 1)));
+                        camera_in_air = chunk->sdf_data[x + y * size_x + z * size_x * size_y] > 0;
+                    }
+                }
+                const auto transitions_begin = workload_transition_records.size();
+                if (in_game && !g_app.hud.paused) {
+                    const auto& transitions = gameSession->GetRegionSchedule().transitions;
+                    if (transitions.size() > workload_transition_records.remaining()) {
+                        LUMINUMBRA_CORE_ERROR("Benchmark region observations exceed bounds");
+                        exit_code = 2;
+                        break;
+                    }
+                    for (const auto& transition : transitions)
+                        workload_transition_records.append({{transition.key.x, transition.key.z},
+                                                            static_cast<int>(transition.from),
+                                                            static_cast<int>(transition.to)});
+                }
+                const auto menu = Measurement::observe_menu(
+                    in_game, g_app.hud.paused, [&](const char* identifier) {
+                        if (traversal->kind != "menu_entry" || !g_uiManager ||
+                            !g_uiManager->GetContext())
+                            return false;
+                        const auto* document = g_uiManager->GetContext()->GetDocument(identifier);
+                        return document && document->IsVisible();
+                    });
+                workload_frame_records.append(
+                    {.tick = traversal_target_tick,
+                     .presentation_seconds =
+                         *Luminumbra::Client::presentation_clock.capture_seconds(),
+                     .frame = measured_frame_id,
+                     .state = menu.state,
+                     .ui_document = menu.document,
+                     .paused = menu.paused,
+                     .region = {region.x, region.z},
+                     .transitions_begin = transitions_begin,
+                     .transitions_end = workload_transition_records.size(),
+                     .far_requested = Luminumbra::Rendering::FarWorldModeName(selection.requested),
+                     .far_effective = Luminumbra::Rendering::FarWorldModeName(selection.effective),
+                     .cave_requested = cave.requested
+                                           ? std::optional<int>(static_cast<int>(*cave.requested))
+                                           : std::nullopt,
+                     .cave_effective = cave.effective
+                                           ? std::optional<int>(static_cast<int>(*cave.effective))
+                                           : std::nullopt,
+                     .underground = in_game && g_camera->Position.y <
+                                                   world->GetTerrainHeightAt(g_camera->Position.x,
+                                                                             g_camera->Position.z),
+                     .camera_in_air = camera_in_air,
+                     .foliage_build_generation = foliage ? foliage->build_generation() : 0,
+                     .terrain_uploads = uploads.terrain_uploads,
+                     .stream_queue_depth = streaming.last_queue_depth,
+                     .stream_generation_batches = streaming.generation_batches,
+                     .stream_meshing_batches = streaming.meshing_batches,
+                     .stream_pending_lod_chunks = streaming.pending_lod_chunks,
+                     .stream_promotion_pending = streaming.promotion_pending,
+                     .region_scheduler_fault = region_scheduler_fault,
+                     .terrain_upload_candidates = uploads.terrain_upload_candidates,
+                     .water_upload_candidates = uploads.water_upload_candidates,
+                     .foliage_pending = foliage && foliage->build_pending(),
+                     .world_ready = scenario_ready && !scenario_failed,
+                     .settled = settled});
+                reload_interval.observe(measured_frame_id, settled, rb_now);
             }
             rb_prev_end = rb_now;
 
@@ -5711,6 +6878,14 @@ int main(int argc, char* argv[]) {
                                      g_app.capture.render_benchmark_path)) {
                     if (rb_warm < g_app.capture.render_benchmark_warmup)
                         ++rb_warm;
+                    if (benchmark_v4) {
+                        workload_warmup_wall.push_back(wall_ms > 0 ? wall_ms
+                                                                   : cpu_submit_ms + present_ms);
+                        if (rb_warm == g_app.capture.render_benchmark_warmup) {
+                            workload_windows["warmup"]["foliage"] = observe_workload_window();
+                            rb_prev_end = std::chrono::steady_clock::now();
+                        }
+                    }
                     upload_warmup_complete = rb_warm >= g_app.capture.render_benchmark_warmup;
                 } else
                     ++upload_warmup_wait_frames;
@@ -5790,9 +6965,11 @@ int main(int argc, char* argv[]) {
                 if (traversal && measuring_v3) {
                     traversal_measured_duration =
                         std::chrono::duration<double>(rb_now - traversal_start).count();
-                    if (traversal_ticks == static_cast<std::uint64_t>(traversal->expectedTicks))
+                    if (traversal_ticks == static_cast<std::uint64_t>(traversal->expectedTicks)) {
                         g_app.capture.render_benchmark_frames = rb_count;
-                    else if (rb_count == static_cast<int>(Measurement::kMaxFrames)) {
+                        if (benchmark_v4)
+                            workload_windows["measured"]["foliage"] = observe_workload_window();
+                    } else if (rb_count == static_cast<int>(Measurement::kMaxFrames)) {
                         LUMINUMBRA_CORE_ERROR("Traversal exhausted its 18000-frame measurement "
                                               "ring before completion");
                         exit_code = 1;
@@ -6036,6 +7213,14 @@ int main(int argc, char* argv[]) {
                                     {"render_scale", renderPipeline.render_scale()},
                                     {"width", renderPipeline.screen_width()},
                                     {"height", renderPipeline.screen_height()}};
+                    if (observed_wireframe)
+                        active_overrides["runtime:wireframe"] = "true";
+                    if (observed_debug_view)
+                        active_overrides["runtime:debug_view"] =
+                            std::to_string(*observed_debug_view);
+                    if (observed_time_scale)
+                        active_overrides["runtime:time_scale"] =
+                            std::to_string(*observed_time_scale);
                     j["debug_overrides"] = {{"active", active_overrides},
                                             {"declared", declared_overrides}};
                     j["excluded_windows"] = nlohmann::json::array(
@@ -6046,7 +7231,7 @@ int main(int argc, char* argv[]) {
                           {"last_frame", g_app.capture.render_benchmark_warmup + rb_count},
                           {"reason", "report and optional screenshot"}}});
                     j["workload"] = benchmark_world_identity;
-                    j["workload"]["kind"] = traversal ? "traversal" : "fixed_view";
+                    j["workload"]["kind"] = traversal ? traversal->kind : "fixed_view";
                     j["workload"]["expected_frames"] = g_app.capture.render_benchmark_frames;
                     if (traversal) {
                         j["workload"]["script"] = traversal_text;
@@ -6058,9 +7243,103 @@ int main(int argc, char* argv[]) {
                         j["workload"]["actual_ticks"] = traversal_ticks;
                         j["workload"]["measured_duration_seconds"] = traversal_measured_duration;
                         j["workload"]["cold_cache"] = true;
-                        j["workload"]["camera_samples"] = traversal_camera_samples;
+                        auto& camera_samples = j["workload"]["camera_samples"] =
+                            nlohmann::json::array();
+                        for (std::size_t index = 0; index < traversal_camera_records.size();
+                             ++index) {
+                            const auto& record = traversal_camera_records.at(index);
+                            camera_samples.push_back({{"tick", record.tick},
+                                                      {"position", record.position},
+                                                      {"yaw", record.yaw},
+                                                      {"pitch", record.pitch}});
+                        }
                     }
                 }
+                if (benchmark_v4) {
+                    j["schema"] = "luminumbra.render_benchmark.v4";
+                    try {
+                        if (Luminumbra::Filesystem::capture_content_paths().refused())
+                            throw std::runtime_error("content reference escapes inventoried trees");
+                        if (capture_content() != benchmark_content)
+                            throw std::runtime_error("workload content changed during capture");
+                    } catch (const std::exception& error) {
+                        LUMINUMBRA_CORE_ERROR("Benchmark content refused: {}", error.what());
+                        exit_code = 2;
+                        break;
+                    }
+                    j["settings"]["simulation_identity"] = gameSession->SystemConfigIdentity();
+                    j["settings"]["content_files"] = benchmark_content;
+                    const auto& region_config = gameSession->GetActiveRegionLedger().config();
+#ifdef LUMINUMBRA_ENABLE_GNS
+                    j["settings"]["gns_enabled"] = true;
+#else
+                    j["settings"]["gns_enabled"] = false;
+#endif
+                    j["settings"]["active_regions"] = {
+                        {"enabled", gameSession->ActiveRegionsEnabled()},
+                        {"work_limit", region_config.work_limit},
+                        {"hold_ticks", region_config.hold_ticks},
+                        {"reduced_shift", region_config.reduced_shift}};
+                    auto workload_observations = nlohmann::json::array();
+                    for (std::size_t index = 0; index < workload_frame_records.size(); ++index)
+                        workload_observations.push_back(Measurement::workload_observation_json(
+                            workload_frame_records.at(index), workload_transition_records));
+                    const auto& last_observation = workload_observations.back();
+                    j["settings"]["far_mode"] = {
+                        {"requested", last_observation["far_requested"]},
+                        {"effective", last_observation["far_effective"]},
+                        {"cave_requested", last_observation["cave_requested"]},
+                        {"cave_effective", last_observation["cave_effective"]}};
+                    j["settings"]["graphics_preset"] =
+                        luminumbra::core::GraphicsPresetName(resolved_graphics.base_preset);
+                    j["settings"]["graphics_preset_status"] = "named";
+                    j["settings"]["effective_render"] = {
+                        {"render_scale", renderPipeline.render_scale()},
+                        {"vsync", false},
+                        {"taau", renderPipeline.taau_enabled()},
+                        {"ssao_quality", renderPipeline.get_ssao_quality()},
+                        {"cloud_quality", renderPipeline.get_cloud_quality()},
+                        {"fov", g_camera->Zoom},
+                        {"ui_scale", g_systemConfig.user().ui_scale},
+                        {"window_mode", WindowModeName(g_windowState.mode)},
+                        {"volumetric_quality", renderPipeline.volumetric_quality()},
+                        {"width", renderPipeline.screen_width()},
+                        {"height", renderPipeline.screen_height()},
+                        {"systems", Measurement::render_systems(g_systemConfig)}};
+                    j["settings"]["effective_render"]["graphics"] =
+                        Measurement::graphics_configuration(graphics_state.Settings(),
+                                                            resolved_graphics);
+                    j["settings"]["render_overrides"] = active_overrides;
+                    j["render_identity"] = Measurement::render_identity(j["settings"]);
+                    const auto warm_stats = Measurement::summarize(workload_warmup_wall);
+                    auto& warm = workload_windows["warmup"];
+                    warm["frame_wall_samples_ms"] = workload_warmup_wall;
+                    warm["distribution"] = {{"unit", "ms"},
+                                            {"sample_count", workload_warmup_wall.size()},
+                                            {"unavailable_count", 0}};
+                    const std::array<const char*, 5> names = {"p50", "p95", "p99", "max", "mad"};
+                    for (std::size_t index = 0; index < names.size(); ++index)
+                        warm["distribution"][names[index]] = warm_stats[index];
+                    workload_windows["measured"]["distribution"] =
+                        j["distribution"]["frame_wall_ms"];
+                    j["windows"] = workload_windows;
+                    auto& actions = j["workload"]["actions"] = nlohmann::json::array();
+                    for (std::size_t index = 0; index < workload_action_records.size(); ++index) {
+                        const auto& record = workload_action_records.at(index);
+                        actions.push_back({{"tick", record.tick},
+                                           {"name", record.name},
+                                           {"succeeded", record.succeeded},
+                                           {"modified_chunks", record.modified_chunks}});
+                    }
+                    j["workload"]["observations"] = workload_observations;
+                    auto& reload = j["workload"]["reload"] = nullptr;
+                    if (const auto& result = reload_interval.result())
+                        reload = {{"request_frame", result->request_frame},
+                                  {"first_settled_frame", result->first_settled_frame},
+                                  {"elapsed_ms", result->elapsed_ms},
+                                  {"settling_passes", reload_settling_passes}};
+                }
+                std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
                 if (!Measurement::write_render_benchmark(rb_path, j, benchmark_v3)) {
                     LUMINUMBRA_CORE_ERROR("Could not write complete render benchmark artifact {}",
@@ -6184,6 +7463,13 @@ int main(int argc, char* argv[]) {
         scenario_runner->onShutdown();
     }
 
+    // Entry preparation can still own the waterfall pass and world. Its drain
+    // joins that worker before any renderer cleanup, including its own rollback.
+    if (world_entry.active()) {
+        world_entry.cancel();
+        world_entry.advance(run_entry_stage, drain_entry);
+    }
+
     trace_shutdown("world_readers_drain_started");
     // Same drain order as prepare_world_entry, with the far-LOD wait visible.
     renderPipeline.prepare_world_swap();
@@ -6197,15 +7483,17 @@ int main(int argc, char* argv[]) {
     // is active or when no chunk carries unsaved edits.
     // The main loop and its quit callback have returned; keep saving on this thread.
     trace_shutdown("world_save_started");
-    Luminumbra::Client::SaveSessionOnExit(
-        gameSession.get(),
-        [&] {
-            if (!g_app.menu.menu_backdrop_active && g_camera)
-                gameSession->SetSpawnPoint(g_playerController
-                                               ? g_playerController->SavedSpawnAnchor()
-                                               : g_camera->Position);
-        },
-        [&] { mark_shutdown("world_state_saved"); });
+    if (entry_save_allowed)
+        Luminumbra::Client::SaveSessionOnExit(
+            gameSession.get(),
+            session_persistence_allowed(),
+            [&] {
+                if (!g_app.menu.menu_backdrop_active && g_camera)
+                    gameSession->SetSpawnPoint(g_playerController
+                                                   ? g_playerController->SavedSpawnAnchor()
+                                                   : g_camera->Position);
+            },
+            [&] { mark_shutdown("world_state_saved"); });
 
     // Finished means the save stage returned; only world_state_saved reports success.
     trace_shutdown("world_save_finished");
@@ -6241,6 +7529,7 @@ int main(int argc, char* argv[]) {
     developerLogAttachment.Detach();
     developerConsole.Shutdown();
     worldGenViewer.reset();
+    glfwSetWindowCloseCallback(window, nullptr);
     glfwSetKeyCallback(window, nullptr);
     glfwSetCharCallback(window, nullptr);
     glfwSetMouseButtonCallback(window, nullptr);
@@ -6274,5 +7563,7 @@ int main(int argc, char* argv[]) {
     }
     glfwDestroyWindow(window);
     glfwTerminate();
+    if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused())
+        exit_code = 2;
     return exit_code;
 }

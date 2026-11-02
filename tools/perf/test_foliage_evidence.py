@@ -8,6 +8,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from validate_foliage_evidence import Refusal, fnv, local, validate
 
 

@@ -1,5 +1,7 @@
 #include "WorldPersistenceRoundtrip.h"
+#include "SavedInputLimits.h"
 
+#include "../HashCheckpoint.h"
 #include "../core/Log.h"
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
 #include "ecs/EntitySnapshot.h"
@@ -329,6 +331,31 @@ nlohmann::json ChunkToJson(const Chunk& chunk,
     return result;
 }
 
+std::vector<std::int32_t> WaterGridFromJson(const nlohmann::json& values) {
+    if (!values.is_array())
+        throw std::invalid_argument("Water grid must be an integer array");
+    std::vector<std::int32_t> grid;
+    if (values.size() > grid.max_size())
+        throw std::length_error("Water grid exceeds capacity");
+    grid.reserve(values.size());
+    for (const auto& value : values) {
+        // Preserve all int32 bits, including raw negative depths. Wider JSON integers
+        // saturate to the grid type before narrowing; migration/stepping normalize depths.
+        if (value.is_number_unsigned()) {
+            grid.push_back(static_cast<std::int32_t>(std::min<std::uint64_t>(
+                value.get<std::uint64_t>(), std::numeric_limits<std::int32_t>::max())));
+        } else if (value.is_number_integer()) {
+            grid.push_back(static_cast<std::int32_t>(
+                std::clamp<std::int64_t>(value.get<std::int64_t>(),
+                                         std::numeric_limits<std::int32_t>::min(),
+                                         std::numeric_limits<std::int32_t>::max())));
+        } else {
+            throw std::invalid_argument("Water grid cells must be integers");
+        }
+    }
+    return grid;
+}
+
 void ValidateAuthorityMetadata(const nlohmann::json& value) {
     if (const auto ownership = value.find("authority"); ownership != value.end()) {
         if (!ownership->is_object() || ownership->size() != 2 ||
@@ -568,17 +595,21 @@ void ApplyChunkJson(const nlohmann::json& value,
     // restore the authoritative fixed-point water state (absent in pre saves -> empty,
     // the sim re-seeds on the next tick).
     chunk.water_depth_mm = value.contains("water_depth_mm")
-                               ? value.at("water_depth_mm").get<std::vector<std::int32_t>>()
+                               ? WaterGridFromJson(value.at("water_depth_mm"))
                                : std::vector<std::int32_t>{};
     chunk.water_bed_mm = value.contains("water_bed_mm")
-                             ? value.at("water_bed_mm").get<std::vector<std::int32_t>>()
+                             ? WaterGridFromJson(value.at("water_bed_mm"))
                              : std::vector<std::int32_t>{};
     // / (authoritative-state change): flow momentum round-trips (see ChunkToJson). Saves
     // that predate the field restore as zeros — the old cleared-on-load behaviour
     // (momentum re-seeds from surface differences on the next tick).
-    chunk.water_edge_flux = value.contains("water_edge_flux")
-                                ? value.at("water_edge_flux").get<std::vector<std::int32_t>>()
-                                : std::vector<std::int32_t>(chunk.water_depth_mm.size() * 2u, 0);
+    if (value.contains("water_edge_flux")) {
+        chunk.water_edge_flux = WaterGridFromJson(value.at("water_edge_flux"));
+    } else {
+        if (chunk.water_depth_mm.size() > chunk.water_edge_flux.max_size() / 2u)
+            throw std::length_error("Water flux grid exceeds capacity");
+        chunk.water_edge_flux.assign(chunk.water_depth_mm.size() * 2u, 0);
+    }
     const nlohmann::json& water_state =
         value.contains("water_state") ? value.at("water_state") : value;
     chunk.has_water_sim.store(water_state.at("has_water_sim").get<bool>(),
@@ -623,13 +654,17 @@ std::string StableDump(const nlohmann::json& value) {
     return stream.str();
 }
 
-std::string Checksum(const std::string& text) {
+std::string Checksum(const std::string& text, std::string_view suffix = {}) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (const char character : text) {
-        const auto byte = static_cast<unsigned char>(character);
-        hash ^= static_cast<std::uint64_t>(byte);
-        hash *= 1099511628211ull;
-    }
+    const auto mix = [&hash](std::string_view bytes) {
+        for (const char character : bytes) {
+            const auto byte = static_cast<unsigned char>(character);
+            hash ^= static_cast<std::uint64_t>(byte);
+            hash *= 1099511628211ull;
+        }
+    };
+    mix(text);
+    mix(suffix);
 
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
@@ -923,9 +958,13 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
     for (const char* field : {"mesh_indices",
                               "water_mesh_indices",
                               "pending_mesh_indices",
-                              "pending_water_mesh_indices"}) {
+                              "pending_water_mesh_indices",
+                              "water_bed_mm",
+                              "water_depth_mm"}) {
         RequireIntegerArray(chunk, field, errors);
     }
+    if (chunk.contains("water_edge_flux"))
+        RequireIntegerArray(chunk, "water_edge_flux", errors);
     for (const char* field : {"mesh_vertices",
                               "water_mesh_vertices",
                               "pending_mesh_vertices",
@@ -1058,6 +1097,12 @@ bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
                                          ChunkAuthorityLoadPolicy authority) {
     m_directTerrainSamples = 0;
     out_state.clear();
+    if (!SavedInputLimits::JsonDepthAllowed(json_text)) {
+        errors.push_back(
+            "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        out_state.clear();
+        return false;
+    }
     try {
         nlohmann::json snapshot;
         std::vector<TerrainSampleArrays> terrain;
@@ -1154,6 +1199,11 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
 
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors) {
+    if (!SavedInputLimits::JsonDepthAllowed(chunk_json)) {
+        errors.push_back(
+            "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        return false;
+    }
     try {
         return ValidateChunkFormatObject(nlohmann::json::parse(chunk_json), errors);
     } catch (const std::exception& e) {
@@ -1208,6 +1258,17 @@ void VerifyChunkFieldResidencyCoverage(const nlohmann::json& chunk_json) {
     }
 }
 
+std::string WaterCursorHashInput(std::uint64_t cursor) {
+    if (cursor == 0)
+        return {};
+    std::string bytes(kWaterCursorHashLabel);
+    // Bounded to label.size() + eight bytes, independent of host size_t width
+    // and byte order. No serialized world buffer needs to be extended or copied.
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        bytes.push_back(static_cast<char>((cursor >> shift) & 0xffu));
+    return bytes;
+}
+
 std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
@@ -1248,11 +1309,13 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
 }
 } // namespace
 
-std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
+std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
+                                           std::uint64_t water_sim_cursor) {
     // Determinism oracle over SIM TRUTH only (render mesh excluded — see
     // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
     // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
-    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
+    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state),
+                    WaterCursorHashInput(water_sim_cursor));
 }
 
 RegionContentHasher::RegionContentHasher() {
@@ -1380,10 +1443,13 @@ WorldAuthorityHashes BindWaterScheduler(WorldAuthorityHashes hashes, std::uint64
         schedule.push_back(
             static_cast<char>(static_cast<unsigned char>((raw_cursor >> shift) & 0xffu)));
     const auto scheduler_hash = StableChecksum(schedule);
+    const auto grid_hash = hashes.sub.water;
     hashes.sub.water = StableChecksum("simulation_water_v5|grids:" + hashes.sub.water +
                                       "|schedule:" + scheduler_hash);
     hashes.world = StableChecksum("simulation_authority_v5|base:" + hashes.world +
                                   "|water:" + hashes.sub.water);
+    // Preserve separate checkpoint components for cursor-only mismatch diagnostics.
+    hashes.sub.water = grid_hash + std::string(kWaterCursorHashLabel) + scheduler_hash;
     hashes.water_scheduler_cursor = raw_cursor;
     return hashes;
 }
@@ -1421,12 +1487,13 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     return stream.str();
 }
 
-WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
+WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
+                                                                 std::uint64_t water_sim_cursor) {
     // project the SAME canonical snapshot the top-level hash uses into
     // per-subsystem field groups, then checksum each group with the SAME
-    // Checksum and the SAME chunk-id-ascending ordering. This never calls or
-    // alters ComputeWorldStreamingStateHash, so the top-level world_hash is
-    // byte-identical; these sub-hashes are purely additive localization data.
+    // Checksum and the SAME chunk-id-ascending ordering. Nonzero scheduling
+    // cursors add a separate checksum to the water group; zero keeps every
+    // legacy projection byte-identical.
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -1517,13 +1584,18 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
                                                    {"chunks", std::move(water_array)}}));
     // entities filled by the overload below from the ECS snapshot (no chunk source).
     sub.entities = std::string();
+    if (water_sim_cursor != 0) {
+        sub.water += kWaterCursorHashLabel;
+        sub.water += Checksum(WaterCursorHashInput(water_sim_cursor));
+    }
     return sub;
 }
 
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
-                                    const std::string& entity_snapshot_json) {
-    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state);
+                                    const std::string& entity_snapshot_json,
+                                    std::uint64_t water_sim_cursor) {
+    WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state, water_sim_cursor);
     sub.entities = Checksum(entity_snapshot_json);
     return sub;
 }

@@ -13,8 +13,10 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
+#include "luminumbra_common/world/WorldClock.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <atomic>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <glm/geometric.hpp>
@@ -186,11 +188,13 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
                        chunk_base_y + sphere.radius,
                        chunk_base_y + static_cast<float>(Luminumbra::CHUNK_SIZE_Y) - sphere.radius);
         const Luminumbra::Vec3 center(sample_x, center_y, sample_z);
+        const Luminumbra::Persistence::WorldSaveService::SaveOwnership ownership;
         if (!CarveSphereIntoChunk(*chunk, center, sphere.radius)) {
             result.failure_reason = "carve_edit_had_no_effect";
             return result;
         }
         chunk->mark_voxel_data_dirty();
+        world_system->notify_far_lod_authority_changed(chunk->get_coords());
         // Invalidate the LOD so the existing surface-horizon rebuild path
         // remeshes the edited voxel data (generation is skipped for chunks
         // that already carry sdf data, so the carve survives the rebuild).
@@ -221,7 +225,8 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
     std::sort(edited_chunk_ids.begin(), edited_chunk_ids.end());
 
     const Luminumbra::Persistence::WorldSaveService save_service;
-    const std::string world_hash = save_service.world_hash(restricted);
+    const std::string world_hash = save_service.world_hash(
+        restricted, game_session->GetWorldSystem()->GetWaterSimWindowCursor());
 
     Luminumbra::world::WorldStateSaveReport save_report;
     // This scenario runs synchronously on the client host thread, like quit saves.
@@ -331,7 +336,18 @@ RunPersistenceRoundtripLoadPhase(const RuntimeScenarioConfig& config,
     const Luminumbra::Persistence::WorldSaveService save_service;
     Luminumbra::WorldStreamingState loaded;
     std::vector<std::string> load_errors;
-    if (!save_service.load_world(loaded, config.persistence_session_dir, load_errors)) {
+    Luminumbra::world::WorldClock saved_clock;
+    bool requires_active_regions = false;
+    std::size_t saved_water_cursor = 0;
+    if (!save_service.load_world(loaded, config.persistence_session_dir, load_errors) ||
+        !Luminumbra::Persistence::WorldSaveService::read_clock_metadata(
+            config.persistence_session_dir,
+            saved_clock,
+            requires_active_regions,
+            &load_errors,
+            nullptr,
+            nullptr,
+            &saved_water_cursor)) {
         for (const std::string& error : load_errors) {
             LUMINUMBRA_CORE_ERROR("Persistence roundtrip load phase: {}", error);
         }
@@ -348,7 +364,7 @@ RunPersistenceRoundtripLoadPhase(const RuntimeScenarioConfig& config,
         }
         restricted.insert_chunk(chunk);
     }
-    const std::string world_hash = save_service.world_hash(restricted);
+    const std::string world_hash = save_service.world_hash(restricted, saved_water_cursor);
 
     const nlohmann::json artifact = {
         {"schema", kPersistencePhaseSchema},

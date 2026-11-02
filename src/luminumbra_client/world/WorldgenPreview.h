@@ -40,7 +40,7 @@
 
 #include <nlohmann/json_fwd.hpp>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
 

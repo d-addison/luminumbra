@@ -97,7 +97,8 @@ protected:
     static void Rebuild(FoliagePass& pass,
                         const std::vector<FoliagePass::ChunkScatter>& chunks,
                         std::uint64_t frame,
-                        const glm::vec3& camera = kCamera) {
+                        const glm::vec3& camera = kCamera,
+                        FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
         pass.set_evidence_frame(frame, 1);
         pass.rebuild_instances(
             chunks,
@@ -105,15 +106,17 @@ protected:
                 return FoliagePass::SurfaceSample{10.0f + x * 0.01f + z * 0.02f, 0.1f, 0.7f, true};
             },
             nullptr,
-            camera);
+            camera,
+            preparation);
     }
     static Attribution::FoliageRebuild
     RebuildAttributed(FoliagePass& pass,
                       const std::vector<FoliagePass::ChunkScatter>& chunks,
                       std::uint64_t frame_id,
-                      const glm::vec3& camera = kCamera) {
+                      const glm::vec3& camera = kCamera,
+                      FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
         const Attribution::FoliageFrameScope frame(true);
-        Rebuild(pass, chunks, frame_id, camera);
+        Rebuild(pass, chunks, frame_id, camera, preparation);
         return frame.snapshot().rebuild;
     }
     static void ExpectReused(const Attribution::FoliageRebuild& rebuild, bool gpu) {

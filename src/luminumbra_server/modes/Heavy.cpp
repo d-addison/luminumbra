@@ -1,6 +1,7 @@
 #include "../HeavyComparison.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/HashCheckpoint.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::HeavyHashes;
@@ -231,10 +232,20 @@ int RunHeavy(const ServerCliOptions& options) {
         {"loaded_at_load", HeavyHashJson(loaded_at_load)},
         {"roundtrip_match", roundtrip_ok},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
+        {"roundtrip_water_difference",
+         orig_at_save.sub.water == loaded_at_load.sub.water
+             ? ""
+             : Luminumbra::WaterHashDifferenceSection(orig_at_save.sub.water,
+                                                      loaded_at_load.sub.water)},
         {"original_final", HeavyHashJson(orig_final)},
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
         {"resim_mesh_match", resim_mesh_match},
+        {"resim_water_difference",
+         orig_final.sub.water == loaded_final.sub.water
+             ? ""
+             : Luminumbra::WaterHashDifferenceSection(orig_final.sub.water,
+                                                      loaded_final.sub.water)},
         {"boot_settle_original", SettleJson(settle_orig)},
         {"boot_settle_loaded", SettleJson(settle_loaded)},
         {"settle_contract_ok", settle_ok},

@@ -7,8 +7,6 @@ import sys
 
 _CHILD_TIMEOUT = 12
 _LOCAL_PARTITIONS = 64
-_CONTRACT_PARTITIONS = 225
-_EXPECTED_CASES = 479
 _PHASE_LIMIT = 768
 _phase_records = 0
 
@@ -742,11 +740,15 @@ class AcceptanceMatrixTests(AcceptanceFixture):
             with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory).resolve()
                 output, displaced = base / "output", base / "displaced"
+                original = base / "original"
                 output.write_bytes(b"original")
                 replace, restore = Path.replace, os.replace
                 active = False
                 def publish(source: Path, target: Path) -> Path:
                     nonlocal active
+                    # Retain the original identity, then substitute it below.
+                    # This deterministically models reuse of its released inode.
+                    output.rename(original)
                     replace(source, target)
                     active = True
                     raise KeyboardInterrupt("publication completed")
@@ -755,7 +757,10 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                         restore(source, target)
                         return
                     Path(source).rename(displaced)
-                    Path(source).write_bytes(contents)
+                    if contents == b"original":
+                        original.rename(source)
+                    else:
+                        Path(source).write_bytes(contents)
                     restore(source, target)
                     raise KeyboardInterrupt("foreign restore completed")
                 with mock.patch.object(Path, "replace", publish), mock.patch.object(os, "replace", substitute), \
@@ -4228,7 +4233,7 @@ script.write_text('changed input', encoding='utf-8')
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}")
                 elif name != "Upload test evidence":
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
-        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  windows-msvc-result:\n", 1)[0]
+        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  lint:\n", 1)[0]
         step = aggregate.split("      - name: Check acceptance matrix CTest execution\n", 1)[1].split("      - name: ", 1)[0]
         condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
         self.assertIsNotNone(condition)
@@ -4758,13 +4763,16 @@ script.write_text('changed input', encoding='utf-8')
         self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("[-2^24, 2^24)", row["discrepancy"])
         self.assertIn("issue #250", row["discrepancy"])
+        self.assertIn("docs/active-regions.md now agrees", row["discrepancy"])
+        self.assertIn("test/common/ActiveRegionLedger_test.cpp", row["discrepancy"])
+        self.assertIn("asymmetric", row["discrepancy"])
         self.assertIn("integrated boundary regression", row["discrepancy"])
         self.assertEqual(row["evidence"][:3], [
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
             {"kind": "ctest", "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
         ])
-        self.assertEqual(len(row["evidence"]), 5)
+        self.assertEqual(len(row["evidence"]), 6)
         planned = row["evidence"][4]
         self.assertEqual(planned["kind"], "ctest")
         self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.SymmetricAnchorBoundaries")
@@ -4775,6 +4783,17 @@ script.write_text('changed input', encoding='utf-8')
         self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
         self.assertIn("docs/active-regions.md", row["discrepancy"])
         self.assertIn("coverage remains planned", row["discrepancy"])
+        self.assertIn("owner: ds", row["evidence"][5]["planned"])
+        self.assertIn("host-boundary regression", row["evidence"][5]["planned"])
+        self.assertEqual(row["evidence"][5]["ref"], "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries")
+        self.assertIn("rejection counters", row["evidence"][5]["planned"])
+        self.assertIn("accept -2^24", row["evidence"][5]["planned"])
+        self.assertIn("reject +2^24", row["evidence"][5]["planned"])
+        self.assertIn("both X and Z endpoints", row["evidence"][5]["planned"])
+        self.assertIn("adjacent interior coordinates", row["evidence"][5]["planned"])
+        self.assertIn("adjacent exterior coordinates", row["evidence"][5]["planned"])
+        self.assertIn("next representable float below -2^24", row["evidence"][5]["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", row["evidence"][5]["planned"])
         self.assertIn("next representable float below -2^24", planned["planned"])
         self.assertIn("both X and Z endpoints", planned["planned"])
         self.assertIn("adjacent interior coordinates", planned["planned"])
@@ -7517,6 +7536,18 @@ def contract_suite(number: int) -> unittest.TestSuite:
 
 
 class AcceptanceSelectionTests(_PhaseCase):
+    def test_partition_total_tracks_new_child_case_without_count_pin(self) -> None:
+        import ast
+        source = Path(__file__).read_text(encoding="utf-8")
+        assignments = [node for node in ast.parse(source).body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "_CONTRACT_PARTITIONS"
+                               for target in node.targets)]
+        self.assertEqual(len(assignments), 1)
+        expression = compile(ast.Expression(assignments[0].value), "partition total", "eval")
+        augmented = {**_CHILD_ALLOWANCES, "AddedContract.test_case": 1}
+        total = eval(expression, {"_LOCAL_PARTITIONS": _LOCAL_PARTITIONS, "_CHILD_ALLOWANCES": augmented})
+        self.assertEqual(total, _CONTRACT_PARTITIONS + 1)
+
     @staticmethod
     def link_image(base: Path) -> dict[Path, tuple[Any, ...]]:
         return {path: (path.read_bytes(), info.st_dev, info.st_ino, info.st_nlink, info.st_mode)
@@ -8098,6 +8129,8 @@ class AcceptanceSelectionTests(_PhaseCase):
         self.assertIn("    _PhaseProgram()\n", source.split('if __name__ == "__main__":', 1)[1])
         self.assertEqual(namespace["_PHASE_LIMIT"], 768)
         emit = namespace["_phase"]
+        # The isolated prefix runs before the generated routing table exists.
+        namespace["_CONTRACT_PARTITIONS"] = _CONTRACT_PARTITIONS
         namespace["_phase_records"] = 0
         events.clear()
         output = Capture()
@@ -9070,10 +9103,16 @@ watchdog.join()
         self.assertEqual(len(selected), len(set(selected)))
         discovered = loader.loadTestsFromModule(sys.modules[__name__])
         self.assertEqual(discovered.countTestCases(), len(expected))
-        self.assertEqual(len(expected), _EXPECTED_CASES)
+        registered_cases = set(_CONTRACT_CASE_PARTITIONS) | {
+            "AcceptanceMatrixPublicTreeTests." + method
+            for method in loader.getTestCaseNames(AcceptanceMatrixPublicTreeTests)}
+        self.assertCountEqual((name.rsplit(".", 2)[-2] + "." + name.rsplit(".", 1)[-1]
+                               for name in expected), registered_cases)
         self.assert_phase_contract()
 
     def _check_partition_entrypoint_refuses_invalid_selection(self, value) -> None:
+        # Resolve the upper boundary after every generated case is registered.
+        value = str(_CONTRACT_PARTITIONS) if value is None else value
         with self.subTest(value=value):
             child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
                                     "--contract-partition", value],
@@ -9432,7 +9471,7 @@ _register_child_cases(AcceptanceSelectionTests, 'test_direct_preparation_native_
                       ((False,), (True,)), 2)
 _register_child_cases(AcceptanceSelectionTests, 'test_partition_entrypoint_refuses_invalid_selection',
                       AcceptanceSelectionTests._check_partition_entrypoint_refuses_invalid_selection,
-                      (('-1',), (str(_CONTRACT_PARTITIONS),), ('unknown',)), 1)
+                      (('-1',), (None,), ('unknown',)), 1)
 
 _register_child_cases(AcceptanceSelectionTests, 'test_full_output_set_native_publication_is_discoverable',
                       AcceptanceSelectionTests._check_full_output_set_native_publication_is_discoverable,
@@ -9492,6 +9531,10 @@ _CHILD_ALLOWANCES.update({
     'AcceptanceSelectionTests.test_artifact_discovery_requires_complete_json_path_tokens': 2,
     'AcceptanceSelectionTests.test_restart_partial_writes_are_discoverable': 2,
 })
+
+# Each child-process case has its own registration in addition to the fixed
+# local storage partitions; the routing table determines the total roster.
+_CONTRACT_PARTITIONS = _LOCAL_PARTITIONS + len(_CHILD_ALLOWANCES)
 
 # A paused holder reserves startup/completion plus kill/drain deadlines.
 # Launches are independently bounded by deadlines and by slow-storage units.

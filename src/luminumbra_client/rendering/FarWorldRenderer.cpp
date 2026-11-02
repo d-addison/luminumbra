@@ -754,6 +754,11 @@ void FarWorldRenderer::Drain() {
     world_epoch_ = 0;
     refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
 }
+void FarWorldRenderer::WaitForAcceptedCacheWrites() {
+    CheckOwner();
+    // Immutable volume builds do not enqueue persistent cache writes.
+}
+
 void FarWorldRenderer::PrepareWorldSwap() {
     CheckOwner();
     Drain();

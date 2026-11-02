@@ -1450,10 +1450,10 @@
       "source": "documented DEM fixtures"
     },
     {
-      "bytes": 900,
+      "bytes": 1210,
       "license": "MIT",
       "path": "test/fixtures/deterministic-work-budgets.json",
-      "sha256": "9b2aa9ad42529c632dcd42af5ebe69a7cfecc256b56ee1ac611f851b843bf163",
+      "sha256": "760650661062465d03fbe510307910adf345c4b058b3db1ee8495fcb86a7422f",
       "source": "Luminumbra test fixtures"
     },
     {

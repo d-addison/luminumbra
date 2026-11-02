@@ -1,9 +1,13 @@
 # Luminumbra v0.3.0 release notes
 
-Release preparation is in progress. v0.3.0 contains the integrated `devel`
-implementation, with every shipping feature enabled by default and dedicated-server
-autosave every five minutes. Current-candidate results are pending native verification; the
-owner runs the release smoke on Windows.
+v0.3.0 was published on 2026-10-16 as a signed source-only tag with the native
+release gates waived by the owner; the Release workflow run failed at its gate check,
+so the release carries no SBOM, checksum or attestation assets (issues #70 and #119).
+v0.3.0 contains the integrated `devel` implementation, with every shipping feature
+enabled by default and dedicated-server autosave every five minutes.
+Current-candidate results are pending native verification; the owner runs the
+release smoke on Windows. Work described below as planned for v0.3.1 was assigned
+at publication time; the [roadmap](roadmap.md) records where it sits now.
 
 ## Included in v0.3.0
 

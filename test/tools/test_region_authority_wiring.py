@@ -59,10 +59,10 @@ class RegionAuthorityWiring(unittest.TestCase):
     def test_incremental_save_publishes_cursor_after_payloads_without_zero_layout_changes(self):
         source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
         save = function(source, "bool GameSession::SaveWorldStateToImpl(")
-        self.assertIn("else if (ok) ok = save_batch.save_water_cursor(", save)
-        self.assertLess(save.index("SaveEnergyFieldRecord(save_dir)"),
-                        save.index("save_batch.save_water_cursor("))
-        self.assertLess(save.index("save_batch.save_water_cursor("),
+        self.assertIn("ReconcileWorldStateMetadataTo(save_dir)", save)
+        self.assertLess(save.index("write_file_durably(energy_path, energy_bytes)"),
+                        save.index("ReconcileWorldStateMetadataTo(save_dir)"))
+        self.assertLess(save.index("ReconcileWorldStateMetadataTo(save_dir)"),
                         save.index("chunk->clear_voxel_data_dirty()"))
         service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(encoding="utf-8")
         cursor = function(service, "bool WorldSaveService::SaveBatch::save_water_cursor(")
@@ -133,13 +133,15 @@ class RegionAuthorityWiring(unittest.TestCase):
 
     def test_cursor_load_paths_keep_persisted_state_and_preflight_metadata(self):
         source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
-        self.assertIn("m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);", function(source, "bool GameSession::LoadWorld("))
+        self.assertIn("AdoptPreparedWorld(PrepareWorldLoad(", function(source, "bool GameSession::LoadWorld("))
+        adopt = function(source, "void GameSession::AdoptWorldStateFrom(")
+        self.assertIn("m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);", adopt)
         reload = function(source, "bool GameSession::LoadWorldStateFrom(")
-        self.assertIn("&water_cursor", reload)
-        self.assertIn("m_worldSystem->SetWaterSimWindowCursor(water_cursor);", reload)
-        self.assertLess(reload.index("read_clock_metadata("), reload.index("clear_world("))
-        self.assertLess(reload.index("SetWaterSimWindowCursor(water_cursor)"), reload.index("adopt_streamed_chunk("))
-        self.assertNotIn("SetWaterSimWindowCursor(0)", reload)
+        self.assertLess(reload.index("read_clock_metadata("), reload.index("ReadWorldStateFrom("))
+        preflight = reload.split("LoadedWorldState state;", 1)[0]
+        self.assertIn("m_worldUsable = false;", preflight)
+        self.assertNotIn("clear_world(", preflight)
+        self.assertNotIn("SetWaterSimWindowCursor(0)", reload + adopt)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8")
         case = function(native, "NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation)")
         for assertion in ("fresh.LoadWorld(", "original.LoadWorldStateFrom(save)",
@@ -297,7 +299,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         header = SOURCE.with_suffix(".h").read_text(encoding="utf-8")
         record = header.split("struct MeshingJobChunk {", 1)[1].split("};", 1)[0]
         self.assertIn("u32 voxel_revision = 0;", record)
-        self.assertIn("chunk->authority_hash_revision(), chunk->voxel_revision()", dispatch)
+        self.assertIn("chunk->authority_hash_revision(), voxel_revision", dispatch)
         self.assertLess(dispatch.index("chunk->voxel_revision()"),
                         dispatch.index("snapshot.sdf_data = chunk->sdf_data"))
         self.assertLess(dispatch.index("snapshot.sdf_data = chunk->sdf_data"),
@@ -419,7 +421,7 @@ class RegionAuthorityWiring(unittest.TestCase):
             with self.subTest(writer=name):
                 implementation = source[source.index("namespace {\nbool WriteFileDurably"): ] if name == "bool WriteFileDurably(" else source
                 writer = function(implementation, name)
-                self.assertLess(writer.index("WriteDurableRegionTemp"),
+                self.assertLess(writer.index("temporary.prepare(bytes, errors)" if "save_regions_validated" in name else "WriteDurableRegionTemp"),
                                 writer.index(interruption))
                 self.assertIn("CreatePayloadDirectory", writer)
                 self.assertLess(writer.index(interruption), writer.index("CreatePayloadDirectory"))

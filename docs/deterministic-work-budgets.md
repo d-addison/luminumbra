@@ -84,7 +84,12 @@ counters retain their units.
 
 Collection adds an optional `work_items` object with schema
 `luminumbra.sim_work.v1` to the enabled `sim_budget` artifact, with ordered named
-counters and integer `{tick, work}` traces. It does not change the existing
+counters and integer `{tick, work}` traces. Capture, proposal, comparison and
+budget-check tools validate all nine counters when the extension is present:
+each trace has exactly the requested ticks, ordered from one, with unsigned
+64-bit tick/work values. Null, partial, duplicate, reordered and future-schema
+extensions are refused. Older artifacts without the extension remain readable.
+It does not change the existing
 `luminumbra.sim_budget.v2` timed-stage layout. Work replay comparison includes
 the new traces and excludes all clock values. Session ticks own region samples;
 the server runner owns the other samples. Collection disabled produces no trace
@@ -110,10 +115,30 @@ Production consumption validates generation and payload size before copying or
 allocating instance storage. Revision resolution precedes readback adoption,
 including on cache-elided frames.
 
-## Terrain upload follow-up
+## Terrain and water upload policy budgets
 
-Terrain upload budget counters depend on the sibling terrain-upload work and
-are deliberately absent here. After that work lands, add its actual upload
-bytes/counts and queue observations to this reviewed budget file and exercise
-the real terrain uploader on the same standard lane. Pointer snapshot counts
-and foliage transfers do not establish a terrain-upload budget.
+The existing `DeterministicWorkBudget` suite also drives the shipping terrain
+and water upload policies directly, without graphics calls or a clock. Each
+lane receives seventeen metadata descriptors with fixed payload costs. Queued
+revisions are replaced after the first pass; subsequent adoptions require the
+new revision. Six calls include an idle call after both lanes have drained.
+The callback represents successful adoption; graphics allocation and driver
+transfer qualification remain the responsibility of the existing renderer tests.
+
+| Lane | Bytes per payload | Bytes per pass | Uploads per pass | Backlog / positive growth | Drain calls |
+|---|---:|---:|---:|---:|---:|
+| Terrain | 524288 | 4194304 | 8 | 17 / 17 | 3 |
+| Water | 262144 | 1048576 | 4 | 17 / 17 | 5 |
+
+Terrain admits eight half-MiB items under its shipping four-MiB/eight-item
+policy; water admits four quarter-MiB items under its one-MiB/eight-item policy.
+Integer ceiling division of seventeen by eight/four gives three/five drain
+calls. All seventeen descriptors arrive together, deriving both backlog bounds.
+The fixture attains every ceiling and checks all seventeen adoptions and the
+total charged bytes, preventing zero work from passing. The shared negative
+control injects limit-plus-one for every new field as for the existing sections.
+
+`SimBudgetGateContract` pins the reviewed fixture values, counter names,
+producers and existing native registration. It and `SimBudgetCaptureContract`
+run in isolated Python mode in their existing CTest entries and standard
+standalone Python lane. There are no new jobs, runners or timeouts.

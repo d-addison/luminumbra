@@ -4,6 +4,10 @@
 
 struct GLFWwindow;
 
+namespace luminumbra::core {
+struct ResolvedGraphics;
+}
+
 namespace Luminumbra::world {
 class GameSession;
 }
@@ -38,6 +42,7 @@ bool RunSceneSurvey(GLFWwindow* window,
                     Camera& camera,
                     const std::filesystem::path& out_dir,
                     const std::filesystem::path& materials_json,
+                    const luminumbra::core::ResolvedGraphics& graphics,
                     bool wireframe);
 
 } // namespace Luminumbra::Rendering

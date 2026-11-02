@@ -1,9 +1,17 @@
 #include "WorldSaveService.h"
+#include "CreatedWorldArtifacts.h"
+#include "RegionFileWriteGuard.h"
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
+#include "PlantPersistence.h"
+#include "SavedInputFile.h"
+#include "SavedInputLimits.h"
+#include "SavedJsonAdmission.h"
 #include "WorldPersistenceRoundtrip.h"
+#include "core/CaptureContentPaths.h"
 #include "core/FilesystemPath.h"
+#include "core/Log.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -27,7 +35,6 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <ios>
 #include <limits>
@@ -35,7 +42,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
@@ -65,7 +74,183 @@
 #endif
 
 namespace Luminumbra::Persistence {
+namespace detail {
+
+struct RegionFileSync {
+    std::shared_mutex publication;
+    std::atomic<std::size_t> waiting_publishers{0};
+};
+
 namespace {
+RegionFileSync& RegionFileSyncFor(const std::filesystem::path& path) {
+    // Fixed storage bounds synchronization overhead regardless of world size.
+    // Hash the generated filename so relative/absolute world paths and Windows
+    // case differences select the same stripe. Collisions may delay publication;
+    // readers never acquire the writer mutex that covers compression or fsync.
+    static std::array<RegionFileSync, 256> stripes;
+    std::size_t hash = 0;
+    const auto filename = path.filename().native();
+    for (const auto character : filename) {
+        const auto folded =
+            character >= 'A' && character <= 'Z' ? character + ('a' - 'A') : character;
+        hash = hash * 31u + static_cast<std::size_t>(folded);
+    }
+    return stripes[hash % stripes.size()];
+}
+} // namespace
+
+FilePublicationReadGuard::FilePublicationReadGuard(const std::filesystem::path& path)
+    : m_sync(&RegionFileSyncFor(path)) {
+    m_sync->publication.lock_shared();
+}
+
+FilePublicationReadGuard::~FilePublicationReadGuard() {
+    m_sync->publication.unlock_shared();
+}
+
+RegionFileWriteGuard::RegionFileWriteGuard(const std::filesystem::path&) {}
+
+RegionFileWriteGuard::~RegionFileWriteGuard() = default;
+
+std::size_t RegionFileWriteGuard::waiting_writers() const {
+    return WorldSaveService::waiting_save_writers();
+}
+
+} // namespace detail
+
+// File-operation injection is defined here rather than in the production API.
+// Persistence regressions observe real open streams and emulate Windows sharing
+// violations on every platform. Hooks are installed before starting any workers.
+namespace detail {
+using ReadObserver = void (*)(const std::filesystem::path&, bool);
+using PublicationHook = bool (*)(const std::filesystem::path&, bool);
+namespace {
+std::atomic<ReadObserver>& ReadObserverForTesting() {
+    static std::atomic<ReadObserver> observer{nullptr};
+    return observer;
+}
+std::atomic<PublicationHook>& PublicationHookForTesting() {
+    static std::atomic<PublicationHook> hook{nullptr};
+    return hook;
+}
+} // namespace
+void set_file_read_observer_for_testing(ReadObserver observer) {
+    ReadObserverForTesting().store(observer, std::memory_order_release);
+}
+void set_file_publication_hook_for_testing(PublicationHook hook) {
+    PublicationHookForTesting().store(hook, std::memory_order_release);
+}
+std::size_t waiting_file_publishers_for_testing(const std::filesystem::path& path) {
+    return RegionFileSyncFor(path).waiting_publishers.load(std::memory_order_acquire);
+}
+} // namespace detail
+namespace {
+bool MissingSavedInputAncestorsAreValid(const std::filesystem::path& path);
+}
+
+SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks leaf_symlinks)
+    : m_publication(path)
+    , m_path(path) {
+#if defined(_WIN32)
+    // Win32 can report PATH_NOT_FOUND for an overlong component beneath a
+    // missing directory. Such an invalid path must never become a clean miss.
+    // Win32 file-name components are bounded to 255 UTF-16 code units.
+    for (const auto& component : path) {
+        if (component.native().size() > 255)
+            return;
+    }
+    const DWORD flags = leaf_symlinks == LeafSymlinks::Refuse
+                            ? FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS
+                            : FILE_FLAG_BACKUP_SEMANTICS;
+    m_handle = ::CreateFileW(
+        path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, flags, nullptr);
+    if (m_handle == INVALID_HANDLE_VALUE) {
+        const DWORD error = ::GetLastError();
+        m_missing = error == ERROR_FILE_NOT_FOUND ||
+                    (error == ERROR_PATH_NOT_FOUND && MissingAncestorsAreDirectories(path));
+    }
+#else
+    // NONBLOCK prevents a FIFO open from waiting for a writer; NOFOLLOW
+    // refuses even dangling symlinks rather than mistaking them for absence.
+    const int flags = leaf_symlinks == LeafSymlinks::Refuse
+                          ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                          : O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+    m_descriptor = ::open(path.c_str(), flags);
+    m_missing = m_descriptor < 0 && errno == ENOENT;
+#endif
+
+#if defined(_WIN32)
+    const bool opened = m_handle != INVALID_HANDLE_VALUE;
+#else
+    const bool opened = m_descriptor >= 0;
+#endif
+    if (!opened && m_missing && leaf_symlinks == LeafSymlinks::Refuse)
+        m_missing = MissingSavedInputAncestorsAreValid(m_path);
+    if (opened) {
+        if (const auto observer = detail::ReadObserverForTesting().load(std::memory_order_acquire))
+            observer(m_path, true);
+        if (leaf_symlinks == LeafSymlinks::Refuse)
+            m_location_admitted = is_within_save_root();
+    }
+}
+
+SavedInputFile::~SavedInputFile() {
+#if defined(_WIN32)
+    const bool opened = m_handle != INVALID_HANDLE_VALUE;
+#else
+    const bool opened = m_descriptor >= 0;
+#endif
+
+#if defined(_WIN32)
+    if (m_handle != INVALID_HANDLE_VALUE)
+        ::CloseHandle(m_handle);
+#else
+    if (m_descriptor >= 0)
+        ::close(m_descriptor);
+#endif
+
+    if (opened) {
+        if (const auto observer = detail::ReadObserverForTesting().load(std::memory_order_acquire))
+            observer(m_path, false);
+    }
+}
+
+namespace {
+
+std::shared_mutex& ClockPairPublicationMutex() {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
+void AcquirePublicationLock(std::unique_lock<std::shared_mutex>& lock,
+                            detail::RegionFileSync& sync) {
+    if (!lock.try_lock()) {
+        // Count only confirmed contention, so diagnostics establish that an
+        // open reader really prevented publication, independent of scheduling.
+        sync.waiting_publishers.fetch_add(1, std::memory_order_release);
+        lock.lock();
+        sync.waiting_publishers.fetch_sub(1, std::memory_order_release);
+    }
+}
+
+struct PublicationLocks {
+    std::unique_lock<std::shared_mutex> clock_pair;
+    std::unique_lock<std::shared_mutex> file;
+};
+
+PublicationLocks LockPublication(const std::filesystem::path& path) {
+    auto& sync = detail::RegionFileSyncFor(path);
+    PublicationLocks locks{.clock_pair =
+                               std::unique_lock(ClockPairPublicationMutex(), std::defer_lock),
+                           .file = std::unique_lock(sync.publication, std::defer_lock)};
+    // Readers comparing ledger and clock need one consistent pair, including
+    // across a rewind. Writers keep the installed ledger tick <= clock tick.
+    // Only replacement holds this gate; staging and fsync never acquire it.
+    if (path.filename() == "world_info.json" || path.filename() == "active-regions.arl")
+        AcquirePublicationLock(locks.clock_pair, sync);
+    AcquirePublicationLock(locks.file, sync);
+    return locks;
+}
 
 constexpr const char* kChunksDirectoryName = "chunks";
 constexpr const char* kWorldStateFileName = "world-state.json";
@@ -88,6 +273,101 @@ constexpr std::uint32_t kMaxRecordBytes = 64u * 1024u * 1024u;
 
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
+
+// Discovery may follow a directory link only within the resolved save root.
+// Payload leaves still use no-follow, same-handle type/length/read admission.
+// Missing directories are quiet; a present dangling link or wrong type is not.
+enum class PersistenceDirectory {
+    Missing,
+    Present,
+    Invalid
+};
+
+bool IsSaveDescendant(const std::filesystem::path& target, const std::filesystem::path& root) {
+    auto component = target.begin();
+    // Both resolved paths are bounded to 32767 native characters, bounding this walk.
+    for (const auto& expected : root) {
+        if (component == target.end() || !Filesystem::PathSpellingEqual(*component, expected))
+            return false;
+        ++component;
+    }
+    return component != target.end();
+}
+
+PersistenceDirectory InspectPersistenceDirectory(const std::filesystem::path& path,
+                                                 const std::filesystem::path& save_root) {
+    if (path.native().size() > 32767 || save_root.native().size() > 32767)
+        return PersistenceDirectory::Invalid;
+    std::error_code error;
+    const auto leaf = std::filesystem::symlink_status(path, error);
+    if (leaf.type() == std::filesystem::file_type::not_found &&
+        (!error || error == std::errc::no_such_file_or_directory))
+        return PersistenceDirectory::Missing;
+    if (error)
+        return PersistenceDirectory::Invalid;
+    if (std::filesystem::is_directory(leaf))
+        return PersistenceDirectory::Present;
+    if (!std::filesystem::is_symlink(leaf) || !std::filesystem::is_directory(path, error) || error)
+        return PersistenceDirectory::Invalid;
+    const auto root = Filesystem::WeaklyCanonicalPath(
+        save_root.empty() ? std::filesystem::path(".") : save_root, error);
+    if (error)
+        return PersistenceDirectory::Invalid;
+    const auto target = Filesystem::WeaklyCanonicalPath(path, error);
+    if (error || root.native().size() > 32767 || target.native().size() > 32767)
+        return PersistenceDirectory::Invalid;
+    return IsSaveDescendant(target, root) ? PersistenceDirectory::Present
+                                          : PersistenceDirectory::Invalid;
+}
+
+bool MissingSavedInputAncestorsAreValid(const std::filesystem::path& path) {
+    const auto directory = path.parent_path();
+    if (directory.filename() != kRegionDirectoryName ||
+        directory.parent_path().filename() != kChunksDirectoryName)
+        return true;
+    const auto save_root = directory.parent_path().parent_path();
+    // A missing payload beneath an escaping/dangling directory link is a
+    // refusal, not an optional miss. Ordinary missing directories stay quiet.
+    return InspectPersistenceDirectory(directory.parent_path(), save_root) !=
+               PersistenceDirectory::Invalid &&
+           InspectPersistenceDirectory(directory, save_root) != PersistenceDirectory::Invalid;
+}
+
+#if !defined(_WIN32)
+int OpenResolvedSavedInput(const std::filesystem::path& resolved) {
+#if defined(O_PATH)
+    constexpr int directory_access = O_PATH;
+#elif defined(O_SEARCH)
+    constexpr int directory_access = O_SEARCH;
+#else
+    constexpr int directory_access = O_RDONLY;
+#endif
+    constexpr int directory_flags = directory_access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+    int descriptor = ::open(resolved.root_path().c_str(), directory_flags);
+    if (descriptor < 0)
+        return -1;
+    try {
+        const auto relative = resolved.relative_path();
+        // The caller bounds resolved to 32767 native characters before this walk.
+        for (auto component = relative.begin(); component != relative.end(); ++component) {
+            auto next = component;
+            ++next;
+            const int flags = next == relative.end()
+                                  ? O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                                  : directory_flags;
+            const int child = ::openat(descriptor, component->c_str(), flags);
+            ::close(descriptor);
+            descriptor = child;
+            if (descriptor < 0)
+                return -1;
+        }
+    } catch (...) {
+        ::close(descriptor);
+        throw;
+    }
+    return descriptor;
+}
+#endif
 
 struct FileIdentity {
 #if defined(_WIN32)
@@ -152,7 +432,8 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
                       std::vector<std::string>* errors,
-                      FileIdentity* published_identity = nullptr);
+                      FileIdentity* published_identity = nullptr,
+                      CreatedWorldArtifacts* artifacts = nullptr);
 
 bool FlushAncestorEntries(const std::filesystem::path& destination,
                           std::vector<std::string>* errors);
@@ -288,7 +569,20 @@ std::uint64_t ReadU64(const unsigned char* bytes) {
 void AddError(std::vector<std::string>* errors, std::string message) {
     if (errors) {
         errors->push_back(std::move(message));
+    } else {
+        LUMINUMBRA_CORE_ERROR("{}", message);
     }
+}
+
+bool AllowPublication(const std::filesystem::path& path,
+                      bool removing,
+                      std::vector<std::string>* errors) {
+    if (const auto hook = detail::PublicationHookForTesting().load(std::memory_order_acquire);
+        hook && !hook(path, removing)) {
+        AddError(errors, "file publication refused: " + Filesystem::GenericUtf8PathString(path));
+        return false;
+    }
+    return true;
 }
 
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
@@ -354,9 +648,856 @@ std::filesystem::path NextRegionTempPath(const std::filesystem::path& destinatio
     return temp;
 }
 
-void RemoveTemporaryFile(const std::filesystem::path& path) {
+void RemoveTemporaryFile(const std::filesystem::path& path,
+                         CreatedWorldArtifacts* artifacts = nullptr) {
+    // Creation rollback owns these files and checks identity after writers drain.
+    if (artifacts)
+        return;
     std::error_code remove_error;
     std::filesystem::remove(path, remove_error);
+}
+
+// A sidecar is separate from every save format. Its instance identity is the
+// exclusively created record's file identity; the payload binds that instance
+// to one filename, one staging identity/change stamp and one save directory.
+using StagingIdentity = std::array<std::uint64_t, 6>;
+
+class StagingFile {
+public:
+    enum class RetainedAccess {
+        Identity,
+        Read
+    };
+    enum class Mode {
+        Inspect,
+        Create,
+        Deferred,
+        Directory
+    };
+
+    StagingFile(const std::filesystem::path& path, Mode mode)
+        : m_path(path) {
+        if (mode != Mode::Deferred)
+            open(mode);
+    }
+
+    void open(Mode mode) {
+#if defined(_WIN32)
+        const DWORD access = mode == Mode::Directory ? FILE_READ_ATTRIBUTES
+                             : mode == Mode::Create  ? GENERIC_READ | GENERIC_WRITE
+                                                     : GENERIC_READ | DELETE;
+        const DWORD sharing = mode == Mode::Create || mode == Mode::Directory
+                                  ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                                  : FILE_SHARE_READ | FILE_SHARE_DELETE;
+        m_handle = ::CreateFileW(m_path.c_str(),
+                                 access,
+                                 sharing,
+                                 nullptr,
+                                 mode == Mode::Create ? CREATE_NEW : OPEN_EXISTING,
+                                 (mode == Mode::Directory ? 0 : FILE_FLAG_OPEN_REPARSE_POINT) |
+                                     (mode == Mode::Create ? FILE_FLAG_WRITE_THROUGH : 0) |
+                                     FILE_FLAG_BACKUP_SEMANTICS,
+                                 nullptr);
+#else
+        const int flags = mode == Mode::Create ? O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC
+                          : mode == Mode::Directory
+                              ? O_RDONLY | O_DIRECTORY | O_CLOEXEC
+                              : O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
+        m_descriptor = ::open(m_path.c_str(), flags, 0666);
+#endif
+    }
+    StagingFile(const StagingFile&) = delete;
+    StagingFile& operator=(const StagingFile&) = delete;
+    ~StagingFile() {
+        close();
+    }
+
+    bool close() {
+#if defined(_WIN32)
+        if (m_handle == INVALID_HANDLE_VALUE)
+            return true;
+        const bool closed = ::CloseHandle(m_handle) != 0;
+        m_handle = INVALID_HANDLE_VALUE;
+#else
+        if (m_descriptor < 0)
+            return true;
+        const bool closed = ::close(m_descriptor) == 0;
+        m_descriptor = -1;
+#endif
+        return closed;
+    }
+
+    bool identity(StagingIdentity& result, bool directory = false, unsigned links = 1) const {
+#if defined(_WIN32)
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (m_handle == INVALID_HANDLE_VALUE || ::GetFileType(m_handle) != FILE_TYPE_DISK ||
+            !::GetFileInformationByHandle(m_handle, &info) ||
+            (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory ||
+            (!directory && (info.nNumberOfLinks == 0 || info.nNumberOfLinks > links)))
+            return false;
+        result = {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow, 0, 0, 0};
+        // Directory contents may change between recording and orphan cleanup.
+        // Bind only volume/index; retain timestamps and length for ordinary files.
+        if (directory)
+            return true;
+        result[3] = (static_cast<std::uint64_t>(info.ftCreationTime.dwHighDateTime) << 32) |
+                    info.ftCreationTime.dwLowDateTime;
+        result[4] = (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+                    info.ftLastWriteTime.dwLowDateTime;
+        result[5] = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+#else
+        struct stat info {};
+        if (m_descriptor < 0 || ::fstat(m_descriptor, &info) != 0 || info.st_ino == 0 ||
+            (directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode)) ||
+            (!directory && (info.st_nlink == 0 || info.st_nlink > links || info.st_size < 0)))
+            return false;
+        result = {static_cast<std::uint64_t>(info.st_dev),
+                  static_cast<std::uint64_t>(info.st_ino),
+                  0,
+                  0,
+                  0,
+                  0};
+        // ctime changes on entry creation, rename and removal within a directory.
+        if (directory)
+            return true;
+#if defined(__APPLE__)
+        const auto changed = info.st_ctimespec;
+#else
+        const auto changed = info.st_ctim;
+#endif
+        result[3] = static_cast<std::uint64_t>(changed.tv_sec);
+        result[4] = static_cast<std::uint64_t>(changed.tv_nsec);
+        result[5] = static_cast<std::uint64_t>(info.st_size);
+#endif
+        return true;
+    }
+
+    bool write(const std::string& bytes) const {
+        std::size_t offset = 0;
+        // Bounded by the admitted ledger size (or the 512-byte sidecar bound).
+        while (offset < bytes.size()) {
+#if defined(_WIN32)
+            DWORD written = 0;
+            const auto count =
+                static_cast<DWORD>(std::min<std::size_t>(bytes.size() - offset, 65536));
+            if (!::WriteFile(m_handle, bytes.data() + offset, count, &written, nullptr) ||
+                written == 0)
+                return false;
+#else
+            const auto count = std::min<std::size_t>(bytes.size() - offset, 65536);
+            const auto written = ::write(m_descriptor, bytes.data() + offset, count);
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(written);
+        }
+#if defined(_WIN32)
+        return ::FlushFileBuffers(m_handle) != 0;
+#else
+        int flushed = 0;
+        do {
+            flushed = ::fsync(m_descriptor);
+        } while (flushed != 0 && errno == EINTR);
+        return flushed == 0;
+#endif
+    }
+
+    bool promote_seed(const std::filesystem::path& destination,
+                      bool& occupied,
+                      std::vector<std::string>* errors) {
+        occupied = false;
+        if (!matches_name())
+            return refuse("staging reservation name no longer matches retained identity", errors);
+#if defined(_WIN32)
+        if (!::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            const DWORD error = ::GetLastError();
+            occupied = error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS;
+            return refuse("cannot exclusively promote staging reservation", errors);
+        }
+#else
+            // Prefer native no-replace rename, including on filesystems without
+            // hard links. The portable fallback also refuses every occupied leaf.
+#if defined(__linux__)
+        const int renamed = static_cast<int>(::syscall(SYS_renameat2,
+                                                       AT_FDCWD,
+                                                       m_path.c_str(),
+                                                       AT_FDCWD,
+                                                       destination.c_str(),
+                                                       RENAME_NOREPLACE));
+        if (renamed != 0 && errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP) {
+            occupied = errno == EEXIST;
+            return refuse("cannot exclusively promote staging reservation", errors);
+        }
+        const bool needs_link = renamed != 0;
+#elif defined(__APPLE__)
+        if (::renamex_np(m_path.c_str(), destination.c_str(), RENAME_EXCL) != 0) {
+            occupied = errno == EEXIST;
+            return refuse("cannot exclusively promote staging reservation", errors);
+        }
+        constexpr bool needs_link = false;
+#else
+        constexpr bool needs_link = true;
+#endif
+        if (needs_link) {
+            // An interruption between link and unlink leaves two names, both
+            // of which recovery verifies against the durable reservation.
+            if (::link(m_path.c_str(), destination.c_str()) != 0) {
+                occupied = errno == EEXIST;
+                return refuse("cannot exclusively promote staging reservation", errors);
+            }
+            if (!matches_name(2) || ::unlink(m_path.c_str()) != 0)
+                return refuse("cannot retire staging reservation name", errors);
+        }
+#endif
+        m_path = destination;
+        return matches_name();
+    }
+
+    bool truncate_payload() const {
+#if defined(_WIN32)
+        LARGE_INTEGER start{};
+        return ::SetFilePointerEx(m_handle, start, nullptr, FILE_BEGIN) && ::SetEndOfFile(m_handle);
+#else
+        return ::lseek(m_descriptor, 0, SEEK_SET) == 0 && ::ftruncate(m_descriptor, 0) == 0;
+#endif
+    }
+
+    bool finish_write(RetainedAccess access, std::vector<std::string>* errors) {
+        // Check close errors before use, then retain only the same file through
+        // publication. A replacement observed during reopening is never adopted.
+        StagingIdentity before{};
+        if (!identity(before))
+            return refuse("cannot identify staging file before closing writer", errors);
+#if defined(_WIN32)
+        const bool closed = ::CloseHandle(m_handle) != 0;
+        m_handle = INVALID_HANDLE_VALUE;
+        if (!closed)
+            return refuse("cannot close staging writer", errors);
+        // ReplaceFileW opens the replacement without sharing read/write/delete
+        // access. Retain attributes only for a payload: a GENERIC_READ handle
+        // conflicts even when that handle itself grants FILE_SHARE_DELETE.
+        // Sidecars need read access but are never replacement payloads.
+        m_handle =
+            ::CreateFileW(m_path.c_str(),
+                          access == RetainedAccess::Read ? GENERIC_READ : FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
+#else
+        const bool closed = ::close(m_descriptor) == 0;
+        m_descriptor = -1;
+        if (!closed)
+            return refuse("cannot close staging writer", errors);
+        (void)access;
+        m_descriptor = ::open(m_path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+#endif
+        StagingIdentity after{};
+#if defined(_WIN32)
+        // Windows finalizes last-write time when the writing handle closes.
+        // Creation time, identity and length must survive the reopen unchanged.
+        if (identity(after) && std::equal(before.begin(), before.begin() + 4, after.begin()) &&
+            before[5] == after[5])
+            return true;
+#else
+        if (identity(after) && after == before)
+            return true;
+#endif
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE)
+            ::CloseHandle(m_handle);
+        m_handle = INVALID_HANDLE_VALUE;
+#else
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+        m_descriptor = -1;
+#endif
+        return refuse("cannot retain unchanged staging identity after closing writer", errors);
+    }
+
+    bool read_record(std::string& bytes) const {
+        StagingIdentity current{};
+        // Sidecars have a fixed 512-byte admission ceiling, before allocation.
+        if (!identity(current) || current[5] > 512)
+            return false;
+        bytes.assign(static_cast<std::size_t>(current[5]), '\0');
+#if defined(_WIN32)
+        LARGE_INTEGER start{};
+        if (!::SetFilePointerEx(m_handle, start, nullptr, FILE_BEGIN))
+            return false;
+#else
+        if (::lseek(m_descriptor, 0, SEEK_SET) < 0)
+            return false;
+#endif
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+#if defined(_WIN32)
+            DWORD received = 0;
+            if (!::ReadFile(m_handle,
+                            bytes.data() + offset,
+                            static_cast<DWORD>(bytes.size() - offset),
+                            &received,
+                            nullptr) ||
+                received == 0)
+                return false;
+#else
+            const auto received =
+                ::read(m_descriptor, bytes.data() + offset, bytes.size() - offset);
+            if (received < 0 && errno == EINTR)
+                continue;
+            if (received <= 0)
+                return false;
+#endif
+            offset += static_cast<std::size_t>(received);
+        }
+        StagingIdentity after{};
+        return identity(after) && after == current;
+    }
+
+    bool matches_path(const std::filesystem::path& path, unsigned links = 1) const {
+        StagingIdentity held{};
+        FileIdentity named;
+        if (!identity(held, false, links) || !ReadFileIdentity(path, named))
+            return false;
+#if defined(_WIN32)
+        return named.volume == held[0] && named.index_high == held[1] && named.index_low == held[2];
+#else
+        return static_cast<std::uint64_t>(named.device) == held[0] &&
+               static_cast<std::uint64_t>(named.inode) == held[1];
+#endif
+    }
+
+    bool matches_name(unsigned links = 1) const {
+        return matches_path(m_path, links);
+    }
+
+    void retain_publication_identity() {
+#if defined(_WIN32)
+        // Both first installation and journal creation publish through hard
+        // links. A named payload handle keeps the source link delete-pending
+        // even with delete sharing; retain only its identity before publication.
+        const auto retained = CreatedWorldArtifacts::retain_file_identity(m_handle);
+        const bool retired = close();
+        m_handle = retained;
+        if (!retired)
+            throw std::runtime_error("Cannot close named staging payload handle.");
+#endif
+    }
+
+    void record_artifact(CreatedWorldArtifacts& artifacts) {
+        retain_publication_identity();
+#if defined(_WIN32)
+        artifacts.record_staged_file(m_path, m_handle);
+#else
+        artifacts.record_staged_file(m_path, m_descriptor);
+#endif
+        m_artifacts = &artifacts;
+    }
+
+    bool remove(unsigned links = 1) {
+        StagingIdentity held{};
+        if (!identity(held, false, links) || !matches_name(links))
+            return false;
+#if defined(_WIN32)
+        // Reopen only for delete access, verify against the retained identity,
+        // then disposition targets that handle even if the name is substituted.
+        const HANDLE retiring =
+            ::CreateFileW(m_path.c_str(),
+                          DELETE | FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr);
+        if (retiring == INVALID_HANDLE_VALUE)
+            return false;
+        BY_HANDLE_FILE_INFORMATION info{};
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        const bool removed = ::GetFileInformationByHandle(retiring, &info) &&
+                             (info.dwFileAttributes &
+                              (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+                             info.nNumberOfLinks > 0 && info.nNumberOfLinks <= links &&
+                             info.dwVolumeSerialNumber == held[0] &&
+                             info.nFileIndexHigh == held[1] && info.nFileIndexLow == held[2] &&
+                             ::SetFileInformationByHandle(retiring,
+                                                          FileDispositionInfo,
+                                                          &disposition,
+                                                          static_cast<DWORD>(sizeof(disposition)));
+        // Disposition alone leaves the name enumerable until ALL retained
+        // handles close, including the creation journal's open-by-ID handle.
+        // Keep retiring open while releasing those references, so identity
+        // cannot be recycled between the removal and journal retirement.
+        const bool finished = removed && finish_removal();
+        const bool closed = ::CloseHandle(retiring) != 0;
+        return finished && closed;
+#else
+        struct stat named {};
+        // SaveGuard excludes cooperating writers. Recheck at unlink itself;
+        // POSIX has no identity-conditioned unlink for hostile concurrent writers.
+        return ::lstat(m_path.c_str(), &named) == 0 && S_ISREG(named.st_mode) &&
+               named.st_nlink > 0 && named.st_nlink <= links &&
+               static_cast<std::uint64_t>(named.st_dev) == held[0] &&
+               static_cast<std::uint64_t>(named.st_ino) == held[1] &&
+               ::unlink(m_path.c_str()) == 0 && finish_removal();
+#endif
+    }
+
+    bool refuse(const char* reason, std::vector<std::string>* errors) const {
+        AddError(errors, std::string(reason) + ": " + Filesystem::GenericUtf8PathString(m_path));
+        return false;
+    }
+
+private:
+    bool finish_removal() {
+        if (m_artifacts) {
+            try {
+#if defined(_WIN32)
+                m_artifacts->forget_removed_staged_file(m_path, m_handle);
+#else
+                m_artifacts->forget_removed_staged_file(m_path, m_descriptor);
+#endif
+                m_artifacts = nullptr;
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        return close();
+    }
+
+    std::filesystem::path m_path;
+    CreatedWorldArtifacts* m_artifacts = nullptr;
+#if defined(_WIN32)
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+};
+
+std::filesystem::path OwnershipPath(const std::filesystem::path& staging) {
+    auto record = staging;
+    record += ".owner";
+    return record;
+}
+
+std::filesystem::path ClaimPath(const std::filesystem::path& staging) {
+    auto record = staging;
+    record += ".claim";
+    return record;
+}
+
+StagingIdentity StablePayloadIdentity(const StagingIdentity& identity) {
+    // An incomplete claim binds the reserved inode/file index, before its
+    // contents and change stamps exist. Completed .owner records keep all six words.
+    auto stable = identity;
+    std::fill(stable.begin() + 3, stable.end(), 0);
+    return stable;
+}
+
+std::string StagingOwnershipBytes(const std::filesystem::path& staging,
+                                  const StagingIdentity& world_identity,
+                                  const StagingIdentity& staging_identity,
+                                  const StagingIdentity& instance_identity) {
+    const auto filename = staging.filename();
+    const auto& native_name = filename.native();
+    // Native staging names are short ASCII; reject foreign names before UTF-8
+    // conversion, including ill-formed native Unicode. The record is <= 512 bytes.
+    if (native_name.size() > 256 ||
+        std::any_of(native_name.begin(), native_name.end(), [](auto unit) {
+            return static_cast<std::uint64_t>(unit) > 127;
+        }))
+        return {};
+    const auto name = Filesystem::GenericUtf8PathString(filename);
+    // Version 1 already stores only the directory's three stable identity words.
+    // At most 408 bytes: 8 magic + 12 identity words + name length + 256 name
+    // bytes + 32 instance bytes + checksum. This stays within the 512-byte reader bound.
+    std::string bytes = "AROWN001";
+    for (std::size_t index = 0; index < 3; ++index)
+        AppendU64(bytes, world_identity[index]);
+    for (const auto value : staging_identity)
+        AppendU64(bytes, value);
+    for (std::size_t index = 0; index < 3; ++index)
+        AppendU64(bytes, instance_identity[index]);
+    AppendU64(bytes, name.size());
+    bytes += name;
+    const auto instance_start = name.rfind('.');
+    if (instance_start == std::string::npos || name.size() - instance_start - 1 != 32)
+        return {};
+    const auto instance = name.substr(instance_start + 1);
+    if (instance.find_first_not_of("0123456789abcdef") != std::string::npos)
+        return {};
+    bytes += instance;
+    std::uint64_t checksum = 14695981039346656037ull;
+    for (const unsigned char byte : bytes) {
+        checksum ^= byte;
+        checksum *= 1099511628211ull;
+    }
+    AppendU64(bytes, checksum);
+    return bytes;
+}
+
+bool ValidStagingOwnership(const std::filesystem::path& staging,
+                           const StagingFile& payload,
+                           const StagingFile& record,
+                           std::string* reason = nullptr) {
+    // This detects invalid/altered records, not deliberate valid fabrication by
+    // an actor already able to write the save directory; that is outside scope.
+    const auto parent =
+        staging.has_parent_path() ? staging.parent_path() : std::filesystem::path(".");
+    const StagingFile directory(parent, StagingFile::Mode::Directory);
+    StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
+    std::string recorded;
+    const auto refuse = [reason](const char* message) {
+        if (reason)
+            *reason = message;
+        return false;
+    };
+    if (!payload.matches_name())
+        return refuse("staging payload name no longer matches retained identity");
+    if (!record.matches_name())
+        return refuse("staging ownership name no longer matches retained identity");
+    if (!directory.identity(world_identity, true))
+        return refuse("cannot identify staging save directory during ownership validation");
+    if (!payload.identity(staging_identity))
+        return refuse("cannot identify staging payload during ownership validation");
+    if (!record.identity(instance_identity))
+        return refuse("cannot identify staging ownership instance during validation");
+    if (!record.read_record(recorded))
+        return refuse("cannot read complete unchanged staging ownership within 512-byte limit");
+    const auto expected =
+        StagingOwnershipBytes(staging, world_identity, staging_identity, instance_identity);
+    if (expected.empty())
+        return refuse("cannot encode staging ownership filename or instance during validation");
+    if (recorded != expected)
+        return refuse(
+            "staging ownership bytes do not match directory, payload, instance or filename");
+    return true;
+}
+
+bool ReclaimOwnedLedgerStaging(const std::filesystem::path& staging) {
+    StagingFile payload(staging, StagingFile::Mode::Inspect);
+    StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    if (!ValidStagingOwnership(staging, payload, record))
+        return false;
+    if (!payload.remove())
+        return payload.refuse("cannot reclaim verified abandoned staging payload", nullptr);
+    if (!record.remove())
+        record.refuse("cannot reclaim staging ownership after payload removal", nullptr);
+    FlushRemovalDirectory(staging, nullptr);
+    return true;
+}
+
+bool ValidOrphanedStagingOwnership(const std::filesystem::path& staging,
+                                   const StagingFile& record,
+                                   StagingIdentity* payload_identity = nullptr) {
+    const auto parent =
+        staging.has_parent_path() ? staging.parent_path() : std::filesystem::path(".");
+    const StagingFile directory(parent, StagingFile::Mode::Directory);
+    StagingIdentity world_identity{}, staging_identity{}, instance_identity{};
+    std::string recorded;
+    if (!record.matches_name() || !directory.identity(world_identity, true) ||
+        !record.identity(instance_identity) || !record.read_record(recorded))
+        return false;
+    // Only the historical payload identity is unavailable after publication.
+    // Read its six fixed-width fields within the admitted 512-byte record, then
+    // require the entire canonical encoding, including all remaining bindings.
+    constexpr std::size_t kPayloadIdentityOffset = 8 + 3 * 8;
+    if (recorded.size() < kPayloadIdentityOffset + staging_identity.size() * 8)
+        return false;
+    for (std::size_t index = 0; index < staging_identity.size(); ++index)
+        staging_identity[index] = ReadU64(reinterpret_cast<const unsigned char*>(
+            recorded.data() + kPayloadIdentityOffset + index * 8));
+    const auto expected =
+        StagingOwnershipBytes(staging, world_identity, staging_identity, instance_identity);
+    if (expected.empty() || recorded != expected)
+        return false;
+    if (payload_identity)
+        *payload_identity = staging_identity;
+    return true;
+}
+
+bool StagingPathMissing(const std::filesystem::path& staging) {
+    // A failed open is not absence: preserve inaccessible and nonregular leaves,
+    // including dangling symlinks and reparse points.
+    const auto refuse = [&staging](const char* reason) {
+        AddError(nullptr, std::string(reason) + ": " + Filesystem::GenericUtf8PathString(staging));
+        return false;
+    };
+#if defined(_WIN32)
+    const HANDLE leaf = ::CreateFileW(staging.c_str(),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                                      nullptr);
+    if (leaf != INVALID_HANDLE_VALUE) {
+        if (!::CloseHandle(leaf))
+            return refuse("cannot close staging leaf inspection handle during orphan cleanup");
+        return refuse("preserving staging ownership: payload leaf is still present");
+    }
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        return true;
+#else
+    struct stat named {};
+    if (::lstat(staging.c_str(), &named) == 0)
+        return refuse("preserving staging ownership: payload leaf is still present");
+    if (errno == ENOENT)
+        return true;
+#endif
+    return refuse("cannot inspect staging payload leaf during orphan cleanup");
+}
+
+bool ReclaimOrphanedLedgerStaging(const std::filesystem::path& staging) {
+    StagingFile record(OwnershipPath(staging), StagingFile::Mode::Inspect);
+    if (!ValidOrphanedStagingOwnership(staging, record) || !StagingPathMissing(staging))
+        return false;
+    if (!record.remove())
+        return record.refuse("cannot reclaim verified orphaned staging ownership", nullptr);
+    FlushRemovalDirectory(staging, nullptr);
+    return true;
+}
+
+bool ReclaimClaimedLedgerStaging(const std::filesystem::path& staging) {
+    StagingFile claim(ClaimPath(staging), StagingFile::Mode::Inspect);
+    StagingIdentity reserved{};
+    if (!ValidOrphanedStagingOwnership(staging, claim, &reserved) ||
+        reserved != StablePayloadIdentity(reserved) || (reserved[1] == 0 && reserved[2] == 0))
+        return false;
+    StagingFile payload(staging, StagingFile::Mode::Inspect);
+    StagingIdentity present{};
+    if (payload.identity(present, false, 2)) {
+        if (StablePayloadIdentity(present) != reserved || !payload.matches_name(2))
+            return false;
+        // A POSIX interruption between link and unlink leaves both names of
+        // the reservation. Permit two links only when BOTH names prove that
+        // exact inode; an unrelated hard link is never sufficient.
+        StagingFile seed(OwnershipPath(staging), StagingFile::Mode::Inspect);
+        StagingIdentity seed_identity{};
+        if (seed.identity(seed_identity, false, 2) &&
+            StablePayloadIdentity(seed_identity) == reserved) {
+            if (!seed.remove(2) || !seed.close())
+                return false;
+        }
+        if (!payload.remove() || !payload.close())
+            return false;
+        // A completed record is removable by the ordinary orphan validator.
+        // A partial or substituted completion remains unprovable and survives.
+        ReclaimOrphanedLedgerStaging(staging);
+    } else if (!StagingPathMissing(staging)) {
+        return false;
+    } else {
+        ReclaimOrphanedLedgerStaging(staging);
+    }
+    if (!claim.remove())
+        return claim.refuse("cannot reclaim verified staging claim", nullptr);
+    FlushRemovalDirectory(staging, nullptr);
+    return true;
+}
+
+std::filesystem::path NextLedgerTempPath(const std::filesystem::path& destination) {
+    auto path = NextRegionTempPath(destination);
+    std::random_device entropy;
+    // A 128-bit suffix avoids predictable collisions after sequence/PID reuse.
+    constexpr char digits[] = "0123456789abcdef";
+    std::string instance;
+    instance.reserve(32);
+    for (int word = 0; word < 4; ++word) {
+        const auto value = static_cast<std::uint32_t>(entropy());
+        for (int shift = 28; shift >= 0; shift -= 4)
+            instance.push_back(digits[(value >> shift) & 15u]);
+    }
+    path += "." + instance;
+    return path;
+}
+
+class LedgerStaging {
+public:
+    explicit LedgerStaging(const std::filesystem::path& destination)
+        : m_path(NextLedgerTempPath(destination))
+        , m_payload(OwnershipPath(m_path), StagingFile::Mode::Create)
+        , m_claim(ClaimPath(m_path), StagingFile::Mode::Create)
+        , m_record(OwnershipPath(m_path), StagingFile::Mode::Deferred) {}
+    ~LedgerStaging() {
+        // Only remove objects created by this call. A substituted payload or
+        // record has lost proof and both occupants must survive untouched.
+        bool payload_remains = false;
+        if (m_ready) {
+            if (!ValidStagingOwnership(m_path, m_payload, m_record)) {
+                payload_remains = true;
+                m_record.refuse("preserving staging pair: ownership changed before rollback",
+                                nullptr);
+            } else if (!m_payload.remove()) {
+                payload_remains = true;
+                m_payload.refuse("cannot remove verified staging payload during rollback", nullptr);
+            } else if (!m_record.remove()) {
+                m_record.refuse("cannot remove staging ownership after payload rollback", nullptr);
+            }
+        } else {
+            if (m_payload_created && !m_payload.remove()) {
+                payload_remains = true;
+                m_payload.refuse("cannot remove newly created staging payload", nullptr);
+            }
+            if (m_record_created && !m_record.remove())
+                m_record.refuse("cannot remove newly created staging ownership", nullptr);
+        }
+        if (!payload_remains && m_claim_created && !m_claim.remove())
+            m_claim.refuse("cannot remove newly created staging claim", nullptr);
+    }
+    LedgerStaging(const LedgerStaging&) = delete;
+    LedgerStaging& operator=(const LedgerStaging&) = delete;
+
+    bool available(std::vector<std::string>* errors) {
+        StagingIdentity payload_identity{}, claim_identity{};
+        m_payload_created = m_payload.identity(payload_identity);
+        m_claim_created = m_claim.identity(claim_identity);
+        if (!m_payload_created)
+            return m_payload.refuse("cannot exclusively create and identify staging payload",
+                                    errors);
+        if (!m_claim_created)
+            return m_claim.refuse("cannot exclusively create and identify staging ownership",
+                                  errors);
+        return true;
+    }
+    bool prepare(const std::string& bytes, std::vector<std::string>* errors) {
+        const auto parent =
+            m_path.has_parent_path() ? m_path.parent_path() : std::filesystem::path(".");
+        const StagingFile directory(parent, StagingFile::Mode::Directory);
+        StagingIdentity world_identity{}, staging_identity{}, instance_identity{}, claim_identity{};
+        if (!directory.identity(world_identity, true))
+            return directory.refuse("cannot identify staging save directory", errors);
+        if (!m_payload.identity(instance_identity) || !m_claim.identity(claim_identity))
+            return m_record.refuse("cannot identify staging ownership instance", errors);
+        // The future payload starts as a small, self-identifying ownership
+        // record. No ledger bytes exist until its identity is durably claimed.
+        const auto seed = StagingOwnershipBytes(m_path, world_identity, {}, instance_identity);
+        const auto claim = StagingOwnershipBytes(
+            m_path, world_identity, StablePayloadIdentity(instance_identity), claim_identity);
+        if (seed.empty() || claim.empty())
+            return m_claim.refuse("cannot encode staging ownership filename or instance", errors);
+        if (!m_payload.write(seed) || !m_claim.write(claim))
+            return m_claim.refuse("cannot write and flush staging claim", errors);
+        if (!m_claim.finish_write(StagingFile::RetainedAccess::Read, errors) ||
+            !FlushAncestorEntries(m_path, errors) || !FlushRemovalDirectory(m_path, errors))
+            return false;
+        if (!m_payload.promote_seed(m_path, m_occupied, errors) ||
+            !FlushRemovalDirectory(m_path, errors))
+            return false;
+        if (!m_payload.truncate_payload() || !m_payload.write(bytes))
+            return m_payload.refuse("cannot write and flush staging payload", errors);
+        if (!m_payload.finish_write(StagingFile::RetainedAccess::Identity, errors))
+            return false;
+        if (!m_payload.identity(staging_identity))
+            return m_payload.refuse("cannot identify completed staging payload", errors);
+        m_record.open(StagingFile::Mode::Create);
+        m_record_created = m_record.identity(instance_identity);
+        if (!m_record_created)
+            return m_record.refuse("cannot exclusively create and identify staging completion",
+                                   errors);
+        // The record is still empty here. Its size and change stamps move as it is
+        // written, so bind only the device and file index, which are what the
+        // encoder and every validator compare.
+        instance_identity = StablePayloadIdentity(instance_identity);
+        const auto ownership =
+            StagingOwnershipBytes(m_path, world_identity, staging_identity, instance_identity);
+        if (ownership.empty())
+            return m_record.refuse("cannot encode staging ownership filename or instance", errors);
+        if (!m_record.write(ownership))
+            return m_record.refuse("cannot write and flush staging ownership", errors);
+        if (!m_record.finish_write(StagingFile::RetainedAccess::Read, errors) ||
+            !FlushRemovalDirectory(m_path, errors))
+            return false;
+        m_ready = true;
+        // Keep the durable stable-identity claim until completion is durable;
+        // a torn completion write can never strand a ledger-sized payload.
+        if (!m_claim.remove())
+            return m_claim.refuse("cannot retire completed staging claim", errors);
+        m_claim_created = false;
+        // Windows does not retire a delete-pending name until the last handle
+        // closes. Hooks and publication must not observe that name as a payload.
+        if (!m_claim.close())
+            return m_claim.refuse("cannot close retired staging claim", errors);
+        if (!FlushRemovalDirectory(m_path, errors))
+            return false;
+        return true;
+    }
+    bool valid(std::vector<std::string>* errors) const {
+        if (!m_ready)
+            return m_record.refuse("staging ownership has not been prepared", errors);
+        std::string reason;
+        if (!ValidStagingOwnership(m_path, m_payload, m_record, &reason))
+            return m_record.refuse(reason.c_str(), errors);
+        return true;
+    }
+    bool occupied() const {
+        return m_occupied;
+    }
+    const std::filesystem::path& path() const {
+        return m_path;
+    }
+    StagingFile& payload() {
+        return m_payload;
+    }
+    void record_payload(CreatedWorldArtifacts& artifacts) {
+        // Register only the validated attempt immediately before publication.
+        // Staging still owns identity-checked payload/sidecar cleanup on failure;
+        // the journal tolerates the absent temporary and owns the published file.
+        m_payload.record_artifact(artifacts);
+    }
+    bool installed_at(const std::filesystem::path& destination, unsigned links = 1) const {
+        return m_payload.matches_path(destination, links);
+    }
+    void published(std::vector<std::string>* errors) {
+        // The payload was renamed (including a post-rename flush failure).
+        // The caller's live ledger is never retired through this handle.
+        m_ready = false;
+        m_payload_created = false;
+        if (m_record.remove())
+            m_record_created = false;
+        else
+            m_record.refuse("cannot remove staging ownership after publication", errors);
+        FlushRemovalDirectory(m_path, errors);
+    }
+
+private:
+    std::filesystem::path m_path;
+    StagingFile m_payload;
+    StagingFile m_claim;
+    StagingFile m_record;
+    bool m_payload_created = false;
+    bool m_record_created = false;
+    bool m_claim_created = false;
+    bool m_ready = false;
+    bool m_occupied = false;
+};
+
+bool StagingNameHasPrefix(const std::filesystem::path& name, const std::filesystem::path& prefix) {
+    const auto& native_name = name.native();
+    const auto& native_prefix = prefix.native();
+    if (native_name.size() < native_prefix.size())
+        return false;
+    return std::equal(
+        native_prefix.begin(), native_prefix.end(), native_name.begin(), [](auto left, auto right) {
+#if defined(_WIN32)
+            // Generated names are ASCII. Recognize their case aliases
+            // before choosing ownership-aware cleanup on Windows.
+            const auto fold = [](auto unit) {
+                return unit >= 'A' && unit <= 'Z' ? unit + ('a' - 'A') : unit;
+            };
+            return fold(left) == fold(right);
+#else
+                          return left == right;
+#endif
+        });
+}
+
+bool StagingNameEquals(const std::filesystem::path& name, const std::filesystem::path& expected) {
+    return name.native().size() == expected.native().size() && StagingNameHasPrefix(name, expected);
 }
 
 // SaveGuard spans enumeration through replacement/removal for every writer.
@@ -369,8 +1510,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     const auto directory =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
     // Compare native filename code units, including Unicode on Windows.
-    auto prefix = destination.filename();
-    prefix += ".tmp.";
+    const auto prefix = destination.filename().native() + std::filesystem::path(".tmp.").native();
     std::size_t reclaimed = 0;
     std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
@@ -378,10 +1518,25 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     for (const std::filesystem::directory_iterator end; !list_error && it != end;
          it.increment(list_error)) {
         const auto& entry = *it;
+        if (!StagingNameHasPrefix(entry.path().filename(), prefix))
+            continue;
+        if (StagingNameEquals(destination.filename(), "active-regions.arl")) {
+            if (StagingNameEquals(entry.path().extension(), ".claim")) {
+                auto staging = entry.path();
+                staging.replace_extension();
+                if (ReclaimClaimedLedgerStaging(staging))
+                    ++reclaimed;
+            } else if (StagingNameEquals(entry.path().extension(), ".owner")) {
+                auto staging = entry.path();
+                staging.replace_extension();
+                if (ReclaimOrphanedLedgerStaging(staging))
+                    ++reclaimed;
+            } else if (ReclaimOwnedLedgerStaging(entry.path()))
+                ++reclaimed;
+            continue;
+        }
         std::error_code kind_error;
         if (!entry.is_regular_file(kind_error) || kind_error)
-            continue;
-        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
             continue;
         std::error_code remove_error;
         if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
@@ -430,21 +1585,33 @@ using RegionFileHandle = HANDLE;
 bool OpenDurableRegionTemp(const std::filesystem::path& destination,
                            HANDLE& file,
                            std::filesystem::path& out_temp,
-                           std::vector<std::string>* errors) {
+                           std::vector<std::string>* errors,
+                           CreatedWorldArtifacts* artifacts = nullptr) {
     file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
                              GENERIC_WRITE,
-                             0,
+                             artifacts ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : 0,
                              nullptr,
                              CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
                              nullptr);
         if (file != INVALID_HANDLE_VALUE) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::CloseHandle(file);
+                throw;
+            }
             break;
         }
         const DWORD error = ::GetLastError();
+        if (artifacts)
+            artifacts->abandon_file_reservation();
         if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
             AddError(errors,
                      "failed to create temporary region file: " +
@@ -469,11 +1636,12 @@ void CloseRegionFile(HANDLE file) {
 
 bool FinishDurableRegionTemp(HANDLE file,
                              const std::filesystem::path& out_temp,
-                             std::vector<std::string>* errors) {
+                             std::vector<std::string>* errors,
+                             CreatedWorldArtifacts* artifacts = nullptr) {
     if (!::FlushFileBuffers(file)) {
         const DWORD error = ::GetLastError();
         ::CloseHandle(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -482,7 +1650,7 @@ bool FinishDurableRegionTemp(HANDLE file,
     }
     if (!::CloseHandle(file)) {
         const DWORD error = ::GetLastError();
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -494,10 +1662,19 @@ bool FinishDurableRegionTemp(HANDLE file,
 
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr,
+                                 StagingFile* retained_payload = nullptr) {
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
+    const auto publish = LockPublication(destination);
+    if (!AllowPublication(destination, false, errors))
+        return false;
+    if (artifacts) {
+        artifacts->publish_file(temp, destination);
+        return true;
+    }
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         if (::ReplaceFileW(destination.c_str(),
@@ -524,15 +1701,40 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      WindowsErrorMessage(attributes_error));
         return false;
     }
-    if (::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        return true;
+    // ReplaceFileW above permits the retained attributes handle. First install
+    // retires a hard-link source, so release its named handle while keeping ID.
+    if (retained_payload)
+        retained_payload->retain_publication_identity();
+    auto file = ::CreateFileW(temp.c_str(),
+                              GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        AddError(errors, "cannot bind file installation: " + WindowsErrorMessage(::GetLastError()));
+        return false;
     }
-    const DWORD error = ::GetLastError();
-    AddError(errors,
-             "failed to atomically install region file: " +
-                 Filesystem::GenericUtf8PathString(destination) + ": " +
-                 WindowsErrorMessage(error));
-    return false;
+    try {
+        file =
+            Detail::WindowsPublishWithoutReplacement(std::exchange(file, INVALID_HANDLE_VALUE),
+                                                     temp,
+                                                     destination,
+                                                     GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES);
+        // Flush the published object's data and metadata through its bound link.
+        if (!::FlushFileBuffers(file))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Cannot flush installed file");
+    } catch (const std::exception& error) {
+        if (file != INVALID_HANDLE_VALUE)
+            ::CloseHandle(file);
+        AddError(errors, "failed to atomically install region file: " + std::string(error.what()));
+        return false;
+    }
+    ::CloseHandle(file);
+    return true;
 }
 
 #else
@@ -574,16 +1776,28 @@ using RegionFileHandle = int;
 bool OpenDurableRegionTemp(const std::filesystem::path& destination,
                            int& file,
                            std::filesystem::path& out_temp,
-                           std::vector<std::string>* errors) {
+                           std::vector<std::string>* errors,
+                           CreatedWorldArtifacts* artifacts = nullptr) {
     file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
         if (file >= 0) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::close(file);
+                throw;
+            }
             break;
         }
-        if (errno != EEXIST) {
-            const int error = errno;
+        const int error = errno;
+        if (artifacts)
+            artifacts->abandon_file_reservation();
+        if (error != EEXIST) {
             AddError(errors,
                      "failed to create temporary region file: " +
                          Filesystem::GenericUtf8PathString(out_temp) + ": " +
@@ -607,14 +1821,15 @@ void CloseRegionFile(int file) {
 
 bool FinishDurableRegionTemp(int file,
                              const std::filesystem::path& out_temp,
-                             std::vector<std::string>* errors) {
+                             std::vector<std::string>* errors,
+                             CreatedWorldArtifacts* artifacts = nullptr) {
     while (::fsync(file) != 0) {
         if (errno == EINTR) {
             continue;
         }
         const int error = errno;
         ::close(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
@@ -622,7 +1837,7 @@ bool FinishDurableRegionTemp(int file,
     }
     if (::close(file) != 0) {
         const int error = errno;
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " +
                      Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
@@ -631,22 +1846,34 @@ bool FinishDurableRegionTemp(int file,
     return true;
 }
 
+bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
+                         std::vector<std::string>* errors);
+
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr,
+                                 StagingFile* retained_payload = nullptr) {
+    (void)retained_payload; // POSIX open descriptors do not delay source unlink.
     LUMIN_PROFILE_ZONE_N("File save replace");
     if (!FlushAncestorEntries(destination, errors))
         return false;
-    // POSIX rename replaces an existing same-filesystem destination atomically.
-    // World members stage in the save root outside the chunks scan; standalone
-    // containers stage beside the file. Cross-filesystem rename fails safely.
-    if (std::rename(temp.c_str(), destination.c_str()) != 0) {
-        const int error = errno;
-        AddError(errors,
-                 "failed to atomically replace region file: " +
-                     Filesystem::GenericUtf8PathString(destination) + ": " +
-                     PosixErrorMessage(error));
-        return false;
+    // Only publication excludes open readers, matching Windows semantics. Flush
+    // both directory entries after releasing that lock when staging is elsewhere.
+    {
+        const auto publish = LockPublication(destination);
+        if (!AllowPublication(destination, false, errors))
+            return false;
+        if (artifacts) {
+            artifacts->publish_file(temp, destination);
+        } else if (std::rename(temp.c_str(), destination.c_str()) != 0) {
+            const int error = errno;
+            AddError(errors,
+                     "failed to atomically replace region file: " +
+                         Filesystem::GenericUtf8PathString(destination) + ": " +
+                         PosixErrorMessage(error));
+            return false;
+        }
     }
 
     // Persist the directory entry update as well as the replacement bytes.
@@ -690,7 +1917,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                      Filesystem::GenericUtf8PathString(parent) + ": " + PosixErrorMessage(error));
         return false;
     }
-    return true;
+    return temp.parent_path() == destination.parent_path() ||
+           FlushDirectoryEntry(
+               temp.has_parent_path() ? temp.parent_path() : std::filesystem::path("."), errors);
 }
 
 // Flushes the directory that holds a newly created entry so the entry survives
@@ -782,39 +2011,42 @@ template<typename Producer>
 bool WriteDurableRegionTempWithProducer(const std::filesystem::path& destination,
                                         Producer&& produce,
                                         std::filesystem::path& out_temp,
-                                        std::vector<std::string>* errors) {
+                                        std::vector<std::string>* errors,
+                                        CreatedWorldArtifacts* artifacts = nullptr) {
     std::filesystem::path staging;
     if (!RegionStagingDestination(destination, staging, errors))
         return false;
     RegionFileHandle file{};
-    if (!OpenDurableRegionTemp(staging, file, out_temp, errors))
+    if (!OpenDurableRegionTemp(staging, file, out_temp, errors, artifacts))
         return false;
     bool produced = false;
     try {
         produced = produce(file);
     } catch (...) {
         CloseRegionFile(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         throw;
     }
     if (!produced) {
         CloseRegionFile(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors, "failed to produce temporary region contents");
         return false;
     }
-    return FinishDurableRegionTemp(file, out_temp, errors);
+    return FinishDurableRegionTemp(file, out_temp, errors, artifacts);
 }
 
 bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            CreatedWorldArtifacts* artifacts = nullptr) {
     return WriteDurableRegionTempWithProducer(
         destination,
         [&](auto file) { return WriteRegionBytes(file, bytes, errors); },
         out_temp,
-        errors);
+        errors,
+        artifacts);
 }
 // Directory traversal is bounded by the supplied path's component count. Repeat
 // it on retries even when a prior attempt already created the directories.
@@ -900,24 +2132,42 @@ public:
     bool Publish(std::vector<std::string>* errors) {
         if (!FlushAncestorEntries(m_destination, errors))
             return false;
+        const auto publish = LockPublication(m_destination);
+        if (!AllowPublication(m_destination, false, errors))
+            return false;
 #if defined(_WIN32)
-        // Keep identity through the move; rollback targets this handle, never a
+        // Keep the created destination link bound; rollback targets its handle, never a
         // replacement file found by looking up the destination a second time.
         m_handle = ::CreateFileW(m_temp.c_str(),
-                                 DELETE | FILE_READ_ATTRIBUTES,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  nullptr,
                                  OPEN_EXISTING,
-                                 FILE_ATTRIBUTE_NORMAL,
+                                 FILE_FLAG_OPEN_REPARSE_POINT,
                                  nullptr);
-        if (m_handle == INVALID_HANDLE_VALUE ||
-            !::MoveFileExW(m_temp.c_str(), m_destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        if (m_handle == INVALID_HANDLE_VALUE) {
             AddError(errors,
                      "cannot publish an unoccupied destination: " +
                          WindowsErrorMessage(::GetLastError()));
             return false;
         }
+        try {
+            m_handle = Detail::WindowsPublishWithoutReplacement(
+                std::exchange(m_handle, INVALID_HANDLE_VALUE),
+                m_temp,
+                m_destination,
+                GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES);
+        } catch (const std::exception& error) {
+            AddError(errors,
+                     "cannot publish an unoccupied destination: " + std::string(error.what()));
+            return false;
+        }
         m_published = true;
+        if (!::FlushFileBuffers(m_handle)) {
+            AddError(errors,
+                     "cannot flush published file: " + WindowsErrorMessage(::GetLastError()));
+            return false;
+        }
         return true;
 #else
         m_descriptor = ::open(m_temp.c_str(), O_RDONLY);
@@ -970,15 +2220,16 @@ private:
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
                      std::vector<std::string>* errors) {
-    if (payload.empty() || payload.size() > kMaxRecordBytes) {
-        AddError(errors, "region record payload exceeds the 64 MiB container bound");
+    if (payload.empty() || payload.size() > SavedInputLimits::kRegionRecordBytes) {
+        AddError(errors, "region record payload exceeds the 64 MiB compatibility limit");
         return false;
     }
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
     std::string compressed(static_cast<std::size_t>(bound), '\0');
     const int written = LZ4_compress_default(
         payload.data(), compressed.data(), static_cast<int>(payload.size()), bound);
-    if (written <= 0 || static_cast<std::size_t>(written) > kMaxRecordBytes) {
+    if (written <= 0 ||
+        static_cast<std::size_t>(written) > SavedInputLimits::kRegionCompressedBytes) {
         AddError(errors, "LZ4 compression of a region record failed or exceeded its bound");
         return false;
     }
@@ -992,8 +2243,10 @@ bool DecompressPayload(const RegionRecord& record,
                        std::string& out_payload,
                        std::vector<std::string>* errors) {
     // Bound allocation before trusting an on-disk length or narrowing to LZ4's int API.
-    if (record.uncompressed_size == 0 || record.uncompressed_size > kMaxRecordBytes ||
-        record.compressed_payload.empty() || record.compressed_payload.size() > kMaxRecordBytes) {
+    if (record.uncompressed_size == 0 ||
+        record.uncompressed_size > SavedInputLimits::kRegionRecordBytes ||
+        record.compressed_payload.empty() ||
+        record.compressed_payload.size() > SavedInputLimits::kRegionCompressedBytes) {
         AddError(errors, "corrupt region record payload length");
         return false;
     }
@@ -1019,7 +2272,8 @@ struct RegionIndex {
         std::streamoff offset = 0;
     };
     std::filesystem::path path;
-    Filesystem::ReplacementSafeInputFile input;
+    std::unique_ptr<SavedInputFile> input;
+    std::stop_token stop;
     // LMR1's u16 count bounds the manifest to 65,535 entries.
     std::vector<Record> records;
     std::size_t next = 0;
@@ -1028,26 +2282,30 @@ struct RegionIndex {
 bool ReadRegionIndex(const std::filesystem::path& path,
                      RegionIndex& index,
                      std::vector<std::string>* errors,
-                     const std::stop_token& stop = {}) {
+                     const std::stop_token& stop = {},
+                     bool missing_allowed = false) {
     LUMIN_PROFILE_ZONE_N("File save read");
     index = {};
     index.path = path;
-    index.input.open(path);
+    index.input = std::make_unique<SavedInputFile>(path);
+    index.stop = stop;
     const auto reject = [&](const char* message) {
         AddError(errors, std::string(message) + ": " + Filesystem::GenericUtf8PathString(path));
         return false;
     };
-    if (!index.input.is_open())
-        return reject("failed to open region file");
-    std::error_code size_error;
-    const auto file_bytes = index.input.size(size_error);
-    if (size_error)
+    if (index.input->missing())
+        return missing_allowed || reject("failed to open region file");
+    std::uint64_t file_bytes = 0;
+    if (!index.input->length(file_bytes))
         return reject("failed to read region file extent");
+    if (!SavedInputLimits::RegionFileLengthAllowed(file_bytes))
+        return reject(
+            "Saved-input admission refused: region file exceeds byte compatibility limit");
     if (file_bytes < kRegionFileHeaderSize ||
         file_bytes > static_cast<std::uintmax_t>(std::numeric_limits<std::streamoff>::max()))
         return reject("corrupt region file length");
     std::array<unsigned char, kRegionFileHeaderSize> header{};
-    if (!index.input.read(reinterpret_cast<char*>(header.data()), header.size()) ||
+    if (!index.input->read_exact(reinterpret_cast<char*>(header.data()), header.size(), stop) ||
         std::memcmp(header.data(), kRegionMagic, sizeof(kRegionMagic)) != 0)
         return reject("region file is missing the LMR1 magic");
     const auto version = ReadU16(header.data() + 4);
@@ -1067,12 +2325,14 @@ bool ReadRegionIndex(const std::filesystem::path& path,
     if (offset > file_bytes)
         return reject("region file record manifest is truncated");
     index.records.resize(count);
+    std::uint64_t work_bytes = 0, payload_bytes = 0;
     std::set<std::pair<u8, u64>> keys;
     for (auto& record : index.records) {
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         std::array<unsigned char, kRecordHeaderSize> record_header{};
-        if (!index.input.read(reinterpret_cast<char*>(record_header.data()), record_header.size()))
+        if (!index.input->read_exact(
+                reinterpret_cast<char*>(record_header.data()), record_header.size(), stop))
             return reject("region file record manifest is truncated");
         record.id = ReadU64(record_header.data());
         record.lod_level = record_header[8];
@@ -1084,9 +2344,16 @@ bool ReadRegionIndex(const std::filesystem::path& path,
             return reject("corrupt or unknown region record header");
         if (record.compressed_size > file_bytes - offset)
             return reject("region file record payload is truncated");
-        if (record.raw_size == 0 || record.raw_size > kMaxRecordBytes ||
-            record.compressed_size == 0 || record.compressed_size > kMaxRecordBytes)
-            return reject("corrupt region record payload length");
+        if (record.raw_size == 0 || record.raw_size > SavedInputLimits::kRegionRecordBytes ||
+            record.compressed_size == 0 ||
+            record.compressed_size > SavedInputLimits::kRegionCompressedBytes ||
+            record.raw_size > SavedInputLimits::kRegionReadWorkBytes - work_bytes ||
+            record.compressed_size >
+                SavedInputLimits::kRegionCompressedAggregateBytes - payload_bytes)
+            return reject("Saved-input admission refused: region record or aggregate exceeds "
+                          "compatibility limit");
+        work_bytes += record.raw_size;
+        payload_bytes += record.compressed_size;
         record.offset = static_cast<std::streamoff>(offset);
         offset += record.compressed_size;
     }
@@ -1097,15 +2364,17 @@ bool ReadIndexedRecord(RegionIndex& index,
                        const RegionIndex::Record& entry,
                        RegionRecord& record,
                        std::vector<std::string>* errors) {
-    if (entry.compressed_size == 0 || entry.compressed_size > kMaxRecordBytes ||
-        entry.raw_size == 0 || entry.raw_size > kMaxRecordBytes) {
+    if (entry.compressed_size == 0 ||
+        entry.compressed_size > SavedInputLimits::kRegionCompressedBytes || entry.raw_size == 0 ||
+        entry.raw_size > kMaxRecordBytes) {
         AddError(errors, "corrupt region record payload length");
         return false;
     }
     record = {entry.id, entry.lod_level, entry.flags, entry.raw_size, {}};
     record.compressed_payload.resize(entry.compressed_size);
-    if (!index.input.seek(static_cast<std::uint64_t>(entry.offset)) ||
-        !index.input.read(record.compressed_payload.data(), entry.compressed_size)) {
+    if (!index.input->seek(static_cast<std::uint64_t>(entry.offset)) ||
+        !index.input->read_exact(
+            record.compressed_payload.data(), entry.compressed_size, index.stop)) {
         AddError(errors,
                  "failed to read region record: " + Filesystem::GenericUtf8PathString(index.path));
         return false;
@@ -1190,9 +2459,10 @@ struct RegionReplacement {
 
 bool RewriteRegionFile(const std::filesystem::path& path,
                        const std::vector<RegionReplacement>& replacements,
-                       std::vector<std::string>* errors) {
+                       std::vector<std::string>* errors,
+                       std::filesystem::path* prepared_temp = nullptr) {
     RegionIndex previous;
-    if (std::filesystem::exists(path) && !ReadRegionIndex(path, previous, errors))
+    if (!ReadRegionIndex(path, previous, errors, {}, true))
         return false;
     struct Entry {
         RegionIndex::Record record;
@@ -1238,6 +2508,7 @@ bool RewriteRegionFile(const std::filesystem::path& path,
             if (!WriteRegionBytes(file, manifest, errors))
                 return false;
             std::uintmax_t total_bytes = manifest.size();
+            std::uint64_t work_bytes = 0;
             manifest.clear();
             manifest.append(kRegionMagic, sizeof(kRegionMagic));
             AppendU16(manifest, kRegionVersion);
@@ -1281,6 +2552,15 @@ bool RewriteRegionFile(const std::filesystem::path& path,
                         }
                     }
                 }
+                if (record.uncompressed_size >
+                        SavedInputLimits::kRegionWriteWorkBytes - work_bytes ||
+                    record.compressed_payload.size() >
+                        record.uncompressed_size + record.uncompressed_size / 255u + 16u) {
+                    AddError(errors,
+                             "region record or aggregate exceeds writer compatibility limit");
+                    return false;
+                }
+                work_bytes += record.uncompressed_size;
                 const auto size = record.compressed_payload.size();
                 if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamoff>::max()) -
                                total_bytes) {
@@ -1302,13 +2582,17 @@ bool RewriteRegionFile(const std::filesystem::path& path,
         errors);
     // Release this writer's source descriptors. Independent readers finish their
     // immutable old image; all LMR1 readers share deletion on Windows.
-    previous.input.close();
+    previous.input.reset();
     for (const auto& replacement : replacements) {
-        if (replacement.source && replacement.source->input.is_open())
-            replacement.source->input.close();
+        if (replacement.source && replacement.source->input)
+            replacement.source->input.reset();
     }
     if (!written)
         return false;
+    if (prepared_temp) {
+        *prepared_temp = std::move(temp);
+        return true;
+    }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
         RemoveTemporaryFile(temp);
         AddError(errors, "region replacement interrupted by test seam before replacing");
@@ -1344,11 +2628,16 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
 
 bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                         std::vector<std::string>* errors) {
+    const detail::RegionFileWriteGuard transaction(manifest_path);
     const nlohmann::json manifest = {{"schema", kWorldManifestSchema},
                                      {"container", "LMR1"},
                                      {"container_version", kRegionVersion}};
 
-    const std::string bytes = manifest.dump(4) + "\n";
+    std::string bytes;
+    if (!BoundedJsonDump(manifest, SavedInputLimits::kManifestBytes, bytes, 4)) {
+        AddError(errors, "world manifest exceeds 2 MiB compatibility limit");
+        return false;
+    }
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
     ReclaimAbandonedStaging(staging);
@@ -1371,16 +2660,10 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 }
 
 bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& reader) {
-    reader = {};
-    reader.path = region_file;
-    std::error_code error;
-    const bool exists = std::filesystem::exists(region_file, error);
-    if (error)
+    if (!ReadRegionIndex(region_file, reader, nullptr, {}, true))
         return false;
-    if (!exists)
+    if (reader.records.empty())
         return true;
-    if (!ReadRegionIndex(region_file, reader, nullptr))
-        return false;
     int expected_x = 0, expected_z = 0;
     if (!ParseRegionFileName(region_file, expected_x, expected_z))
         return false;
@@ -1423,6 +2706,55 @@ bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& r
 
 } // namespace
 
+bool SavedInputFile::is_within_save_root() const {
+    const auto directory = m_path.parent_path();
+    if (directory.filename() != kRegionDirectoryName ||
+        directory.parent_path().filename() != kChunksDirectoryName)
+        return true;
+    if (m_path.native().size() > 32767)
+        return false;
+    std::error_code error;
+    const auto save_root = directory.parent_path().parent_path();
+    const auto root = Filesystem::WeaklyCanonicalPath(
+        save_root.empty() ? std::filesystem::path(".") : save_root, error);
+    if (error || root.native().size() > 32767)
+        return false;
+#if defined(_WIN32)
+    // Final names come from this payload's owning handle, including junctions
+    // and short-name aliases. The fixed buffer covers the extended-path bound.
+    std::array<wchar_t, 32768> buffer{};
+    const DWORD resolved_length = ::GetFinalPathNameByHandleW(
+        m_handle, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED);
+    if (resolved_length == 0 || resolved_length >= buffer.size())
+        return false;
+    std::wstring spelling(buffer.data(), resolved_length);
+    if (spelling.starts_with(LR"(\\?\UNC\)"))
+        spelling = LR"(\\)" + spelling.substr(8);
+    else if (spelling.starts_with(LR"(\\?\)"))
+        spelling.erase(0, 4);
+    const std::filesystem::path resolved(std::move(spelling));
+#else
+    struct stat actual {};
+    if (::fstat(m_descriptor, &actual) != 0 || !S_ISREG(actual.st_mode))
+        return false;
+    const auto resolved = std::filesystem::canonical(m_path, error);
+    if (error || resolved.native().size() > 32767 || !IsSaveDescendant(resolved, root))
+        return false;
+    // The canonical spelling alone cannot authorize a read. Open its components
+    // without links and compare identities to the original payload descriptor.
+    const int checked = OpenResolvedSavedInput(resolved);
+    if (checked < 0)
+        return false;
+    struct stat expected {};
+    const bool matches = ::fstat(checked, &expected) == 0 && S_ISREG(expected.st_mode) &&
+                         actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino;
+    ::close(checked);
+    if (!matches)
+        return false;
+#endif
+    return IsSaveDescendant(resolved, root);
+}
+
 WorldSaveService::SaveOwnership::SaveOwnership()
     : m_lock(SaveMutex(), std::defer_lock) {
     if (!m_lock.try_lock()) {
@@ -1445,16 +2777,76 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
     return destination;
 }
 
+bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
+                                            std::vector<std::string>* errors) {
+    if (bytes.size() > SavedInputLimits::kMetadataBytes) {
+        AddError(errors,
+                 "Saved-input admission refused: metadata exceeds 2 MiB compatibility limit.");
+        return false;
+    }
+    if (!SavedInputLimits::JsonDepthAllowed(bytes)) {
+        AddError(errors,
+                 "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
+        return false;
+    }
+    if (!AdmitMetadataText(bytes)) {
+        AddError(
+            errors,
+            "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
+        return false;
+    }
+    auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    if (!AdmitMetadata(metadata)) {
+        AddError(
+            errors,
+            "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
+        return false;
+    }
+    const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
+    const bool has_render_calendar = metadata.contains("renderCalendar");
+    if (has_clock || has_render_calendar) {
+        // Match save_metadata's normalization before a paired writer can publish
+        // its ledger. Even adding an absent simulationTick can cross the byte cap.
+        world::WorldClock clock;
+        std::string error;
+        std::optional<Vec3> anchor;
+        std::optional<world::WorldCalendar> calendar;
+        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+            !ReadAmbientAnchor(metadata, anchor, error) ||
+            !world::WorldClock::read_render_calendar(metadata, calendar, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        if (has_clock)
+            clock.write_metadata(metadata);
+        if (calendar)
+            metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
+        std::string normalized;
+        if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes, normalized, 4)) {
+            AddError(errors,
+                     "Saved-input admission refused: normalized metadata exceeds 2 MiB "
+                     "compatibility limit.");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
-                                     std::vector<std::string>* errors) {
+                                     std::vector<std::string>* errors,
+                                     CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    return validate_save(save_dir, errors) && save_metadata_validated(bytes, save_dir, errors);
+    return validate_save(save_dir, errors) &&
+           save_metadata_validated(bytes, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::save_metadata_validated(const std::string& bytes,
                                                const std::filesystem::path& save_dir,
-                                               std::vector<std::string>* errors) {
+                                               std::vector<std::string>* errors,
+                                               CreatedWorldArtifacts* artifacts) {
+    if (!admit_metadata_bytes(bytes, errors))
+        return false;
     // Metadata-only writes require an existing root. Ancestor staging must not
     // turn a missing legacy destination into a newly created save directory.
     const auto directory = save_dir.empty() ? std::filesystem::path(".") : save_dir;
@@ -1465,13 +2857,15 @@ bool WorldSaveService::save_metadata_validated(const std::string& bytes,
     }
     world::WorldClock clock;
     std::string clock_error;
-    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
-    // Clock and water cursor fields opt into structured validation. Other legacy
-    // input remains opaque; the existing destination is still validated.
+    auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    // Legacy metadata is opaque input to this helper. Clock or marker input
+    // opts into calendar validation; the existing destination is still validated.
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     std::optional<Vec3> ambient_anchor;
-    if ((has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
-                       !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) ||
+    const bool has_render_calendar = metadata.contains("renderCalendar");
+    if (((has_clock || has_render_calendar) &&
+         (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+          !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) ||
         !ReadWaterCursor(metadata, nullptr, clock_error)) {
         AddError(errors, clock_error);
         return false;
@@ -1484,18 +2878,40 @@ bool WorldSaveService::save_metadata_validated(const std::string& bytes,
         AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
         return false;
     }
+    // Explicit writes normalize supported calendar encodings; reads never rewrite.
+    if (has_clock)
+        clock.write_metadata(metadata);
+    if (has_render_calendar) {
+        std::optional<world::WorldCalendar> calendar;
+        if (!world::WorldClock::read_render_calendar(metadata, calendar, clock_error)) {
+            AddError(errors, clock_error);
+            return false;
+        }
+        if (!calendar.has_value()) {
+            AddError(errors, "Corrupt world metadata: missing renderCalendar.");
+            return false;
+        }
+        metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
+    }
+    const std::string output_bytes =
+        (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
+    if (!admit_metadata_bytes(output_bytes, errors))
+        return false;
     const auto destination = save_dir / "world_info.json";
-    ReclaimAbandonedStaging(destination);
+    if (artifacts)
+        artifacts->reserve_file(destination);
+    else
+        ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (!WriteDurableRegionTemp(destination, output_bytes, temp, errors, artifacts))
         return false;
     if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
-        RemoveTemporaryFile(temp);
+        RemoveTemporaryFile(temp, artifacts);
         AddError(errors, "interrupted before metadata replacement");
         return false;
     }
-    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
-        RemoveTemporaryFile(temp);
+    if (!ReplaceRegionFileAtomically(temp, destination, errors, artifacts)) {
+        RemoveTemporaryFile(temp, artifacts);
         return false;
     }
     return true;
@@ -1504,15 +2920,20 @@ bool WorldSaveService::save_metadata_validated(const std::string& bytes,
 bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
-                                                        std::vector<std::string>* errors) {
+                                                        std::vector<std::string>* errors,
+                                                        CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    return validate_save(save_dir, errors) && save_pair_validated(bytes, ledger, save_dir, errors);
+    return validate_save(save_dir, errors) &&
+           save_pair_validated(bytes, ledger, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::save_pair_validated(const std::string& bytes,
                                            world::ActiveRegionLedger& ledger,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           CreatedWorldArtifacts* artifacts) {
+    if (!admit_metadata_bytes(bytes, errors))
+        return false;
     const SaveGuard guard;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     world::WorldClock clock;
@@ -1522,6 +2943,10 @@ bool WorldSaveService::save_pair_validated(const std::string& bytes,
         !ReadAmbientAnchor(metadata, ambient_anchor, error) ||
         !ReadWaterCursor(metadata, nullptr, error)) {
         AddError(errors, error);
+        return false;
+    }
+    if (!metadata.contains("simulationTick") && !metadata.contains("calendar")) {
+        AddError(errors, "Corrupt world metadata: active regions require clock metadata.");
         return false;
     }
     // Decode validates record stamps; empty ledgers need the same clock check explicitly.
@@ -1543,10 +2968,10 @@ bool WorldSaveService::save_pair_validated(const std::string& bytes,
     // Each writer validates the installed pair. On rewind, replace the ledger
     // first so it cannot be newer than the clock, even if metadata writing fails.
     if (clock.tick() < previous_clock.tick())
-        return save_regions_validated(ledger, clock, save_dir, errors) &&
-               save_metadata_validated(bytes, save_dir, errors);
-    return save_metadata_validated(bytes, save_dir, errors) &&
-           save_regions_validated(ledger, clock, save_dir, errors);
+        return save_regions_validated(ledger, clock, save_dir, errors, artifacts) &&
+               save_metadata_validated(bytes, save_dir, errors, artifacts);
+    return save_metadata_validated(bytes, save_dir, errors, artifacts) &&
+           save_regions_validated(ledger, clock, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
@@ -1554,29 +2979,80 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
                                            bool& requires_active_regions,
                                            std::vector<std::string>* errors,
                                            std::optional<Vec3>* ambient_anchor,
-                                           std::size_t* water_cursor) {
+                                           std::optional<world::WorldCalendar>* render_calendar,
+                                           std::size_t* water_sim_cursor,
+                                           const std::stop_token& stop) {
     LUMIN_PROFILE_ZONE_N("File clock metadata load");
-    clock = world::WorldClock{};
+    clock = world::WorldClock{0, world::WorldCalendar::Legacy()};
+    if (water_sim_cursor)
+        *water_sim_cursor = 0;
+    if (render_calendar)
+        render_calendar->reset();
     requires_active_regions = false;
     if (ambient_anchor)
         ambient_anchor->reset();
-    if (water_cursor)
-        *water_cursor = 0;
     try {
+        // The installed ledger is simulation authority even without clock
+        // metadata, including empty and anchor-only ledgers of either version.
+        // Root-level .tmp.* siblings are uncommitted staging, never authority.
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
-        if (!std::filesystem::exists(path))
+        nlohmann::json metadata;
+        bool missing = false;
+        SavedJsonFailure json_failure = SavedJsonFailure::None;
+        if (!ReadSavedJson(path,
+                           SavedInputLimits::kMetadataBytes,
+                           metadata,
+                           missing,
+                           true,
+                           &json_failure,
+                           stop) ||
+            (!missing && !AdmitMetadata(metadata))) {
+            AddError(
+                errors,
+                json_failure == SavedJsonFailure::Cancelled ? "Saved-world validation cancelled."
+                : json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "Corrupt world metadata: invalid JSON."
+                           : "Corrupt world metadata: unreadable or non-regular input.")
+                    : "Saved-input admission refused: unreadable or oversized world metadata.");
+            return false;
+        }
+        if (missing)
             return true;
-        std::ifstream input(path, std::ios::binary);
-        const auto metadata = nlohmann::json::parse(input);
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
             !ReadAmbientAnchor(metadata, anchor, error) ||
-            !ReadWaterCursor(metadata, water_cursor, error)) {
+            !ReadWaterCursor(metadata, water_sim_cursor, error)) {
             AddError(errors, error);
             return false;
         }
+        std::optional<world::WorldCalendar> rendering;
+        if (!world::WorldClock::read_render_calendar(metadata, rendering, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        if (rendering && requires_active_regions) {
+            AddError(errors,
+                     "Corrupt world metadata: renderCalendar conflicts with active regions.");
+            return false;
+        }
+        std::size_t cursor = 0;
+        if (metadata.contains("waterSimCursor")) {
+            const auto& value = metadata.at("waterSimCursor");
+            if (!value.is_number_unsigned() ||
+                value.get<std::uint64_t>() > std::numeric_limits<std::size_t>::max()) {
+                AddError(errors, "Corrupt world metadata: invalid water simulation cursor.");
+                return false;
+            }
+            cursor = value.get<std::size_t>();
+        }
+        if (water_sim_cursor)
+            *water_sim_cursor = cursor;
+        if (render_calendar)
+            *render_calendar = rendering;
         requires_active_regions = requires_active_regions || metadata.contains("simulationTick") ||
                                   metadata.contains("calendar");
         if (ambient_anchor)
@@ -1610,27 +3086,122 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
     return region_directory(save_dir) / "plant-entities.json";
 }
 
+bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                              std::string& bytes,
+                                              std::vector<std::string>* errors) {
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot, false)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
+    std::size_t aggregate = 0;
+    for (const auto& entity : snapshot.entities) {
+        for (const auto& component : entity.components) {
+            std::string encoded;
+            // The envelope adds five object/array levels before component data.
+            if (!AdmitJsonValueDepth(component.data,
+                                     SavedInputLimits::kJsonNestingDepth - 5,
+                                     SavedInputLimits::kPlantComponentBytes) ||
+                !BoundedJsonDump(component.data, SavedInputLimits::kPlantComponentBytes, encoded) ||
+                encoded.size() > SavedInputLimits::kPlantComponentAggregateBytes - aggregate) {
+                AddError(errors,
+                         "Saved-input admission refused: plant component JSON compatibility limit "
+                         "(1 MiB each, 128 MiB aggregate).");
+                return false;
+            }
+            aggregate += encoded.size();
+        }
+    }
+    // Preserve the existing serializer's ordering and exact pretty-file bytes,
+    // with bounded output rather than an unbounded dump followed by a size check.
+    nlohmann::json entities = nlohmann::json::array();
+    std::size_t components = 0;
+    for (const auto& entity : snapshot.entities) {
+        nlohmann::json values = nlohmann::json::array();
+        for (const auto& component : entity.components) {
+            values.push_back({{"type", component.type}, {"data", component.data}});
+            ++components;
+        }
+        std::sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.at("type") < rhs.at("type");
+        });
+        entities.push_back({{"entity_id", entity.entity_id},
+                            {"name", entity.name},
+                            {"components", std::move(values)}});
+    }
+    std::sort(entities.begin(), entities.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.at("entity_id") < rhs.at("entity_id");
+    });
+    const nlohmann::json envelope = {{"schema", Ecs::EntitySnapshotSchema()},
+                                     {"order_contract", Ecs::EntitySnapshotOrderContract()},
+                                     {"entity_count", snapshot.entities.size()},
+                                     {"component_count", components},
+                                     {"entities", std::move(entities)}};
+    std::string checked;
+    if (!BoundedJsonDump(envelope, SavedInputLimits::kPlantFileBytes, checked, 4)) {
+        AddError(errors,
+                 "Saved-input admission refused: plant file exceeds 256 MiB compatibility limit.");
+        return false;
+    }
+    bytes = std::move(checked);
+    return true;
+}
+
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
     const SaveGuard guard;
-    return validate_save(save_dir, errors) && save_plants_validated(snapshot, save_dir, errors);
+    PreparedPlantWrite prepared;
+    return prepared.prepare(snapshot, errors) && prepared.publish(save_dir, errors);
 }
 
-bool WorldSaveService::save_plants_validated(
-    const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
-    const std::filesystem::path& save_dir,
-    std::vector<std::string>* errors) {
+bool WorldSaveService::save_plants_validated(const Ecs::EntityRegistrySnapshot& snapshot,
+                                             const std::filesystem::path& save_dir,
+                                             std::vector<std::string>* errors) {
+    PreparedPlantWrite prepared;
+    return prepared.prepare(snapshot, errors) && prepared.publish(save_dir, errors, false);
+}
+
+bool WorldSaveService::PreparedPlantWrite::prepare(const Ecs::EntityRegistrySnapshot& snapshot,
+                                                   std::vector<std::string>* errors) {
+    m_prepared = false;
+    m_bytes.clear();
+    if (!prepare_plant_entities(snapshot, m_bytes, errors))
+        return false;
+    m_empty = snapshot.entities.empty();
+    m_prepared = true;
+    return true;
+}
+
+bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& save_dir,
+                                                   std::vector<std::string>* errors,
+                                                   bool validate_existing) const {
+    const SaveGuard guard;
     LUMIN_PROFILE_ZONE_N("File plant entities save");
+    if (!m_prepared) {
+        AddError(errors, "plant write has not been prepared");
+        return false;
+    }
+    if (validate_existing && !validate_save(save_dir, errors))
+        return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
+    const detail::RegionFileWriteGuard transaction(path);
     // Like ledger staging, abandoned plant copies must live outside the strict
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
     ReclaimAbandonedStaging(staging);
     std::error_code ec;
-    if (snapshot.entities.empty()) {
+    if (m_empty) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
-        std::filesystem::remove(path, ec);
+        {
+            const auto publish = LockPublication(path);
+            if (!AllowPublication(path, true, errors)) {
+                AddError(errors,
+                         "failed to remove plant entities file: " +
+                             Filesystem::GenericUtf8PathString(path));
+                return false;
+            }
+            std::filesystem::remove(path, ec);
+        }
         if (ec) {
             AddError(errors,
                      "failed to remove plant entities file: " +
@@ -1639,34 +3210,62 @@ bool WorldSaveService::save_plants_validated(
         }
         return FlushRemovalDirectory(path, errors);
     }
-    return WriteFileDurably(
-        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), staging, errors);
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        AddError(errors, "failed to create plant directory: " + ec.message());
+        return false;
+    }
+    return WriteFileDurably(path, m_bytes, staging, errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           const std::stop_token& stop) {
     LUMIN_PROFILE_ZONE_N("File plant entities load");
-    out = Luminumbra::Ecs::EntityRegistrySnapshot{};
-    const std::filesystem::path path = plant_entities_path(save_dir);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
-        return true; // clean miss: a fresh / no-plant world
-    }
-    const std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors,
-                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
         return false;
     }
-    std::ostringstream ss;
-    ss << in.rdbuf();
+    const std::filesystem::path path = plant_entities_path(save_dir);
+    const SavedInputFile input(path);
+    if (input.missing()) {
+        out = Luminumbra::Ecs::EntityRegistrySnapshot{};
+        return true; // clean miss: a fresh / no-plant world
+    }
+    std::string bytes;
+    if (!input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)) {
+        AddError(
+            errors,
+            stop.stop_requested()
+                ? "Saved-world validation cancelled."
+                : "Saved-input admission refused: unreadable, non-regular or over 256 MiB plant "
+                  "entities file: " +
+                      Filesystem::GenericUtf8PathString(path));
+        return false;
+    }
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    Luminumbra::Ecs::EntityRegistrySnapshot candidate;
+    if (!AdmitPlantComponentBytes(bytes)) {
+        AddError(errors,
+                 "Saved-input admission refused: plant component JSON compatibility limit (1 MiB "
+                 "each, 128 MiB aggregate).");
+        return false;
+    }
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
     }
+    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate, false)) {
+        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        return false;
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    out = std::move(candidate);
     return true;
 }
 
@@ -1677,30 +3276,43 @@ std::filesystem::path WorldSaveService::active_regions_path(const std::filesyste
 bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors,
-                                           const world::WorldClock& absent_clock) {
+                                           const world::WorldClock& absent_clock,
+                                           const std::stop_token& stop) {
     LUMIN_PROFILE_ZONE_N("File active regions load");
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
     try {
         const auto path = active_regions_path(save_dir);
-        if (!std::filesystem::exists(path)) {
+        const SavedInputFile input(path);
+        if (input.missing()) {
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
-        const auto length = std::filesystem::file_size(path);
-        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
-            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        std::string bytes;
+        if (!input.read(bytes, world::ActiveRegionLedger::kMaxFileBytes, stop)) {
+            AddError(errors,
+                     stop.stop_requested() ? "Saved-world validation cancelled."
+                                           : world::ActiveRegionLedger::kCorruptMessage);
             return false;
         }
-        std::ifstream input(path, std::ios::binary);
-        std::string bytes(static_cast<std::size_t>(length), '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
-        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        world::ActiveRegionLedger candidate(ledger.config(), absent_clock);
+        if (!world::ActiveRegionLedger::decode(bytes, candidate, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            return false;
+        }
+        ledger = std::move(candidate);
         return true;
     } catch (const std::exception&) {
-        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        AddError(errors,
+                 stop.stop_requested() ? "Saved-world validation cancelled."
+                                       : world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
 }
@@ -1708,24 +3320,36 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
 bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
     return validate_save(save_dir, errors) &&
-           save_regions_validated(ledger, clock, save_dir, errors);
+           save_regions_validated(ledger, clock, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
                                               const world::WorldClock& clock,
                                               const std::filesystem::path& save_dir,
-                                              std::vector<std::string>* errors) {
+                                              std::vector<std::string>* errors,
+                                              CreatedWorldArtifacts* artifacts) {
     // Empty ledgers have no last_save stamps to validate against the ceiling.
     // Require the acknowledged clock before either writing or taking the no-op path.
     if (ledger.header_tick() != clock.tick()) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
+    world::WorldClock previous_clock;
+    bool required = false;
+    std::optional<world::WorldCalendar> render_calendar;
+    if (!read_clock_metadata(save_dir, previous_clock, required, errors, nullptr, &render_calendar))
+        return false;
+    if (render_calendar) {
+        AddError(errors, "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        return false;
+    }
     const auto staging = save_dir / active_regions_path(save_dir).filename();
-    ReclaimAbandonedStaging(staging);
+    if (!artifacts)
+        ReclaimAbandonedStaging(staging);
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1741,23 +3365,58 @@ bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
     }
     try {
         const auto path = active_regions_path(save_dir);
-        std::filesystem::path temp;
-        // Keep abandoned staging files outside the strict region integrity scan.
-        // The save root is on the save filesystem; replacement refuses EXDEV
-        // if a separately mounted chunks/region/ directory violates that layout.
-        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
-            return false;
-        if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
-            RemoveTemporaryFile(temp);
-            AddError(errors, "interrupted before active-region ledger replacement");
-            return false;
+        if (artifacts) {
+            artifacts->create_directory(path.parent_path().parent_path());
+            artifacts->create_directory(path.parent_path());
+            artifacts->reserve_file(path);
         }
-        if (!CreatePayloadDirectory(path, errors)) {
-            RemoveTemporaryFile(temp);
-            return false;
+        // Exclusive creation skips unknown payload or sidecar occupants. The
+        // bounded retry also handles a substituted file observed before use.
+        bool hook_called = false;
+        bool replaced = false;
+        for (int attempt = 0; attempt < 128; ++attempt) {
+            LedgerStaging temporary(staging);
+            if (!temporary.available(errors))
+                continue;
+            if (!temporary.prepare(bytes, errors)) {
+                if (temporary.occupied())
+                    continue;
+                AddError(errors, "Cannot durably record active-region staging ownership");
+                return false;
+            }
+            if (!hook_called) {
+                hook_called = true;
+                if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
+                    AddError(errors, "interrupted before active-region ledger replacement");
+                    return false;
+                }
+            }
+            if (!temporary.valid(errors))
+                continue;
+            if (!artifacts && !CreatePayloadDirectory(path, errors))
+                return false;
+            if (artifacts)
+                temporary.record_payload(*artifacts);
+            try {
+                replaced = ReplaceRegionFileAtomically(
+                    temporary.path(), path, errors, artifacts, &temporary.payload());
+            } catch (...) {
+                // Windows recovery can retain both verified publication links.
+                // The journal owns those links; retire the scoped sidecar too.
+                if (artifacts && temporary.installed_at(path, 2))
+                    temporary.published(errors);
+                throw;
+            }
+            // A failed final directory flush can leave the complete new ledger
+            // installed. Retiring the sidecar never removes that live file.
+            if (temporary.installed_at(path))
+                temporary.published(errors);
+            if (!replaced)
+                return false;
+            break;
         }
-        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
-            RemoveTemporaryFile(temp);
+        if (!replaced) {
+            AddError(errors, "Cannot allocate unique active-region staging");
             return false;
         }
         ledger = std::move(saved);
@@ -1924,9 +3583,16 @@ bool WorldSaveService::SaveBatch::save_water_cursor(std::size_t cursor,
     try {
         const auto path = m_directory / "world_info.json";
         nlohmann::json metadata = {{"container_version", kContainerVersion}};
-        if (std::filesystem::exists(path)) {
-            std::ifstream input(path, std::ios::binary);
-            metadata = nlohmann::json::parse(input);
+        bool missing = false;
+        nlohmann::json existing;
+        if (!ReadSavedJson(path, SavedInputLimits::kMetadataBytes, existing, missing, true) ||
+            (!missing && !AdmitMetadata(existing))) {
+            AddError(errors, "Saved-input admission refused: invalid water scheduler metadata.");
+            m_valid = false;
+            return false;
+        }
+        if (!missing) {
+            metadata = std::move(existing);
             std::size_t previous = 0;
             std::string error;
             if (!metadata.is_object() || !ReadWaterCursor(metadata, &previous, error)) {
@@ -1962,17 +3628,8 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
     out_records.clear();
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     RegionIndex index;
-    if (!ReadRegionIndex(region_file, index, errors)) {
+    if (!ReadRegionIndex(region_file, index, errors, {}, true)) {
         return false;
     }
     out_records.reserve(index.records.size());
@@ -1999,17 +3656,8 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
                                           std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                           std::vector<std::string>* errors) {
     out_chunks.clear();
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     RegionIndex index;
-    if (!ReadRegionIndex(region_file, index, errors)) {
+    if (!ReadRegionIndex(region_file, index, errors, {}, true)) {
         return false;
     }
     for (const auto& entry : index.records) {
@@ -2048,17 +3696,8 @@ bool WorldSaveService::read_authoritative_region_chunks(
         AddError(errors, "authoritative chunk read bounds are invalid");
         return false;
     }
-    std::error_code exists_error;
-    const bool exists = std::filesystem::exists(region_file, exists_error);
-    if (exists_error) {
-        AddError(errors, "failed to inspect region file: " + exists_error.message());
-        return false;
-    }
-    if (!exists)
-        return true; // clean miss
-
     RegionIndex index;
-    if (!ReadRegionIndex(region_file, index, errors)) {
+    if (!ReadRegionIndex(region_file, index, errors, {}, true)) {
         return false;
     }
     for (const auto& entry : index.records) {
@@ -2314,6 +3953,21 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
     const SaveGuard guard;
+    return upsert_container_records(guard, region_file, records, errors);
+}
+
+bool WorldSaveService::upsert_container_records(const SaveOwnership&,
+                                                const std::filesystem::path& region_file,
+                                                const std::vector<ContainerRecord>& records,
+                                                std::vector<std::string>* errors) {
+    const auto parent = region_file.parent_path();
+    if (parent.filename() == kRegionDirectoryName &&
+        parent.parent_path().filename() == kChunksDirectoryName) {
+        world::WorldClock clock;
+        bool required = false;
+        if (!read_clock_metadata(parent.parent_path().parent_path(), clock, required, errors))
+            return false;
+    }
     try {
         if (records.size() > std::numeric_limits<u16>::max()) {
             AddError(errors, "region file exceeds the 65535-record limit");
@@ -2347,32 +4001,35 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
                       std::vector<std::string>* errors,
-                      FileIdentity* published_identity) {
+                      FileIdentity* published_identity,
+                      CreatedWorldArtifacts* artifacts) {
     // Callers hold SaveGuard. Stage in an existing ancestor before creating
     // payload directories, so a refused payload leaves the hierarchy unchanged.
+    if (artifacts)
+        artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors))
+    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors, artifacts))
         return false;
     // Capture the exclusive staging file's identity before publication. Alias
     // rollback later checks this identity at replacement under SaveGuard.
     if (published_identity && !ReadFileIdentity(temp_path, *published_identity)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors, "cannot retain replacement identity");
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      Filesystem::GenericUtf8PathString(destination));
         return false;
     }
     if (!CreatePayloadDirectory(destination, errors)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
-    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
-        RemoveTemporaryFile(temp_path);
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors, artifacts)) {
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     return true;
@@ -2381,10 +4038,12 @@ bool WriteFileDurably(const std::filesystem::path& destination,
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+                                          std::vector<std::string>* errors,
+                                          CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    ReclaimAbandonedStaging(destination);
-    return WriteFileDurably(destination, bytes, destination, errors);
+    if (!artifacts)
+        ReclaimAbandonedStaging(destination);
+    return WriteFileDurably(destination, bytes, destination, errors, nullptr, artifacts);
 }
 
 bool WorldSaveService::create_file_durably(const std::filesystem::path& destination,
@@ -2403,8 +4062,10 @@ bool WorldSaveService::create_file_durably(const std::filesystem::path& destinat
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        AddError(errors, "interrupted before exclusive file publication");
         return false;
+    }
     if (!publication.Publish(errors))
         return false;
     publication.Commit();
@@ -2420,10 +4081,9 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // Revalidate the parsed source under ownership so another persistence writer
     // cannot change the source between the caller's parse and this transaction.
     {
-        const std::ifstream input(source, std::ios::binary);
-        std::ostringstream contents;
-        contents << input.rdbuf();
-        if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
+        const SavedInputFile input(source, SavedInputFile::LeafSymlinks::Follow);
+        std::string contents;
+        if (!input.read(contents, expected_bytes.size()) || contents != expected_bytes) {
             AddError(errors, "rename source changed or cannot be read");
             return false;
         }
@@ -2518,11 +4178,17 @@ bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
     // existing writer; parent aliases and UNC roots must retain their meaning.
     if (destination.has_parent_path())
         std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || !WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (error) {
+        AddError(errors, "cannot create rename publication directory: " + error.message());
+        return false;
+    }
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
     NewFilePublication publication(temp, destination);
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        AddError(errors, "interrupted before rename publication");
         return false;
+    }
     if (!publication.Publish(errors))
         return false;
     if (!std::filesystem::remove(source, error) || error) {
@@ -2567,9 +4233,9 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>* errors,
                                   bool preserve_authority) const {
-    const SaveGuard guard;
-    return validate_save(save_dir, errors) &&
-           write_snapshot(state.snapshot_chunks(), save_dir, errors, nullptr, preserve_authority);
+    PreparedWorldWrite prepared;
+    return prepared.prepare(state, save_dir, false, errors, preserve_authority) &&
+           prepared.publish(errors);
 }
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
@@ -2580,6 +4246,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   bool require_full_sdf_lattice,
                                   bool migrate_legacy_water) const {
     LUMIN_PROFILE_ZONE_N("File world load");
+    // Staging lives outside the strict region inventory. Each published file
+    // is read independently; validation never holds a world-wide transaction.
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -2591,9 +4259,28 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         const auto metadata_path = save_dir / "world_info.json";
-        if (std::filesystem::exists(metadata_path)) {
-            std::ifstream input(metadata_path, std::ios::binary);
-            const auto metadata = nlohmann::json::parse(input);
+        nlohmann::json metadata;
+        bool metadata_missing = false;
+        SavedJsonFailure json_failure = SavedJsonFailure::None;
+        if (!ReadSavedJson(metadata_path,
+                           SavedInputLimits::kMetadataBytes,
+                           metadata,
+                           metadata_missing,
+                           true,
+                           &json_failure,
+                           stop) ||
+            (!metadata_missing && !AdmitMetadata(metadata)))
+            return reject(
+                json_failure == SavedJsonFailure::Cancelled ? "Saved-world validation cancelled."
+                : json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "corrupt world metadata: invalid JSON"
+                           : "corrupt world metadata: unreadable or non-regular input")
+                    : "Saved-input admission refused: unreadable or oversized world metadata.");
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        if (!metadata_missing) {
             if (!metadata.is_object())
                 return reject("corrupt world metadata: expected an object");
             // Old worlds can contain only metadata: no chunk container exists yet
@@ -2611,7 +4298,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   version.dump());
                 return reject("corrupt world metadata container version");
             }
-            if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+            if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
+                metadata.contains("renderCalendar")) {
                 world::WorldClock clock;
                 std::string error;
                 std::optional<Vec3> anchor;
@@ -2629,24 +4317,42 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
             return reject(kObsoleteWorldMessage);
         }
-        if (!std::filesystem::exists(chunks_dir))
+        const auto chunks_status = InspectPersistenceDirectory(chunks_dir, save_dir);
+        if (chunks_status == PersistenceDirectory::Missing)
             return false;
+        if (chunks_status == PersistenceDirectory::Invalid)
+            return reject("corrupt world persistence directory: " +
+                          Filesystem::GenericUtf8PathString(chunks_dir));
         for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
-            if (entry.path() != region_dir || !entry.is_directory())
+            if (entry.path() != region_dir || InspectPersistenceDirectory(entry.path(), save_dir) !=
+                                                  PersistenceDirectory::Present)
                 return reject("corrupt or unknown world persistence artifact: " +
                               Filesystem::GenericUtf8PathString(entry.path()));
         }
-        if (!std::filesystem::exists(region_dir))
+        const auto region_status = InspectPersistenceDirectory(region_dir, save_dir);
+        if (region_status == PersistenceDirectory::Missing)
             return false;
+        if (region_status == PersistenceDirectory::Invalid)
+            return reject("corrupt world persistence directory: " +
+                          Filesystem::GenericUtf8PathString(region_dir));
         std::vector<std::filesystem::path> region_files;
         bool present = false;
         for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
-            if (!entry.is_regular_file())
+            const std::shared_lock read(detail::RegionFileSyncFor(entry.path()).publication);
+            // A plant file can be retired after iterator discovery. Inspect it
+            // under its publication lock and accept that clean disappearance.
+            // Inspect the leaf itself: a dangling link is present and invalid,
+            // never the clean disappearance of a retired plant file. Payload
+            // readers independently open once and verify that same handle.
+            const auto status = std::filesystem::symlink_status(entry.path());
+            if (!std::filesystem::exists(status) && entry.path() == plant_entities_path(save_dir))
+                continue;
+            if (!std::filesystem::is_regular_file(status))
                 return reject("corrupt world persistence artifact: " +
                               Filesystem::GenericUtf8PathString(entry.path()));
             if (entry.path() == world_manifest_path(save_dir) ||
@@ -2663,9 +4369,26 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         if (!present)
             return false;
-        if (std::filesystem::exists(world_manifest_path(save_dir))) {
-            std::ifstream input(world_manifest_path(save_dir), std::ios::binary);
-            const auto manifest = nlohmann::json::parse(input);
+        nlohmann::json manifest;
+        bool manifest_missing = false;
+        if (!ReadSavedJson(world_manifest_path(save_dir),
+                           SavedInputLimits::kManifestBytes,
+                           manifest,
+                           manifest_missing,
+                           false,
+                           &json_failure,
+                           stop))
+            return reject(
+                json_failure == SavedJsonFailure::Cancelled ? "Saved-world validation cancelled."
+                : json_failure == SavedJsonFailure::Malformed ||
+                        json_failure == SavedJsonFailure::Unreadable
+                    ? (json_failure == SavedJsonFailure::Malformed
+                           ? "corrupt world manifest: invalid JSON"
+                           : "corrupt world manifest: unreadable or non-regular input")
+                    : "Saved-input admission refused: unreadable or oversized world manifest.");
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        if (!manifest_missing) {
             if (manifest.is_object() && manifest.contains("schema") &&
                 manifest.at("schema").is_string()) {
                 const auto schema = manifest.at("schema").get<std::string>();
@@ -2752,30 +4475,47 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 }
             }
         }
-        world::ActiveRegionLedger ledger;
-        if (!load_active_regions(ledger, save_dir, &errors))
-            return reject("");
-        if (std::filesystem::exists(active_regions_path(save_dir))) {
-            world::WorldClock clock;
-            bool required = false;
-            if (!read_clock_metadata(save_dir, clock, required, &errors))
+        {
+            const std::shared_lock pair(ClockPairPublicationMutex());
+            world::ActiveRegionLedger ledger;
+            if (!load_active_regions(ledger,
+                                     save_dir,
+                                     &errors,
+                                     world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                     stop))
                 return reject("");
-            if (ledger.header_tick() > clock.tick())
-                return reject(world::ActiveRegionLedger::kCorruptMessage);
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
+            if (std::filesystem::exists(active_regions_path(save_dir))) {
+                world::WorldClock clock;
+                bool required = false;
+                if (!read_clock_metadata(
+                        save_dir, clock, required, &errors, nullptr, nullptr, nullptr, stop))
+                    return reject("");
+                if (stop.stop_requested())
+                    return reject("Saved-world validation cancelled.");
+                if (ledger.header_tick() > clock.tick())
+                    return reject(world::ActiveRegionLedger::kCorruptMessage);
+            }
         }
         Ecs::EntityRegistrySnapshot plants;
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
-        if (!load_plant_entities(plants, save_dir, &errors))
+        if (!load_plant_entities(plants, save_dir, &errors, stop))
             return reject("");
+        // The last payload reader has closed. Cancellation at that boundary
+        // must discard the staged chunks just like cancellation during a read.
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         return true;
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
 }
 
-std::string WorldSaveService::world_hash(const WorldStreamingState& state) const {
-    return ComputeWorldStreamingStateHash(state);
+std::string WorldSaveService::world_hash(const WorldStreamingState& state,
+                                         std::uint64_t water_sim_cursor) const {
+    return ComputeWorldStreamingStateHash(state, water_sim_cursor);
 }
 
 WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& state,
@@ -2803,35 +4543,10 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_validated(WorldStreamingState&
         return report;
     }
 
-    // O(edited regions): rewrite only region files containing dirty chunks,
-    // refreshing the records of every in-memory chunk in those regions.
-    std::map<std::pair<int, int>, bool> dirty_regions;
-    for (const ChunkID id : dirty_ids) {
-        if (const auto chunk = state.find_chunk(id)) {
-            int rx = 0;
-            int rz = 0;
-            region_coords_for_chunk(chunk->get_coords(), rx, rz);
-            dirty_regions[{rx, rz}] = true;
-        }
-    }
-
-    std::vector<std::shared_ptr<Chunk>> chunks_to_write;
-    for (const auto& chunk : state.snapshot_chunks()) {
-        if (!chunk) {
-            continue;
-        }
-        int rx = 0;
-        int rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        if (dirty_regions.count({rx, rz}) != 0) {
-            chunks_to_write.push_back(chunk);
-        }
-    }
-
-    if (!write_snapshot(
-            chunks_to_write, save_dir, errors, &report.regions_written, preserve_authority)) {
+    PreparedWorldWrite prepared;
+    if (!prepared.prepare(state, save_dir, true, errors, preserve_authority, false) ||
+        !prepared.publish(errors, &report.regions_written))
         return report;
-    }
 
     if (acknowledge_dirty) {
         for (const ChunkID id : dirty_ids) {
@@ -2850,29 +4565,72 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       std::size_t* regions_written,
                                       bool preserve_authority) const {
     const SaveGuard guard;
-    LUMIN_PROFILE_ZONE_N("File world save");
+    WorldStreamingState state;
+    for (const auto& chunk : chunks)
+        state.insert_chunk(chunk);
+    PreparedWorldWrite prepared;
+    return prepared.prepare(state, save_dir, false, errors, preserve_authority, false) &&
+           prepared.publish(errors, regions_written);
+}
+
+struct WorldSaveService::PreparedWorldWrite::Data {
+    SaveOwnership ownership;
+    std::filesystem::path save_dir;
+    std::map<std::filesystem::path, std::filesystem::path> regions;
+    ~Data() {
+        for (const auto& [path, temp] : regions)
+            RemoveTemporaryFile(temp);
+    }
+    bool write_manifest = false;
+};
+
+WorldSaveService::PreparedWorldWrite::PreparedWorldWrite() = default;
+WorldSaveService::PreparedWorldWrite::~PreparedWorldWrite() = default;
+
+bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& state,
+                                                   const std::filesystem::path& save_dir,
+                                                   bool dirty_only,
+                                                   std::vector<std::string>* errors,
+                                                   bool preserve_authority,
+                                                   bool validate_existing) {
+    m_data.reset();
+    auto candidate = std::make_unique<Data>();
+    candidate->save_dir = save_dir;
     try {
+        if (validate_existing && !validate_save(save_dir, errors))
+            return false;
+        std::set<std::pair<int, int>> dirty_regions;
+        if (dirty_only) {
+            for (const auto id : state.dirty_chunk_ids()) {
+                if (const auto chunk = state.find_chunk(id)) {
+                    int rx = 0, rz = 0;
+                    region_coords_for_chunk(chunk->get_coords(), rx, rz);
+                    dirty_regions.emplace(rx, rz);
+                }
+            }
+        }
+        if (dirty_only && dirty_regions.empty()) {
+            m_data = std::move(candidate);
+            return true;
+        }
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
-        for (const auto& chunk : chunks) {
+        for (const auto& chunk : state.snapshot_chunks()) {
             if (!chunk) {
                 continue;
             }
             int rx = 0;
             int rz = 0;
             region_coords_for_chunk(chunk->get_coords(), rx, rz);
-            regions[{rx, rz}].push_back(chunk);
+            if (!dirty_only || dirty_regions.contains({rx, rz}))
+                regions[{rx, rz}].push_back(chunk);
         }
 
-        std::size_t written = 0;
         for (auto& [region_coords, region_chunks] : regions) {
             const std::filesystem::path path =
                 region_file_path(save_dir, region_coords.first, region_coords.second);
+            const detail::RegionFileWriteGuard transaction(path);
 
-            if (region_chunks.size() > std::numeric_limits<u16>::max()) {
-                AddError(errors, "region file exceeds the 65535-record limit");
-                return false;
-            }
             std::vector<RegionReplacement> replacements;
             replacements.reserve(region_chunks.size());
             for (const auto& chunk : region_chunks)
@@ -2880,21 +4638,48 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                         .lod_level = 0,
                                         .preserve_authority = preserve_authority,
                                         .chunk = chunk});
-            if (!RewriteRegionFile(path, replacements, errors))
+            auto& temp = candidate->regions[path];
+            if (!RewriteRegionFile(path, replacements, errors, &temp))
                 return false;
-            ++written;
         }
-
-        if (!WriteWorldManifest(world_manifest_path(save_dir), errors)) {
-            return false;
-        }
-
-        if (regions_written) {
-            *regions_written = written;
-        }
+        candidate->write_manifest = !dirty_only || !regions.empty();
+        m_data = std::move(candidate);
         return true;
-    } catch (const std::exception& e) {
-        AddError(errors, std::string("failed to write world region files: ") + e.what());
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("failed to prepare world region files: ") + error.what());
+        return false;
+    }
+}
+
+bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* errors,
+                                                   std::size_t* regions_written) {
+    auto prepared = std::move(m_data);
+    if (!prepared) {
+        AddError(errors, "world write has not been prepared or was already consumed");
+        return false;
+    }
+    if (regions_written)
+        *regions_written = 0;
+    if (!prepared->write_manifest)
+        return true;
+    try {
+        for (auto& [path, temp] : prepared->regions) {
+            if (InterruptBeforeRegionReplaceForTesting().exchange(false,
+                                                                  std::memory_order_acq_rel)) {
+                AddError(errors, "region replacement interrupted by test seam before replacing");
+                return false;
+            }
+            if (!CreatePayloadDirectory(path, errors) ||
+                !ReplaceRegionFileAtomically(temp, path, errors))
+                return false;
+        }
+        if (!WriteWorldManifest(world_manifest_path(prepared->save_dir), errors))
+            return false;
+        if (regions_written)
+            *regions_written = prepared->regions.size();
+        return true;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("failed to write world region files: ") + error.what());
         return false;
     }
 }

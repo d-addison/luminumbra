@@ -42,10 +42,12 @@ TEST(JobSystemStressTest, DispatchRunsThousandsOfIndependentJobs) {
     constexpr int kJobCount = 4096;
     constexpr auto kTimeout = 10s;
 
-    RunningJobSystem system;
     std::atomic<int> completed{0};
     std::mutex mutex;
     std::condition_variable completed_cv;
+    // Shutdown joins callbacks before any captured state is destroyed, including
+    // a fatal timeout assertion or an exception during dispatch.
+    RunningJobSystem system;
 
     for (int i = 0; i < kJobCount; ++i) {
         system.job_system.dispatch([&completed, &completed_cv]() {
@@ -72,7 +74,6 @@ TEST(JobSystemStressTest, BatchDispatchCompletesManyIndependentBatches) {
     constexpr int kTotalJobs = static_cast<int>(kBatchCount * kJobsPerBatch);
     constexpr auto kTimeout = 10s;
 
-    RunningJobSystem system;
     std::array<std::atomic<int>, kBatchCount> batch_counts;
     for (auto& count : batch_counts) {
         count.store(0, std::memory_order_relaxed);
@@ -83,6 +84,7 @@ TEST(JobSystemStressTest, BatchDispatchCompletesManyIndependentBatches) {
     std::condition_variable completed_cv;
     std::vector<Luminumbra::JobHandle> handles;
     handles.reserve(kBatchCount);
+    RunningJobSystem system;
 
     for (std::size_t batch_index = 0; batch_index < kBatchCount; ++batch_index) {
         std::vector<Luminumbra::Job> jobs;
@@ -155,6 +157,47 @@ private:
 constexpr int kHighLaneMarker = 1;
 constexpr int kNormalLaneMarker = 0;
 
+TEST(JobSystem, BoundedDispatchChecksBothLanesAndDrainsAcceptedPayloadsOnClose) {
+    GatedSingleWorker system;
+    auto completed = std::make_shared<std::atomic<int>>(0);
+    const auto task = +[](void* payload) {
+        static_cast<std::atomic<int>*>(payload)->fetch_add(1, std::memory_order_relaxed);
+    };
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 0));
+    EXPECT_FALSE(system.job_system.try_dispatch(nullptr, completed, 2));
+    ASSERT_TRUE(system.job_system.try_dispatch(task, completed, 2, Luminumbra::JobPriority::High));
+    ASSERT_TRUE(
+        system.job_system.try_dispatch(task, completed, 2, Luminumbra::JobPriority::Normal));
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 2));
+    EXPECT_EQ(system.job_system.get_runtime_stats().queue_depth, 2u);
+    system.release();
+    system.job_system.shutdown(); // Delivers both accepted payloads before closing.
+    EXPECT_EQ(completed->load(std::memory_order_relaxed), 2);
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 2));
+}
+
+TEST(JobSystem, BoundedDispatchRetainsPayloadUntilExecutionThenReleasesStorage) {
+    std::atomic<int> completed{0};
+    GatedSingleWorker system;
+    struct Payload {
+        std::atomic<int>* count;
+    };
+    auto payload = std::make_shared<Payload>(Payload{&completed});
+    std::weak_ptr<Payload> observer = payload;
+    ASSERT_TRUE(system.job_system.try_dispatch(
+        +[](void* data) {
+            static_cast<Payload*>(data)->count->fetch_add(1, std::memory_order_relaxed);
+        },
+        payload,
+        1));
+    payload.reset();
+    EXPECT_FALSE(observer.expired());
+    system.release();
+    system.job_system.shutdown();
+    EXPECT_EQ(completed.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(observer.expired());
+}
+
 std::vector<Luminumbra::Job> MakeLaneMarkerJobs(int count,
                                                 int marker,
                                                 std::mutex& order_mutex,
@@ -174,9 +217,9 @@ TEST(JobSystemPriorityTest, HighJobsCompleteBeforeQueuedNormalBacklog) {
     constexpr int kNormalJobs = 32;
     constexpr int kHighJobs = 5;
 
-    GatedSingleWorker gated;
     std::mutex order_mutex;
     std::vector<int> completion_order;
+    GatedSingleWorker gated;
 
     // Normal backlog is queued FIRST; the High jobs arrive behind it and must
     // still be served ahead of it (modulo the starvation guard).
@@ -222,9 +265,9 @@ TEST(JobSystemPriorityTest, NormalJobsAreNotStarvedByHighBacklog) {
     constexpr int kHighJobs = 20;
     constexpr int kNormalJobs = 3;
 
-    GatedSingleWorker gated;
     std::mutex order_mutex;
     std::vector<int> completion_order;
+    GatedSingleWorker gated;
 
     const Luminumbra::JobHandle high_handle = gated.job_system.dispatch_batch(
         MakeLaneMarkerJobs(kHighJobs, kHighLaneMarker, order_mutex, completion_order),
@@ -262,9 +305,9 @@ TEST(JobSystemPriorityTest, NormalJobsAreNotStarvedByHighBacklog) {
 }
 
 TEST(JobSystemPriorityTest, RuntimeStatsReportPerLaneQueueDepths) {
-    GatedSingleWorker gated;
     std::mutex order_mutex;
     std::vector<int> completion_order;
+    GatedSingleWorker gated;
 
     const Luminumbra::JobHandle high_handle = gated.job_system.dispatch_batch(
         MakeLaneMarkerJobs(2, kHighLaneMarker, order_mutex, completion_order),
@@ -299,10 +342,11 @@ TEST(JobSystemStressTest, BatchCountersCanBeReusedAcrossSequentialBatches) {
     constexpr int kBatchIterations = 512;
     constexpr int kJobsPerBatch = 8;
 
+    std::atomic<int> completed{0};
     RunningJobSystem system;
 
     for (int batch = 0; batch < kBatchIterations; ++batch) {
-        std::atomic<int> completed{0};
+        completed.store(0, std::memory_order_relaxed);
         std::vector<Luminumbra::Job> jobs;
         jobs.reserve(kJobsPerBatch);
 
@@ -332,11 +376,12 @@ TEST(JobSystemPoolTest, RingGrowsAndRecyclesAcrossManyCycles) {
     constexpr int kCycles = 200;
     constexpr int kJobsPerCycle = 1000; // > initial 256/lane capacity -> growth
 
-    RunningJobSystem system;
     std::atomic<long long> grand_total{0};
+    std::atomic<int> ran{0};
+    RunningJobSystem system;
 
     for (int cycle = 0; cycle < kCycles; ++cycle) {
-        std::atomic<int> ran{0};
+        ran.store(0, std::memory_order_relaxed);
         std::vector<Luminumbra::Job> jobs;
         jobs.reserve(kJobsPerCycle);
         for (int i = 0; i < kJobsPerCycle; ++i) {
@@ -371,11 +416,11 @@ TEST(JobSystemPoolTest, NestedDispatchCompletesFully) {
     constexpr int kOuter = 16;
     constexpr int kInner = 32;
 
-    RunningJobSystem system;
     std::atomic<int> inner_ran{0};
     std::mutex handles_mutex;
     std::vector<Luminumbra::JobHandle> inner_handles;
     inner_handles.reserve(kOuter);
+    RunningJobSystem system;
 
     std::vector<Luminumbra::Job> outer_jobs;
     outer_jobs.reserve(kOuter);
@@ -429,8 +474,9 @@ TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
     }
 
     constexpr int kJobs = 128;
-    RunningJobSystem system;
     std::atomic<int> survived{0};
+    std::atomic<int> after{0};
+    RunningJobSystem system;
 
     std::vector<Luminumbra::Job> jobs;
     jobs.reserve(kJobs);
@@ -449,7 +495,6 @@ TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
     EXPECT_EQ(survived.load(std::memory_order_acquire), kJobs);
 
     // The pool/workers are still healthy: a subsequent batch completes.
-    std::atomic<int> after{0};
     std::vector<Luminumbra::Job> more;
     more.reserve(8);
     for (int i = 0; i < 8; ++i) {
@@ -539,6 +584,7 @@ void CheckCaptureCompletion(std::size_t job_count,
                             bool throwing,
                             bool drain_on_shutdown = false) {
     const auto gate = std::make_shared<CaptureLifetimeGate>();
+    std::atomic<int> reused{0};
     Luminumbra::JobSystem job_system;
     job_system.startup(job_count);
     // Destruction order releases the gates before joining shutdown or workers,
@@ -607,7 +653,6 @@ void CheckCaptureCompletion(std::size_t job_count,
         job_system.startup(job_count);
     }
     // Recycle more than one lane's initial 256 slots, retaining the old handle.
-    std::atomic<int> reused{0};
     std::vector<Luminumbra::Job> more(
         260, [&reused] { reused.fetch_add(1, std::memory_order_relaxed); });
     job_system.wait(job_system.dispatch_batch(more, priority));

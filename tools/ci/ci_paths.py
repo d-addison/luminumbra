@@ -15,12 +15,18 @@ import sys
 PYTHON_TESTS = (
     "test/tools/test_region_authority_wiring.py",
     "test/tools/test_system_config_identity.py",
+    "tools/ci/test_ui_layout_contract.py",
+    "tools/ci/test_rmlui_source.py",
+    "tools/ci/test_local_rmlui_recipe.py",
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
     "test/tools/test_runtime_config_contract.py",
+    "test/tools/test_graphics_ui_contract.py",
+    "test/tools/test_frame_pacing_contract.py",
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",
+    "test/persistence/test_world_entry_filesystem_wiring.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_replay_workspace.py",
     "test/rendering/test_upload_budget_wiring.py",
@@ -37,6 +43,8 @@ PYTHON_TESTS = (
     "tools/ci/test_jolt_startup.py",
     "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
+    "tools/ci/test_containment_link_closure.py",
+    "tools/ci/test_first_party_exceptions.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_compare_ambient_receipts.py",
     "tools/ci/test_qualify_prefab_runtime.py",
@@ -56,6 +64,7 @@ PYTHON_TESTS = (
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
+    "tools/perf/test_render_crash_capture.py",
     "tools/perf/test_run_qualification.py",
     "tools/perf/test_sim_budget_gate.py",
     "tools/perf/test_summarize_process_receipts.py",
@@ -71,6 +80,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
@@ -198,10 +208,20 @@ def needs_cpp(path: str) -> bool:
     return True
 
 
+RMLUI_CALLER_INPUTS = frozenset({
+    "CMakePresets.json", "tools/gates/run-coverage.ps1", "tools/gates/validate-engine-frontier.ps1",
+    "README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",
+    "docs/performance.md", "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md",
+    "docs/dependency-source.md", "docs/ci/local-checks.md", "tools/prefab_runtime/README.md",
+})
+
+
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    return path.endswith(".py") or path.startswith(CI_PREFIXES)
+    return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+            or path == "vendor/rmlui/rmlui-6.1-source.json"
+            or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
 
 def changed_paths(root: Path, base: str, head: str) -> list[str]:

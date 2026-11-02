@@ -9,8 +9,9 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.3.0 is in release preparation;
-v0.2.1 remains the latest published source release. The
+This is an owner-maintained hobby project. v0.3.0 is the latest published source
+release (a signed source-only tag published on 2026-10-16 without uploaded SBOM,
+checksum or attestation assets); v0.3.1 is in preparation. The
 [coordinated roadmap](docs/roadmap.md) separates implemented release scope,
 acceptance deferred to v0.3.1 and publication. Interfaces and content formats may
 change between releases.
@@ -25,7 +26,7 @@ Ladder is the default requested far-world mode. Missing immutable authority in n
 presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km
 range and a 3,200 m far plane); the default request does not establish 16 km native
 coverage. Saved-world far production authority remains fixture-only until FW S8
-(v0.3.1), with an explicit unavailable/refusal diagnostic in the renderer.
+(v0.3.2), with an explicit unavailable/refusal diagnostic in the renderer.
 
 TCP admission now requires matching effective simulation and resolved preset-content
 identities; runtime/soak peers that do not complete Hello within 10 seconds are
@@ -41,12 +42,14 @@ zero disables autosave.
 The persisted clock, active-region ledger, edited-content digest and scheduler-fault
 foundations are implemented. Indexed authority durability/rehydration, durable completed work and ground-object continuation,
 durable regional fields/weather/scent/energy, and regional foliage/water continuation
-with host persistence (issue #242) are planned for v0.3.1. Strict distant policy
-and distant creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and
-FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness,
-the developer console, asymmetric day/night and the calendar-relative lunar cycle,
-GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for
-v0.3.1.
+with host persistence (issue #242), strict distant policy and distant creatures (S8),
+remaining S9 closure, and the committed-generation edited-SDF producer and FW S8
+consumer are planned for v0.3.2 (Performance overhaul). The render qualification
+tooling stack, the acceptance evidence matrix, the developer console, asymmetric
+day/night and the calendar-relative lunar cycle, GNS/Steam admission identity, and the
+MG2 E4 candidate directory landed on `devel` for v0.3.1, which carries the performance
+bundle, persistence and saved-input hardening, CI and Windows tooling and the native
+acceptance checklist.
 
 Performance work to ship regional continuation on by default is planned for v0.4.0 as
 [issue #320](https://github.com/d-addison/luminumbra/issues/320).
@@ -110,13 +113,36 @@ Luminumbra uses CMake presets and Ninja. A first configure downloads dependencie
 at revisions pinned by the repository, so it requires Git and network access.
 
 ```sh
-cmake --preset debug
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
+cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure
 ```
 
+When upgrading an existing `build/debug` without a matching ownership receipt,
+use a new, absent directory for the one-time migration. Leave the old directory
+and all its contents untouched; never initialize it again or remove its records.
+For example, if `build/debug-fresh` does not exist:
+
+```sh
+python3 -I -B tools/ci/rmlui_source.py init --root build/debug-fresh || exit
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug-fresh || exit
+cmake -B build/debug-fresh --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
+cmake --build build/debug-fresh --parallel
+ctest --test-dir build/debug-fresh -LE manual --no-tests=error --output-on-failure
+```
+
+The explicit build and test directories above match the configure override;
+`--build --preset debug` would still select `build/debug`. If the example directory
+already exists, choose another absent directory and use it in every command.
+Use the same fresh-directory procedure after a delivery change or interruption.
+
 Use `release` for optimized builds and `debug-asan` for AddressSanitizer builds.
-All generated files stay under `build/<preset>/`.
+Preset defaults keep generated files under `build/<preset>/`; an explicit build
+directory override uses that directory instead.
 
 The primary executables are written to `build/<preset>/bin/`:
 

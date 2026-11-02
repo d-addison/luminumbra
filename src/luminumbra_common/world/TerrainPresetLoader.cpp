@@ -1,5 +1,6 @@
 #include "TerrainPresetLoader.h"
 #include "core/Profiler.h"
+#include "persistence/SavedJsonAdmission.h"
 
 #include <algorithm>
 #include <array>
@@ -7,7 +8,6 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -69,7 +69,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                nlohmann::json& manifest,
                                std::vector<std::string>& errors,
                                const World::WorldgenFileStatusReader& read_status,
-                               const World::WorldgenFileReader& dependency_reader) {
+                               const World::WorldgenFileReader& dependency_reader,
+                               const std::stop_token& stop) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -106,6 +107,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
     };
     const World::WorldgenFileReader read_file = [&](const std::filesystem::path& path,
                                                     std::string& bytes) {
+        if (stop.stop_requested())
+            return false;
         const auto logical = logical_path(path.lexically_relative(data_root));
         if (logical.empty())
             return false;
@@ -469,28 +472,35 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
-                                          const std::filesystem::path& data_root) {
+                                          const std::filesystem::path& data_root,
+                                          const std::stop_token& stop) {
     LUMIN_PROFILE_ZONE_N("File preset load");
     TerrainPresetLoadResult result;
 
-    std::ifstream file(preset_path);
-    if (!file.is_open()) {
-        result.errors.push_back("failed to open world preset: " +
+    nlohmann::json data;
+    bool missing = false;
+    Persistence::SavedJsonFailure failure = Persistence::SavedJsonFailure::None;
+    if (!Persistence::ReadSavedJson(preset_path,
+                                    Persistence::SavedInputLimits::kPresetBytes,
+                                    data,
+                                    missing,
+                                    false,
+                                    &failure,
+                                    stop) ||
+        missing) {
+        const bool unavailable = missing || failure == Persistence::SavedJsonFailure::Unreadable;
+        result.errors.push_back((unavailable ? "failed to open world preset: "
+                                             : "failed to parse world preset JSON: ") +
                                 Filesystem::GenericUtf8PathString(preset_path));
         return result;
     }
 
-    nlohmann::json data;
-    try {
-        data = nlohmann::json::parse(file);
-    } catch (const nlohmann::json::exception& e) {
-        result.errors.push_back("failed to parse world preset JSON '" +
-                                Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
-        return result;
-    }
-
-    return LoadTerrainPresetFromJson(
-        data, data_root, Filesystem::GenericUtf8PathString(preset_path));
+    return LoadTerrainPresetFromJson(data,
+                                     data_root,
+                                     Filesystem::GenericUtf8PathString(preset_path),
+                                     World::ReadWorldgenSymlinkStatus,
+                                     World::ReadWorldgenFile,
+                                     stop);
 }
 
 TerrainPresetLoadResult
@@ -498,8 +508,13 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
                           const World::WorldgenFileStatusReader& read_status,
-                          const World::WorldgenFileReader& dependency_reader) try {
+                          const World::WorldgenFileReader& dependency_reader,
+                          const std::stop_token& stop) try {
     TerrainPresetLoadResult result;
+    if (stop.stop_requested()) {
+        result.errors.push_back("Saved-world validation cancelled.");
+        return result;
+    }
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
     // param blocks for unrelated assertions and have never had to declare it.
@@ -819,8 +834,12 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
 
     nlohmann::json manifest;
     if (!ResolveDependencyManifest(
-            result, data_root, manifest, result.errors, read_status, dependency_reader))
+            result, data_root, manifest, result.errors, read_status, dependency_reader, stop))
         return result;
+    if (stop.stop_requested()) {
+        result.errors.push_back("Saved-world validation cancelled.");
+        return result;
+    }
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
     return result;
@@ -847,18 +866,16 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& json_text,
                                std::string& error) {
     LUMIN_PROFILE_ZONE_N("File preset override load");
-    std::ifstream file(preset_path);
-    if (!file) {
-        error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
+    nlohmann::json document;
+    bool missing = false;
+    if (!Persistence::ReadSavedJson(
+            preset_path, Persistence::SavedInputLimits::kPresetBytes, document, missing, false) ||
+        missing) {
+        error = "cannot read preset override within compatibility limits: " +
+                Filesystem::GenericUtf8PathString(preset_path);
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(file);
-        if (file.bad()) {
-            error =
-                "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
-            return false;
-        }
         const auto validated = LoadTerrainPresetFromJson(
             document, data_root, Filesystem::GenericUtf8PathString(preset_path));
         if (!validated.ok) {

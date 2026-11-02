@@ -1,33 +1,35 @@
 # Manual AC2/AC4 CI capture
 
-The `ci.yml`, `asan.yml` and `performance.yml` workflows accept an optional
+The `ci.yml`, `windows-daily.yml`, `asan.yml` and `performance.yml` workflows accept an optional
 `qualification_capture` boolean and `expected_sha` full lowercase commit SHA.
 The default is disabled. Enabling capture adds evidence to the existing Linux,
 ASan, MSVC and UCRT test lanes and runs an independent candidate server capture.
 It does not add routine devel PR gates or change the existing paired performance
-comparison. Each manual capture run has its own uncancelled concurrency group.
+comparison. Windows dispatches queue with scheduled daily runs without cancelling them.
+The other manual capture runs have their own uncancelled concurrency groups.
 
-All three dispatches must resolve to the same candidate, including the workflow
+All four dispatches must resolve to the same candidate, including the workflow
 files and helper code. Preflight refuses a moved branch, a dirty checkout, a
 workflow SHA mismatch, or missing AC2/AC4 dependencies before installing/building.
 The candidate must contain `compare_ambient_receipts.py`, the simulation capture,
 proposal and checker modules, and `tools/perf/baselines/sim-budgets.json`. Capture
 routing alone does not provide those dependencies from another revision.
 
-Dispatch all three workflows against a branch or tag whose tip is the candidate.
+Dispatch all four workflows against a branch or tag whose tip is the candidate.
 Use the full SHA already recorded by the integration qualification plan:
 
 ```sh
 candidate_sha=FULL_40_CHARACTER_LOWERCASE_SHA
 candidate_ref=EXISTING_BRANCH_OR_TAG_AT_THAT_SHA
-for workflow in ci.yml asan.yml performance.yml; do
+for workflow in ci.yml windows-daily.yml asan.yml performance.yml; do
   gh workflow run "$workflow" --repo d-addison/luminumbra --ref "$candidate_ref" \
     -f qualification_capture=true -f expected_sha="$candidate_sha"
 done
 ```
 
 Record the resulting run IDs and attempts explicitly. The CI run produces
-`linux-gcc`, `windows-msvc` and `windows-ucrt64`; ASan produces `asan`; Performance
+`linux-gcc`; Daily Windows produces `windows-msvc` and `windows-ucrt64` through
+`windows-build.yml`; ASan produces `asan`; Performance
 produces `server-capture`. Artifact names have this form:
 
 ```text
@@ -39,14 +41,17 @@ failure. Such an upload is not a successful capture. A complete manifest require
 all producer step **outcomes** to be `success`. Validation separately checks the
 exact completed producer job's GitHub status and conclusion, and binds the ZIP
 to GitHub's recorded artifact SHA-256, size and originating run. Missing digests,
-expired artifacts, ambiguous names or changing pagination fail closed.
+expired artifacts, ambiguous names or changing pagination fail closed. Windows
+job identities include the reusable caller prefix `build / `; the workflow identity
+is `windows-daily.yml`. Evidence from `ci.yml` cannot substitute for a daily capture.
 
 List artifacts for each recorded run and select the exact name above. Download
-its original ZIP without unpacking or repacking it:
+its original ZIP without unpacking or repacking it. Replace `/path/to/captures`
+with an existing directory outside the checkout:
 
 ```sh
 gh api repos/d-addison/luminumbra/actions/runs/RUN_ID/artifacts --paginate
-gh api repos/d-addison/luminumbra/actions/artifacts/ARTIFACT_ID/zip > /tmp/LANE.zip
+gh api repos/d-addison/luminumbra/actions/artifacts/ARTIFACT_ID/zip > /path/to/captures/LANE.zip
 ```
 
 Check out the candidate with a clean worktree, keep downloaded ZIPs and output
@@ -55,12 +60,12 @@ outside it, and validate all five selections together:
 ```sh
 python3 tools/ci/qualification_capture.py validate-chain \
   --expected-sha "$candidate_sha" \
-  --artifact linux-gcc CI_RUN_ID CI_ATTEMPT /tmp/linux-gcc.zip \
-  --artifact windows-msvc CI_RUN_ID CI_ATTEMPT /tmp/windows-msvc.zip \
-  --artifact windows-ucrt64 CI_RUN_ID CI_ATTEMPT /tmp/windows-ucrt64.zip \
-  --artifact asan ASAN_RUN_ID ASAN_ATTEMPT /tmp/asan.zip \
-  --artifact server-capture PERF_RUN_ID PERF_ATTEMPT /tmp/server-capture.zip \
-  --output /tmp/qualification-chain.json
+  --artifact linux-gcc CI_RUN_ID CI_ATTEMPT /path/to/captures/linux-gcc.zip \
+  --artifact windows-msvc WINDOWS_RUN_ID WINDOWS_ATTEMPT /path/to/captures/windows-msvc.zip \
+  --artifact windows-ucrt64 WINDOWS_RUN_ID WINDOWS_ATTEMPT /path/to/captures/windows-ucrt64.zip \
+  --artifact asan ASAN_RUN_ID ASAN_ATTEMPT /path/to/captures/asan.zip \
+  --artifact server-capture PERF_RUN_ID PERF_ATTEMPT /path/to/captures/server-capture.zip \
+  --output /path/to/captures/qualification-chain.json
 ```
 
 The output path must be new. The validator extracts only declared evidence into

@@ -278,11 +278,14 @@ def check_enabled_compile():
         script = step.split("        run:", 1)[1]
         script = re.sub(r"(?m)^\s*#.*$", "", script).replace("\\\n", " ")
         commands.append(" ".join(script.split()).removeprefix("| "))
-    require("cmake --preset profile -B build/gns-probe -DBUILD_TESTING=ON "
-            "-DLUMINUMBRA_ENABLE_GNS=ON" in commands,
+    configure = (
+        "python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe "
+        "cmake --preset profile -B build/gns-probe "
+        "\"-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')\" "
+        "-DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON")
+    require(configure in commands,
             "CI must configure the enabled profile preset with both compile fixtures available")
-    configure_index = commands.index(
-        "cmake --preset profile -B build/gns-probe -DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON")
+    configure_index = commands.index(configure)
     bootstrap = commands[:configure_index]
     for package in ("python3-numpy", "python3-pil"):
         require(any(re.search(r"\bapt-get install\b.*\b" + package + r"\b", command)

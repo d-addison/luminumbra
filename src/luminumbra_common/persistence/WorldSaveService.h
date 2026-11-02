@@ -27,6 +27,7 @@ namespace Luminumbra::Persistence {
 class RegionContentHasher;
 class AuthorityHashCache;
 struct WorldAuthorityHashes;
+class CreatedWorldArtifacts;
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -91,22 +92,45 @@ public:
     static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Own the admitted encoding so a compound save serializes plants once,
+    // before any payload writes. Empty snapshots retain stale-file retirement.
+    class PreparedPlantWrite {
+    public:
+        PreparedPlantWrite() = default;
+        PreparedPlantWrite(const PreparedPlantWrite&) = delete;
+        PreparedPlantWrite& operator=(const PreparedPlantWrite&) = delete;
+        bool prepare(const Ecs::EntityRegistrySnapshot& snapshot,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(const std::filesystem::path& save_dir,
+                     std::vector<std::string>* errors = nullptr,
+                     bool validate_existing = true) const;
+
+    private:
+        // Bounded by SavedInputLimits::kPlantFileBytes during preparation.
+        std::string m_bytes;
+        bool m_prepared = false;
+        bool m_empty = true;
+    };
     // A missing file is a clean miss: out is emptied, returns true.
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    const std::stop_token& stop = {});
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    CreatedWorldArtifacts* artifacts = nullptr);
     // Missing file: clear region state at absent_clock and preserve ledger.config().
     // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
-                                    const world::WorldClock& absent_clock = world::WorldClock{});
+                                    const world::WorldClock& absent_clock =
+                                        world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                    const std::stop_token& stop = {});
     // Content-only projection region_content_v2: live over parked over durable records flagged
     // edited; pristine chunks excluded. Loading is excluded for incomplete live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
@@ -148,7 +172,8 @@ public:
     // Refuses an unsupported existing save before touching its metadata.
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
-                              std::vector<std::string>* errors = nullptr);
+                              std::vector<std::string>* errors = nullptr,
+                              CreatedWorldArtifacts* artifacts = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
     // Writes are serialized within the process, including nested pair saves and
@@ -156,16 +181,20 @@ public:
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
-                                                 std::vector<std::string>* errors = nullptr);
+                                                 std::vector<std::string>* errors = nullptr,
+                                                 CreatedWorldArtifacts* artifacts = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
-    // Missing metadata is a legacy snapshot with a default clock.
+    // Missing metadata is a legacy snapshot with a pinned legacy clock and zero water cursor.
+    // A present cursor must be an unsigned integer representable by size_t.
     static bool read_clock_metadata(const std::filesystem::path& save_dir,
                                     world::WorldClock& clock,
                                     bool& requires_active_regions,
                                     std::vector<std::string>* errors = nullptr,
                                     std::optional<Vec3>* ambient_anchor = nullptr,
-                                    std::size_t* water_cursor = nullptr);
+                                    std::optional<world::WorldCalendar>* render_calendar = nullptr,
+                                    std::size_t* water_sim_cursor = nullptr,
+                                    const std::stop_token& stop = {});
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -250,6 +279,13 @@ public:
                                          const std::vector<ContainerRecord>& records,
                                          std::vector<std::string>* errors = nullptr);
 
+    // Compose a record update with an authority check under existing ownership.
+    // The token must remain on its acquiring thread through publication.
+    static bool upsert_container_records(const SaveOwnership& ownership,
+                                         const std::filesystem::path& region_file,
+                                         const std::vector<ContainerRecord>& records,
+                                         std::vector<std::string>* errors = nullptr);
+
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
     // save root outside strict scans when the original suffix is chunks/region.
@@ -285,9 +321,12 @@ public:
     // reclaim abandoned staging. All process writers serialize through cleanup
     // and replacement, independent of destination spelling. Independently launched
     // processes sharing a destination are outside this ownership contract.
+    // With a creation journal, the parent must already be owned. Temporary and
+    // published files remain journal-owned on failure until writers drain and rollback runs.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
-                                   std::vector<std::string>* errors = nullptr);
+                                   std::vector<std::string>* errors = nullptr,
+                                   CreatedWorldArtifacts* artifacts = nullptr);
 
     // Create a new file with checked, atomic no-replace publication. An occupied
     // entry (including a dangling symlink) is refused without changing its bytes.
@@ -319,11 +358,40 @@ public:
     // ownership. Includes all destinations; does not inspect or mutate the disk.
     static std::size_t waiting_save_writers();
 
-    // Called after ledger staging is flushed/closed, before replacement. Returning
+    // Called after ledger staging and ownership are flushed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
     // to leave real crash debris. Install/clear while no writers are running.
     // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
+
+    // Preparation retains process save ownership through publication or destruction.
+    // Inputs must remain stable while preparing; publication reuses compressed records.
+    // Publication consumes the preparation, including on failure.
+    // dirty_only selects every resident chunk in a dirty region, and no others.
+    class PreparedWorldWrite {
+    public:
+        PreparedWorldWrite();
+        ~PreparedWorldWrite();
+        PreparedWorldWrite(const PreparedWorldWrite&) = delete;
+        PreparedWorldWrite& operator=(const PreparedWorldWrite&) = delete;
+        bool prepare(const WorldStreamingState& state,
+                     const std::filesystem::path& save_dir,
+                     bool dirty_only,
+                     std::vector<std::string>* errors = nullptr,
+                     bool preserve_authority = false,
+                     bool validate_existing = true);
+        bool publish(std::vector<std::string>* errors = nullptr,
+                     std::size_t* regions_written = nullptr);
+
+    private:
+        struct Data;
+        std::unique_ptr<Data> m_data;
+    };
+    static bool admit_metadata_bytes(const std::string& bytes,
+                                     std::vector<std::string>* errors = nullptr);
+    static bool prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                       std::string& bytes,
+                                       std::vector<std::string>* errors = nullptr);
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
@@ -350,7 +418,10 @@ public:
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
     // independent: computed over the in-memory snapshot, never file bytes.
-    std::string world_hash(const WorldStreamingState& state) const;
+    // Supply the live cursor or the validated cursor restored from world metadata.
+    // Chunk-only legacy fixtures use the zero default.
+    std::string world_hash(const WorldStreamingState& state,
+                           std::uint64_t water_sim_cursor = 0) const;
 
     // Incremental writes: only region files containing
     // at least one dirty chunk are rewritten (all in-memory chunks of those
@@ -428,15 +499,18 @@ public:
 private:
     static bool save_metadata_validated(const std::string& bytes,
                                         const std::filesystem::path& directory,
-                                        std::vector<std::string>* errors);
+                                        std::vector<std::string>* errors,
+                                        CreatedWorldArtifacts* artifacts = nullptr);
     static bool save_pair_validated(const std::string& bytes,
                                     world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& directory,
-                                    std::vector<std::string>* errors);
+                                    std::vector<std::string>* errors,
+                                    CreatedWorldArtifacts* artifacts = nullptr);
     static bool save_regions_validated(world::ActiveRegionLedger& ledger,
                                        const world::WorldClock& clock,
                                        const std::filesystem::path& directory,
-                                       std::vector<std::string>* errors);
+                                       std::vector<std::string>* errors,
+                                       CreatedWorldArtifacts* artifacts = nullptr);
     static bool save_plants_validated(const Ecs::EntityRegistrySnapshot& snapshot,
                                       const std::filesystem::path& directory,
                                       std::vector<std::string>* errors);

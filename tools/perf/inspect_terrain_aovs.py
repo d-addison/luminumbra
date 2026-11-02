@@ -13,6 +13,8 @@ import math
 import os
 from pathlib import Path
 
+from render_contract import validate_terrain_benchmark as validate_benchmark
+
 import numpy as np
 
 from fixture_paths import contain_path, decode_text, open_regular, read_text
@@ -162,24 +164,6 @@ def inspect(directory, legacy_forward=False):
         return manifest, arrays, report
 
 
-def validate_benchmark(manifest, benchmark):
-    # v3 preserves the capture-frame attachment contract while adding a separate
-    # measurement contract. This join does not validate its timing distributions.
-    require(benchmark['schema'] in ('luminumbra.render_benchmark.v2',
-                                    'luminumbra.render_benchmark.v3'), 'Unknown benchmark schema')
-    require([benchmark['width'], benchmark['height']] == manifest['color_dimensions'] and
-            [benchmark['internal_width'], benchmark['internal_height']] == manifest['gbuffer_dimensions'],
-            'Benchmark/AOV dimensions mismatch')
-    coverage = benchmark['terrain_coverage']
-    require(coverage['capture_complete'] is True, 'Benchmark capture incomplete')
-    rows = coverage['frame_observations']
-    frames = [row['render_frame'] for row in rows]
-    require(all(type(frame) is int for frame in frames) and
-            all(a < b for a, b in zip(frames, frames[1:])), 'Unordered or duplicate observations')
-    captures = [row for row in rows if row['benchmark_phase'] == 'capture']
-    require(len(captures) == 1 and captures[0]['render_frame'] == manifest['render_frame'] and
-            captures[0]['far'] == manifest['far'], 'Benchmark capture-frame/AOV state mismatch')
-    return dict(capture_frame=manifest['render_frame'], observation_count=len(rows))
 
 
 def compare(first, second):

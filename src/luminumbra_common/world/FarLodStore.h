@@ -27,10 +27,14 @@
 #include "Chunk.h"
 #include "FarDensityQuantization.h"
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -229,7 +233,12 @@ public:
                                FarLodTile& out_tile,
                                std::vector<std::string>* errors = nullptr);
 
-    bool save_tile(const FarLodTile& tile, std::vector<std::string>* errors = nullptr) const;
+    // A supplied authority is checked after taking persistence ownership, which
+    // is retained through publication. Null admits an unconditional tile.
+    bool save_tile(const FarLodTile& tile,
+                   std::vector<std::string>* errors = nullptr,
+                   const Systems::SHIELD_WorldSystem* authority = nullptr,
+                   u64 authority_revision = 0) const;
 
     // Loads the (tier, region) tile. Pristine tiles are regenerable cache: a
     // params_hash mismatch is a clean miss (returns false, no error) so the
@@ -244,6 +253,54 @@ public:
 
 private:
     std::filesystem::path m_save_dir;
+};
+
+// Single consumer preserves submission order, including repeated writes to one
+// tile. Accepted work owns its world path and is drained before close returns.
+// A full queue refuses admission without moving the caller's tile.
+class AsyncFarLodStore {
+public:
+    static constexpr std::size_t kMaxPendingSaves = 64; // queued + active tiles
+    struct Diagnostics {
+        std::size_t pending = 0;
+        u64 saved = 0;
+        u64 failed = 0;
+        bool closed = false;
+    };
+
+    AsyncFarLodStore();
+    ~AsyncFarLodStore();
+    AsyncFarLodStore(const AsyncFarLodStore&) = delete;
+    AsyncFarLodStore& operator=(const AsyncFarLodStore&) = delete;
+    // Derived runtime tiles carry their captured world's authority revision.
+    // The caller must drain before destroying/rebinding that world. Only its
+    // atomic revision is read by the worker, never owner-thread containers.
+    // A null authority admits an explicitly supplied, unconditional tile.
+    bool enqueue(const std::filesystem::path& save_dir,
+                 FarLodTile&& tile,
+                 const Systems::SHIELD_WorldSystem* authority = nullptr,
+                 u64 authority_revision = 0);
+    // Owner-thread lifecycle operations; close drains, reports closed, then
+    // joins. Concurrent producers are rejected once closing begins.
+    void flush();
+    void close();
+    Diagnostics diagnostics() const;
+
+private:
+    struct Save {
+        std::filesystem::path save_dir;
+        FarLodTile tile;
+        const Systems::SHIELD_WorldSystem* authority = nullptr;
+        u64 authority_revision = 0;
+    };
+    void run();
+    mutable std::mutex m_mutex;
+    std::condition_variable m_ready;
+    std::condition_variable m_drained;
+    std::deque<Save> m_queue;
+    Diagnostics m_diagnostics;
+    bool m_closing = false;
+    std::thread m_worker;
 };
 
 } // namespace Luminumbra::World

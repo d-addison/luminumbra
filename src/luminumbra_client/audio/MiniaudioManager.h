@@ -246,6 +246,8 @@ private:
     void ApplyAmbientBusGain();
 
     std::string m_rootPath;
+    // Configured only for capture; callbacks outlive all engine decoder jobs.
+    ma_vfs_callbacks m_captureVfs{};
     std::unique_ptr<ma_engine> m_engine;
     std::unordered_map<AudioEventID, AudioEventDefinition> m_eventDefinitions;
 

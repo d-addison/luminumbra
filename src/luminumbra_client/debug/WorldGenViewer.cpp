@@ -1,6 +1,7 @@
 #include "debug/WorldGenViewer.h"
 #include "core/Log.h"
 #include "luminumbra_common/world/LayerGraph.h"
+#include "rendering/RenderPipeline.h"
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
@@ -49,7 +50,8 @@ void WorldGenViewer::RecreateWorldSystem() {
         std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, m_params, m_seed);
 }
 
-void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system) {
+void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system,
+                                  Rendering::RenderPipeline& pipeline) {
     // Re-create the world system if parameters have changed, then regenerate the texture.
     if (m_paramsChanged) {
         RecreateWorldSystem();
@@ -82,9 +84,13 @@ void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system
         if (ImGui::Button("Apply & Regenerate")) {
             if (main_world_system) {
                 LUMINUMBRA_CORE_INFO("Applying new generator settings to the world.");
+                pipeline.prepare_world_swap();
                 main_world_system->set_params(m_params);
                 main_world_system->set_seed(m_seed);
                 main_world_system->regenerate_all_chunks(nullptr); // Pass physics system if needed
+                // The swap retires old far terrain even when settings are unchanged;
+                // restore the live world's waterfall geometry and spray afterward.
+                pipeline.prepare_waterfalls(*main_world_system);
             }
         }
         ImGui::EndDisabled();

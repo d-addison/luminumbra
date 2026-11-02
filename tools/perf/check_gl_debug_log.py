@@ -50,13 +50,27 @@ def open_input(path):
     """Open a regular file with a byte cap; reject malformed path arguments."""
     try:
         candidate = Path(path)
-        if not stat.S_ISREG(candidate.stat().st_mode):
+        before = candidate.lstat()
+        if (not stat.S_ISREG(before.st_mode)
+                or getattr(before, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
             raise InputError(f'input is not a regular file: {path}')
-        source = candidate.open('rb')
+        # A replaced FIFO must not block before fstat can reject it. Read only
+        # the verified descriptor; both log and artifact readers use this gate.
+        flags = (os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                 | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        descriptor = os.open(candidate, flags)
+        try:
+            source = os.fdopen(descriptor, 'rb')
+        except BaseException:
+            os.close(descriptor)
+            raise
         try:
             info = os.fstat(source.fileno())
             if not stat.S_ISREG(info.st_mode):
                 raise InputError(f'input is not a regular file: {path}')
+            if (not info.st_ino or not before.st_ino
+                    or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)):
+                raise InputError(f'input changed while opening or identity unavailable: {path}')
             if info.st_size > MAX_FILE_BYTES:
                 raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
         except (OSError, InputError):
@@ -173,8 +187,11 @@ def evaluate(lines):
 def build_parser():
     parser = argparse.ArgumentParser(
         description='Verdict on GL KHR_debug output recorded in a client log.')
-    parser.add_argument('--log', required=True, type=Path,
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--log', type=Path,
                         help='Client log path (UTF-8 or UTF-16 with BOM)')
+    inputs.add_argument('--stdin', action='store_true',
+                        help='Read bounded binary client log bytes from standard input')
     parser.add_argument('--artifact', type=Path, default=None,
                         help='Optional render benchmark v3 capture to validate')
     parser.add_argument('--format', choices=('json',), default='json',
@@ -187,7 +204,8 @@ def main(argv=None):
     try:
         if args.artifact is not None:
             check_artifact(args.artifact)
-        result = evaluate(read_log(args.log))
+        result = evaluate(read_log('<stdin>' if args.stdin else args.log,
+                                   source=sys.stdin.buffer if args.stdin else None))
     except InputError as error:
         print(f'check_gl_debug_log: {str(error)[:MAX_ERROR_CHARS]}', file=sys.stderr)
         return 2

@@ -8,6 +8,9 @@ import types
 import unittest
 from unittest import mock
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from test_fixture_hash import directory_link, remove_directory_link, symlink_or_skip
 
 

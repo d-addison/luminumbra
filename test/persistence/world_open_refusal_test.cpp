@@ -1,3 +1,5 @@
+#include "../support/CalendarMetadataCases.h"
+#include "../support/PersistenceFileOps.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
@@ -13,6 +15,8 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/persistence/SavedEnergyInput.h"
+#include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -42,8 +46,10 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -608,6 +614,78 @@ TEST_F(WorldOpenRefusal, CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    for (const bool metadata_only : {false, true}) {
+        if (metadata_only)
+            fs::remove_all(save / "chunks");
+        for (const auto& patch : TestSupport::InvalidCalendarMetadata()) {
+            SCOPED_TRACE(patch.dump());
+            auto metadata = base;
+            metadata.update(patch);
+            Write(save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(save);
+            EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+            const auto catalog = Persistence::EnumerateSavedWorlds(root);
+            ASSERT_EQ(catalog.worlds.size(), 1u);
+            EXPECT_FALSE(catalog.worlds.front().error.empty());
+            EXPECT_FALSE(WorldSaveService::validate_save(save));
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(RootString());
+            session.SetActiveRegionsEnabled(true);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            GameSession snapshot;
+            snapshot.SetJobSystem(&jobs);
+            snapshot.SetRootPath(RootString());
+            ASSERT_TRUE(snapshot.CreateTransientWorld("Snapshot reader", "1337", "default"));
+            EXPECT_FALSE(snapshot.LoadWorldStateFrom(save));
+            EXPECT_FALSE(snapshot.SaveWorldStateTo(save));
+            EXPECT_EQ(DiskBytes(save), before);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    fs::remove_all(save / "chunks");
+    const auto v2 = TestSupport::DefaultCalendarMetadata();
+    const auto v1 = nlohmann::json{{"dayLengthTicks", 36000}, {"daysPerYear", 3}};
+    for (const auto& patch : {nlohmann::json::object(),
+                              nlohmann::json{{"calendar", v1}},
+                              nlohmann::json{{"calendar", v2}},
+                              nlohmann::json{{"renderCalendar", v2}}}) {
+        fs::remove_all(save / "chunks");
+        auto metadata = base;
+        metadata.update(patch);
+        Write(save / "world_info.json", metadata.dump());
+        const auto before = DiskBytes(save);
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.requires_active_regions, patch.contains("calendar"));
+        EXPECT_EQ(inspected.render_calendar.has_value(), patch.contains("renderCalendar"));
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(RootString());
+        session.SetActiveRegionsEnabled(patch.contains("calendar"));
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        const auto expected =
+            patch.contains("renderCalendar") ||
+                    patch.value("calendar", nlohmann::json::object()).contains("version")
+                ? world::WorldCalendar{}
+            : patch.contains("calendar") ? world::WorldCalendar{36000, 3, 1, 2, 8}
+                                         : world::WorldCalendar::Legacy();
+        EXPECT_EQ(session.GetRenderCalendar(), expected);
+        EXPECT_EQ(DiskBytes(save), before);
+        ASSERT_TRUE(session.SaveWorld());
+        const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
+        if (patch.contains("calendar"))
+            EXPECT_EQ(written.at("calendar"), patch.at("calendar"));
+        else
+            EXPECT_EQ(written.contains("renderCalendar"), patch.contains("renderCalendar"));
+    }
+}
+
 TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {
     fs::remove_all(save / "chunks");
     const auto before = DiskBytes(save);
@@ -646,7 +724,11 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     config.world_id = "fixture";
     config.surface_radius = 0;
     config.collision_radius = 0;
-    const auto before = DiskBytes(save);
+    auto expected = DiskBytes(save);
+    auto metadata = nlohmann::json::parse(expected.at("world_info.json"));
+    // Existing metadata is reconciled even at zero; absent metadata stays absent.
+    metadata["waterSimCursor"] = 0;
+    expected["world_info.json"] = metadata.dump(4) + "\n";
     Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
     ASSERT_NE(runner.Session(), nullptr);
@@ -662,7 +744,203 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     }
     EXPECT_TRUE(found);
     runner.Shutdown();
-    EXPECT_EQ(DiskBytes(save), before);
+    EXPECT_EQ(DiskBytes(save), expected);
+}
+
+TEST_F(WorldOpenRefusal, ServerWaterCursorBindsEveryHashCaptureAndSurvivesReload) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    // Cap ongoing boot streaming too: the initial horizon radii alone still
+    // allow thousands of chunks, each serialized by all three capture APIs.
+    config.test_streaming_radius_cap = 1;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* world_system = runner.Session()->GetWorldSystem();
+    world_system->SetWaterSimWindowCursor(0);
+    const auto legacy_hash = runner.ComputeWorldHash();
+    const auto legacy_sub = runner.ComputeWorldSubHashes();
+    std::string saved_hash;
+    Persistence::WorldStreamingStateSubHashes saved_sub;
+    for (const std::size_t cursor : {std::size_t{0}, std::size_t{65}, std::size_t{66}}) {
+        SCOPED_TRACE(cursor);
+        world_system->SetWaterSimWindowCursor(cursor);
+        runner.ComputeWorldHashAndSubHashes(saved_hash, saved_sub);
+        const auto separate_hash = cursor == 0 ? legacy_hash : runner.ComputeWorldHash();
+        const auto separate_sub = cursor == 0 ? legacy_sub : runner.ComputeWorldSubHashes();
+        EXPECT_EQ(saved_hash, separate_hash);
+        EXPECT_EQ(saved_sub.water, separate_sub.water);
+        EXPECT_EQ(saved_sub.terrain, legacy_sub.terrain);
+        EXPECT_EQ(saved_sub.entities, legacy_sub.entities);
+        if (cursor == 0) {
+            EXPECT_EQ(saved_hash, legacy_hash);
+            EXPECT_EQ(saved_sub.water, legacy_sub.water);
+        } else {
+            EXPECT_NE(saved_hash, legacy_hash);
+            EXPECT_NE(saved_sub.water, legacy_sub.water);
+            EXPECT_EQ(WaterHashDifferenceSection(saved_sub.water, legacy_sub.water),
+                      "water/cursor");
+        }
+    }
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    runner.Shutdown();
+    Server::ServerWorldRunner restored(config);
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    auto* restored_world = restored.Session()->GetWorldSystem();
+    EXPECT_EQ(restored_world->GetWaterSimWindowCursor(), 66u);
+    std::string restored_hash;
+    Persistence::WorldStreamingStateSubHashes restored_sub;
+    restored.ComputeWorldHashAndSubHashes(restored_hash, restored_sub);
+    EXPECT_EQ(restored_sub.water, saved_sub.water);
+    EXPECT_EQ(restored_sub.entities, saved_sub.entities);
+    EXPECT_EQ(restored_sub.wind, saved_sub.wind);
+    EXPECT_EQ(restored_sub.weather, saved_sub.weather);
+    EXPECT_EQ(restored_sub.aether, saved_sub.aether);
+    EXPECT_EQ(restored_sub.aether_state, saved_sub.aether_state);
+    // The composite includes chunk lifecycle/collision availability, which
+    // adoption normalizes before boot rebuilds colliders. Only water authority
+    // and the unchanged runtime systems above must round-trip in this fixture.
+    // Compare cursor changes within the restored world, holding all else fixed.
+    restored_world->SetWaterSimWindowCursor(0);
+    std::string restored_zero_hash;
+    Persistence::WorldStreamingStateSubHashes restored_zero_sub;
+    restored.ComputeWorldHashAndSubHashes(restored_zero_hash, restored_zero_sub);
+    EXPECT_NE(restored_hash, restored_zero_hash);
+    EXPECT_NE(restored_sub.water, restored_zero_sub.water);
+    EXPECT_EQ(WaterHashDifferenceSection(restored_sub.water, restored_zero_sub.water),
+              "water/cursor");
+    EXPECT_EQ(restored_sub.terrain, restored_zero_sub.terrain);
+    EXPECT_EQ(restored_sub.entities, restored_zero_sub.entities);
+    restored_world->SetWaterSimWindowCursor(66);
+    EXPECT_EQ(restored.ComputeWorldHash(), restored_hash);
+    EXPECT_EQ(restored.ComputeWorldSubHashes().water, restored_sub.water);
+    restored.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, RenderCalendarRefusesEveryInstalledLedgerWithoutClockMetadata) {
+    const world::WorldClock zero;
+    world::ActiveRegionLedger anchored;
+    anchored.set_local_anchor(Vec3(8, 18, 8));
+    world::ActiveRegionLedger populated;
+    populated.mark_edited({10, -3}, zero);
+    populated.set_populated({10, -3}, true);
+    world::ActiveRegionLedger frozen({0, 1, 1});
+    frozen.mark_edited({10, -3}, zero);
+    frozen.schedule(world::WorldClock(1));
+    const std::array work{world::RegionWork{{10, -3}, 1, 0, 0, 0}};
+    for (const std::uint64_t tick : {2u, 3u}) {
+        frozen.schedule(world::WorldClock(tick), {}, work, [](world::RegionKey) { return 17u; });
+    }
+    const auto version_two = frozen.encode();
+    ASSERT_EQ(version_two.at(4), 2);
+    // The supported legacy frozen-history envelope has no extension block.
+    // Re-seal it using the same stable FNV checksum as the ledger codec.
+    auto legacy_frozen = version_two.substr(0, version_two.size() - 8 - 11);
+    legacy_frozen[4] = 1;
+    const auto checksum = std::stoull(Persistence::StableChecksum(legacy_frozen), nullptr, 16);
+    for (unsigned byte = 0; byte < 8; ++byte)
+        legacy_frozen.push_back(static_cast<char>((checksum >> (byte * 8)) & 255u));
+    const std::vector<std::pair<std::string, std::string>> forms{
+        {"empty-v1", world::ActiveRegionLedger{}.encode()},
+        {"anchor-only-v1", anchored.encode()},
+        {"populated-v1", populated.encode()},
+        {"frozen-v1", legacy_frozen},
+        {"frozen-v2", version_two}};
+
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Unchanged", "1337", "default"));
+    auto* original_world = session.GetWorldSystem();
+    const auto original_ledger = session.GetActiveRegionLedger().encode();
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    ASSERT_FALSE(metadata.contains("simulationTick"));
+    ASSERT_FALSE(metadata.contains("calendar"));
+    for (const auto& [name, bytes] : forms) {
+        SCOPED_TRACE(name);
+        Write(save / "world_info.json", metadata.dump());
+        Write(WorldSaveService::active_regions_path(save), bytes);
+        world::ActiveRegionLedger decoded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::load_active_regions(decoded, save, &errors));
+        EXPECT_EQ(decoded.encode(), bytes);
+        world::WorldClock clock;
+        bool required = false;
+        std::optional<world::WorldCalendar> rendering;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        EXPECT_TRUE(required);
+        EXPECT_FALSE(rendering.has_value());
+        auto conflicting = metadata;
+        conflicting["renderCalendar"] = TestSupport::DefaultCalendarMetadata();
+        Write(save / "world_info.json", conflicting.dump());
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.back(),
+                  "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        EXPECT_FALSE(rendering.has_value());
+        EXPECT_FALSE(WorldSaveService::validate_save(save));
+        WorldStreamingState rejected;
+        EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, errors));
+        EXPECT_TRUE(rejected.empty());
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+        EXPECT_FALSE(session.LoadWorld("fixture"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        EXPECT_EQ(session.GetWorldSystem(), original_world);
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), original_ledger);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, RenderCalendarLedgerRefusalUsesPresenceRatherThanPayloadOrStaging) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["renderCalendar"] = TestSupport::DefaultCalendarMetadata();
+    Write(save / "world_info.json", metadata.dump());
+    const auto path = WorldSaveService::active_regions_path(save);
+    // Staged copies are outside the strict region scan and are never loaded,
+    // even if their bytes contain a valid ledger.
+    Write(save / "active-regions.arl.tmp.abandoned", world::ActiveRegionLedger{}.encode());
+    world::WorldClock clock;
+    bool required = true;
+    std::optional<world::WorldCalendar> rendering;
+    ASSERT_TRUE(
+        WorldSaveService::read_clock_metadata(save, clock, required, nullptr, nullptr, &rendering));
+    EXPECT_FALSE(required);
+    EXPECT_TRUE(rendering.has_value());
+    EXPECT_TRUE(WorldSaveService::validate_save(save));
+    world::ActiveRegionLedger absent;
+    absent.mark_edited({10, -3}, clock);
+    ASSERT_TRUE(WorldSaveService::load_active_regions(absent, save));
+    EXPECT_TRUE(absent.records().empty());
+    for (const std::string& bytes : {std::string{}, std::string{"ARL1"}, std::string{"unknown"}}) {
+        SCOPED_TRACE(bytes);
+        Write(path, bytes);
+        const auto before = DiskBytes(root);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+            save, clock, required, &errors, nullptr, &rendering));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.back(),
+                  "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        EXPECT_TRUE(required);
+        EXPECT_FALSE(rendering.has_value());
+        EXPECT_FALSE(WorldSaveService::validate_save(save));
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    ASSERT_TRUE(fs::remove(path));
+    ASSERT_TRUE(fs::create_directory(path));
+    std::vector<std::string> errors;
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(WorldSaveService::read_clock_metadata(save, clock, required, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save));
+    EXPECT_EQ(DiskBytes(root), before);
 }
 
 TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting) {
@@ -1069,6 +1347,42 @@ TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRe
     EXPECT_FALSE(ledger.local_anchor().has_value());
 }
 
+TEST_F(WorldOpenRefusal, RuntimeHelloMatchesNewWorldCalendarWithActiveRegionsOnAndOff) {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        const nlohmann::json systems = {
+            {"sim", {{"active_regions", {{"enabled", active_regions}}}}}};
+        Write(root / "data/common/systems.json", systems.dump());
+        for (const bool use_override : {false, true}) {
+            SCOPED_TRACE(use_override);
+            ServerCliOptions options;
+            options.root = RootString();
+            options.seed = "1337";
+            options.preset = "default";
+            if (use_override)
+                options.systems_config_override =
+                    luminumbra::core::SystemConfig::FromJsonString(systems.dump());
+            const auto hello = RuntimeHelloFrom(options);
+            GameSession host;
+            host.SetRootPath(RootString());
+            host.SetJobSystem(&jobs);
+            host.ApplySystemConfig(luminumbra::core::SystemConfig::FromJsonString(systems.dump()));
+            host.SetFiniteHydrologyEnabled(RunnerConfigFrom(options).finite_hydrology);
+            ASSERT_TRUE(host.CreateWorld("Network calendar", options.seed, options.preset));
+            ASSERT_TRUE(host.LoadWorldState());
+            EXPECT_EQ(host.ActiveRegionsEnabled(), active_regions);
+            EXPECT_EQ(host.GetRenderCalendar(), world::WorldCalendar{});
+            EXPECT_EQ(hello.system_config_identity, host.SystemConfigIdentity());
+            auto expected = hello;
+            expected.system_config_identity = host.SystemConfigIdentity();
+            expected.preset_content_hash = host.PresetContentHash();
+            Net::HelloMsg decoded;
+            ASSERT_TRUE(Net::DecodeHello(Net::EncodeHello(hello), decoded));
+            EXPECT_TRUE(Net::HelloMatches(expected, decoded));
+        }
+    }
+}
+
 TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerIdentity) {
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     Server::ServerWorldRunnerConfig config;
@@ -1110,6 +1424,10 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
 }
 
 TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
+    // Keep the calendar identical to fresh sessions so only scheduler rules differ.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     // Each field changes independently while both sessions start with default member storage.
     // Identity must observe the decoded ledger rather than that original storage.
     world::RegionSchedulerConfig work_limit, hold_ticks, reduced_shift;
@@ -1188,6 +1506,10 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
 }
 
 TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerReplacement) {
+    // Fresh and reloaded sessions must resolve the same calendar in this scheduler test.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
@@ -1219,6 +1541,9 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
 }
 
 TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithoutWriting) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
@@ -1658,9 +1983,9 @@ INSTANTIATE_TEST_SUITE_P(RegionModesAndSnapshotPaths,
                          SnapshotEnergyFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 6)));
 
-// Fail the selected sibling writer after the chunk and manifest replacements.
-// Windows denies replacement while still allowing validation to read the file;
-// POSIX injects a directory-flush failure through the existing persistence seam.
+// Refuse the selected sibling publication after chunk and manifest progress.
+// Match the actual destination on every platform, independently of how many
+// directory entries the durable writer flushes before reaching it.
 class SiblingWriteFailure {
 public:
     SiblingWriteFailure() = default;
@@ -1670,79 +1995,39 @@ public:
     SiblingWriteFailure(const SiblingWriteFailure&) = delete;
     SiblingWriteFailure& operator=(const SiblingWriteFailure&) = delete;
 
-    void Arm([[maybe_unused]] GameSession& session, const fs::path& destination, bool energy) {
-#if defined(_WIN32)
-        const auto path = energy ? destination / "aether_state.efs"
-                                 : WorldSaveService::plant_entities_path(destination);
-        handle = ::CreateFileW(path.c_str(),
-                               GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               nullptr,
-                               OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL,
-                               nullptr);
-        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-#else
-        // Follow the payload sequence in SaveWorldStateToImpl: exported durable
-        // authority, live regions + manifest, then plants before energy. Each
-        // replacement flushes its ancestors and its final parent exactly once.
-        int flushes = 0;
-        const auto source = session.GetWorldSystem()->authority_directory();
-        if (session.ActiveRegionsEnabled() && source != destination &&
-            !fs::equivalent(source, destination)) {
-            for (const auto& entry :
-                 fs::directory_iterator(WorldSaveService::region_directory(source))) {
-                if (entry.path().extension() != ".lmr")
-                    continue;
-                WorldSaveService::AuthorityReader reader;
-                ASSERT_TRUE(reader.open(entry.path()));
-                if (reader.next_id().has_value())
-                    flushes += ReplacementFlushes(WorldSaveService::region_directory(destination) /
-                                                  entry.path().filename());
-            }
-        }
-        std::set<fs::path> regions;
-        for (const auto& resident : session.GetWorldSystem()->snapshot_streamed_chunks()) {
-            int rx = 0, rz = 0;
-            WorldSaveService::region_coords_for_chunk(resident->get_coords(), rx, rz);
-            regions.insert(WorldSaveService::region_file_path(destination, rx, rz));
-        }
-        for (const auto& region : regions)
-            flushes += ReplacementFlushes(region);
-        flushes += ReplacementFlushes(WorldSaveService::world_manifest_path(destination));
-        if (energy)
-            flushes += ReplacementFlushes(WorldSaveService::plant_entities_path(destination));
-        WorldSaveService::set_directory_flush_failure_for_testing(flushes);
-#endif
+    void Arm(const fs::path& destination, bool energy) {
+        Target() = energy ? destination / "aether_state.efs"
+                          : WorldSaveService::plant_entities_path(destination);
+        Reached() = false;
+        Persistence::detail::set_file_publication_hook_for_testing(&Publish);
     }
 
     void Reset() {
-#if defined(_WIN32)
-        if (handle != INVALID_HANDLE_VALUE) {
-            EXPECT_TRUE(::CloseHandle(handle));
-            handle = INVALID_HANDLE_VALUE;
-        }
-#else
-        WorldSaveService::set_directory_flush_failure_for_testing(-1);
-#endif
+        Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        // A writer may already have loaded the hook. Keep its target immutable
+        // until this session has drained, before the next fixture arms it.
+    }
+
+    bool reached() const {
+        return Reached();
     }
 
 private:
-#if !defined(_WIN32)
-    static int ReplacementFlushes(const fs::path& payload) {
-        // One post-rename parent flush, plus one per non-root ancestor.
-        // Path depth bounds this count; the fixture owns every component.
-        int flushes = 1;
-        for (auto ancestor = payload.parent_path();
-             !ancestor.empty() && ancestor != ancestor.root_path();
-             ancestor = ancestor.parent_path())
-            ++flushes;
-        return flushes;
+    static fs::path& Target() {
+        static fs::path target;
+        return target;
     }
-#endif
-#if defined(_WIN32)
-    HANDLE handle = INVALID_HANDLE_VALUE;
-#endif
+    static bool& Reached() {
+        static bool reached = false;
+        return reached;
+    }
+    static bool Publish(const fs::path& path, bool removing) {
+        if (!removing && path == Target()) {
+            Reached() = true;
+            return false;
+        }
+        return true;
+    }
 };
 
 class CompleteSaveFailure : public WorldOpenRefusal {};
@@ -1858,6 +2143,7 @@ TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegio
         bool reported = false;
         Client::SaveSessionOnExit(
             session,
+            true,
             [&] { session->SetSpawnPoint(spawn); },
             [&] {
                 reported = true;
@@ -1927,6 +2213,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
         bool spawn_captured = false;
         Client::SaveSessionOnExit(
             session,
+            true,
             [&] {
                 spawn_captured = true;
                 session->SetSpawnPoint(Vec3(29, 31, 37));
@@ -1941,6 +2228,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     } else {
         runner.Shutdown(&report);
     }
+    EXPECT_TRUE(failure.reached());
     failure.Reset();
     EXPECT_FALSE(report.saved);
     EXPECT_EQ(report.chunks_saved, 0u);
@@ -2436,9 +2724,27 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
     ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_TRUE(session.SaveWorldStateTo(save));
+    // Metadata reconciliation retains extensions and persists the legacy water cursor.
+    metadata["waterSimCursor"] = 0;
+    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump(4) + "\n");
+}
+
+TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeExtensions) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["extension"] = std::string(std::size_t{1024} * 1024, 'x');
+    Write(save / "world_info.json", metadata.dump());
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     for (const bool full_snapshot : {false, true}) {
         EXPECT_TRUE(session.SaveWorldStateTo(save, nullptr, full_snapshot));
-        EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+        auto expected = metadata;
+        expected["waterSimCursor"] = 0;
+        EXPECT_EQ(Read(save / "world_info.json"), expected.dump(4) + "\n");
     }
 }
 
@@ -2763,6 +3069,357 @@ TEST_F(WorldOpenRefusal, PartialAuthorityHasNoSimulationCollisionSurface) {
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_FALSE(chunk->has_collision.load());
+}
+
+TEST_F(WorldOpenRefusal, AllEnergyOpenPathsRefuseWithoutAdoptingOrWriting) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    const auto loaded_count = session.GetLastLoadedChunkCount();
+    ASSERT_EQ(loaded_count, 1u);
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const PendingSnapshotState pending(session);
+    std::string too_many_pages = "EFS1 2 8\n";
+    for (std::size_t page = 0; page <= luminumbra::fields::kEnergyReadPages; ++page)
+        too_many_pages += "P " + std::to_string(page) + " 0 0:1\n";
+    for (const auto& invalid :
+         {std::string("EFS1 17 8\n"), too_many_pages, std::string("EFS1 2 8\nP 0 0 0:1junk\n")}) {
+        Write(save / "aether_state.efs", invalid);
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.LoadWorld("fixture"));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_FALSE(session.LoadWorldFrom("fixture", root));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        pending.ExpectUnchanged(session, *chunk);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), loaded_count);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    Write(save / "aether_state.efs", "EFS1 16 8\nP 0 0 4095:65535\n");
+    EXPECT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetEnergyFieldState()->channels(), 16);
+}
+
+TEST_F(WorldOpenRefusal, OversizedEnergyFileIsRefusedBeforeBufferingAndPartialHeaderIsInvalid) {
+    const auto path = save / "aether_state.efs";
+    Write(path, "EFS1 2 8\n");
+    fs::resize_file(path, luminumbra::fields::kEnergyReadRecordBytes + 1);
+    {
+        const Persistence::SavedInputFile input(path);
+        std::string record = "unchanged";
+        EXPECT_FALSE(Persistence::ReadSavedEnergy(input, record));
+        EXPECT_EQ(record, "unchanged");
+    }
+    for (const auto* malformed : {"EFS1 2", "EFS1 2 8\nP 0 0 0:1junk\n"}) {
+        Write(path, malformed);
+        const Persistence::SavedInputFile partial(path);
+        std::string record = "unchanged";
+        EXPECT_FALSE(Persistence::ReadSavedEnergy(partial, record));
+        EXPECT_EQ(record, "unchanged");
+    }
+}
+
+TEST_F(WorldOpenRefusal, AdmissionWordsInPathsDoNotReclassifyCorruptRegionRefusals) {
+    const auto snapshot = root / "oversized compatibility limit";
+    fs::copy(save, snapshot, fs::copy_options::recursive);
+    Write(WorldSaveService::region_file_path(snapshot, 0, 0), std::string("BAD!\2\0\0\0", 8));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(session, chunk, false));
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(session.LoadWorldStateFrom(snapshot));
+    EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_FALSE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, EnergyWriterCapRefusesBeforeAnySiblingWriterOrDirtyAcknowledgement) {
+    const auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner runner(config);
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
+    auto* session = runner.Session();
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+    std::string record = "EFS1 2 8\n";
+    for (std::size_t page = 0; page <= luminumbra::fields::kEnergyWritePages; ++page)
+        record += "P " + std::to_string(page) + " 0 0:1\n";
+    ASSERT_TRUE(session->GetEnergyFieldState()->DeserializeRecord(record, 0));
+    const PendingSnapshotState pending(*session);
+    const auto before = DiskBytes(root);
+    for (const bool full : {false, true}) {
+        EXPECT_FALSE(session->SaveWorldStateTo(session->GetWorldSaveDir(), nullptr, full));
+        pending.ExpectUnchanged(*session, *chunk);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, CleanOversizedRegionDoesNotBlockIndependentPayloadSaves) {
+    for (const bool active_regions : {false, true}) {
+        const auto config = SnapshotRunnerConfig(RootString(), active_regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, active_regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        chunk->clear_voxel_data_dirty();
+        // Each maximum finite float needs more than 20 encoded bytes, even
+        // before indentation. This one resident chunk exceeds the 64 MiB cap.
+        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 20 + 1,
+                                     std::numeric_limits<float>::max());
+        const auto region = WorldSaveService::region_file_path(session->GetWorldSaveDir(), 0, 0);
+        const auto region_before = Read(region);
+        const auto manifest = WorldSaveService::world_manifest_path(session->GetWorldSaveDir());
+        const auto manifest_before = Read(manifest);
+        const auto plant_path = WorldSaveService::plant_entities_path(session->GetWorldSaveDir());
+        const auto energy_path = session->GetWorldSaveDir() / "aether_state.efs";
+        const auto plants_before = Read(plant_path);
+        const auto energy_before = Read(energy_path);
+        // Restore energy so only the plant payload changes in this save.
+        ASSERT_TRUE(session->GetEnergyFieldState()->DeserializeRecord(
+            energy_before, session->GetSimulationTickCount()));
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_NE(Read(plant_path), plants_before);
+        EXPECT_EQ(Read(energy_path), energy_before);
+        const auto plants_after = Read(plant_path);
+        session->GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 1000);
+        session->GetEnergyFieldState()->Tick(session->GetSimulationTickCount());
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_EQ(Read(plant_path), plants_after);
+        EXPECT_NE(Read(energy_path), energy_before);
+        EXPECT_EQ(Read(region), region_before);
+        EXPECT_EQ(Read(manifest), manifest_before);
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        // A dirty region elsewhere does not pull the oversized clean region
+        // into the incremental write set.
+        auto other = std::make_shared<Chunk>(IVec3(32, 0, 0));
+        other->set_state(ChunkState::Idle);
+        other->heightmap_data = {8.0f};
+        other->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(other));
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_EQ(Read(region), region_before);
+        EXPECT_FALSE(other->is_voxel_data_dirty());
+        const auto before = DiskBytes(root);
+        chunk->mark_voxel_data_dirty();
+        EXPECT_FALSE(session->SaveWorldState());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(DiskBytes(root), before);
+        // A clean chunk in the SAME region must still be admitted when that
+        // region is replaced, and full snapshots must admit all residents.
+        chunk->clear_voxel_data_dirty();
+        auto neighbour = std::make_shared<Chunk>(IVec3(1, 0, 0));
+        neighbour->set_state(ChunkState::Idle);
+        neighbour->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(neighbour));
+        EXPECT_FALSE(session->SaveWorldState());
+        EXPECT_TRUE(neighbour->is_voxel_data_dirty());
+        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_FALSE(session->SaveWorldStateTo(session->GetWorldSaveDir(), nullptr, true));
+        EXPECT_EQ(DiskBytes(root), before);
+        // Release the large fixture before shutdown, which autosaves.
+        chunk->heightmap_data = {42.0f};
+        runner.Shutdown();
+    }
+}
+
+TEST_F(WorldOpenRefusal, EmbeddedPresetDepthBoundaryPrecedesCatalogAndSessionParsing) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Preset depth", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    const auto preset_path = destination / "preset.json";
+    auto preset = nlohmann::json::parse(Read(preset_path));
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 1; depth < Persistence::SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    preset["extension"] = extension;
+    auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+    metadata["presetIdentity"] = Persistence::StableChecksum(preset.dump());
+    Write(preset_path, preset.dump());
+    Write(destination / "world_info.json", metadata.dump());
+    EXPECT_TRUE(Persistence::InspectSavedWorld(root, id).error.empty());
+    preset["extension"] = nlohmann::json::array({std::move(extension)});
+    Write(preset_path, preset.dump());
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, id).error.empty());
+    EXPECT_FALSE(session.LoadWorld(id));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, EmbeddedPresetByteLimitIsInclusiveAndRefusesWithoutWrites) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Preset bytes", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    const auto preset_path = destination / "preset.json";
+    auto bytes = Read(preset_path);
+    bytes.resize(Persistence::SavedInputLimits::kPresetBytes, ' ');
+    Write(preset_path, bytes);
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, id).error.empty());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(Read(preset_path), bytes);
+    bytes += ' ';
+    Write(preset_path, bytes);
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, id).error.empty());
+    EXPECT_FALSE(session.LoadWorld(id));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, NewWorldPresetIdentityReopensAtTheCompactWriteBoundary) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Canonical preset", "1337", "default"));
+    auto preset = nlohmann::json::parse(Read(session.GetWorldSaveDir() / "preset.json"));
+    for (const bool near_limit : {false, true}) {
+        SCOPED_TRACE(near_limit);
+        preset["extension"] = "";
+        if (near_limit)
+            preset["extension"] = std::string(
+                Persistence::SavedInputLimits::kPresetBytes - 1 - preset.dump().size(), 'x');
+        const auto canonical = preset.dump();
+        ASSERT_TRUE(session.CreateWorld("Reopen preset", "1337", "default", &canonical));
+        const auto destination = session.GetWorldSaveDir();
+        const auto id = session.GetMetadata().worldId;
+        EXPECT_EQ(Read(destination / "preset.json"), canonical + "\n");
+        const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+        EXPECT_EQ(metadata.at("presetIdentity"), Persistence::StableChecksum(canonical));
+        const auto inspected = Persistence::InspectSavedWorld(root, id);
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_json, canonical);
+        ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    }
+}
+
+TEST_F(WorldOpenRefusal, ExactCompactPresetLoadsAndSavesWithoutReplacementButRefusesFreshExport) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Full preset", "1337", "default"));
+    const auto destination = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    auto preset = nlohmann::json::parse(Read(destination / "preset.json"));
+    preset["extension"] = "";
+    preset["extension"] =
+        std::string(Persistence::SavedInputLimits::kPresetBytes - preset.dump().size(), 'x');
+    const auto canonical = preset.dump();
+    ASSERT_EQ(canonical.size(), Persistence::SavedInputLimits::kPresetBytes);
+    Write(destination / "preset.json", canonical);
+    auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+    metadata["presetIdentity"] = Persistence::StableChecksum(canonical);
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(Read(destination / "preset.json"), canonical);
+    const auto before = DiskBytes(root);
+    EXPECT_FALSE(session.SaveWorldStateTo(root / "full-preset-export", nullptr, true));
+    EXPECT_EQ(DiskBytes(root), before);
+
+    // An admitted file can expand on compact dumping (1e2 becomes 100.0).
+    // Reusing that existing file must not apply a new-file encoding budget.
+    preset["extension"] = nullptr;
+    auto encoded = preset.dump();
+    const auto offset = encoded.find("\"extension\":null");
+    ASSERT_NE(offset, std::string::npos);
+    const auto count = Persistence::SavedInputLimits::kPresetBytes / 5;
+    std::string numbers = "[";
+    numbers.reserve(count * 4 + 1);
+    for (std::size_t index = 0; index < count; ++index)
+        numbers += index + 1 == count ? "1e2]" : "1e2,";
+    encoded.replace(offset + std::string("\"extension\":").size(), 4, numbers);
+    ASSERT_LT(encoded.size(), Persistence::SavedInputLimits::kPresetBytes);
+    const auto expanded_canonical = nlohmann::json::parse(encoded).dump();
+    ASSERT_GT(expanded_canonical.size(), Persistence::SavedInputLimits::kPresetBytes);
+    Write(destination / "preset.json", encoded);
+    metadata["presetIdentity"] = Persistence::StableChecksum(expanded_canonical);
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(Read(destination / "preset.json"), encoded);
+}
+
+TEST_F(WorldOpenRefusal, PresetAdmissionRefusesCreationBeforeDirectoryOrLiveStateChanges) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Existing world", "1337", "default"));
+    const auto* previous_system = session.GetWorldSystem();
+    const auto previous_id = session.GetMetadata().worldId;
+    const auto preset = nlohmann::json::parse(Read(session.GetWorldSaveDir() / "preset.json"));
+    nlohmann::json extension = 0;
+    for (std::size_t depth = 0; depth < Persistence::SavedInputLimits::kJsonNestingDepth; ++depth)
+        extension = nlohmann::json::array({std::move(extension)});
+    auto deep = preset;
+    deep["extension"] = std::move(extension);
+    auto large = preset;
+    large["extension"] = std::string(Persistence::SavedInputLimits::kPresetBytes, 'x');
+    for (const auto& bytes : {deep.dump(), large.dump(), std::string("{")}) {
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.CreateWorld("Refused", "1337", "default", &bytes));
+        EXPECT_EQ(session.GetWorldSystem(), previous_system);
+        EXPECT_EQ(session.GetMetadata().worldId, previous_id);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, CatalogSharesWriterMetadataLimitAndTextLimitsAreInclusive) {
+    const auto original = nlohmann::json::parse(Read(save / "world_info.json"));
+    auto metadata = original;
+    metadata["name"] = std::string(Persistence::SavedInputLimits::kWorldNameBytes, 'x');
+    metadata["seed"] = std::string(Persistence::SavedInputLimits::kWorldSeedBytes, '7');
+    auto bytes = metadata.dump();
+    bytes.resize(Persistence::SavedInputLimits::kMetadataBytes, ' ');
+    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, save));
+    EXPECT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    bytes += ' ';
+    Write(save / "world_info.json", bytes);
+    EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    for (const auto* key : {"name", "seed"}) {
+        metadata = original;
+        metadata[key] = std::string(Persistence::SavedInputLimits::kWorldNameBytes + 1, 'x');
+        Write(save / "world_info.json", metadata.dump());
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    }
+}
+
+TEST_F(WorldOpenRefusal, MetadataTextWriterRefusesBeforeWorldCreationChangesAnything) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Live world", "1337", "default"));
+    const auto before = DiskBytes(root);
+    const auto old_name = session.GetMetadata().name;
+    const std::string excessive(Persistence::SavedInputLimits::kWorldNameBytes + 1, 'x');
+    EXPECT_FALSE(session.CreateWorld(excessive, "1337", "default"));
+    EXPECT_FALSE(session.CreateWorld("Valid", excessive, "default"));
+    EXPECT_EQ(session.GetMetadata().name, old_name);
+    EXPECT_EQ(DiskBytes(root), before);
 }
 
 } // namespace

@@ -1,4 +1,5 @@
 #include "FarAuthorityOverlay.h"
+#include "persistence/SavedInputFile.h"
 
 #include "FarTierTable.h"
 #include "FarWantedSet.h"
@@ -515,23 +516,13 @@ FarOverlayDecodeResult ReadFarOverlay(const std::filesystem::path& save_dir,
     FarOverlayDecodeResult result;
     const std::filesystem::path path = FarOverlayPath(save_dir, key);
 
-    std::error_code ec;
-    const bool exists = std::filesystem::exists(path, ec);
-    if (ec) {
-        result.error = FarOverlayError::IoError;
-        return result;
-    }
-    if (!exists) {
+    const Persistence::SavedInputFile input(path);
+    if (input.missing()) {
         result.error = FarOverlayError::NotFound;
         return result;
     }
-    const bool regular = std::filesystem::is_regular_file(path, ec);
-    if (ec || !regular) {
-        result.error = FarOverlayError::IoError;
-        return result;
-    }
-    const std::uintmax_t file_size = std::filesystem::file_size(path, ec);
-    if (ec) {
+    std::uint64_t file_size = 0;
+    if (!input.length(file_size)) {
         result.error = FarOverlayError::IoError;
         return result;
     }
@@ -539,15 +530,8 @@ FarOverlayDecodeResult ReadFarOverlay(const std::filesystem::path& save_dir,
         result.error = FarOverlayError::LimitExceeded;
         return result;
     }
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        result.error = FarOverlayError::IoError;
-        return result;
-    }
-    std::string bytes(static_cast<std::size_t>(file_size), '\0');
-    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (!input || input.gcount() != static_cast<std::streamsize>(bytes.size())) {
+    std::string bytes;
+    if (!input.read(bytes, kFsv1MaxFileBytes)) {
         result.error = FarOverlayError::IoError;
         return result;
     }

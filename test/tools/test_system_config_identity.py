@@ -19,7 +19,7 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=4):
+                    region_reduced_shift=1, authority_rules_revision=4, calendar=None):
     result = bytearray(b"system-config:v3:" if authority_rules_revision == 3 else b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
@@ -54,6 +54,13 @@ def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                               region_work_limit, region_hold_ticks, region_reduced_shift))
     if authority_rules_revision != 3:
         result.extend(struct.pack("<I", authority_rules_revision))
+        # A session without a world/marker uses the legacy presentation calendar
+        # when active regions are disabled. Booted sessions supply their calendar.
+        if calendar is None:
+            active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
+            calendar = (162000, 8, 2, 3, 8) if active else (216000, 8, 1, 2, 8)
+        result.extend(b"calendar-epoch:v1:")
+        result.extend(struct.pack("<IIIII", *calendar))
     return bytes(result)
 
 
@@ -137,20 +144,22 @@ class SystemConfigIdentityTest(unittest.TestCase):
             document = copy.deepcopy(SHIPPED)
             document["sim"]["active_regions"]["enabled"] = regions
             self.assertEqual(canonical_bytes(document, authority_rules_revision=3), expected)
-            self.assertEqual(canonical_bytes(document), b"system-config:v4:" + expected[17:] + b"\x04\0\0\0")
+            self.assertEqual(canonical_bytes(document), b"system-config:v4:" + expected[17:] + b"\x04\0\0\0" +
+                             b"calendar-epoch:v1:" + struct.pack("<IIIII", *(
+                                 (162000, 8, 2, 3, 8) if regions else (216000, 8, 1, 2, 8))))
         source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
         self.assertIn('legacy ? "system-config:v3:" : "system-config:v4:"', source)
-        self.assertRegex(source, r"if \(!legacy\)\s+integer\(revision, 32\);")
+        self.assertRegex(source, r"if \(!legacy\)\s*\{\s*integer\(revision, 32\);")
 
     def test_exact_shipping_pin(self):
-        self.assertEqual(len(canonical_bytes(SHIPPED)), 301)
+        self.assertEqual(len(canonical_bytes(SHIPPED)), 339)
         self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "60ab3c242d54ce89")
-        self.assertEqual(identity(SHIPPED), "2a0d6f2dc4028dda")
+        self.assertEqual(identity(SHIPPED), "2f2a9405252345a8")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
         self.assertEqual(len(canonical_bytes(SHIPPED, authority_rules_revision=3)), 297)
-        self.assertEqual(canonical_bytes(SHIPPED)[-4:], struct.pack("<I", 4))
+        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 4))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
         header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
@@ -160,11 +169,11 @@ class SystemConfigIdentityTest(unittest.TestCase):
 
     def test_current_profile_pins_are_independently_encoded(self):
         historical = json.loads((ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8"))
-        self.assertEqual(identity(SHIPPED, authority_rules_revision=4), "2a0d6f2dc4028dda")
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=4), "2f2a9405252345a8")
         self.assertEqual(identity(historical, authority_rules_revision=3), '74f285c5fa387d66')
-        self.assertEqual(identity(historical, authority_rules_revision=4), "2cecd744f35f6695")
+        self.assertEqual(identity(historical, authority_rules_revision=4), "25078e8b112a6ebd")
         self.assertEqual(canonical_bytes(SHIPPED, authority_rules_revision=3)[17:],
-                         canonical_bytes(SHIPPED, authority_rules_revision=4)[17:-4])
+                         canonical_bytes(SHIPPED, authority_rules_revision=4)[17:297])
         source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
         self.assertIn("return ComputeIdentityForRevision(kAuthorityRulesRevision);", source)
         self.assertIn("return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);", source)
@@ -221,6 +230,15 @@ class SystemConfigIdentityTest(unittest.TestCase):
         changed["render"]["moonlight"]["params"]["strength"] = 0.75
         changed["user"] = {"video": {"fov": 90}}
         self.assertEqual(identity(changed), identity(SHIPPED))
+
+    def test_each_resolved_calendar_field_changes_identity(self):
+        baseline = identity(SHIPPED)
+        for calendar in ((162001, 8, 2, 3, 8), (162000, 9, 2, 3, 8),
+                         (162000, 8, 1, 3, 8), (162000, 8, 2, 5, 8),
+                         (162000, 8, 2, 3, 9), (216000, 8, 1, 2, 8)):
+            with self.subTest(calendar=calendar):
+                self.assertNotEqual(identity(SHIPPED, calendar=calendar), baseline)
+        self.assertEqual(identity(SHIPPED, calendar=(162000, 8, 2, 3, 8)), baseline)
 
     def test_disabled_tuning_uses_compiled_default(self):
         disabled = {"sim": {"ecology": {"enabled": False}}}

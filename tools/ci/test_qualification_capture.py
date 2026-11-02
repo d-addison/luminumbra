@@ -68,6 +68,18 @@ class CaptureContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             capture.identity("linux-gcc", "aaaa", environment(), HEAD)
 
+    def test_windows_capture_requires_daily_caller_identity_and_prefixed_jobs(self):
+        for lane, name in (("windows-msvc", "MSVC"), ("windows-ucrt64", "MSYS2 UCRT64")):
+            self.assertEqual(capture.LANES[lane][0], "windows-daily.yml")
+            self.assertEqual(capture.LANES[lane][1], "build / Windows / " + name)
+            self.assertEqual(capture.identity(lane, HEAD, environment(lane), HEAD)["workflow_path"],
+                             ".github/workflows/windows-daily.yml")
+            for filename in ("ci.yml", "windows-build.yml"):
+                bad = {**environment(lane), "QUALIFICATION_WORKFLOW_REF":
+                       f"{capture.REPO}/.github/workflows/{filename}@refs/heads/candidate"}
+                with self.subTest(lane=lane, workflow=filename), self.assertRaisesRegex(ValueError, "workflow path/ref mismatch"):
+                    capture.identity(lane, HEAD, bad, HEAD)
+
     def test_same_producer_property_and_stdout_are_one_receipt(self):
         with patch.object(capture, "module", return_value=self.comparator()):
             self.assertEqual(capture.ambient_receipt(self.junit(property_too=True)), RECEIPT)

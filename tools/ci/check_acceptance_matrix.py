@@ -2128,15 +2128,15 @@ def _replace_outputs(
             current = _transaction_record(path)
         except FileNotFoundError:
             current = None
+        if path in restorations:
+            return current == restorations[path]
         original = originals[path]
         if current == original:
-            # Absence alone cannot prove that an interrupted publication did
-            # not happen: the source must still be ours, or removal attempted.
-            if current is not None or path in restorations:
-                return True
+            # Original bytes and even its inode can recur after publication.
+            # Only our still-unpublished candidate proves no restore is needed.
             _verify_transaction_file(candidates[path])
             return True
-        return path in restorations and current == restorations[path]
+        return False
 
     def verify_retained_links() -> None:
         # At most fifteen payloads plus the fixed metadata names. Validate the

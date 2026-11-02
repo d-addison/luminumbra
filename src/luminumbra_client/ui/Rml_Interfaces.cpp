@@ -1,10 +1,14 @@
 #include "Rml_Interfaces.h"
 #include "app/FrameAttribution.h"
 #include "core/Profiler.h"
+#include "luminumbra_client/core/PresentationClock.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 #include <GLFW/glfw3.h> // For glfwGetTime
 #include <SOIL2/SOIL2.h>
 #include <cstdio> // For FILE operations
+#include <limits>
+#include <sstream>
 
 // Note: The original file was missing some includes which I've added.
 
@@ -12,7 +16,7 @@ namespace Luminumbra::Client {
 
 // --- RmlSystem Implementation ---
 double RmlSystem::GetElapsedTime() {
-    return glfwGetTime();
+    return presentation_clock.now(glfwGetTime);
 }
 
 // Fixed: The base class virtual function returns a bool.
@@ -44,6 +48,18 @@ RmlFileInterface::RmlFileInterface(const std::string& root_path)
 
 Rml::FileHandle RmlFileInterface::Open(const Rml::String& path) {
     std::string full_path = m_root + path;
+    if (Filesystem::capture_content_paths().active()) {
+        std::string bytes;
+        if (!Filesystem::capture_content_paths().read_file(
+                full_path,
+                bytes,
+                static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()),
+                Filesystem::MissingContent::Optional))
+            return 0;
+        // RmlUi owns this memory stream until Close; it never reopens the source.
+        auto input = std::make_unique<std::istringstream>(std::move(bytes), std::ios::binary);
+        return reinterpret_cast<Rml::FileHandle>(input.release());
+    }
     FILE* fp = fopen(full_path.c_str(), "rb");
     if (!fp) {
         LUMINUMBRA_CORE_ERROR("[RmlUi] Failed to open file: {}", full_path);
@@ -52,19 +68,45 @@ Rml::FileHandle RmlFileInterface::Open(const Rml::String& path) {
 }
 
 void RmlFileInterface::Close(Rml::FileHandle file) {
-    if (file)
+    if (Filesystem::capture_content_paths().active()) {
+        delete reinterpret_cast<std::istringstream*>(file);
+    } else if (file) {
         fclose((FILE*)file);
+    }
 }
 
 size_t RmlFileInterface::Read(void* buffer, size_t size, Rml::FileHandle file) {
+    if (Filesystem::capture_content_paths().active()) {
+        if (size > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
+            return 0;
+        auto& input = *reinterpret_cast<std::istringstream*>(file);
+        input.read(static_cast<char*>(buffer), static_cast<std::streamsize>(size));
+        return static_cast<std::size_t>(input.gcount());
+    }
     return fread(buffer, 1, size, (FILE*)file);
 }
 
 bool RmlFileInterface::Seek(Rml::FileHandle file, long offset, int origin) {
+    if (Filesystem::capture_content_paths().active()) {
+        auto& input = *reinterpret_cast<std::istringstream*>(file);
+        input.clear();
+        if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END)
+            return false;
+        input.seekg(offset,
+                    origin == SEEK_SET   ? std::ios::beg
+                    : origin == SEEK_CUR ? std::ios::cur
+                                         : std::ios::end);
+        return static_cast<bool>(input);
+    }
     return fseek((FILE*)file, offset, origin) == 0;
 }
 
 size_t RmlFileInterface::Tell(Rml::FileHandle file) {
+    if (Filesystem::capture_content_paths().active()) {
+        auto& input = *reinterpret_cast<std::istringstream*>(file);
+        input.clear();
+        return static_cast<std::size_t>(input.tellg());
+    }
     return ftell((FILE*)file);
 }
 
@@ -241,12 +283,28 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions,
     // GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str, SOIL_LOAD_AUTO,
     // SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
 
-    // CORRECTED LINE:
-    GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str(),
-                                              SOIL_LOAD_AUTO,
-                                              SOIL_CREATE_NEW_ID,
-                                              SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_SAFE_RGB |
-                                                  SOIL_FLAG_COMPRESS_TO_DXT);
+    GLuint texture_id = 0;
+    if (Filesystem::capture_content_paths().active()) {
+        std::string bytes;
+        if (!Filesystem::capture_content_paths().read_file(
+                full_path,
+                bytes,
+                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                Filesystem::MissingContent::Optional))
+            return 0;
+        texture_id = SOIL_load_OGL_texture_from_memory(
+            reinterpret_cast<const unsigned char*>(bytes.data()),
+            static_cast<int>(bytes.size()),
+            SOIL_LOAD_AUTO,
+            SOIL_CREATE_NEW_ID,
+            SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_SAFE_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
+    } else {
+        texture_id = SOIL_load_OGL_texture(full_path.c_str(),
+                                           SOIL_LOAD_AUTO,
+                                           SOIL_CREATE_NEW_ID,
+                                           SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_SAFE_RGB |
+                                               SOIL_FLAG_COMPRESS_TO_DXT);
+    }
 
     if (texture_id == 0) {
         LUMINUMBRA_CORE_ERROR("[RmlUi] SOIL2 failed to load texture: {}", full_path);

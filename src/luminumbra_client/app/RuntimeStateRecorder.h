@@ -147,6 +147,10 @@ struct RuntimeScenarioFrameSample {
     std::size_t water_stale_upload_candidates = 0;
     std::size_t water_stale_uploads_deferred = 0;
     std::size_t water_deferred_nearer_than_selected = 0;
+    uint64_t far_tiles_saved_async = 0;
+    std::size_t far_pending_saves = 0;
+    std::size_t far_snapshot_bytes_copied = 0;
+    std::size_t far_integration_uploads_deferred = 0;
     uint64_t gl_debug_errors = 0;
 };
 

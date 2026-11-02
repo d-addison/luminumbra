@@ -2,6 +2,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
+#include "../world/ActivationResidencyIndex.h"
 #include "../world/BiomeTable.h"
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
@@ -10,7 +11,7 @@
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
 #include "core/Profiler.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -225,33 +226,28 @@ struct TerrainGenParams {
 };
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
-// vectors and never exposes a mutable streamed Chunk beyond the owner thread.
+// payloads and never exposes a mutable streamed Chunk beyond the owner thread.
 struct FarLodSdfSnapshotEntry {
     IVec3 coords{};
     ChunkSdfProvenance provenance = ChunkSdfProvenance::GeneratedCurrentParams;
     u32 voxel_revision = 0;
     bool authority_durable = true;
-    std::vector<f32> sdf_data;
-    std::vector<u8> material_data;
+    std::shared_ptr<const World::FarLodSdfSnapshot> payload;
 
-    World::FarLodSdfSnapshot as_reduction_snapshot() const {
-        World::FarLodSdfSnapshot snapshot;
-        snapshot.coords = coords;
-        snapshot.revision = voxel_revision;
-        snapshot.source_kind = provenance == ChunkSdfProvenance::LoadedOrEdited
-                                   ? World::FarLodBrickSourceKind::Authoritative
-                                   : World::FarLodBrickSourceKind::RegenerableCache;
-        snapshot.sdf_data = sdf_data;
-        snapshot.material_data = material_data;
-        return snapshot;
+    const World::FarLodSdfSnapshot& as_reduction_snapshot() const {
+        return *payload;
     }
 };
 
 struct FarLodSdfSnapshot {
+    std::size_t bytes_copied = 0; // this capture only; render diagnostic, never hashed
     u64 capture_epoch = 0;
     u64 params_hash = 0;
     u64 authority_revision = 0;
     u64 region_authority_revision = 0;
+    // Validated lower corner of the fixed region-plus-halo capture footprint.
+    // Transient owner-thread validation metadata; never serialized or hashed.
+    IVec2 min_chunk_coords{0};
     std::vector<FarLodSdfSnapshotEntry> entries;
 };
 
@@ -356,6 +352,18 @@ public:
         std::size_t cumulative_deferred_meshing = 0;
         uint64_t max_deferred_age_frames = 0;
         std::size_t last_queue_depth = 0;
+        // Latest post-dispatch snapshot, including completed but unpublished work.
+        // A zero candidate backlog alone does not imply streaming quiescence.
+        std::size_t generation_batches = 0;
+        std::size_t meshing_batches = 0;
+        std::size_t pending_lod_chunks = 0;
+        bool promotion_pending = false;
+
+        bool quiescent() const {
+            return last_queue_depth == 0 && generation_batches == 0 && meshing_batches == 0 &&
+                   pending_lod_chunks == 0 && !promotion_pending;
+        }
+
         //  the SETTLED backlog floor — the minimum
         // queue depth observed across the trailing activation window
         // (STREAMING_ACTIVATION_INTERVAL_FRAMES). Chunk activation runs only
@@ -452,14 +460,29 @@ public:
     // to this, so existing callers + single-anchor behaviour are byte-identical (one
     // anchor -> one disc, identical eviction). Streaming sets RESIDENCY only, not chunk
     // content, so world_hash is unaffected for a given anchor set.
+    // Disabling simulation preserves water state while streaming, meshing and
+    // collision preparation continue. Existing callers retain live stepping.
     void update(entt::registry& registry,
                 const std::vector<Vec3>& anchor_positions,
-                PhysicsSystem* physics_system);
-    void
-    update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
+    void update(entt::registry& registry,
+                const Vec3& camera_position,
+                PhysicsSystem* physics_system,
+                bool advance_simulation = true);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+
+    // Owner-thread capture for bounded boot input jobs. No streamed chunks,
+    // callbacks or live-world pointers escape; exact immutable noise nodes,
+    // parameters and warm hydro regions are retained. Only derived caches mutate.
+    [[nodiscard]] std::shared_ptr<const SHIELD_WorldSystem> capture_water_seed_sampler() const;
+
+    // Changes with seed/terrain parameters, independently of worker completion.
+    [[nodiscard]] std::uint64_t water_seed_terrain_generation() const {
+        return m_water_seed_terrain_generation.load(std::memory_order_acquire);
+    }
     // the single cave-carve composition point. Samples the cheese BODY noise
     // and adds spaghetti EDGE tunnels and Worley caverns via order-free max. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
@@ -783,6 +806,14 @@ public:
         m_streaming_radius_cap = cap_chunks;
     }
 
+    // Owner-thread cumulative diagnostics; derived indexes never enter world_hash.
+    const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
+        return m_activation_index.counters();
+    }
+    // Owner-thread diagnostic in dispatch/publication order. Returns at most
+    // 1024 coordinates, including unpublished batches whose workers finished.
+    std::vector<IVec3> generation_queue_prefix(std::size_t max_count) const;
+
     //  ( T.1): the water epoch (terraform bed edits increment it) —
     // folded into the waterfall site-cache key for bounded re-surveys.
     std::uint64_t water_epoch() const;
@@ -825,9 +856,15 @@ public:
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
+    // Observers run under SaveOwnership and must not dispatch or wait for jobs.
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
+    // Host-thread preparation for bounded scripted edits (radius <= 16 m,
+    // coordinates within +/-32000 m). Drains streaming, then supplies full SDF
+    // lattices throughout the edit AABB, including chunks below the surface.
+    // False means unavailable/malformed terrain, never an already-air no-op.
+    bool PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m);
     int EditTerrainVoxel(const Vec3& world_pos,
                          float radius_m,
                          bool fill,
@@ -966,7 +1003,7 @@ public:
         return m_snapshot_copies.load(std::memory_order_relaxed);
     }
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
-    // halo. Only exact full SDF lattices are copied into the immutable result.
+    // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
     // Cached authority projection; scans durable records once per load, then only
     // bounded resident authority. Water and voxel mutation are observed exactly.
@@ -985,6 +1022,9 @@ public:
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
     u64 far_lod_region_authority_revision(i32 rx, i32 rz) const;
+    // External owner-thread edits hold SaveOwnership before changing any bytes
+    // and through this notification, exactly like EditTerrainVoxel.
+    void notify_far_lod_authority_changed(const IVec3& chunk_coords);
     // Phase-A persistence transition: a successful authoritative chunk rewrite
     // changes the durable source observed by far workers even when voxel bytes
     // themselves were edited earlier. Bump the generation so any worker that
@@ -1121,6 +1161,8 @@ private:
     // the worldgen-epoch gate (see acquire_worldgen_sample_scope).
     mutable std::shared_mutex m_worldgen_epoch_mutex;
     mutable std::atomic<bool> m_worldgen_writer_pending{false};
+    std::atomic<std::uint64_t> m_water_seed_terrain_generation{0};
+    std::shared_ptr<HighWaterSeedInputs> request_water_seed_inputs(Chunk& chunk) const;
     mutable std::atomic<u64> m_far_lod_capture_epoch{0};
     std::atomic<u64> m_far_lod_authority_revision{0};
     mutable std::mutex m_far_lod_region_revision_mutex;
@@ -1235,20 +1277,21 @@ private:
     // wall between columns of different surface height is always inside one
     // of the two spans. center_y preserves the old single-point sample for
     // ordering (drain center-out) and collision selection.
-    struct ColumnSurfaceSpan {
-        int min_y = 0;
-        int max_y = 0;
-        int center_y = 0;
-        // cached surface biome id for the column (u8, 255 = none).
-        // Filled from BiomeIdAt when biomes are enabled, kNoBiome otherwise.
-        u8 biome_id = 255u;
-    };
-    // Pure 5-point sampling (no cache) - usable from const initial-load paths.
+    using ColumnSurfaceSpan = World::ActivationResidencyIndex::SurfaceSpan;
+    // The policy span remains the procedural five-point span, even after edits;
+    // changing that policy would change residency and the simulation hash.
     ColumnSurfaceSpan compute_column_surface_span(int chunk_x, int chunk_z) const;
-    // Cached for the lifetime of the current seed/params (terrain height is
-    // deterministic).
+    ColumnSurfaceSpan column_surface_span_from_heights(int chunk_x,
+                                                       int chunk_z,
+                                                       const std::array<float, 5>& heights) const;
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
-    std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
+    void publish_generated_column_span(const ::Luminumbra::Chunk& chunk);
+    World::ActivationResidencyIndex m_activation_index;
+    bool m_activation_plan_valid = false;
+    int m_activation_plan_radius = -1;
+    std::vector<IVec3> m_activation_plan_camera_chunks;
+    std::size_t m_activation_plan_surface_columns = 0;
+    int m_last_eviction_radius = -1;
 
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the
@@ -1466,6 +1509,9 @@ private:
     int m_update_tick_counter = 0;
 
     // --- Dependencies ---
+    struct WaterSeedSamplerTag {};
+    SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag);
+
     JobSystem* m_job_system;
     TerrainGenParams m_params;
     int m_seed;

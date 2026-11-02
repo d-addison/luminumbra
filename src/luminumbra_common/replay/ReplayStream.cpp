@@ -36,6 +36,35 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// --- Bounded text fragments for the recorder's Open refusal. -----------------
+// Only the tail of a path or OS message enters the fixed-size refusal; the full
+// strings go to the logger. The three helpers feed one "%s%.*s" conversion.
+constexpr std::size_t kRefusalFragmentBytes = 80;
+
+// The longest refusal (reserve-directory) with every field at its bound must fit
+// the fixed buffer, so the error category and code are never truncated away.
+constexpr std::size_t kUnsigned64Digits = 20;
+constexpr std::size_t kSignedIntChars = 11;
+constexpr std::size_t kCategoryBytes = 16;
+constexpr std::size_t kLongestRefusalBytes =
+    sizeof("reserve-directory: attempt  candidate 'lockstep-recording-' beside '': (  )") +
+    2 * kUnsigned64Digits + 2 * (kRefusalFragmentBytes + sizeof("...") - 1) + kCategoryBytes +
+    kSignedIntChars;
+static_assert(kLongestRefusalBytes < BoundedReplayRecorder::kOpenRefusalBytes,
+              "the longest Open refusal must fit the fixed refusal buffer");
+
+const char* PathTailPrefix(const std::string& text) {
+    return text.size() > kRefusalFragmentBytes ? "..." : "";
+}
+
+int PathTailLength(const std::string& text) {
+    return static_cast<int>(std::min(text.size(), kRefusalFragmentBytes));
+}
+
+const char* PathTail(const std::string& text) {
+    return text.c_str() + (text.size() - static_cast<std::size_t>(PathTailLength(text)));
+}
+
 // --- Little-endian fixed-width append helpers (the only on-wire encoders). ---
 void PutU8(std::vector<std::uint8_t>& out, std::uint8_t v) {
     out.push_back(v);
@@ -358,11 +387,32 @@ bool BoundedReplayRecorder::Configure(std::size_t max_tick_bytes, std::uint64_t 
     return true;
 }
 
+bool BoundedReplayRecorder::Refused(int formatted) {
+    // snprintf reports the untruncated length; the buffer always holds a
+    // terminated prefix of it. A formatting error leaves the text empty.
+    m_open_refusal_length =
+        formatted < 0 ? 0 : std::min(static_cast<std::size_t>(formatted), kOpenRefusalBytes - 1);
+    m_open_refusal[m_open_refusal_length] = '\0';
+    return false;
+}
+
 bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHeader& header) {
-    if (m_byte_limit == 0 || !m_directory.empty())
-        return false;
+    // Every refusal below names its step in the fixed-size refusal text; the
+    // full paths go to the logger only.
+    if (m_byte_limit == 0)
+        return Refused(std::snprintf(m_open_refusal.data(),
+                                     kOpenRefusalBytes,
+                                     "unconfigured: Configure must succeed before Open"));
+    if (!m_directory.empty())
+        return Refused(std::snprintf(m_open_refusal.data(),
+                                     kOpenRefusalBytes,
+                                     "already-open: working directory '%s%.*s' is reserved",
+                                     PathTailPrefix(m_directory),
+                                     PathTailLength(m_directory),
+                                     PathTail(m_directory)));
     // Header allocation is bounded independently of the tick/segment budget.
     std::size_t remaining = kSegmentBytes - 66; // fixed fields + six u32 lengths
+    std::size_t part_index = 0;
     for (const auto* part : {&header.seed_string,
                              &header.preset,
                              &header.start_world_hash,
@@ -370,29 +420,49 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                              &header.system_config_identity,
                              &header.preset_content_hash}) {
         if (part->size() > remaining)
-            return false;
+            return Refused(std::snprintf(m_open_refusal.data(),
+                                         kOpenRefusalBytes,
+                                         "header-budget: part %llu holds %llu bytes, %llu remain",
+                                         static_cast<unsigned long long>(part_index),
+                                         static_cast<unsigned long long>(part->size()),
+                                         static_cast<unsigned long long>(remaining)));
         remaining -= part->size();
+        ++part_index;
     }
     std::error_code ec;
     const fs::path out_path(destination);
     if (out_path.has_parent_path()) {
         fs::create_directories(out_path.parent_path(), ec);
         if (ec) {
-            LUMINUMBRA_CORE_ERROR("Replay recorder: cannot create parent '{}': {} ({})",
-                                  out_path.parent_path().string(),
-                                  ec.message(),
-                                  ec.value());
-            return false;
+            const std::string parent = out_path.parent_path().string();
+            const std::string message = ec.message();
+            LUMINUMBRA_CORE_ERROR(
+                "Replay recorder: cannot create parent '{}': {} ({})", parent, message, ec.value());
+            return Refused(std::snprintf(m_open_refusal.data(),
+                                         kOpenRefusalBytes,
+                                         "create-parent: '%s%.*s': %.*s (%.16s %d)",
+                                         PathTailPrefix(parent),
+                                         PathTailLength(parent),
+                                         PathTail(parent),
+                                         PathTailLength(message),
+                                         message.c_str(),
+                                         ec.category().name(),
+                                         ec.value()));
         }
     }
     // Exclusive directory creation avoids collisions between concurrent sessions,
     // including processes using the same default dump destination.
     static std::atomic<std::uint64_t> next_directory{0};
+    // Concurrent opens interleave on the counter, so the refusal names only the
+    // first and last candidates this call itself reserved, never a continuous range.
+    std::uint64_t first_ordinal = 0;
+    std::uint64_t ordinal = 0;
     for (std::size_t attempt = 0; attempt < kSegmentTicks; ++attempt) {
+        ordinal = next_directory.fetch_add(1);
+        if (attempt == 0)
+            first_ordinal = ordinal;
         const auto candidate =
-            (out_path.parent_path() /
-             ("lockstep-recording-" + std::to_string(next_directory.fetch_add(1))))
-                .string();
+            (out_path.parent_path() / ("lockstep-recording-" + std::to_string(ordinal))).string();
         if (fs::create_directory(candidate, ec)) {
             m_directory = candidate;
             m_header = header;
@@ -401,20 +471,45 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
             m_elided_digest = m_digest;
             m_last_tick = 0;
             m_output.clear();
+            m_open_refusal_length = 0;
+            m_open_refusal[0] = '\0';
             return true;
         }
         if (ec) {
+            const std::string message = ec.message();
             LUMINUMBRA_CORE_ERROR("Replay recorder: cannot reserve directory '{}': {} ({})",
                                   candidate,
-                                  ec.message(),
+                                  message,
                                   ec.value());
-            return false;
+            return Refused(
+                std::snprintf(m_open_refusal.data(),
+                              kOpenRefusalBytes,
+                              "reserve-directory: attempt %llu candidate "
+                              "'lockstep-recording-%llu' beside '%s%.*s': %.*s (%.16s %d)",
+                              static_cast<unsigned long long>(attempt),
+                              static_cast<unsigned long long>(ordinal),
+                              PathTailPrefix(destination),
+                              PathTailLength(destination),
+                              PathTail(destination),
+                              PathTailLength(message),
+                              message.c_str(),
+                              ec.category().name(),
+                              ec.value()));
         }
     }
     LUMINUMBRA_CORE_ERROR("Replay recorder: exhausted {} directory candidates beside '{}'",
                           kSegmentTicks,
                           destination);
-    return false;
+    return Refused(std::snprintf(m_open_refusal.data(),
+                                 kOpenRefusalBytes,
+                                 "exhausted: %llu candidates tried (first lockstep-recording-%llu, "
+                                 "last lockstep-recording-%llu) beside '%s%.*s' already exist",
+                                 static_cast<unsigned long long>(kSegmentTicks),
+                                 static_cast<unsigned long long>(first_ordinal),
+                                 static_cast<unsigned long long>(ordinal),
+                                 PathTailPrefix(destination),
+                                 PathTailLength(destination),
+                                 PathTail(destination)));
 }
 
 bool BoundedReplayRecorder::Prune(std::uint64_t tick, std::uint64_t confirmed_tick) {
@@ -628,6 +723,7 @@ struct QueuedReplayRecorder::State {
                   std::uint64_t divergence_tick);
     void Close();
     [[nodiscard]] const char* FailureReason() const;
+    [[nodiscard]] std::string_view OpenRefusal() const;
     [[nodiscard]] std::size_t RetainedBytes() const;
     [[nodiscard]] std::size_t ByteLimit() const;
     [[nodiscard]] std::size_t SegmentCount() const;
@@ -737,6 +833,9 @@ private:
     std::atomic<std::size_t> retained_bytes{0};
     std::atomic<std::size_t> segments{0};
     Failure failure = Failure::None;
+    // Static text for this recorder's own Open preconditions; nullptr defers to
+    // the sink. Written and read only on the thread that calls Open.
+    const char* open_refusal = nullptr;
     bool open = false;
     bool stopping = false;
     bool waiting = false;
@@ -776,7 +875,17 @@ bool QueuedReplayRecorder::State::Configure(std::size_t tick_byte_limit,
 
 bool QueuedReplayRecorder::State::Open(const std::string& destination, const ReplayHeader& header) {
     auto& state = *this;
-    if (state.open || state.max_tick_bytes == 0 || !state.sink->Open(destination, header))
+    if (state.open) {
+        state.open_refusal = "already-open: recorder is open";
+        return false;
+    }
+    if (state.max_tick_bytes == 0) {
+        state.open_refusal = "unconfigured: Configure must succeed before Open";
+        return false;
+    }
+    // From here the sink's own refusal text (or its emptiness) is authoritative.
+    state.open_refusal = nullptr;
+    if (!state.sink->Open(destination, header))
         return false;
     state.stopping = false;
     state.failure = State::Failure::None;
@@ -925,6 +1034,12 @@ const char* QueuedReplayRecorder::State::FailureReason() const {
     return "recorder failure";
 }
 
+std::string_view QueuedReplayRecorder::State::OpenRefusal() const {
+    if (open_refusal != nullptr)
+        return open_refusal;
+    return sink ? sink->OpenRefusal() : std::string_view{};
+}
+
 std::size_t QueuedReplayRecorder::State::RetainedBytes() const {
     return retained_bytes.load(std::memory_order_relaxed);
 }
@@ -980,6 +1095,10 @@ void QueuedReplayRecorder::Close() {
 
 const char* QueuedReplayRecorder::FailureReason() const {
     return m_state->FailureReason();
+}
+
+std::string_view QueuedReplayRecorder::OpenRefusal() const {
+    return m_state->OpenRefusal();
 }
 
 std::size_t QueuedReplayRecorder::RetainedBytes() const {

@@ -27,7 +27,7 @@ namespace Luminumbra::Client::App {
 // the same sampling meshing workers already do concurrently); the main thread
 // polls the handle and creates the point-light entities when the batch lands.
 // TEARDOWN CONTRACT: the jobs hold a raw SHIELD_WorldSystem* — every world
-// transition (CreateWorld / session reset) MUST DrainBackgroundWorldScan first.
+// transition MUST wait for the scan first; discard results only after adoption.
 struct BackgroundWorldScan {
     const void* world = nullptr; // identity guard: consume only for the world scanned
     Luminumbra::Systems::SHIELD_WorldSystem::SurfaceBreakInfo doline;
@@ -45,12 +45,17 @@ BackgroundWorldScanState& GetBackgroundWorldScanState() {
     return state;
 }
 
-void DrainBackgroundWorldScan(Luminumbra::JobSystem& jobs) {
+void WaitForBackgroundWorldScan(Luminumbra::JobSystem& jobs) {
     auto& state = GetBackgroundWorldScanState();
     if (state.handle.counter) {
         jobs.wait(state.handle);
     }
     state.handle = {};
+}
+
+void DrainBackgroundWorldScan(Luminumbra::JobSystem& jobs) {
+    WaitForBackgroundWorldScan(jobs);
+    auto& state = GetBackgroundWorldScanState();
     state.scan.reset();
 }
 

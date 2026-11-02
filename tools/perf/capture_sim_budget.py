@@ -25,10 +25,36 @@ STAGES = (
     "circadian", "territory", "packs", "migration", "events", "server_streaming",
     "server_water",
 )
+WORK_ITEMS = (
+    "water_cells", "streaming_generation", "streaming_meshing", "physics_bodies",
+    "physics_characters", "active_region_records", "active_region_due", "snapshot_copies",
+    "activation_queries",
+)
 
 
 def integer(value: Any) -> bool:
     return type(value) is int and 0 <= value < 2**64
+
+
+def validate_work_items(work: Any, ticks: int) -> None:
+    """Validate the additive diagnostic extension without accepting partial coverage."""
+    if not isinstance(work, dict) or work.get("schema") != "luminumbra.sim_work.v1":
+        raise ValueError("missing or unsupported work_items schema")
+    counters = work.get("counters")
+    if (not isinstance(counters, list) or len(counters) != len(WORK_ITEMS)
+            or any(not isinstance(c, dict) for c in counters)
+            or [c.get("name") for c in counters] != list(WORK_ITEMS)):
+        raise ValueError("missing, duplicate, reordered or unsupported work_items counter")
+    # Nine traces, each bounded by the requested capture tick count. Never
+    # materialize a tick range or copy the traces during validation.
+    for counter in counters:
+        trace = counter.get("work_trace")
+        if not isinstance(trace, list) or len(trace) != ticks:
+            raise ValueError(f"incomplete work_items trace: {counter['name']}")
+        for tick, sample in enumerate(trace, start=1):
+            if (not isinstance(sample, dict) or not integer(sample.get("tick"))
+                    or sample["tick"] != tick or not integer(sample.get("work"))):
+                raise ValueError(f"invalid work_items sample: {counter['name']}")
 
 
 def shipping_simulation_gates() -> tuple[str, ...]:
@@ -60,6 +86,10 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
         raise ValueError("missing or unsupported sim_budget schema")
     if budget.get("work_replay_match") is not True:
         raise ValueError("simulation work counts did not reproduce")
+    # Historical v2 captures predate this optional extension. Present but invalid
+    # data is always refused, including null; absence alone remains compatible.
+    if "work_items" in budget:
+        validate_work_items(budget["work_items"], ticks)
     stages = budget.get("stages")
     if (not isinstance(stages, list) or any(not isinstance(s, dict) for s in stages)
             or [s.get("name") for s in stages] != list(STAGES)):

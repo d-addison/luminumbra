@@ -3,6 +3,10 @@
 import unittest
 import xml.etree.ElementTree as ET
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from qualify_prefab_runtime import (
     REQUIRED_CASES, REQUIRED_INSTALLED_CHECKS, validate_acceptance, validate_ctest,
 )

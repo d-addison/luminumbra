@@ -17,15 +17,20 @@
 #include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
+
+namespace Luminumbra::Persistence {
+class CreatedWorldArtifacts;
+}
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -95,6 +100,12 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Staged entry retains the journal until activation or drained rollback.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     Persistence::CreatedWorldArtifacts& artifacts);
     // Replay must preserve omitted historical selectors and their identity bytes.
     // A required content identity is checked before directory creation or live-world replacement.
     bool CreateWorld(const std::string& name,
@@ -115,9 +126,62 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk. Pre-adoption refusal also preserves
-    // the current world and its save eligibility.
+    // Load an existing world from disk. Catalog/preset preflight refusals preserve
+    // the current world and save eligibility. Snapshot reader refusals clear
+    // resident chunks and disable saving without publishing staged members.
     bool LoadWorld(const std::string& worldId);
+    // Read a caller-owned immutable save snapshot. Keep it alive until the next successful
+    // canonical save or world replacement: region freezes also read its durable directory.
+    // Runtime content and subsequent persistence retain this session's configured roots.
+    bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
+
+    // Copy on the owner thread, then prepare without reading any live session.
+    // The opaque result owns all admitted input; cancellation never adopts it.
+    struct WorldPreparationOptions {
+        std::string root_path;
+        // Reading a private snapshot must not retarget subsequent persistence.
+        std::filesystem::path save_root;
+        std::filesystem::path configured_save_root;
+        std::vector<std::filesystem::path> required_assets;
+        RegionSchedulerConfig ledger_config;
+        std::optional<RegionSchedulerConfig> scheduler_override;
+        std::uint64_t simulation_tick = 0;
+        std::uint64_t world_revision = 0;
+        bool active_regions = true;
+        bool aether_state = false;
+        bool job_system_available = false;
+        bool transient_creation = false;
+    };
+    struct WorldPreparation;
+    WorldPreparationOptions CaptureWorldPreparationOptions() const;
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldLoad(const WorldPreparationOptions& options,
+                     const std::string& world_id,
+                     const std::stop_token& stop = {});
+    // Initial snapshot restoration into a newly created, paused world, with its
+    // default energy state. Adoption refuses if that world's revision changed.
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldState(const WorldPreparationOptions& options,
+                      const std::filesystem::path& save_directory,
+                      const std::stop_token& stop = {});
+    static std::shared_ptr<WorldPreparation>
+    PrepareWorldCreation(const WorldPreparationOptions& options,
+                         const std::string& name,
+                         const std::string& seed,
+                         const std::string& world_type,
+                         const std::string* custom_preset,
+                         TerrainPresetUse preset_use = TerrainPresetUse::NewWorld,
+                         const std::string& required_identity = {},
+                         const std::stop_token& stop = {});
+    static std::string WorldPreparationError(const WorldPreparation& prepared);
+    bool AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
+                            Persistence::CreatedWorldArtifacts* artifacts = nullptr);
+
+    // Changes when create/load invalidates or releases the previous world, including a
+    // replacement that subsequently fails. Preflight refusal preserves it.
+    std::uint64_t WorldRevision() const {
+        return m_worldRevision;
+    }
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -129,7 +193,8 @@ public:
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
     // plants and energy persist even when no chunks are dirty. Active-region saves
-    // also persist metadata; regions-disabled incremental saves preserve its bytes.
+    // also persist metadata; regions-disabled incremental saves reconcile the
+    // presentation calendar, otherwise preserving unmarked legacy metadata bytes.
     // A save without a prior container emits a full snapshot; later writes flush through
     // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
     // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
@@ -146,9 +211,11 @@ public:
     // called AFTER the world systems initialize but BEFORE chunk streaming
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
-    // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). Corrupt/incompatible snapshot refusal disables saving;
-    // a tick-boundary refusal leaves the session unchanged.
+    // edits are never clobbered by regeneration. Restores the saved water window
+    // cursor; absent metadata or an absent cursor resets it to zero. Malformed
+    // cursors refuse before changing the live cursor. A missing snapshot is a
+    // clean miss (returns true). Corrupt/incompatible snapshot refusal disables
+    // saving; a tick-boundary refusal leaves the session unchanged.
     // Latest create/open diagnostic, independent of current-world save eligibility.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
@@ -168,7 +235,8 @@ public:
     static WorldConfigValidationResult
     ValidateWorldConfig(const std::string& root_path,
                         const std::string& worldType,
-                        const std::vector<std::filesystem::path>& required_assets = {});
+                        const std::vector<std::filesystem::path>& required_assets = {},
+                        const std::stop_token& stop = {});
 
     // Registers the caller's required runtime assets (relative to the root
     // path) checked by CreateWorld/LoadWorld validation. The client populates
@@ -279,11 +347,13 @@ public:
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
-    // Computed on demand from the current effective simulation gates and tuning.
+    // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
     [[nodiscard]] std::string LegacyRevision3SystemConfigIdentity() const;
     // Immutable value captured on the owner thread at a completed tick boundary.
     [[nodiscard]] Persistence::WorldAuthorityHashes CaptureAuthorityHashes() const;
+    // Pre-world admission can supply the calendar selected for the intended world.
+    [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -414,6 +484,10 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] WorldCalendar GetRenderCalendar() const {
+        return m_activeRegionsEnabled ? m_worldClock.calendar()
+                                      : m_renderCalendar.value_or(WorldCalendar::Legacy());
+    }
     [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
         return m_activeRegionLedger;
     }
@@ -509,18 +583,41 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
-    bool SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch) const;
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
     [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
+    bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
+                                bool full_metadata,
+                                std::string& bytes) const;
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    struct LoadedWorldState;
+    bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
+                            LoadedWorldState& state,
+                            bool resetting_clock = false);
+    static bool
+    ReadPreparedWorldState(const std::filesystem::path& save_dir,
+                           const WorldPreparationOptions& options,
+                           LoadedWorldState& state,
+                           std::string& error,
+                           bool resetting_clock,
+                           const std::stop_token& stop,
+                           const luminumbra::fields::EnergyFieldState* current_energy = nullptr);
+    bool AdoptCreatedWorld(WorldPreparation& prepared,
+                           Persistence::CreatedWorldArtifacts* artifacts);
+    bool AdoptLoadedWorld(WorldPreparation& prepared);
+    void AdoptWorldStateFrom(const std::filesystem::path& save_dir, LoadedWorldState& state);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
+    std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
     RegionSchedulerConfig m_regionSchedulerConfig;
     std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;
@@ -531,7 +628,7 @@ private:
     std::vector<RegionWork> m_regionWork;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
-    void LatchRegionFault(std::uint64_t tick, std::string message);
+    void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
@@ -548,6 +645,7 @@ private:
                              const std::string& worldType,
                              const std::string* customPresetJson,
                              bool transient,
+                             Persistence::CreatedWorldArtifacts* artifacts,
                              TerrainPresetUse presetUse,
                              const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
@@ -582,7 +680,7 @@ private:
     JobSystem* m_jobSystem = nullptr;
 
     // Generate a unique world ID
-    std::string GenerateWorldId();
+    static std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
     // False for fresh, incomplete, or fatally refused snapshot adoption. Operation
@@ -600,8 +698,6 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
-    bool LoadEnergyFieldRecord(const std::filesystem::path& save_dir);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

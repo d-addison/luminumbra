@@ -3,6 +3,94 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "render.ui-layout-sidecar",
+      "source": "docs/visual-regression.md#ui-layout-sidecars",
+      "statement": "CLI UI screenshots add schema-1 layout sidecars without changing existing image formats or simulation state. Capture-only collection records Rml document trees eligible for rendering, pruning visibility:hidden and display:none subtrees even with locally visible descendants, including non-DOM controls and visible direct text from populated text inputs, primary border boxes (including opacity-zero, zero-size and offscreen boxes) and rectangular clipping regions with mask presence. Single and batch captures pass no ImGui context because readback precedes the ImGui composite, so imgui_windows is empty and the sidecar matches the UI layer in the image. The collector API retains optional ImGui window geometry and drawing order for other callers. Rml effective paint order is unavailable in the pinned public API, so z is null. The GL-free serializer fixes key order, precision and locale, and refuses invalid geometry, parent links and capture limits. Source wiring and registered serializer, ImGui and hidden-window regressions cover input text, non-DOM child order, hidden documents, nested visibility overrides, hidden DOM and non-DOM text, visited-node budgets and clipping with explicit fixture layout and fonts; native execution and rendered qualification remain pending.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "UiLayoutSourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UiLayoutSerializer.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UiLayoutCollection.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UiSmokeTest.LayoutIncludesVisibleDocumentsDirectTextClipsAndTree"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_ui_layout_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/visual-regression.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.deterministic-work-budgets",
+      "source": "docs/deterministic-work-budgets.md",
+      "statement": "Issue #396 uses pinned integer work ceilings in the existing native suites for foliage idle, dirty sampling, copies, transfers, simulation counters, activation, backlog growth and eventual drain. Terrain and water upload policy fixtures attain their pinned byte/count/backlog/drain ceilings without graphics calls or clock reads and require current queued revisions. SimBudgetGateContract pins fixture values, counter producers and registration; all capture consumers refuse malformed work-item extensions while accepting older artifacts that omit them. Native execution remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetGateContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DeterministicWorkBudget.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.DeterministicWorkBudgetMovementEditDrainAndIdle"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.OutdatedRevisionReadbackIsDiscardedBeforeAdoption"
+        },
+        {
+          "kind": "script",
+          "ref": "test/fixtures/deterministic-work-budgets.json"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/deterministic-work-budgets.md",
+          "planned": "Run the registered native work-budget and foliage fixtures on standard CI; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.base-edit-routing",
+      "source": "issue #637",
+      "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels, Windows-sensitive paths or C++ classification, including confirmed non-C++ changes. MSVC runs when C++ or Python classification is required or uncertain. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_workflow_policy.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "profiler.build-contract",
       "source": "issue #433",
       "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. The bootstrap installs NumPy and Pillow before enabling tests. Disposable TCP accept attempts retain job and future-wait zones without process-lifetime thread-name registration; persistent workers remain named. The licence disclosure links to the repository-hosted notice from generated documentation. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
@@ -24,14 +112,75 @@
       "requirements": []
     },
     {
-      "id": "ci.fast-replay-budget",
-      "source": "docs/ci/local-checks.md#fast-hosted-validation",
-      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes.",
+      "id": "ci.changed-tus-partitions",
+      "source": "docs/ci/local-checks.md#python-helper-checks",
+      "statement": "Six disjoint whole-case selector partitions retain every assertion, ci/tools labels and 30-second deadlines. Selection, CI replay and publication, CMake fixtures, process-tree checks, base-ref subprocesses and locale subprocesses have separate entries in both engine and compiler-free CTest projects. Direct invocation and unittest discovery retain the complete suite. Roster and CLI regressions reject unknown, duplicate, missing and invalid selections and pin exact coverage. Windows retains four-slot reservations; hosted Windows deadline qualification remains pending. Publication failure still overrides pending replay exceptions and cancellation after cache namespace restoration, without returning from finally.",
       "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart5"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_changed_tus.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LocalCheckRegistrationContract"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.fast-replay-budget",
+      "source": "docs/ci/local-checks.md#fast-hosted-validation",
+      "statement": "Fast validation counts a total budget of 5 GCC and Clang command variants after union and target expansion. Selection, coverage, admission and combined command fingerprint checks precede the budget decision. Above budget, explicit deferred JSON evidence names the selected count, budget and deferral to full required builds; at or below budget every selected variant replays. Changed first-party sources are admitted by each compiler's configured dependency closure, including included sources without their own database entries; standalone sources without database entries and sources consumed only by absent targets refuse before replay even above budget. Local compile/tidy share this admission. Included-source reports name proven consumers' inputs, and unconfigured-source reports exclude those inputs. Refusals, missing consumers or cross-selected TU entries, input errors, publication failures and compile/tidy failures remain failures. Evidence is replaced atomically after the temporary file closes and uploaded on the native route. The 60 CPU-second compile and 90 CPU-second per tidy configuration estimates bound replay to about 7 minutes on two vCPUs; hosted duration qualification remains pending and the timeout stays 20 minutes. The pilot reflection executable remains in both databases without slangc and is excluded from the default build in that case. Shader generation and reflection-parity CTest registration remain gated on slangc, with tool-present behaviour unchanged. Offline contracts evaluate Windows, Apple and Linux link branches and exercise compile and both tidy plans; native database generation remains CI qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart5"
         },
         {
           "kind": "script",
@@ -49,6 +198,26 @@
         {
           "kind": "ctest",
           "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart5"
         }
       ],
       "requirements": []
@@ -96,7 +265,7 @@
     {
       "id": "ci.workflow-policy-partitions",
       "source": "tools/ci/test_workflow_policy.py",
-      "statement": "Ten disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for both new entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
+      "statement": "Disjoint workflow policy partitions retain every unittest case and subtest, unchanged ci/tools labels and 30-second deadlines. WorkflowPolicyContractPart8 isolates bootstrap classification coverage; WorkflowPolicyContractPart9 isolates the native aggregate route grid with two bounded case workers. WorkflowPolicyContractPart10 isolates required-aggregate behaviour; WorkflowPolicyContractPart11 isolates reusable Windows routing and standalone Python contract placement; WorkflowPolicyContractPart12 isolates the aggregate refusal of uncertain classification. Selection refuses unregistered classes and invalid class or case partition targets. The worker option follows the route-grid partition and is refused for other partitions. Windows reserves four CTest slots for every partition and seeds costs for the launch-heavy entries. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster, CLI and scheduling regressions cover both platform branches. Windows deadline qualification remains pending.",
       "status": "covered",
       "evidence": [
         {
@@ -138,13 +307,67 @@
         {
           "kind": "ctest",
           "ref": "WorkflowPolicyContractPart9"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart10"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart12"
         }
       ]
     },
     {
+      "id": "ci.compiler-cache-budget",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "MSVC and UCRT64 compiler caches use 1200M each on the daily runner's disk. The five hosted compiler lanes total 1.75 GB per branch; main/devel's newest generations total 3.5 GB, within the unchanged 9.5 GB repository cleanup budget. The remaining 6.5 GB of the 10 GB repository limit accommodates other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the cleanup budget cause cleanup to warn and skip deletion; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_cache_retention.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "ci.ucrt64-routing",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Full MSVC and UCRT64 validation runs on the self-hosted daily runner for schedules, manual dispatches and same-repository pull requests labelled windows-proof. Every admitted proof selects full native validation; aggregates reject drafts, missing draft metadata, unsuccessful classification and skipped expected producers. Normal CI retains its non-Windows jobs and base-retarget handling. Windows proof gates the v0.3.1 tag rather than landings.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_ci_paths.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart11"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorkflowPolicyContractPart12"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.asan-fast-lane",
       "source": "docs/development.md#continuous-integration",
-      "statement": "Ready pull requests needing native validation run ChangedTranslationUnitsContract and OfflineDependenciesContract before three ASan shards with 75-minute job deadlines. Fixture groups and each required parity and ambient receipt suite stay together; timing observations and CTest COST hints balance deterministic placement. Ordered qualification records cover all three producers with matching binary digests and exactly one ambient receipt. A failed fast lane skips all three shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
+      "statement": "Ready pull requests needing native validation run the complete selector and offline-dependency Python suites before three ASan shards with 75-minute job deadlines. Fixture groups and each required parity and ambient receipt suite stay together; timing observations and CTest COST hints balance deterministic placement. Ordered qualification records cover all three producers with matching binary digests and exactly one ambient receipt. A failed fast lane skips all three shards and fails the required Linux / GCC ASan aggregate. Draft rejection, non-C++ path skips, required check names, main/devel pushes and manual dispatch routes are preserved.",
       "status": "covered",
       "evidence": [
         {
@@ -175,6 +398,26 @@
         {
           "kind": "ctest",
           "ref": "ChangedTranslationUnitsContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContractPart5"
         },
         {
           "kind": "doc",
@@ -236,7 +479,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 62 existing column indices and appends dirty_columns at index 62, for 63 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72–75, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -367,7 +610,7 @@
     {
       "id": "perf.timer-attribution",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "The software sample ring preserves frame identity when results are assigned directly out of order. GpuQueryRing with fake queries exercises delayed result collection and leaves unsupported GPU timings and incomplete pass timings unavailable. The query fixture uses identical durations for every frame; frame-distinct GPU-query attribution remains unproven.",
+      "statement": "The software sample ring preserves frame identity when results are assigned directly out of order. GpuQueryRing with fake queries exercises delayed result collection and leaves unsupported GPU timings and incomplete pass timings unavailable. The query fixture uses identical durations for every frame; frame-distinct GPU-query attribution remains unproven. Water timing subzones remain nested in streaming. The source wiring regression checks bounded boot input batches, detached sampler ownership and owner publication after readiness and callback release. Registered native regressions cover Medium and High boot seed equivalence, mixed readiness, rejected dispatch and detached sampler lifetime; native execution remains required.",
       "status": "covered",
       "evidence": [
         {
@@ -377,6 +620,34 @@
         {
           "kind": "ctest",
           "ref": "RenderMeasurementGpuQueries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.DetachedSamplerSurvivesSourceResetPrefetchAndDestruction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterSeedInputs.BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrameAttributionWiringPython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
         }
       ]
     },
@@ -519,6 +790,15 @@
           "kind": "script",
           "ref": "tools/perf/far_settle_check.py",
           "planned": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator; owner: fw"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderCrashCapturePython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md",
+          "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload. Cave qualification awaits live Ladder activation. Frame evidence uses bounded records serialized after measurement; RenderResolvedConfiguration checks record bounds and workload option forms. RenderSavedAuthorityTampering and HostSchedulerFault cover verified snapshots and refusal without save replacement. Windows failure diagnostics retain bounded matching images and exception dumps before fixture cleanup; RenderCrashCapturePython checks event ownership, refusal/success, crash, timeout, identity, bounds and CI upload wiring. Native crash resolution remains pending matching CI evidence. Save/load drains streaming at a fixed script pose until all gates settle, with a 300-pass no-progress watchdog over resident chunks, ready chunks, admitted meshes and foliage generation. The reload report includes a positive settling_passes count; RenderContractPython checks missing, malformed and long-progress counts. RenderReloadInterval and RenderMeasurementGpuQueries register long-progress, stalled, oscillating, empty and partial-timer regressions; native execution remains pending. Per-pass query segments accumulate without growing storage or accepting incomplete segments. Extra residency passes pause loaded water, restore live stepping on success or failure, and do not present additional frames. FrameAttributionWiringPython checks the shared reload drain wiring. Capture galleries omit optional personal ratings without reading them or clearing required thumbnail containment; the public UI regression and RenderContractPython cover that boundary. Windows-only RenderCrashCaptureWindows smoke entries require real debug events, bounded minidumps and retained executable identity; their native execution remains pending. One frame simulation decision gates capture ticks, physics and water initialization and stepping; warmup, paused menus and report frames keep streaming, meshing, uploads and rendering active without advancing simulation. Both world update overloads preserve live stepping by default; reload settling explicitly disables simulation. FrameAttributionWiringPython covers the policy branches and production wiring; RenderReloadInterval registers the native policy regression, whose execution remains pending."
         }
       ],
       "requirements": [
@@ -3129,23 +3409,28 @@
     {
       "id": "contract.calendar",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "The persisted clock, pinned calendar consumers, numeric bounds and tick-boundary snapshot refusals have landed unit evidence.",
+      "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods. Snapshots refuse inside a batched catch-up and are taken only at tick boundaries.",
       "status": "covered",
       "requirements": [
         "dw.calendar.001",
         "dw.calendar.002",
+        "dw.calendar.024",
+        "dw.calendar.025",
+        "dw.calendar.026",
         "dw.calendar.004",
         "dw.calendar.005",
         "dw.calendar.006",
         "dw.calendar.007",
         "dw.calendar.008",
-        "dw.calendar.009",
-        "dw.calendar.010",
-        "dw.calendar.011",
-        "dw.calendar.012",
-        "dw.calendar.013",
-        "dw.calendar.014",
+        "dw.calendar.027",
         "dw.calendar.015",
+        "dw.calendar.010",
+        "dw.calendar.032",
+        "dw.calendar.011",
+        "dw.calendar.033",
+        "dw.calendar.035",
+        "dw.calendar.036",
+        "dw.calendar.020",
         "dw.calendar.016"
       ],
       "evidence": [
@@ -3159,6 +3444,46 @@
         },
         {
           "kind": "ctest",
+          "ref": "WorldClockTest.SolarHorizonsUseIntegerBoundariesAtEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SymmetricIdentityOddDaysAndLargeIntegerProducts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarKnotsHaveExactPhasesAndContinuousRates"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SmoothSolarDaylightShareIsExactToOneTickInEverySeason"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StimulusSolarLightTemperatureAndOverridesPreserveFallbacks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DefaultCalendarContinuesAcrossSaveAndExplicitSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.BoundedWeatherRestorationMatchesStormMotionAndStrikes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
+        },
+        {
+          "kind": "ctest",
           "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
         },
         {
@@ -3167,15 +3492,7 @@
         },
         {
           "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.CalendarConsumersUsePinnedPhasesOnTheRealTickPath"
-        },
-        {
-          "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
         }
       ]
     },
@@ -3278,7 +3595,7 @@
     {
       "id": "contract.region-cadence",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed.",
+      "statement": "Absolute cadence, checked shifts/ticks and bounded resume keep frozen simulation content fixed. Resume caps use one recorded elapsed calendar day (162,000 ticks for new worlds), independent of the solar daylight fraction; ARL1 bytes and timestamps are unchanged.",
       "status": "covered",
       "requirements": [
         "ar.activation.041",
@@ -3290,7 +3607,11 @@
         "ar.activation.047",
         "ar.activation.057",
         "ar.activation.058",
-        "ar.activation.059"
+        "ar.activation.059",
+        "dw.calendar.031",
+        "ar.activation.065",
+        "ar.activation.066",
+        "ar.activation.067"
       ],
       "evidence": [
         {
@@ -3304,6 +3625,10 @@
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.FrozenContentsAndCursorDoNotAdvanceAndResumeIsBounded"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.CanonicalLayoutAndObservationalExclusion"
         }
       ]
     },
@@ -3356,7 +3681,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; an integrated boundary regression with full endpoint coverage remains planned; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering`: docs/active-regions.md now agrees with the ledger's asymmetric half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers both axes; an integrated boundary regression with full endpoint coverage remains planned under issue #250. Boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
       "evidence": [
         {
           "kind": "ctest",
@@ -3379,6 +3704,11 @@
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
           "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
+          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: exercise both X and Z endpoints; accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters; owner: ds"
         }
       ]
     },
@@ -3549,7 +3879,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -3651,7 +3981,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -4043,7 +4373,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -4064,7 +4394,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -4314,7 +4644,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -4408,12 +4738,11 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Explicit false selects the legacy clock path. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
         "ar.scope.002",
-        "ar.scope.003",
         "ar.scope.004",
         "ar.scope.005",
         "ar.scope.006",
@@ -4481,7 +4810,7 @@
       "requirements": [
         "ar.activation.027",
         "ar.activation.028",
-        "ar.activation.065",
+        "ar.activation.073",
         "ar.activation.029",
         "ar.activation.030",
         "ar.activation.037",
@@ -4519,7 +4848,7 @@
     {
       "id": "contract.ar.activation.05",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Acceptance obligations: No callback consumer or catch-up is installed.",
+      "statement": "Acceptance obligations: no callback consumer or catch-up is installed.",
       "status": "planned",
       "requirements": [
         "ar.activation.060"
@@ -4599,7 +4928,7 @@
     {
       "id": "contract.ar.file.04",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: Forward saves replace metadata first; / rewinds replace the ledger first, preserving ledger tick <= clock tick at every boundary. / Ledger bytes are staged as unique `<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place. / A separately mounted region directory causes replacement to fail across devices; / no copy fallback compromises atomicity. / Termination can leave staging debris in the save root;",
+      "statement": "Acceptance obligations: Forward saves replace metadata first; / rewinds replace the ledger first, preserving ledger tick <= clock tick at every boundary. / Ledger bytes are staged as unique `<save>/active-regions.arl.tmp.<pid>.<sequence>.<instance>` files with separate durable `.owner` sidecars, outside the strict `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place. / A separately mounted region directory causes replacement to fail across devices; / no copy fallback compromises atomicity. / Termination can leave staging debris in the save root;",
       "status": "planned",
       "requirements": [
         "ar.file.019",
@@ -4620,7 +4949,7 @@
     {
       "id": "contract.ar.file.05",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim it. / Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer. / It is best effort: a file that cannot be removed is left alone and never blocks the save. / Unknown files inside the region directory are still refused. / The POSIX subprocess regression exits after the staging file is flushed and closed, verifies recovery while that file remains, and then verifies the next successful save removes it. / An accepted partial pair can contain an older ledger than its saved clock.",
+      "statement": "Acceptance obligations: loading ignores it, and every later ledger save, including an empty-ledger save, attempts to reclaim only staging with a valid durable ownership record binding its filename, save-instance ID, file and record identities and world directory. / Reclamation holds the shared mutex through cleanup and replacement, so existing staging cannot belong to another active in-process writer. / It is best effort: unknown or unprovable occupants (including legacy files, invalid records, substitutions, symlinks and directories) remain untouched and never block the save, which reserves fresh unique names. / Unknown files inside the region directory are still refused. / The POSIX subprocess regression exits after staging and ownership bytes and directory entries are durably flushed, verifies recovery while both files remain, and then verifies the next successful save removes the proven pair. / An accepted partial pair can contain an older ledger than its saved clock.",
       "status": "planned",
       "requirements": [
         "ar.file.025",
@@ -5073,19 +5402,50 @@
     {
       "id": "contract.calendar-pacing",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "Calendar pacing, flag-off legacy behavior and lunar-cycle limitations require dedicated evidence review.",
-      "status": "planned",
+      "statement": "Pure celestial and inverse-mapping tests cover calendar-relative sun, season and moon phases. The registered rendering clock test exercises fallback pacing, restored calendars, pins, hold and overrides with a GL context; live client rendering, environment precedence and unchanged disc/shader presentation remain pending native qualification.",
+      "status": "needs-native-run",
       "requirements": [
-        "dw.calendar.018",
-        "dw.calendar.019",
-        "dw.calendar.020",
-        "dw.calendar.021",
-        "dw.calendar.022",
-        "dw.calendar.023",
-        "dw.calendar.017",
-        "dw.calendar.003"
+        "dw.calendar.009",
+        "dw.calendar.028",
+        "dw.calendar.029",
+        "dw.calendar.030",
+        "dw.calendar.050",
+        "dw.calendar.054",
+        "dw.calendar.055",
+        "dw.calendar.056",
+        "dw.calendar.057",
+        "dw.calendar.058",
+        "dw.calendar.059",
+        "dw.calendar.060",
+        "dw.calendar.061",
+        "dw.calendar.062",
+        "dw.calendar.003",
+        "dw.calendar.023"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.ElapsedSolarInverseAndCalendarRelativeCelestialSeam"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TimeOfDayModel.MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.SkyCircadianAndStimulusSharePinnedCalendarPhases"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderClock.DefaultPacingAndRestoredCustomCalendarPreserveOverrides"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/gates/validate-engine-frontier.ps1",
+          "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode TimeOfDaySweep",
+          "receipt_schema": "luminumbra.timeofday_sweep.v1",
+          "planned": "Extend the visual sweep to qualify default and imported calendar pacing, marker selection, environment and direct illumination precedence, pin release and unchanged moon disc/shaders in the live client; the existing pinned sweep alone does not establish these claims.; owner: ac"
+        },
         {
           "kind": "doc",
           "ref": "docs/distant-world.md",
@@ -5123,8 +5483,8 @@
         "ar.activation.062",
         "ar.activation.063",
         "ar.activation.064",
-        "ar.activation.066",
-        "ar.activation.067",
+        "ar.activation.074",
+        "ar.activation.075",
         "ar.activation.068",
         "ar.activation.069"
       ],
@@ -5187,9 +5547,192 @@
       ]
     },
     {
+      "id": "contract.calendar-metadata",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Calendar version 2 has five bounded integer parameters. Invalid members, versions, rational fractions, lunar periods and clock ticks refuse transactionally through metadata and world-open paths; the engine guide records the schema.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.034",
+        "dw.calendar.013",
+        "dw.calendar.014",
+        "dw.calendar.037"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ConstructorChecksRationalAndLunarBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockInvalidMetadata.RefusesWithoutChangingClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-compatibility",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Absent and unversioned calendars retain pinned legacy values, explicit saves select the legacy or version 2 encoding without rescaling state, and legacy clock hash bytes remain exact. Calendar identity participates in admission without changing replay layouts.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.018",
+        "dw.calendar.012",
+        "dw.calendar.019",
+        "dw.calendar.038",
+        "dw.calendar.039",
+        "dw.calendar.040",
+        "dw.calendar.041",
+        "dw.calendar.042",
+        "dw.calendar.043",
+        "dw.calendar.044",
+        "dw.calendar.045",
+        "dw.calendar.046"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.MissingMetadataUsesPinnedDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyMetadataRoundTripsAsExactTwoFieldV1Record"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.ExtendedSolarOrLunarParametersRetainV2Encoding"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LegacyCanonicalBytesMatchV1Exactly"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledLegacyClockPinsEmptyEcologyFold"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.HeaderRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-disabled",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Disabled world opens restart simulation at zero with legacy biological periods. Explicit snapshots retain the running tick while replacing the presentation calendar, including absent metadata; markers persist without requiring active regions or entering the disabled clock hash, and competing authorities refuse.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.017",
+        "dw.calendar.047",
+        "dw.calendar.048",
+        "dw.calendar.049",
+        "dw.calendar.051",
+        "dw.calendar.052",
+        "dw.calendar.053",
+        "ar.scope.003"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledKeepsLegacyMetadataBytesAndTickZeroLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitlyDisabledCallbacksKeepLegacySavesLoadsAndNestedTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RenderCalendarMarkerLifecycleAndSnapshotReplacement"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-lunar-period",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "The lunar month is independent of solar phase and year length, and imported calendars use their recorded day length for the eight-day lunar period.",
+      "status": "covered",
+      "requirements": [
+        "dw.calendar.021",
+        "dw.calendar.022"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldClockTest.LunarMonthIsIndependentOfYearAndImportsRecordedDayLength"
+        }
+      ]
+    },
+    {
+      "id": "contract.calendar-speed",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Simulation speed controls retain batching and the pause through 16 times range; at ideal 16 times speed the default day lasts 337.5 seconds. Input dispatch and live pacing need dedicated regression and native evidence.",
+      "status": "planned",
+      "requirements": [
+        "dw.calendar.063",
+        "dw.calendar.064"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add an input-dispatch regression for pause, doubling, halving and the 16 times cap, and qualify actual tick batching and day duration in the live client.; owner: ac"
+        }
+      ]
+    },
+    {
       "id": "render.benchmark-far-frame-storage",
       "source": "docs/render-benchmark.md#compatibility-and-commands",
-      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "statement": "All three benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. V3 and v4 issue additional GL queries.",
       "status": "covered",
       "evidence": [
         {
@@ -5205,7 +5748,7 @@
     {
       "id": "render.benchmark-output-completion",
       "source": "docs/render-benchmark.md#compatibility-and-commands",
-      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "statement": "All three benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
       "status": "covered",
       "evidence": [
         {
@@ -5231,11 +5774,70 @@
       ]
     },
     {
+      "id": "render.benchmark-residency-fixture",
+      "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+      "statement": "Schema v4 accepts an explicit diagnostic streaming radius of 0..12 chunks, with 0 preserving uncapped streaming, and other schemas refuse the option. The cap applies before surface preparation on both creation and reload and remains a declared override bound to capture identity. Both save/load integration variants use startup, collision and streaming radii of 4 and a 0.4-second, 12-tick traversal at 30 Hz, saving at tick 1 and reloading at tick 2. The camera holds through tick 6 and resumes through tick 12. The 81 prepared columns retain the unchanged readiness minima of 64 renderable chunks and nine collision chunks. Every reload settle gate, loader, action and identity assertion remains required. Committed qualification traversals are unchanged; native rendering and timing verification remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderRunnerEvidencePython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadSaveLoadIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderWorkloadNoAudioIntegrated",
+          "planned": "native rendering and timing verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkStreamRadiusRefusal",
+          "planned": "native admission verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "native boundary and refusal verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "native write-order verification; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "render.content-directory-identity",
+      "source": "docs/render-benchmark.md#scripted-workloads-issue-403",
+      "statement": "Schema v4 content manifests include every scanned subdirectory, including empty ones, as a null entry keyed by its portable relative path with a trailing slash. Directory entries share the 65,536-entry, 4096-byte key and depth-64 bounds. Adding an empty directory changes render identity, removing it restores identity, and identical trees have identical identities regardless of enumeration order. Malformed directory markers and content beneath an absent audio tree are refused.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderResolvedConfiguration",
+          "planned": "native directory identity verification; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+        }
+      ]
+    },
+    {
       "id": "content.foliage-directory-recovery",
       "source": "docs/engine-guide.md#shipping-defaults",
       "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
       "status": "covered",
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderContentReferenceContainment",
+          "detail": "Foliage and creature directory loaders refuse directories and entries outside capture content trees, report failure with or without an optional output flag, and preserve previously loaded templates. Native execution remains pending."
+        },
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
@@ -5293,7 +5895,7 @@
     {
       "id": "render.ladder-content-identity",
       "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
-      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "statement": "The v2, v3 and v4 benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
       "status": "covered",
       "evidence": [
         {
@@ -5303,7 +5905,6 @@
         {
           "kind": "ctest",
           "ref": "RenderContractPython"
-
         }
       ]
     },
@@ -5957,7 +6558,7 @@
     {
       "id": "iss.553-dependency-startup",
       "source": "issue #553",
-      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work.",
+      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work. Windows native worker and semaphore refusal regressions are registered; MSVC and UCRT64 execution remains pending.",
       "status": "partial",
       "evidence": [
         {
@@ -5972,6 +6573,21 @@
           "kind": "ctest",
           "ref": "JoltStartup.MeasuredNullThrowAndUnwindSweep",
           "planned": "Run actual-dependency failure and mutation controls with generated build owners; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsFirstAndLaterWorkerCreationFailureJoinsAcquiredWorkers",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsApplicationWorkerCreationFailureReleasesRuntimeAndAllowsRetry",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.WindowsApplicationSemaphoreCreationFailureReleasesRuntimeAndAllowsRetry",
+          "planned": "Run Windows native creation refusal and rollback regressions under MSVC and UCRT64; owner: physics"
         }
       ],
       "requirements": []
@@ -7105,6 +7721,38 @@
         {
           "kind": "doc",
           "ref": "docs/v0.3-acceptance.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingPreservesUnknownOccupantsAndEmptySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingReclaimsOnlyValidOwnedPairsIncludingEmptySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingPreservesMalformedAndMismatchedOwnership"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingPreservesMissingOrSubstitutedProofAndPayload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingPreservesPairCopiedFromAnotherWorldOrFilename"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingInterruptedWriteRemovesItsPairAndPreservesLiveLedger"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingSubstitutionBeforePublishUsesFreshName"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.LedgerStagingOwnershipSurvivesDirectoryAliases"
         }
       ]
     },
@@ -7869,6 +8517,61 @@
           "planned": "Registered native regression; execution and qualification pending; owner: ds"
         }
       ]
+    },
+    {
+      "id": "iss.393",
+      "source": "issue #393",
+      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-2 selections preserve Ultra visuals for every tier pending owner approval; saved revision-1 values remain readable. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsPresets.NewSelectionsPreserveUltraAndIndependentFramePacingPendingApproval"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsPresets.SavedRevisionOneRetainsItsVisualsUntilExplicitReselection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsSettingsState.DetectionIsRepeatableAndPreservesConservativeVisualsForEveryCpuTier"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntime.NewSelectionsRetainUltraPassValuesPendingVisualApproval"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsUiSourceContract"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/ci/check_acceptance_matrix.py",
+          "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
+          "receipt_schema": "luminumbra.acceptance_execution.v1"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "dependency.rmlui-source",
+      "source": "docs/dependency-source.md",
+      "statement": "RmlUi source delivery binds the immutable pin and exact patch to a complete upstream identity manifest in vendor/rmlui/rmlui-6.1-source.json, owned workspace and readiness receipt. Configure callers explicitly bind CMake to the bootstrap interpreter without changing serialized root equality. The manifest retains LF checkout bytes and selects both Python and native CI lanes. Registered Python controls check full-file preservation and read-only repetition; the separate command contract checks workspace ownership and command refusals. Generated command equivalence, supported CMake versions, Windows and native builds require separate execution.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RmlUiSourceScriptContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RmlUiSourceCommandContract"
+        }
+      ],
+      "requirements": []
     }
   ]
 }

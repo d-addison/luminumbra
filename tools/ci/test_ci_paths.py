@@ -1,9 +1,11 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+from itertools import product
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,7 @@ SPEC = importlib.util.spec_from_file_location("ci_paths", Path(__file__).with_na
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 from ci_shell import bash_executable
+import ctest_shards as shards
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +40,31 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_rmlui_manifest_requires_python_and_native_lanes(self):
+        manifest = "vendor/rmlui/rmlui-6.1-source.json"
+        for paths in ([manifest], ["docs/dependency-source.md", manifest],
+                      ["cmake/patches/rmlui-6.1-source.json", manifest]):
+            with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
+                self.assertTrue(gate.needs_python(manifest))
+                self.assertTrue(gate.needs_cpp(manifest))
+                self.assertEqual(self.classify_lanes(ROOT, "pull_request", "base", "head",
+                                               "owner/repo", "owner/repo"), (True, True))
+        for path in ("vendor/rmlui/other.json", "vendor/other/rmlui-6.1-source.json"):
+            with self.subTest(path=path):
+                self.assertFalse(gate.needs_python(path))
+                self.assertTrue(gate.needs_cpp(path))
+
+    def test_asan_shard_suite_is_registered_in_every_test_entrypoint(self):
+        path = "tools/ci/test_asan_shards.py"
+        self.assertIn((path,), gate.python_test_commands(ROOT))
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B\n'
+                      '    ${CMAKE_SOURCE_DIR}/' + path + ')', cmake)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 " + path, workflow)
+
     def classify_lanes(self, root, event, base, head, repository, head_repository):
         return gate.classify(root, event, base, head, repository, head_repository, "devel")[:2]
 
@@ -130,7 +158,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_pr_classification_and_mixed_changes(self):
         for paths, expected in (
-            (["docs/development.md"], (False, False)),
+            (["docs/development.md"], (False, True)),
             (["tools/audio/bank_validate.py"], (True, True)),
             (["tools/ci/check_docs.py"], (True, True)),
             (["src/main.cpp"], (True, False)),
@@ -210,6 +238,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow += (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             # Split on a job boundary, not nested YAML mappings.
             body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n", 1)[1])[0]
@@ -217,14 +246,17 @@ class PathGateTests(unittest.TestCase):
                          "Run standalone Python contracts (including CTest-registered suites)"):
                 condition = body.split(f"      - name: {step}\n", 1)[1].splitlines()[0].strip()
                 expression = condition.removeprefix("if: ${{ ").removesuffix(" }}")
-                for cpp, python, expected in (("true", "true", True), ("false", "true", True),
-                                               ("true", "false", False), ("false", "false", True),
-                                               ("", "", True)):
-                    actual = expression.replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
-                        "needs.changes.outputs.needs_python", repr(python)
-                    ).replace("||", "or").replace("&&", "and")
-                    with self.subTest(job=job, step=step, cpp=cpp, python=python):
-                        self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+                # Windows runs the contracts once, on shard 2 (and the shard-0 qualification capture).
+                shard_bound = job == "windows-msvc" and step.startswith("Run standalone")
+                for shard in (0, 1, 2) if shard_bound else (1,):
+                    for cpp, python, expected in (("true", "true", True), ("false", "true", True),
+                                                   ("true", "false", False), ("false", "false", True),
+                                                   ("", "", True)):
+                        actual = expression.replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                            "needs.changes.outputs.needs_python", repr(python)
+                        ).replace("matrix.shard", repr(shard)).replace("||", "or").replace("&&", "and")
+                        with self.subTest(job=job, step=step, shard=shard, cpp=cpp, python=python):
+                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected and (shard != 1 or not shard_bound))
             self.assertIn("route: ${{ steps.route.outputs.route }}", body)
             self.assertIn("tools/ci/ci_paths.py python-tests", body)
             self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)
@@ -232,6 +264,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_route_is_visible_in_log_summary_and_step_output(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow += (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             script = run_block(workflow.split(f"  {job}:\n", 1)[1], "Report validation route")
             for cpp, route in (("false", "python-only"), ("true", "native"), ("", "native")):
@@ -250,18 +283,18 @@ class PathGateTests(unittest.TestCase):
     def test_job_routes_keep_draft_guards_and_fail_open_native_analysis(self):
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
-            for name in ("ci", "asan", "performance")
+            for name in ("ci", "asan", "performance", "windows-build")
         }
         routes = (
             ("ci", "linux", "guarded-python"),
-            ("ci", "windows-msvc", "ready-python"),
+            ("windows-build", "windows-msvc", "ready-native-or-python"),
             ("ci", "gns-compile-probe", "ready-native"),
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
             ("ci", "linux-result", "required-aggregate"),
-            ("ci", "windows-msvc-result", "required-aggregate"),
-            ("ci", "windows-ucrt64-result", "required-aggregate"),
+            ("windows-build", "windows-msvc-result", "required-aggregate"),
+            ("windows-build", "windows-ucrt64-result", "required-aggregate"),
             ("asan", "asan-shard", "guarded-native"),
             ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
@@ -269,11 +302,14 @@ class PathGateTests(unittest.TestCase):
         for workflow, job, route in routes:
             body = re.split(r"\n  [\w-]+:\n", workflows[workflow].split(f"  {job}:\n", 1)[1])[0]
             condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            condition = condition.replace("(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (", "(")
             expression = condition.removeprefix("${{ ").removesuffix(" }}")
             # Missing/failed classifier output is represented by the empty string.
-            for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+            for event, action, base_changed in product(
+                    ("pull_request", "push", "schedule", "workflow_dispatch"),
+                    ("synchronize", "edited"), (False, True)):
                 for draft in (True, False, None):
-                    for cpp in ("true", "false", ""):
+                    for cpp, python in product(("true", "false", ""), ("true", "false", "")):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
                             if route == "required-aggregate":
@@ -284,11 +320,16 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled
                             elif route == "guarded-native":
                                 expected = not cancelled and (not ready or cpp != "false")
+                            elif route == "ready-native-or-python":
+                                # MSVC also carries the standalone Python contracts.
+                                expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
-                                expected = not cancelled and ready and (
-                                    route == "ready-python" or cpp != "false"
-                                )
-                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
+                                expected = not cancelled and ready and cpp != "false"
+                            expected = expected and (workflow != "ci" or event != "pull_request"
+                                                     or action != "edited" or base_changed)
+                            actual = expression.replace("github.event.action", repr(action)).replace(
+                                "github.event.changes.base", repr(base_changed))
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
@@ -297,18 +338,79 @@ class PathGateTests(unittest.TestCase):
                             ).replace("needs.changes.result", repr("success")).replace(
                                 "needs.asan-shard.result", repr("success")
                             ).replace("needs.tidy-shard.result", repr("success")
+                            ).replace("needs.changes.outputs.head_sha", repr("a" * 40)
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                                "needs.changes.outputs.needs_python", repr(python)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
-                                              draft=draft, cpp=cpp, cancelled=cancelled):
+                                              draft=draft, cpp=cpp, python=python, cancelled=cancelled,
+                                              action=action, base_changed=base_changed):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_ucrt64_producer_and_gate_preserve_main_prs_and_classified_routes(self):
+        workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+        producer = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64:\n", 1)[1])[0]
+        aggregate = re.split(r"\n  [\w-]+:\n", workflow.split("  windows-ucrt64-result:\n", 1)[1])[0]
+        gate_step = aggregate.split("      - name: Require expected producers and route\n", 1)[1].split(
+            "      - name:", 1)[0]
+        condition = re.search(r"^    if: (.*)$", producer, re.MULTILINE)[1]
+        bindings = dict(re.findall(r"^          ([A-Z_]+): (.*)$", gate_step, re.MULTILINE))
+        command = shlex.split(" ".join(re.search(r"        run: >-\n((?:          .*\n)+)", gate_step)[1].splitlines()))
+        self.assertEqual(command[:3], ["python3", "tools/ci/ctest_shards.py", "gate"])
+        self.assertEqual(bindings["NEEDS_CPP"], "${{ needs.changes.outputs.needs_cpp }}")
+
+        def evaluate(expression, context):
+            expression = expression.removeprefix("${{ ").removesuffix(" }}")
+            expression = re.sub(r"\b(?:github|needs|inputs)\.[\w.*-]+",
+                                lambda match: repr(context[match[0]]), expression)
+            expression = expression.replace("!cancelled()", "True").replace("== false", "== False")
+            return eval(expression.replace("&&", "and").replace("||", "or"),
+                        {"__builtins__": {}, "contains": lambda labels, label: label in labels})
+
+        # 960 contexts x 6 classifications x 6 producer results; no subprocess per case.
+        for event, base, cpp, draft, label, paths in product(
+                ("pull_request", "push", "workflow_dispatch", "schedule"), ("main", "devel"),
+                ("true", "false", "", "unknown"), (False, True, None), (False, True),
+                ("true", "false", "", "unknown", "TRUE")):
+            enabled = cpp != "false" and event in ("pull_request", "workflow_dispatch", "schedule")
+            authorized = event != "pull_request" or label
+            ready = event != "pull_request" or draft is False
+            context = {
+                "github.event_name": event, "github.base_ref": base, "github.ref": f"refs/heads/{base}",
+                "github.event.action": "synchronize", "github.event.changes.base": "",
+                "github.event.pull_request.draft": draft,
+                "github.event.pull_request.labels.*.name": ("windows-proof",) if label else (),
+                "github.event.pull_request.head.repo.full_name": "owner/repo", "github.repository": "owner/repo",
+                "needs.changes.outputs.head_sha": "a" * 40, "needs.changes.result": "success",
+                "needs.changes.outputs.needs_cpp": cpp,
+                "inputs.qualification_capture": False,
+            }
+            with self.subTest(event=event, base=base, cpp=cpp, draft=draft, label=label, paths=paths):
+                self.assertEqual(evaluate(condition, context), enabled and ready and authorized)
+                self.assertEqual(evaluate(bindings["CI_ENABLED"], context), enabled)
+                for classification, result in product(
+                        ("success", "failure", "cancelled", "skipped", "", "unknown"),
+                        ("success", "failure", "cancelled", "skipped", "", "unknown")):
+                    inputs = {**context, "needs.changes.result": classification,
+                              "needs.windows-ucrt64.result": result}
+                    env = {key: str(evaluate(expr, inputs)).lower() if expr.startswith("${{") else expr.strip('"')
+                           for key, expr in bindings.items()}
+                    arguments = {flag.removeprefix("--"): env[argument.removeprefix("$")]
+                                 for flag, argument in zip(command[3::2], command[4::2])}
+                    accepted = (classification == "success" and ready
+                                and result == ("success" if enabled else "skipped"))
+                    if accepted:
+                        self.assertEqual(shards.gate(**arguments), "sharded" if enabled else "skipped")
+                    else:
+                        with self.assertRaises(ValueError, msg=repr(arguments)):
+                            shards.gate(**arguments)
 
     def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
         for filename, producer, aggregate in (
             ("ci", "linux", "linux-result"),
-            ("ci", "windows-msvc", "windows-msvc-result"),
-            ("ci", "windows-ucrt64", "windows-ucrt64-result"),
+            ("windows-build", "windows-msvc", "windows-msvc-result"),
+            ("windows-build", "windows-ucrt64", "windows-ucrt64-result"),
             ("ci", "tidy-shard", "tidy"),
             ("asan", "asan-shard", "asan"),
         ):
@@ -319,7 +421,7 @@ class PathGateTests(unittest.TestCase):
                 for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     invalid = classification != "success" or result not in ("success", "skipped")
                     for workflow_cancelled in (False, True):
-                        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                        expression = condition.replace("(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'windows-proof'))) && (", "(").removeprefix("${{ ").removesuffix(" }}")
                         expression = expression.replace("!cancelled()", repr(not workflow_cancelled))
                         expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
                         expression = expression.replace("needs.changes.result", repr(classification))
@@ -386,7 +488,7 @@ class PathGateTests(unittest.TestCase):
                 "--head-repository", "owner/repo", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\nneeds_heavy=false\nheavy_reason=reviewed_presentation_or_docs\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=true\nneeds_heavy=false\nheavy_reason=reviewed_presentation_or_docs\n")
 
     def test_cli_uses_hosted_base_ref_for_older_workflow_callers(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(gate, "changed_paths", return_value=["README.md"]):
@@ -507,12 +609,18 @@ class PathGateTests(unittest.TestCase):
     def test_standalone_plan_covers_ctest_python_contracts_without_native_runner(self):
         commands = gate.python_test_commands(ROOT)
         for test in (
+            "test/rendering/test_upload_budget_wiring.py",
+            "test/tools/test_runtime_config_contract.py", "test/tools/check_profiler_contract.py",
+            "test/tools/check_audio_shutdown_contract.py", "tools/ci/test_audio_propagation_metrics.py",
+            "tools/ci/test_jolt_startup.py", "tools/gates/test_common_library_isa.py",
+            "tools/ci/test_rmlui_source.py", "tools/ci/test_local_rmlui_recipe.py",
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
             "tools/ci/test_check_acceptance_matrix.py",
             "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
             "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
+            "tools/perf/test_check_gl_debug_log.py", "tools/perf/test_summarize_process_receipts.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",
             "tools/rendering/acceptance/test_scene_matrix.py",
             "tools/ci/test_check_acceptance_matrix.py",

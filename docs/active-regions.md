@@ -3,8 +3,9 @@
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
 `sim.active_regions` switch, enabled in compiled and packaged defaults for
-v0.3.0. Explicit false selects the legacy clock path. Budgets remain unlimited in
-shipped configuration. No distant system consumes this schedule yet; field pages, creature records, water shares,
+v0.3.0. Explicitly disabling it retains the legacy simulation periods and hash
+behavior. Budgets remain unlimited in shipped configuration. No distant system
+consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
 
 Durable completed work and ground-object continuation, durable regional
@@ -96,7 +97,11 @@ failure still retains its faulting tick because that tick's systems already ran.
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
 ticks to both the system's explicit cap and one WorldClock calendar day; it
-refuses a resume before freeze. No callback consumer or catch-up is installed.
+refuses a resume before freeze. New calendars cap at 162,000 ticks (90 minutes),
+while imported calendars retain their recorded day, including 36,000 or 216,000
+ticks. The daylight fraction changes solar phase without changing this elapsed
+cap. ARL1 bytes and timestamps are unchanged; no callback consumer or catch-up
+is installed.
 
 ## File and compatibility
 
@@ -135,17 +140,21 @@ directory are outside this ownership contract.
 Incoming pairs are validated before either replacement. Forward saves replace metadata
 first; rewinds replace the ledger first, preserving ledger tick <= clock tick at every
 boundary. Ledger bytes are staged as unique
-`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and
-`chunks/region/` scans on the save filesystem, then atomically renamed into place. A
-separately mounted region directory causes replacement to fail across devices; no copy
-fallback compromises atomicity. Termination can leave staging debris in the save root;
-loading ignores it, and every later ledger save, including an empty-ledger save,
-attempts to reclaim it. Reclamation holds the shared mutex through cleanup and
+`<save>/active-regions.arl.tmp.<pid>.<sequence>.<instance>` files with separate durable
+`.owner` sidecars, outside the strict `chunks/` and `chunks/region/` scans on the save
+filesystem, then atomically renamed into place. A separately mounted region directory
+causes replacement to fail across devices; no copy fallback compromises atomicity.
+Termination can leave staging debris in the save root; loading ignores it, and every
+later ledger save, including an empty-ledger save, attempts to reclaim only staging with
+a valid durable ownership record binding its filename, save-instance ID, file and record
+identities and world directory. Reclamation holds the shared mutex through cleanup and
 replacement, so existing staging cannot belong to another active in-process writer. It
-is best effort: a file that cannot be removed is left alone and never blocks the save.
-Unknown files inside the region directory are still refused. The POSIX subprocess
-regression exits after the staging file is flushed and closed, verifies recovery while
-that file remains, and then verifies the next successful save removes it.
+is best effort: unknown or unprovable occupants (including legacy files, invalid
+records, substitutions, symlinks and directories) remain untouched and never block the
+save, which reserves fresh unique names. Unknown files inside the region directory are
+still refused. The POSIX subprocess regression exits after staging and ownership bytes
+and directory entries are durably flushed, verifies recovery while both files remain,
+and then verifies the next successful save removes the proven pair.
 
 An accepted partial pair can contain an older ledger than its saved clock. The
 ledger therefore carries two tick values. The canonical scheduler tick advances

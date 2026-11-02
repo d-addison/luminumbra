@@ -239,14 +239,14 @@ TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // See docs/development/system-config-identity.md for the complete computation.
     EXPECT_EQ(Luminumbra::world::GameSession{}.LegacyRevision3SystemConfigIdentity(),
               "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "2a0d6f2dc4028dda");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "2f2a9405252345a8");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
     Luminumbra::world::GameSession legacy;
     legacy.ApplySystemConfig(SystemConfig::LoadFromFile(path));
     EXPECT_EQ(legacy.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "2a0d6f2dc4028dda");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "2f2a9405252345a8");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
 }
@@ -268,7 +268,7 @@ TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
         {"water_high_res",
          {"f19ddc19ff363221", "fee6c60cfcf39382", "77bc1aa8d3d992aa", "a1571bc82dd99e19"}},
         {"active_regions",
-         {"0820e02bb23ece12", "8830afa562b7cab1", "60ab3c242d54ce89", "2a0d6f2dc4028dda"}},
+         {"0820e02bb23ece12", "8830afa562b7cab1", "60ab3c242d54ce89", "2f2a9405252345a8"}},
         {"mutation_rate",
          {"685d3dd6e3bacd77", "684927e833c5681c", "87c6f0914eb60e88", "424a8ca0f34125f3"}},
         {"energy_drain_per_second",
@@ -529,6 +529,41 @@ TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
         EXPECT_FALSE(error.empty());
         EXPECT_EQ(ConfigIdentity(config), identity);
     }
+    std::filesystem::remove_all(directory, remove_error);
+}
+
+TEST(SystemConfig, FileReadersRefuseRawNulWithoutChangingExplicitSnapshot) {
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-systemconfig-nul-");
+    const auto path = directory / "override.json";
+    SystemConfig config =
+        SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
+    const auto identity = ConfigIdentity(config);
+    const std::string valid = R"({"sim":{"plant_growth":{"enabled":false}}})";
+    for (const auto position : {std::size_t{0}, valid.size() / 2, valid.size()}) {
+        auto bytes = valid;
+        bytes.insert(position, 1, '\0');
+        bytes += "garbage";
+        {
+            std::ofstream file(path, std::ios::binary);
+            ASSERT_TRUE(file.good());
+            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            file.close();
+            ASSERT_FALSE(file.fail());
+        }
+        std::string error;
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path, config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), identity);
+        EXPECT_TRUE(SystemConfig::LoadFromFile(path).enabled(SysKey::SimPlantGrowth));
+        EXPECT_TRUE(SystemConfig::FromJsonString(bytes).enabled(SysKey::SimPlantGrowth));
+        config.user().frame_cap = 60;
+        config.OverlayUserFromJsonString(bytes);
+        EXPECT_EQ(config.user().frame_cap, 60);
+        EXPECT_EQ(config.settings_load_report().state,
+                  luminumbra::core::SettingsLoadState::Recovery);
+    }
+    std::error_code remove_error;
     std::filesystem::remove_all(directory, remove_error);
 }
 

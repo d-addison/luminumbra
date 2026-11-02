@@ -297,6 +297,11 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
         EXPECT_EQ(r.frozen_digest, frozen.frozen_digest);
     }
     constexpr std::uint64_t day = Luminumbra::world::WorldCalendar{}.dayLengthTicks;
+    EXPECT_EQ(day, 162000u);
+    EXPECT_EQ(ActiveRegionLedger::resume_window(
+                  kFar, 3, WorldClock(400000, WorldCalendar::Legacy()), UINT64_MAX)
+                  .elapsed_ticks,
+              216000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(day + 100000), UINT64_MAX)
                   .elapsed_ticks,
               day);

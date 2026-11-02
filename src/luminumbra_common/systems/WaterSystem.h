@@ -1,7 +1,8 @@
 #pragma once
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
-#include "entt/entt.hpp"
+#include "../core/WaterAttribution.h"
+#include "entt/entity/registry.hpp"
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -10,7 +11,8 @@
 
 namespace Luminumbra {
 class Chunk;
-}
+struct HighWaterSeedInputs;
+} // namespace Luminumbra
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 }
@@ -185,7 +187,7 @@ public:
     // advances each awake chunk's ticks_below_threshold only once per rotation — with ~2900
     // awake chunks that is one sleep-counter step per ~45 ticks, x120 needed, >> any sane
     // settle cap (measured: the loaded heavy-oracle session exits its 400-cap with ALL 5433
-    // water chunks still awake). Boot mode lifts BOTH caps (init ALL pending in parallel,
+    // water chunks still awake). Boot mode lifts BOTH caps (init ALL pending in order,
     // sim ALL awake chunks) so settle converges; loading-phase wall time is the only cost.
     // Set ONLY around the Boot settle loop — live-play behaviour is byte-identical.
     void SetBootSettleMode(bool on) {
@@ -232,13 +234,21 @@ public:
     // RUNTIME TELEMETRY ONLY (never hashed, never persisted), the DbgStreamTimings
     // pattern from SHIELD_WorldSystem. Localizes where the per-tick water budget goes.
     struct DbgWaterTimings {
-        double init = 0.0;        // adaptive-resize scan/apply + first-time grid seeding
+        double init = 0.0; // adaptive-resize scan/apply + first-time grid seeding
+        // Finer init subzones are populated only inside opt-in frame attribution.
+        double selection = 0.0;
+        double seed_inputs = 0.0;
+        double initialization = 0.0;
         double sim = 0.0;         // per-chunk fixed-point kernel (StepChunkWaterFixed)
         double seam = 0.0;        // cross-chunk owner-edge shared-flux pass
         double bookkeeping = 0.0; // sources, wake/sleep scans, window selection, mass telemetry
     };
     [[nodiscard]] const DbgWaterTimings& dbg_water_timings() const {
         return m_dbg_water;
+    }
+    // Latest-update work counters, never hashed or persisted.
+    [[nodiscard]] const WaterAttribution::Frame& dbg_seed_attribution() const {
+        return m_seed_attribution;
     }
 
     // The sim-window cursor is EVOLUTION-RELEVANT state whenever more chunks are awake than the
@@ -276,7 +286,9 @@ public:
      * @param chunk The chunk to resize
      * @param new_level The new detail level
      */
-    void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
+    // False leaves the chunk unchanged; incomplete grids remain ineligible for
+    // simulation, seams and external water edits until valid state is supplied.
+    bool ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
     std::vector<Chunk*> PrepareWaterGrids(bool deterministic_authority);
@@ -286,8 +298,14 @@ private:
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
 
-    JobSystem* m_job_system;
+    std::vector<std::shared_ptr<HighWaterSeedInputs>>
+    prepare_high_water_seed_inputs(std::span<Chunk* const> to_init, bool defer_fallback);
+    void initialize_water_chunks(std::span<Chunk* const> to_init, bool deterministic_authority);
+    void seed_chunk_water(Chunk* chunk,
+                          const std::vector<float>& terrain,
+                          const HighWaterSeedInputs* inputs);
 
+    JobSystem* m_job_system;
     SHIELD_WorldSystem* m_shield_system;
 
     // Holds a read-only pointer to the main chunk map from SHIELD_WorldSystem.
@@ -372,6 +390,7 @@ private:
     std::size_t m_dbg_cells_simmed = 0;       // see dbg_cells_simmed()
     std::size_t m_cells_stepped_last_update = 0;
     DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
+    WaterAttribution::Frame m_seed_attribution{};
 
     // Historical resize window is used only by the legacy streaming path.
     std::size_t m_water_resize_cursor = 0;

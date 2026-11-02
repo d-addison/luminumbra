@@ -18,10 +18,13 @@
 #include <glad/glad.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rendering/PassShaderLayouts.h"
@@ -135,6 +138,61 @@ bool ReadTextFile(const std::string& path, std::string& out, std::string& err) {
     return true;
 }
 
+// The engine's shader loader expands `#include "name"` lines before the driver sees
+// the source; the GL driver does not. Expand them here the same way so the shipping
+// GLSL links when a real context is available.
+bool ReadShaderSource(const std::filesystem::path& path,
+                      std::set<std::string>& active,
+                      std::string& out,
+                      std::string& err) {
+    const std::filesystem::path normal = std::filesystem::absolute(path).lexically_normal();
+    const std::string key = normal.generic_string();
+    if (!active.insert(key).second) {
+        err = "cyclic shader include: " + key;
+        return false;
+    }
+    std::ifstream f(normal, std::ios::binary);
+    if (!f) {
+        err = "cannot open " + key;
+        active.erase(key);
+        return false;
+    }
+    constexpr std::string_view prefix = "#include \"";
+    std::string line;
+    while (std::getline(f, line)) {
+        const bool has_newline = !f.eof();
+        std::string_view directive(line);
+        if (has_newline && directive.ends_with('\r'))
+            directive.remove_suffix(1);
+        if (directive.substr(0, prefix.size()) != prefix) {
+            out += line;
+            if (has_newline)
+                out.push_back('\n');
+            continue;
+        }
+        const std::size_t name_end = directive.find('"', prefix.size());
+        if (name_end == std::string_view::npos || name_end + 1 != directive.size()) {
+            err = "malformed shader include in " + key + ": " + line;
+            active.erase(key);
+            return false;
+        }
+        const std::string name(directive.substr(prefix.size(), name_end - prefix.size()));
+        if (!ReadShaderSource(normal.parent_path() / name, active, out, err)) {
+            active.erase(key);
+            return false;
+        }
+        if (has_newline && !out.ends_with('\n'))
+            out.push_back('\n');
+    }
+    active.erase(key);
+    return true;
+}
+
+bool ReadShaderSource(const std::string& path, std::string& out, std::string& err) {
+    std::set<std::string> active;
+    return ReadShaderSource(std::filesystem::path(path), active, out, err);
+}
+
 std::map<std::string, GLenum> ReflectedSamplerMap(const std::vector<ReflectedSampler>& s) {
     std::map<std::string, GLenum> m;
     for (const auto& x : s)
@@ -191,8 +249,8 @@ void RunParity(HiddenGlContext* ctx, const char* pass_name, const char* json_bas
     // B: GL introspection of the shipping GLSL (adds the third source when GL is up).
     if (ctx != nullptr && ctx->ready()) {
         std::string vs, fs;
-        ASSERT_TRUE(ReadTextFile(SourceRoot() + "/" + entry->vert, vs, err)) << err;
-        ASSERT_TRUE(ReadTextFile(SourceRoot() + "/" + entry->frag, fs, err)) << err;
+        ASSERT_TRUE(ReadShaderSource(SourceRoot() + "/" + entry->vert, vs, err)) << err;
+        ASSERT_TRUE(ReadShaderSource(SourceRoot() + "/" + entry->frag, fs, err)) << err;
         std::string link_err;
         const GLuint prog = LinkProgram(vs.c_str(), fs.c_str(), link_err);
         ASSERT_NE(prog, 0u) << "GLSL link failed for '" << pass_name << "': " << link_err;

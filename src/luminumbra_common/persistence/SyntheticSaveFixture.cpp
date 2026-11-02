@@ -1,5 +1,6 @@
 #include "SyntheticSaveFixture.h"
 
+#include "SavedJsonAdmission.h"
 #include "SavedWorldCatalog.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
@@ -11,7 +12,6 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -168,7 +168,31 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
         if (spec.preset_source.empty())
             return Fail(std::move(report), "preset_source is required for a new save.");
 
+        // An occupied leaf takes precedence over unreadable preset input. This
+        // inspection never authorizes overwriting: create_directory below is exclusive.
         std::error_code ec;
+        const auto leaf = fs::symlink_status(report.save_dir, ec);
+        if (leaf.type() != fs::file_type::not_found) {
+            if (ec)
+                return Fail(std::move(report), "cannot inspect save directory: " + ec.message());
+            return Fail(std::move(report), "save already exists; refusing to overwrite it.");
+        }
+        if (ec && ec != std::errc::no_such_file_or_directory)
+            return Fail(std::move(report), "cannot inspect save directory: " + ec.message());
+        ec.clear();
+
+        std::string preset_bytes;
+        {
+            const SavedInputFile input(spec.preset_source);
+            if (!input.read(preset_bytes, SavedInputLimits::kPresetBytes) ||
+                !SavedInputLimits::JsonDepthAllowed(preset_bytes))
+                return Fail(std::move(report), "cannot read preset within compatibility limits");
+        }
+        const auto preset_json = json::parse(preset_bytes, nullptr, false);
+        if (preset_json.is_discarded())
+            return Fail(std::move(report), "cannot parse preset JSON");
+        const auto preset_identity = StableChecksum(preset_json.dump());
+
         static_cast<void>(fs::create_directories(report.save_dir.parent_path(), ec));
         if (ec)
             return Fail(std::move(report),
@@ -181,15 +205,11 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             return Fail(std::move(report), "save already exists; refusing to overwrite it.");
         cleanup.MarkCreated();
 
-        if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
+        std::vector<std::string> save_errors;
+        if (!WorldSaveService::write_file_durably(
+                report.save_dir / "preset.json", preset_bytes, &save_errors))
             return Fail(std::move(report),
-                        "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
-                            ec.message() + ")");
-        std::string preset_identity;
-        {
-            std::ifstream input(report.save_dir / "preset.json");
-            preset_identity = StableChecksum(json::parse(input).dump());
-        }
+                        save_errors.empty() ? "cannot persist preset" : save_errors.front());
         const json metadata = {
             {"container_version", WorldSaveService::kContainerVersion},
             {"presetFormat", kSavedPresetFormat},
@@ -208,7 +228,6 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             FillChunk(*chunk, spec, static_cast<std::uint64_t>(i));
             chunk->mark_sdf_loaded_or_edited();
         }
-        std::vector<std::string> save_errors;
         if (!WorldSaveService{}.save_world(state, report.save_dir, &save_errors))
             return Fail(std::move(report),
                         save_errors.empty() ? "world save failed" : save_errors.front());

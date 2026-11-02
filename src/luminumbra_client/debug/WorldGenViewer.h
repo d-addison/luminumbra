@@ -13,6 +13,10 @@ namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 }
 
+namespace Luminumbra::Rendering {
+class RenderPipeline;
+}
+
 namespace Luminumbra::Client {
 
 class WorldGenViewer {
@@ -34,7 +38,8 @@ public:
     }
 
     // Draw preview contents. A null live world disables the explicit application operation.
-    void DrawContents(Systems::SHIELD_WorldSystem* main_world_system);
+    void DrawContents(Systems::SHIELD_WorldSystem* main_world_system,
+                      Rendering::RenderPipeline& pipeline);
 
 private:
     // Regenerates the preview texture based on current parameters.

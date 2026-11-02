@@ -88,6 +88,11 @@ def windows_binary_stats():
 
 class MatrixTestBase(unittest.TestCase):
     def setUp(self):
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        capture_patch = mock.patch.object(runner.crash_capture, 'run', side_effect=ordinary_run)
+        capture_patch.start()
+        self.addCleanup(capture_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         # Temporary roots may use directory aliases or Windows short names.

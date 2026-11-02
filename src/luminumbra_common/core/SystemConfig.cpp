@@ -237,7 +237,15 @@ private:
     std::vector<Frame> m_frames;
 };
 
+void CheckSettingsBytes(const std::string& json_text) {
+    const auto nul = json_text.find('\0');
+    if (nul != std::string::npos)
+        throw nlohmann::json::parse_error::create(
+            101, nul + 1, "raw NUL in settings JSON", nullptr);
+}
+
 nlohmann::json ParseSettingsJson(const std::string& json_text) {
+    CheckSettingsBytes(json_text);
     // Keep the ordinary path unchanged. Retry only numeric overflow in the layouts subtree;
     // syntax errors and errors from sim/render or other user settings keep their behavior.
     std::string recovered;
@@ -429,11 +437,13 @@ bool ParseGraphicsSection(const nlohmann::json& data,
             !ParseGraphicsPreset(graphics["base_preset"].get<std::string>(), parsed.base_preset) ||
             !graphics.contains("preset_revision") ||
             !graphics["preset_revision"].is_number_integer() ||
-            graphics["preset_revision"] != kGraphicsPresetRevision ||
+            (graphics["preset_revision"] != 1 &&
+             graphics["preset_revision"] != kGraphicsPresetRevision) ||
             !graphics.contains("overrides") || !graphics["overrides"].is_object()) {
             error = "invalid graphics preset, revision or overrides";
             return false;
         }
+        parsed.preset_revision = graphics["preset_revision"].get<std::uint32_t>();
         for (const auto& [key, value] : graphics["overrides"].items()) {
             if (value.is_boolean())
                 parsed.overrides[key] = value.get<bool>();
@@ -481,7 +491,8 @@ bool ParseGraphicsSection(const nlohmann::json& data,
         user.graphics = std::move(parsed);
     }
     ResolvedGraphics resolved;
-    if (!ResolveGraphics(user.graphics, {}, resolved, error))
+    if (!ResolveGraphics(
+            user.graphics, {}, resolved, error, {.vsync = user.vsync, .frame_cap = user.frame_cap}))
         return false;
     user.render_scale = static_cast<float>(resolved.values.render_scale);
     return true;
@@ -589,7 +600,7 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 }
 
 SystemConfig SystemConfig::LoadFromFile(const std::filesystem::path& path) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file)
         return SystemConfig{}; // missing/unreadable -> defaults
     std::ostringstream buffer;
@@ -602,7 +613,7 @@ SystemConfig SystemConfig::LoadFromFile(const std::filesystem::path& path) {
 bool SystemConfig::TryLoadFromFile(const std::filesystem::path& path,
                                    SystemConfig& config,
                                    std::string& error) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file) {
         error =
             "cannot read systems config: " + Luminumbra::Filesystem::GenericUtf8PathString(path);
@@ -616,7 +627,9 @@ bool SystemConfig::TryLoadFromFile(const std::filesystem::path& path,
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(buffer.str());
+        const auto bytes = buffer.str();
+        CheckSettingsBytes(bytes);
+        const auto document = nlohmann::json::parse(bytes);
         if (!document.is_object()) {
             error = "systems config must be a JSON object: " +
                     Luminumbra::Filesystem::GenericUtf8PathString(path);
@@ -711,8 +724,9 @@ std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t r
         hash ^= static_cast<std::uint64_t>(value);
         hash *= 1099511628211ull;
     };
-    // Revision 3 predates the trailing authority revision field. Its complete
-    // byte projection, including the domain prefix, is a saved-data contract.
+    // Revision 3 predates the trailing authority revision field and the calendar
+    // epoch. Its complete byte projection, including the domain prefix, is a
+    // saved-data contract.
     const bool legacy = revision == kLegacyAuthorityRulesRevision;
     for (const char ch : std::string(legacy ? "system-config:v3:" : "system-config:v4:"))
         byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
@@ -760,8 +774,18 @@ std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t r
     integer(region_work_limit, 64);
     integer(region_hold_ticks, 32);
     byte(region_reduced_shift);
-    if (!legacy)
+    if (!legacy) {
         integer(revision, 32);
+        // Epoch v1: tick zero is midnight, day zero, midwinter, lunar phase zero.
+        // The epoch is fixed by WorldClock, rather than supplied by save metadata.
+        for (const char ch : std::string("calendar-epoch:v1:"))
+            byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
+        integer(day_length_ticks, 32);
+        integer(days_per_year, 32);
+        integer(daylight_numerator, 32);
+        integer(daylight_denominator, 32);
+        integer(lunar_cycle_days, 32);
+    }
     // Hex digits are emitted explicitly so even the result is independent of locale.
     constexpr char digits[] = "0123456789abcdef";
     std::string result(16, '0');
@@ -857,7 +881,12 @@ bool SystemConfig::SaveUserOverlay(const std::filesystem::path& path) const {
         return false;
     ResolvedGraphics resolved;
     std::string error;
-    if (!ResolveGraphics(m_user.graphics, {}, resolved, error) ||
+    if (!ResolveGraphics(m_user.graphics,
+                         {},
+                         resolved,
+                         error,
+                         {.vsync = m_user.vsync,
+                          .frame_cap = IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0}) ||
         GraphicsPresetName(m_user.graphics.detection.recommended_preset).empty() ||
         m_user.graphics.detection.observed_hardware.size() > 4096)
         return false;
@@ -866,8 +895,8 @@ bool SystemConfig::SaveUserOverlay(const std::filesystem::path& path) const {
     user["video"] = {
         {"resolution", m_user.resolution},
         {"window_mode", m_user.window_mode},
-        {"vsync", m_user.vsync},
-        {"frame_cap", IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0},
+        {"vsync", resolved.frame_pacing.vsync},
+        {"frame_cap", resolved.frame_pacing.frame_cap},
         {"fov", m_user.fov},
         {"ui_scale", m_user.ui_scale},
         {"mouse_sensitivity", m_user.mouse_sensitivity},

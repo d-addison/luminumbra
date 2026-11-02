@@ -25,7 +25,7 @@
 #include <cstdlib>
 #include <vector>
 
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 
 #include "../components/ForagingComponents.h"
 #include "ScentField.h"

@@ -90,6 +90,15 @@ TEST(ReplicationProtocol, AckRoundTrip) {
     EXPECT_EQ(in.usercmd_tick, out.usercmd_tick);
 }
 
+TEST(ReplicationProtocol, AckHasExactly12LittleEndianPayloadBytes) {
+    AckMsg message;
+    message.snapshot_seq = 0x12345678;
+    message.usercmd_tick = 0x0123456789abcdefULL;
+    const std::vector<std::uint8_t> expected{
+        3, 12, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
+    EXPECT_EQ(EncodeAck(message), expected);
+}
+
 TEST(ReplicationProtocol, SnapshotMultiEntityRoundTrip) {
     SnapshotMsg in;
     in.server_tick = 5000;

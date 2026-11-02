@@ -30,7 +30,7 @@ jobs:
     steps:
       # Workflow code is trusted and no repository code is checked out. GitHub
       # also evicts old keys, but that alone would fill the 10 GB free quota.
-      - name: Retain one generation per branch and lane, below 6 GB total
+      - name: Retain one generation per branch and lane, below 9.5 GB total
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -50,7 +50,7 @@ jobs:
               'perf-paired-linux-x64-gcc-', 'qualification-server-linux-x64-gcc-',
               'tidy-cache-',
           )
-          BUDGET = 6_000_000_000
+          BUDGET = 9_500_000_000
           RECENCY_GRACE = timedelta(hours=6)
 
           def warning(message):
@@ -102,7 +102,7 @@ jobs:
               used = sum(c['size_in_bytes'] for c in protected)
               if used > BUDGET:
                   warning(f'Newest, protected and grace-window caches use {used} bytes, exceeding the {BUDGET} byte '
-                          f'(6 GB) budget by {used - BUDGET} bytes; skipping cleanup')
+                          f'(9.5 GB) budget by {used - BUDGET} bytes; skipping cleanup')
                   return []
               retained = {retention_group(c) for c in protected}
               obsolete = []

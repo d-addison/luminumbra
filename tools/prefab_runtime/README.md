@@ -6,13 +6,18 @@ registry. `luminumbra_prefab_inspect` is its installed, headless consumer. It em
 the resulting ECS hierarchy, world transforms, normal matrices, bounds and
 material bindings as JSON. This path needs no Blender or graphics context.
 
-Enable and install the consumer from an engine checkout:
+Enable and install the consumer from the engine checkout root. Choose a fresh,
+absent build directory; initialization refuses existing roots. The example keeps
+any existing release build intact and uses the release preset with an explicit
+directory and bootstrap interpreter:
 
 ```sh
-cmake --preset release -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
-cmake --build --preset release --target luminumbra_prefab_inspect prefab_runtime_test --parallel 2
-ctest --test-dir build/release -R '^Prefab(Digest|RuntimeTest)\.' --no-tests=error --output-on-failure
-cmake --install build/release --prefix /your/install --component PrefabRuntime
+python3 -I -B tools/ci/rmlui_source.py init --root build/release-prefab || exit
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/release-prefab || exit
+cmake --preset release -B build/release-prefab "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
+cmake --build build/release-prefab --target luminumbra_prefab_inspect prefab_runtime_test --parallel 2
+ctest --test-dir build/release-prefab -R '^Prefab(Digest|RuntimeTest)\.' --no-tests=error --output-on-failure
+cmake --install build/release-prefab --prefix /your/install --component PrefabRuntime
 ```
 
 The option defaults to OFF. Normal engine builds, world loading and saved-world

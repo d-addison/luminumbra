@@ -48,6 +48,11 @@ void ToggleWindowedBorderless(GLFWwindow* window, WindowState& state);
 // previous F11 binding).
 void ToggleFullscreen(GLFWwindow* window, WindowState& state);
 
+// Interactive photo readback only: discard pre-existing GL errors immediately
+// before reading; any readback error refuses the capture. Each error pass makes
+// at most eight queries. Invalid dimensions or failure leave pixels unchanged.
+bool ReadPhotoCapturePixels(int width, int height, std::vector<unsigned char>& pixels);
+
 // Write a downscaled 24-bit uncompressed TGA thumbnail of a captured frame.
 bool WriteCaptureThumbnailTga(const std::filesystem::path& path,
                               int srcW,

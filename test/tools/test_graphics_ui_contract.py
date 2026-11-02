@@ -9,6 +9,14 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def compact_cpp(path):
+    source = path.read_text(encoding="utf-8")
+    tokens = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*.*?\*/', re.S)
+    source = tokens.sub(lambda match: "" if match[0].startswith(("//", "/*"))
+                        else match[0], source)
+    return re.sub(r"\s+", "", source)
+
+
 def rules(path):
     text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
     return [
@@ -21,7 +29,7 @@ class GraphicsUiContract(unittest.TestCase):
     def test_world_entry_refuses_every_failed_collision_horizon(self):
         main = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
         calls = list(re.finditer(r"const bool horizon_ready = gameSession->EnsureWorldEntryReady\([^;]*;", main))
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         for call in calls:
             with self.subTest(call=call.start()):
                 before_camera = main[call.end():main.index("g_camera =", call.end())]
@@ -29,6 +37,52 @@ class GraphicsUiContract(unittest.TestCase):
                 self.assertIn('refuse_world_entry("World collision horizon could not be prepared.", false)',
                               before_camera)
                 self.assertRegex(before_camera, r"(?:return|break);")
+        horizon = main.split("auto prepare_entry_horizon =", 1)[1].split("auto drain_entry =", 1)[0]
+        self.assertIn("return gameSession->EnsureWorldEntryReady(", horizon)
+        for begin, end, refusal in (
+            ("case WorldEntryStage::PrepareHorizon:", "case WorldEntryStage::Activate:", "return WorldEntryResult::Failed;"),
+            ("case GameState::WORLD_LOADING: {", "case GameState::IN_GAME:", "break;"),
+        ):
+            body = main.split(begin, 1)[1].split(end, 1)[0]
+            self.assertRegex(body, r"if \(!prepare_entry_horizon\(\)\)\s*\{")
+            failure = body.split("if (!prepare_entry_horizon())", 1)[1]
+            self.assertLess(failure.index("refuse_world_entry("), failure.index(refusal))
+
+    def test_new_presets_are_conservative_and_saved_revisions_stay_explicit(self):
+        header = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.h")
+        resolver = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.cpp")
+        loader = compact_cpp(ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
+        self.assertIn("kGraphicsPresetRevision=2;", header)
+        self.assertIn("constexprstd::arraykRevision2{kUltraRevision1,kUltraRevision1,"
+                      "kUltraRevision1,kUltraRevision1};", resolver)
+        self.assertIn("settings.preset_revision==1?kRevision1[index]:kRevision2[index]", resolver)
+        self.assertIn('parsed.preset_revision=graphics["preset_revision"].get<std::uint32_t>();', loader)
+        self.assertIn('(graphics["preset_revision"]!=1&&'
+                      'graphics["preset_revision"]!=kGraphicsPresetRevision)', loader)
+
+    def test_frame_pacing_choices_reach_resolved_graphics_and_persistence(self):
+        header = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.h")
+        resolver = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.cpp")
+        loader = compact_cpp(ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
+        main = compact_cpp(ROOT / "src/luminumbra_client/main_client.cpp")
+        self.assertIn("FramePacingframe_pacing{.vsync=true,.frame_cap=0};", header)
+        self.assertIn("if(!IsValidFrameCap(frame_pacing.frame_cap)){", resolver)
+        self.assertLess(resolver.index("if(!IsValidFrameCap(frame_pacing.frame_cap)){"),
+                        resolver.index("result=std::move(resolved);"))
+        self.assertIn(".frame_pacing=frame_pacing,", resolver)
+        self.assertIn('{"vsync",resolved.frame_pacing.vsync}', loader)
+        self.assertIn('{"frame_cap",resolved.frame_pacing.frame_cap}', loader)
+        pacing = ("{.vsync=g_systemConfig.user().vsync,"
+                  ".frame_cap=g_systemConfig.user().frame_cap}")
+        self.assertIn("resolved_graphics,graphics_error," + pacing + ");", main)
+        self.assertIn("candidate,graphics_error," + pacing + ")&&", main)
+        self.assertIn("display.effective.frame_pacing=" + pacing + ";", main)
+
+    def test_first_launch_does_not_save_after_renderer_apply_failure(self):
+        main = compact_cpp(ROOT / "src/luminumbra_client/main_client.cpp")
+        self.assertIn("graphics_ready=renderPipeline.apply_graphics(resolved_graphics);", main)
+        self.assertIn("if(graphics_ready&&(graphics_first_launch||graphics_detect_requested))"
+                      "graphics_state.ScheduleSave(glfwGetTime());", main)
 
     def test_every_authored_backdrop_has_off_and_half_rules(self):
         authored = 0

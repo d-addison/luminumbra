@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 
+import render_crash_capture as crash_capture
+
 if os.name == 'nt':
     import msvcrt
 else:
@@ -167,6 +169,8 @@ def verified_binary(receipt):
                 raise OSError(errno.EIO, 'executable changed during execution', path)
         except OSError as error:
             receipt.update(binary_sha256=None, binary_identity_status='changed')
+            if 'native_diagnostics' in receipt:
+                receipt['native_diagnostics'].update(status='incomplete', executable_retained=False)
             receipt['evidence_errors'].append(f'executable verification: {error}')
             if not failed:
                 raise
@@ -525,12 +529,14 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         with verified_binary(receipt), log.open('wb') as output:
             started = time.perf_counter()
             try:
-                result = subprocess.run(command, cwd=cwd, env=environment,
-                                        stdout=output, stderr=subprocess.STDOUT,
-                                        timeout=timeout_seconds, check=False)
+                result = crash_capture.run(command, receipt=receipt,
+                                           evidence_parent=receipt_path.parent,
+                                           cwd=cwd, env=environment,
+                                           stdout=output, stderr=subprocess.STDOUT,
+                                           timeout=timeout_seconds, check=False)
+                receipt.update(outcome='returned', return_code=result.returncode)
             finally:
                 receipt['elapsed_seconds'] = time.perf_counter() - started
-            receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,

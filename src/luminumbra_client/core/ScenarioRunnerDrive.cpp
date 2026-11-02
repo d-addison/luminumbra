@@ -115,6 +115,7 @@ bool ScenarioRunnerImpl::drivePersistenceRoundtrip() {
         if (scenario_config.persistence_phase == "load") {
             phase_result = RunPersistenceRoundtripLoadPhase(scenario_config, gameSession.get());
         } else {
+            renderPipeline.prepare_world_swap();
             phase_result = RunPersistenceRoundtripSavePhase(scenario_config, gameSession.get());
         }
         if (!phase_result.passed) {
@@ -524,7 +525,8 @@ bool ScenarioRunnerImpl::onPreRenderFoliage() {
         foliage->rebuild_instances(chunk_scatter,
                                    &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
                                    &ctx,
-                                   g_camera->Position);
+                                   g_camera->Position,
+                                   Luminumbra::Rendering::FoliagePass::Preparation::Complete);
     }
     return true;
 }

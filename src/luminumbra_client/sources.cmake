@@ -51,6 +51,8 @@ set(CLIENT_INTERNAL_SOURCES
     # Rendering
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureManifest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureManifestLive.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp
@@ -119,6 +121,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/WorldDressing.cpp
 
     # UI
+    ${CMAKE_CURRENT_LIST_DIR}/ui/CollectUiLayout.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/UiLayout.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Button.cpp
@@ -189,6 +193,12 @@ set(CLIENT_APP_SOURCES
 # through the baseline startup wrapper before constructing engine state.
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
     COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
+
+# Both client executables need room for the entry TU's COFF sections on MSVC.
+if(MSVC)
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+endif()
 
 # Complete executable source set for legacy consumers that include this file
 # directly.

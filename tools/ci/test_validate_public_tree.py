@@ -28,6 +28,24 @@ class PublicTreeValidatorTests(unittest.TestCase):
         vocabulary.start()
         self.addCleanup(vocabulary.stop)
 
+    def test_numeric_relative_json_filename_keys_keep_other_checks(self):
+        text = '{"Tests/Data/gap-\x3001.rml": {"sha256": "abc"}, "note": "-\x3001"}'
+        findings = MODULE.inspect_text("cmake/source-map.json", text)
+        self.assertEqual([(f.rule, f.line) for f in findings], [("internal-short-label", 1)] * 2)
+        for text in ('{"Tests/Data/gap-\x3001.rml": {}}',
+                     '{"Tests/Data/gap-\x3001-ref.rml": {}}',
+                     '{"../gap-\x3001.rml": {}}', '{"/Tests/gap-\x3001.rml": {}}',
+                     '{"Tests/../gap-\x3001.rml": {}}', '{"key": "Tests/Data/gap-\x3001.rml"}',
+                     '{"Tests/Data/gap-\x3001": {}}', '{"Tests/Data/gap-\x3001.rml": "\x50R #123"}',
+                     '{"note": "See Tests/Data/gap-\x3001.rml for details"}',
+                     '{"Tests/Data/gap-\x3001.json": {}}'):
+            with self.subTest(text=text):
+                findings = MODULE.inspect_text("cmake/source-map.json", text)
+                self.assertIn("internal-short-label", [f.rule for f in findings])
+        findings = MODULE.inspect_text("cmake/source-map.json", '{"Tests/Data/gap-\x3001.rml": "\x50R #123"}')
+        self.assertGreaterEqual(len({f.rule for f in findings}), 2)
+        self.assertTrue(MODULE.inspect_text("docs/source-map.md", '{"Tests/Data/gap-\x3001.rml": {}}'))
+
     def test_name_digests_use_lowercase_sha256(self):
         expected = "1a4fb4a3d415efae3900bc8e222c89b80eb7e4cd925fd904cb4adaad31c36570"
         self.assertEqual(MODULE.name_digest("ExampleReviewer"), expected)

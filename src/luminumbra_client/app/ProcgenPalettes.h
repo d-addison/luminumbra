@@ -10,7 +10,7 @@
 #include "luminumbra_common/components/PlantComponents.h"
 #include "rendering/passes/PlantProcgenPass.h"
 
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 
 #include <cstdint>
 #include <glm/glm.hpp>

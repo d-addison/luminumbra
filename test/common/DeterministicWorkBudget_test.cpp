@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/DeterministicWorkBudget.h"
 
+#include "luminumbra_client/rendering/UploadBudget.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -305,7 +306,7 @@ TEST(DeterministicWorkBudget, OccupiedPromotionLaneKeepsRefusedCandidatesInBackl
 
 TEST(DeterministicWorkBudget, EveryPinnedLimitRejectsAnInjectedExcess) {
     const auto data = TestSupport::WorkBudgetData();
-    ASSERT_EQ(data.size(), 3u);
+    ASSERT_EQ(data.size(), 5u);
     for (const auto& [scenario, values] : data.items()) {
         (void)values;
         const auto limits = WorkLimits(scenario);
@@ -351,6 +352,76 @@ TEST(DeterministicWorkBudget, MissingOrExtraMeasurementsRefuse) {
     observed.emplace("unknown", 0);
     std::ostringstream extra;
     EXPECT_FALSE(CompareWork(observed, limits, extra));
+}
+
+TEST(DeterministicWorkBudget, TerrainAndWaterUploadWorkAndProgressStayPinned) {
+    using namespace Rendering;
+    struct Upload {
+        std::uint64_t id = 0;
+        unsigned revision = 0;
+    };
+    for (const bool water : {false, true}) {
+        const std::string scenario = water ? "water_upload" : "terrain_upload";
+        SCOPED_TRACE(scenario);
+        const auto limits = water ? kWaterUploadLimits : kTerrainUploadLimits;
+        const std::size_t payload_bytes = water ? 256 * 1024 : 512 * 1024;
+        UploadQueue<Upload> queue;
+        // Seventeen metadata-only payloads cross both shipping byte/count caps.
+        // Five deterministic drains suffice for both lanes, followed by idle.
+        std::vector<Upload> candidates;
+        for (std::uint64_t id = 0; id < 17; ++id)
+            candidates.push_back({id, 1});
+        refresh_uploads(
+            queue,
+            candidates,
+            [](const Upload& item) { return item.id; },
+            [](const Upload& item) { return item.id; });
+        WorkCounts peak;
+        std::uint64_t adopted = 0;
+        std::uint64_t next_id = 0;
+        std::uint64_t uploaded_bytes = 0;
+        std::uint64_t previous_backlog = 0;
+        for (std::uint64_t step = 1; step <= 6; ++step) {
+            const auto backlog = queue.size();
+            const auto growth = backlog > previous_backlog ? backlog - previous_backlog : 0;
+            const auto work = drain_uploads(
+                queue,
+                limits,
+                [payload_bytes](const Upload&) { return payload_bytes; },
+                [&](const Upload& item) {
+                    EXPECT_EQ(item.id, next_id);
+                    ++next_id;
+                    EXPECT_EQ(item.revision, step == 1 ? 1u : 2u);
+                    return true;
+                },
+                [] { return 0.0; }); // Fixed policy input, no CPU or GPU clock.
+            adopted += work.adopted;
+            uploaded_bytes += work.bytes;
+            const WorkCounts observed{{"uploaded_bytes", work.bytes},
+                                      {"uploads", work.attempts},
+                                      {"backlog", backlog},
+                                      {"backlog_growth", growth},
+                                      {"drain_steps", work.attempts == 0 ? 0 : step}};
+            EXPECT_TRUE(CheckWork(observed, scenario));
+            TestSupport::PeakWork(peak, observed);
+            previous_backlog = queue.size();
+            // Refresh every retained payload to a new revision. A stale queued
+            // descriptor must never replace the current one or restart its FIFO.
+            candidates.clear();
+            for (std::uint64_t id = adopted; id < 17; ++id)
+                candidates.push_back({id, 2});
+            refresh_uploads(
+                queue,
+                candidates,
+                [](const Upload& item) { return item.id; },
+                [](const Upload& item) { return item.id; });
+        }
+        EXPECT_EQ(adopted, 17u);
+        EXPECT_EQ(uploaded_bytes, 17u * payload_bytes);
+        EXPECT_EQ(queue.size(), 0u);
+        // These fixtures attain every ceiling; none is an unmeasured allowance.
+        EXPECT_EQ(peak, WorkLimits(scenario));
+    }
 }
 
 TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {

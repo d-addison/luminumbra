@@ -58,6 +58,7 @@
 // recorded for collision-avoidance only and intentionally never consumed
 // (the PhotoScoring +24 / PhotoFilters +35 precedent).
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -83,6 +84,20 @@ inline constexpr int kEnergyDiffuseIterations = 4;
 inline constexpr unsigned kEnergyDiffuseShift = 4; // outflow = v >> 4 per side
 inline constexpr unsigned kEnergyDecayShift = 10;  // v' = v*(1024-d) >> 10
 inline constexpr unsigned kEnergyDecayD = 8;       // ~0.78% per cadence step
+
+// Named compatibility limits (issue #584). Previously unbounded writers now
+// refuse above 4096 pages or 16 channels (the session uses two). Readers admit
+// twice the page maximum; the channel policy remains 16 to bound page allocation.
+inline constexpr int kEnergyRecordChannels = 16;
+inline constexpr std::size_t kEnergyWritePages = 4096;
+inline constexpr std::size_t kEnergyReadPages = 2 * kEnergyWritePages;
+// Worst writer: 10-byte header; each page has a 26-byte coordinate line and
+// 4096 cells, each with space + colon + five value digits (7 bytes). Indices
+// 0..4095 need 10 + 90*2 + 900*3 + 3096*4 digits. Reader bytes are exactly 2x.
+inline constexpr std::size_t kEnergyWriteRecordBytes =
+    10 +
+    kEnergyWritePages * (26 + 256 * kEnergyRecordChannels * 7 + 10 + 90 * 2 + 900 * 3 + 3096 * 4);
+inline constexpr std::size_t kEnergyReadRecordBytes = 2 * kEnergyWriteRecordBytes;
 
 class EnergyFieldState {
 public:
@@ -129,7 +144,10 @@ public:
     // Persistence (-4). Serialize normalizes (catch-up to save_tick's
     // cadence step) then emits the record; Deserialize replaces this object's
     // state, rebasing onto load_tick_base and restoring the cadence phase.
+    // Throws length_error without mutation on a compatibility-limit refusal.
     [[nodiscard]] std::string SerializeRecord(std::uint64_t save_tick);
+    // Lexical admission performs no allocation and runs before any page construction.
+    [[nodiscard]] static bool AdmitRecord(const std::string& record);
     bool DeserializeRecord(const std::string& record, std::uint64_t load_tick_base);
 
     // Restore an absent record on an absolute clock without replaying empty history.
