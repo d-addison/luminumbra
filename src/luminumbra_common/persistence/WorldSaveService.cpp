@@ -2952,6 +2952,22 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
 
 bool FileBytesEqual(const std::filesystem::path& path, const std::string& bytes);
 
+// Publishes the manifest inside the active transaction. An unprotected manifest
+// with identical bytes stays in place; a changed one is protected before the write.
+bool PublishTransactionManifest(const std::filesystem::path& save_dir,
+                                const std::string& bytes,
+                                std::vector<std::string>* errors) {
+    constexpr const char* kManifest = "chunks/region/world-manifest.json";
+    auto* transaction = SaveTransaction::active_for(save_dir);
+    if (transaction && !transaction->member_is_protected(kManifest)) {
+        if (FileBytesEqual(save_dir / kManifest, bytes))
+            return true;
+        if (!transaction->protect({kManifest}, errors))
+            return false;
+    }
+    return WorldSaveService::write_member_bytes(save_dir, kManifest, bytes, errors);
+}
+
 bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                         std::vector<std::string>* errors) {
     const detail::RegionFileWriteGuard transaction(manifest_path);
@@ -2968,8 +2984,7 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
         return false;
     }
     if (active)
-        return WorldSaveService::write_member_bytes(
-            save_dir, "chunks/region/world-manifest.json", bytes, errors);
+        return PublishTransactionManifest(save_dir, bytes, errors);
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
     ReclaimAbandonedStaging(staging);
@@ -3812,7 +3827,7 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
                write_file_durably(destination, bytes, errors, artifacts);
     }
     std::filesystem::create_directories(destination.parent_path());
-    return write_member_bytes(save_dir, "chunks/region/world-manifest.json", bytes, errors);
+    return PublishTransactionManifest(save_dir, bytes, errors);
 }
 
 bool WorldSaveService::save_metadata(const std::string& bytes,
@@ -5596,8 +5611,7 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
-    if (auto* transaction = SaveTransaction::active_for(save_dir);
-        transaction && transaction->member_is_protected(relative) &&
+    if (SaveTransaction::active_for(save_dir) &&
         !SaveTransaction::check_publication_target(save_dir / relative, errors))
         return false;
     TransactionScope scope(save_dir, {}, errors);
