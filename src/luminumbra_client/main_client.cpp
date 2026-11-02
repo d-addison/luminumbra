@@ -2148,10 +2148,11 @@ int main(int argc, char* argv[]) {
 
     // Extend the benchmark's presentation override to scenario/perf captures.
     // Keep saved player choices intact, including when either settings UI is used.
+    const bool frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv");
     const luminumbra::core::FramePacingOverrides pacing_overrides{
         .benchmark_active = !g_app.capture.render_benchmark_path.empty(),
         .scenario_active = scenario_config.active(),
-        .profiling_active = g_app.capture.profile_fly_seconds > 0.0};
+        .profiling_active = g_app.capture.profile_fly_seconds > 0.0 || frame_csv_enabled};
     int applied_swap_interval =
         luminumbra::core::ResolveFramePacing(
             g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides)
@@ -4354,7 +4355,6 @@ int main(int argc, char* argv[]) {
         return WorldEntryResult::Complete;
     };
     namespace Attribution = Luminumbra::Client::Attribution;
-    const bool frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv");
     const bool frame_attribution_enabled =
         frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
     Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
@@ -6620,7 +6620,7 @@ int main(int argc, char* argv[]) {
                         "misses={} deferred={} copied_bytes={} hashed_bytes={} uploaded_bytes={} "
                         "scratch_bytes={} backlog={} path={} fallback={} dirty_columns={} "
                         "worker_dispatched={} worker_completed={} worker_stale_rejected={} "
-                        "worker_queue_age_frames={}",
+                        "worker_queue_age_frames={} other={:.3f} total={:.3f}",
                         foliage_attribution.signature_ms,
                         foliage_attribution.sort_ms,
                         foliage_attribution.surface_ms,
@@ -6646,7 +6646,9 @@ int main(int argc, char* argv[]) {
                         foliage_attribution.worker_dispatched,
                         foliage_attribution.worker_completed,
                         foliage_attribution.worker_stale_rejected,
-                        foliage_attribution.worker_queue_age_frames);
+                        foliage_attribution.worker_queue_age_frames,
+                        foliage_attribution.other(foliage_frame.rebuild_ms),
+                        foliage_frame.rebuild_ms);
                 if (gameSession && gameSession->GetWorldSystem()) {
                     const auto& st = gameSession->GetWorldSystem()->dbg_stream_timings();
                     LUMINUMBRA_CORE_WARN(

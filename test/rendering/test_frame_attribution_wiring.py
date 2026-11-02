@@ -432,10 +432,39 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertTrue(compact(block(scope, "~RebuildAttributionScope()")).startswith(
             "if (!m_enabled) return;"))
         self.assertEqual(self.foliage.count("steady_clock::now()"), 2)
-        timers = re.findall(r"Attribution::StageTimer \w+\((.*?)\);", self.foliage, re.S)
+        self.assertNotRegex(self.foliage, r"Attribution::StageTimer\b")
+        timers = re.findall(r"Attribution::FoliageStageTimer \w+\((.*?)\);", self.foliage, re.S)
         self.assertGreater(len(timers), 10)
         for arguments in timers:
+            self.assertTrue(compact(arguments).startswith("m_rebuild_attribution, "))
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
+        wrapper = compact(block(self.collector, "FoliageStageTimer::FoliageStageTimer("))
+        self.assertEqual(wrapper, "")
+        for guarded in ("m_stages_before(enabled ? rebuild.sum() : 0)",
+                        "m_phases_before(enabled ? phase_total_ms() : 0)",
+                        "m_timer(m_elapsed, enabled)"):
+            self.assertIn(guarded, compact(self.collector))
+        stop = compact(block(self.collector, "void FoliageStageTimer::stop()"))
+        self.assertTrue(stop.startswith("if (!m_running) return; m_timer.stop();"))
+        self.assertIn("m_ms += m_elapsed - (m_rebuild.sum() - m_stages_before) - "
+                      "(phase_total_ms() - m_phases_before);", stop)
+        self.assertTrue(stop.endswith("m_running = false;"))
+        self.assertNotIn("steady_clock::now()", block(self.header, "class FoliageStageTimer"))
+
+    def test_foliage_remainder_and_cpu_repacking_are_reported(self):
+        rebuild = compact(block(self.foliage, "void FoliagePass::rebuild_instances("))
+        self.assertIn("FoliageStageTimer repack_timer( m_rebuild_attribution, "
+                      "m_rebuild_attribution.repack_ms, collect_attribution);", rebuild)
+        self.assertIn("return total_ms - sum();", block(self.header, "struct FoliageRebuild"))
+        self.assertIn("foliage_attribution.other(foliage_frame.rebuild_ms)", self.main)
+        native = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        counters = block(native, "TEST_F(FoliageRebuildTest, "
+                         "CpuCountersDescribeInitialReusedAndCameraRebuilds)")
+        self.assertIn("pass.rebuild_attribution()", counters)
+        for field in ("admitted_columns", "reasons", "uploaded_bytes", "backlog", "path"):
+            self.assertIn("work." + field, counters)
+        self.assertIn("CheckWork(", counters)
+        self.assertNotIn("_ms", counters)
 
     def test_water_subzones_share_the_opt_in_frame_and_csv(self):
         main = compact(self.main)
@@ -466,7 +495,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_rebuild_attribution = {};", qualification)
         self.assertIn("m_rebuild_attribution.reasons = Attribution::Initial;", qualification)
         self.assertIn("m_rebuild_attribution.path = Attribution::FoliagePath::FrozenGpu;", frozen)
-        timer_position = frozen.index("Attribution::StageTimer timer(")
+        timer_position = frozen.index("Attribution::FoliageStageTimer timer(")
         for operation in ("glClearBufferData(", "dispatch_scatter();", "submit_foliage_readback();"):
             self.assertGreater(frozen.index(operation), timer_position)
         self.assertNotIn("timer.stop()", frozen)
@@ -1581,7 +1610,7 @@ class FrameAttributionWiring(unittest.TestCase):
                          '"water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms," '
                          '"water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns," '
                          '"water_stale_columns,worker_dispatched,worker_completed,worker_stale_rejected," '
-                         '"worker_queue_age_frames\\n";')
+                         '"worker_queue_age_frames,foliage_other_ms\\n";')
         self.assertEqual(encoded.rstrip("\n").split(","), [
             "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
             "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
@@ -1607,13 +1636,13 @@ class FrameAttributionWiring(unittest.TestCase):
                          "water_precomputed_columns", "water_fallback_columns", "water_stale_columns"]
         worker_columns = ["worker_dispatched", "worker_completed",
                           "worker_stale_rejected", "worker_queue_age_frames"]
-        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"] + water_columns + worker_columns
-        self.assertEqual(len(columns), 76)
+        columns = encoded.split(",") + [name + "_ms" for name in phase_names] + ["dirty_columns"] + water_columns + worker_columns + ["foliage_other_ms"]
+        self.assertEqual(len(columns), 77)
         self.assertEqual(columns[62], "dirty_columns")
         self.assertEqual(columns[63:72], water_columns)
         self.assertEqual(columns[72:76], worker_columns)
         documentation = read(ROOT / "docs/render-benchmark.md")
-        self.assertIn("The CSV has 76 fields.", documentation)
+        self.assertIn("The CSV has 77 fields.", documentation)
         phase_table = documentation.split("| Column | Work measured |", 1)[1].split("\n\n", 1)[0]
         phase_columns = re.findall(r"^\| `([a-z_]+)` \|", phase_table, re.M)
         self.assertEqual(phase_columns, [name + "_ms" for name in phase_names])
@@ -1641,7 +1670,8 @@ class FrameAttributionWiring(unittest.TestCase):
                                     "<< water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns "
                                     "<< ',' << water.stale_columns; "
                                     "out << ',' << foliage.worker_dispatched << ',' << foliage.worker_completed << ',' "
-                                    "<< foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << '\\n'; "
+                                    "<< foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << ',' "
+                                    "<< foliage.other(buckets.foliage) << '\\n'; "
                                     "return out.good();"))
         self.assertEqual(row.count("foliage.dirty_columns"), 1)
 

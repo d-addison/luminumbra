@@ -889,8 +889,9 @@ reads. This applies to gameplay, preview/menu and qualification callers alike.
 frame to `logs/frame-attribution.csv` in the process working directory, independently of
 benchmark warmup, the 12 ms slow-frame threshold and the 400-line log window.
 It is off by default, replaces the previous session's CSV, streams through a
-bounded buffer and closes on normal exit. It does not change vsync or the frame
-cap; “uncapped” refers to the recording duration and number of rows.
+bounded buffer and closes on normal exit. Recording disables VSync and the frame
+cap through the existing profiling override without changing saved player settings.
+There is no duration or row limit.
 
 The frame interval runs from loop entry through buffer swap. Its exclusive
 buckets are sim, stream, render submission, present, foliage rebuilds,
@@ -902,10 +903,10 @@ field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
 `other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
 remains rebuild time only.
 
-The CSV has 76 fields. Existing fields retain their zero-based indices;
+The CSV has 77 fields. Existing fields retain their zero-based indices;
 `dirty_columns` remains at index 62, after all terrain, water and phase fields.
 The nine water subzone fields below follow it at indices 63–71.
-Worker counters follow at indices 72–75.
+Worker counters follow at indices 72–75; `foliage_other_ms` is appended at index 76.
 Within each range below, columns appear in the listed order:
 
 | Indices | Columns |
@@ -920,6 +921,7 @@ Within each range below, columns appear in the listed order:
 | 62 | `dirty_columns` |
 | 63–71 | `water_selection_ms`, `water_seed_inputs_ms`, `water_initialization_ms`, `water_sim_ms`, `water_seam_ms`, `water_bookkeeping_ms`, `water_precomputed_columns`, `water_fallback_columns`, `water_stale_columns` |
 | 72–75 | `worker_dispatched`, `worker_completed`, `worker_stale_rejected`, `worker_queue_age_frames` |
+| 76 | `foliage_other_ms` |
 
 Issue #402's CPU wall-time phase columns follow the terrain and water fields,
 at indices 51–61, in order:
@@ -986,9 +988,15 @@ Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence
 and early-out handling. `surface_ms` covers complete uncached column builds
 (including CPU placement in fallback), never individual candidate timers.
-`repack_ms` covers GPU column ordering and slot preparation excluding surface builds.
-`cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
-add it to those sub-times. Palette/scratch time includes null-data storage
+`repack_ms` covers GPU column/slot preparation, metadata and batch scratch copies,
+and CPU instance emission from cached records. `cpu_fallback_ms` measures the
+remaining CPU fallback housekeeping, excluding surface builds, repacking and
+mapped uploads. All nine stage buckets are exclusive, including nested
+shader-first-use phases already assigned to the frame phase buckets. Their sum
+plus `foliage_other_ms` equals `foliage_ms` (within CSV rounding to six decimal
+places). The remainder includes admission, cache maintenance outside named
+stages, readback polling/submission and instrumentation overhead; negative values
+are preserved to expose accounting errors. Palette/scratch time includes null-data storage
 allocation; `scratch_bytes` records that allocation separately from actual
 `uploaded_bytes`. The `dirty_columns` field counts surface-slot uploads,
 including reconstruction after storage growth or compute-resource recreation.
