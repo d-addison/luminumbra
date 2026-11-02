@@ -287,53 +287,22 @@ private:
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
     }
 
-    // Scent channels have unit permeability and no per-cell seals. Match the scalar
-    // solver's snapshot flux and horizontal-then-vertical edge order, gating only
-    // the edges. Participation does not gate flux: a common border phase can exchange
-    // scent even when neither owner's interior is due.
+    // Scent channels have unit permeability and no per-cell seals, so the scalar
+    // solver's edge filter gates only the edges and keeps its snapshot flux, edge
+    // order and unclamped intermediates. Participation does not gate flux: a
+    // common border phase can exchange scent even when neither owner's interior
+    // is due.
     static void DiffuseSealed(luminumbra::fields::ScalarFieldDiffusion& field,
                               std::size_t iterations,
                               double diffusion_rate,
                               const EdgeGate& exchange) {
-        if (!std::isfinite(diffusion_rate) || diffusion_rate <= 0.0 || diffusion_rate > 0.25) {
-            throw std::invalid_argument(
-                "scalar diffusion rate must be finite and in the stable range (0, 0.25]");
-        }
         const std::size_t grid_width = field.width();
-        const std::size_t grid_height = field.height();
-        for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-            const auto& values = field.values();
-            std::vector<double> next = values;
-            const auto transfer =
-                [&](std::size_t x, std::size_t z, std::size_t nx, std::size_t nz) {
-                    if (!exchange(static_cast<int>(x),
-                                  static_cast<int>(z),
-                                  static_cast<int>(nx),
-                                  static_cast<int>(nz))) {
-                        return;
-                    }
-                    const std::size_t lhs = z * grid_width + x;
-                    const std::size_t rhs = nz * grid_width + nx;
-                    const double delta = (values[lhs] - values[rhs]) * diffusion_rate * 1.0;
-                    next[lhs] -= delta;
-                    next[rhs] += delta;
-                };
-            for (std::size_t z = 0; z < grid_height; ++z) {
-                for (std::size_t x = 0; x + 1 < grid_width; ++x) {
-                    transfer(x, z, x + 1, z);
-                }
-            }
-            for (std::size_t z = 0; z + 1 < grid_height; ++z) {
-                for (std::size_t x = 0; x < grid_width; ++x) {
-                    transfer(x, z, x, z + 1);
-                }
-            }
-            for (std::size_t z = 0; z < grid_height; ++z) {
-                for (std::size_t x = 0; x < grid_width; ++x) {
-                    field.set(x, z, next[z * grid_width + x]);
-                }
-            }
-        }
+        (void)field.diffuse(iterations, diffusion_rate, [&](std::size_t lhs, std::size_t rhs) {
+            return exchange(static_cast<int>(lhs % grid_width),
+                            static_cast<int>(lhs / grid_width),
+                            static_cast<int>(rhs % grid_width),
+                            static_cast<int>(rhs / grid_width));
+        });
     }
 
     [[nodiscard]] double BilinearSealed(const std::vector<double>& values,

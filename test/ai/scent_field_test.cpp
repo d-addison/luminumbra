@@ -300,3 +300,23 @@ TEST(ScentField, GatedDiffusionRetainsLegacyRateValidation) {
                      std::invalid_argument);
     }
 }
+
+TEST(ScentField, GatedDiffusionKeepsRoundoffIntermediatesLikeTheLegacySolver) {
+    // One iteration leaves the center at -0x1p-53 before smoothing; both solvers
+    // must carry that intermediate into the smoothing pass instead of rejecting it.
+    const double center = 0x1.0000000000003p0;
+    ScentField legacy_call(3, 3, 1);
+    ScentField gated(3, 3, 1);
+    legacy_call.Deposit(0, 1, 1, center);
+    gated.Deposit(0, 1, 1, center);
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) { return true; };
+
+    EXPECT_NO_THROW(legacy_call.Step(0.25, 1, 0.0));
+    EXPECT_NO_THROW(gated.Step(0.25, 1, 0.0, 0.0, 0.0, {}, all_edges));
+    for (int z = 0; z < 3; ++z) {
+        for (int x = 0; x < 3; ++x) {
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(gated.Sample(0, x, z)),
+                      std::bit_cast<std::uint64_t>(legacy_call.Sample(0, x, z)));
+        }
+    }
+}
