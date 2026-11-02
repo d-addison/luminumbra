@@ -36,7 +36,7 @@
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
-#include "luminumbra_common/core/WaterComponents.h" // water-source: WaterSourceComponent
+#include "luminumbra_common/core/WaterComponents.h" // water-source: FlowingWaterSourceComponent
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
@@ -438,9 +438,9 @@ TEST(WaterDeterminism, WeatherDrivenRainIsDeterministic) {
 
 // water-source: SOURCE INJECTION routes through the fixed-point mm domain.
 // The proof leans on derived-state reclassification: the water hash covers ONLY the mm truth (the
-// float mirrors are Render-classified) — so if the WaterSourceComponent injection still wrote only
-// the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the control's
-// and this test would fail. Deterministic: two sourced runs match.
+// float mirrors are Render-classified) — so if the FlowingWaterSourceComponent injection still
+// wrote only the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the
+// control's and this test would fail. Deterministic: two sourced runs match.
 struct SourceResult {
     std::vector<std::uint64_t> hashes;
     bool mass_ok = true;
@@ -505,7 +505,7 @@ SourceResult run_with_source(const std::string& root, bool add_source) {
             const auto e = reg.create();
             auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
             tf.position = Vec3(pit.x, world->GetTerrainHeightAt(pit.x, pit.z), pit.z);
-            auto& src = reg.emplace<Luminumbra::Components::WaterSourceComponent>(e);
+            auto& src = reg.emplace<Luminumbra::Components::FlowingWaterSourceComponent>(e);
             src.flow_rate = 40.0f; // strong spring: >= 1 mm/cell/tick after quantization
         }
         for (int t = 0; t < kSourceObservationTicks; ++t) {
@@ -541,7 +541,7 @@ TEST(WaterDeterminism, SourceInjectionRoutesThroughFixedPoint) {
     // Compare the FULL sequences: even if a sink eventually re-equilibrates the
     // body, SOME post-tick state along the way must differ once mm water landed.
     EXPECT_NE(a.hashes, control.hashes)
-        << "the WaterSourceComponent injection did not reach the HASHED mm truth at "
+        << "the FlowingWaterSourceComponent injection did not reach the HASHED mm truth at "
            "ANY tick — it is writing the float mirror only (the pre-water-source bug)";
 }
 
