@@ -2065,13 +2065,13 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                        Chunk& chunk) {
     (void)water_system;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    if (resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
+    // Supported water detail levels bound each mesh to 32*32 quads.
+    if (resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
         chunk.water_mesh_vertices.clear();
         chunk.water_mesh_indices.clear();
         chunk.water_mesh_generated.store(false, std::memory_order_release);
         return;
     }
-
     // Resolution is validated before multiplication/allocation: at most 32*32
     // quads, four vertices and six indices per quad.
     const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);

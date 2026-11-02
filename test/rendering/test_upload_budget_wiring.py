@@ -877,6 +877,16 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("upload.uploaded_indices = element_count;", presented)
         self.assertIn("pool.valid_allocation(pool_handle, element_count)", presented)
         self.assertIn("data.SetPresentedTerrainUpload(upload, m_chunk_geometry_pool)", self.pipeline)
+        preparation = compact(body(self.pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("if (found != m_chunk_render_data.end()) {", preparation)
+        self.assertIn("if (water_found != m_water_render_data.end()) {", preparation)
+        culling = compact(body(self.pipeline, "void RenderPipeline::ensure_terrain_culling_hierarchy("))
+        self.assertIn("return chunk.has_terrain_mesh() ||", culling)
+        self.assertIn("m_chunk_geometry_pool.valid_allocation(found->second.pool_handle, "
+                      "found->second.element_count)", culling)
+        self.assertEqual(culling.count("if (has_presented_terrain(chunk))"), 2)
+        resources = compact(body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources("))
+        self.assertIn("if (Water || chunk.has_terrain_mesh()) active.insert(chunk.id);", resources)
         water = compact(body(self.header, "void SetPresentedLadderWaterUpload("))
         self.assertIn("SetLadderWaterUpload(upload, mesh_version, enabled)", water)
         native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
@@ -931,8 +941,14 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("new_resolution == current_resolution && "
                       "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
         update = compact(body(source, "void WaterSystem::update("))
-        self.assertIn("chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()",
-                      update)
+        self.assertIn("auto to_init = PrepareWaterGrids(deterministic_authority);", update)
+        prepare = compact(body(source, "std::vector<Chunk*> WaterSystem::PrepareWaterGrids("))
+        self.assertIn("required_detail != WaterDetailLevel::Off && "
+                      "(static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load() || "
+                      "(chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()))", prepare)
+        self.assertIn("resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});",
+                      prepare)
+        self.assertIn("ResizeSimulationGrid(*req.chunk, req.level);", prepare)
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
         for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
                            "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):

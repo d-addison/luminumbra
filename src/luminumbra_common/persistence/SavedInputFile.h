@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -132,6 +133,19 @@ public:
             offset += static_cast<std::size_t>(received);
         }
         return true;
+    }
+
+    [[nodiscard]] bool seek(std::uint64_t offset) const {
+        if (!m_location_admitted ||
+            offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            return false;
+#if defined(_WIN32)
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        return ::SetFilePointerEx(m_handle, position, nullptr, FILE_BEGIN) != 0;
+#else
+        return ::lseek(m_descriptor, static_cast<off_t>(offset), SEEK_SET) >= 0;
+#endif
     }
 
     [[nodiscard]] bool rewind() const {

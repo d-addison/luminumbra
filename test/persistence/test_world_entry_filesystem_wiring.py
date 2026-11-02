@@ -220,6 +220,8 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         metadata = body(writer, "bool WorldSaveService::save_metadata(")
         self.assertIn("const SaveGuard guard;", metadata)
+        self.assertIn("save_metadata_validated(bytes, save_dir, errors, artifacts)", metadata)
+        metadata = body(writer, "bool WorldSaveService::save_metadata_validated(")
         self.assertIn("clock.write_metadata(metadata);", metadata)
         self.assertIn('metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();',
                       metadata)
@@ -228,8 +230,10 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
                         metadata.index("artifacts->reserve_file(destination)"))
         paired = body(writer, "bool WorldSaveService::save_metadata_and_active_regions(")
         self.assertIn("const SaveGuard guard;", paired)
-        for call in ("save_metadata(bytes, save_dir, errors, artifacts)",
-                     "save_active_regions(ledger, clock, save_dir, errors, artifacts)"):
+        self.assertIn("save_pair_validated(bytes, ledger, save_dir, errors, artifacts)", paired)
+        paired = body(writer, "bool WorldSaveService::save_pair_validated(")
+        for call in ("save_metadata_validated(bytes, save_dir, errors, artifacts)",
+                     "save_regions_validated(ledger, clock, save_dir, errors, artifacts)"):
             self.assertEqual(paired.count(call), 2)
 
     def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):

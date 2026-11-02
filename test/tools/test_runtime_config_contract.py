@@ -703,7 +703,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                       'std::filesystem::path(".")', service[start:end])
         self.assertIn("returndirectory.parent_path().parent_path()/destination.filename();", service)
         self.assertNotIn('/".."/".."', service)
-        for function, destination in (("WriteRegionFile", "path"),
+        for function, destination in (("RewriteRegionFile", "path"),
                                       ("WriteWorldManifest", "manifest_path")):
             start = service.index("bool" + function + "(")
             end = service.index("returntrue;", start)
@@ -711,23 +711,34 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("constautostaging=WorldSaveService::region_staging_path(" +
                           destination + ");", write)
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
-            self.assertIn("WriteDurableRegionTemp(staging,", write)
+            self.assertIn("WriteDurableRegionTempWithProducer(staging," if function == "RewriteRegionFile"
+                          else "WriteDurableRegionTemp(staging,", write)
 
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
         start = session.index("boolGameSession::SaveWorldStateToImpl(")
         sequence = session[start:session.index("boolGameSession::LoadWorldState()", start)]
-        guard = "constPersistence::WorldSaveService::SaveOwnershipsave_ownership;"
+        guard = "autobatch=Persistence::WorldSaveService::SaveBatch::begin(save_dir);"
         self.assertIn(guard, sequence)
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        header = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.h")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("SaveOwnershipm_ownership;", header)
+        begin = service[service.index("WorldSaveService::SaveBatch::begin("):]
+        self.assertLess(begin.index("SaveOwnershipownership;"), begin.index("load_world("))
+        self.assertIn("SaveBatch(directory,present,!probe.empty(),std::move(ownership))", begin)
         ownership = sequence.index(guard)
+        checked_batch = "if(!batch.has_value())returnfalse;auto&save_batch=batch.value();"
+        self.assertIn(checked_batch, sequence)
+        self.assertLess(ownership, sequence.index(checked_batch))
         # Function scope keeps ownership across all phases and every early return.
         self.assertEqual(sequence[:ownership].count("{") - sequence[:ownership].count("}"), 1)
         for capture in ("quiesce_streaming_jobs_for_save();", "BuildPlantEntitySnapshot(m_registry)",
                         "state.dirty_chunk_ids()"):
             self.assertLess(sequence.index(capture), ownership)
         for operation in ("ClockConfigurationCompatible(save_dir)",
-                          "validate_save(save_dir)",
                           "SavedPresetCompatible(save_dir)", "prepared_chunks.prepare(",
                           "prepared_chunks.publish(", "prepared_plants.publish(", "write_file_durably(energy_path,energy_bytes)",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
@@ -740,8 +751,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
-                     "write_file_durably", "remove_file_and_staging",
-                     "create_file_durably", "rename_file_durably"):
+                     "write_snapshot", "write_file_durably", "remove_file_and_staging",
+                     "create_file_durably", "rename_file_durably",
+                     "persist_water_column_migration", "copy_chunk_authority"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
@@ -757,12 +769,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertLess(prepare.index("std::make_unique<Data>()"),
                         prepare.index("validate_save(save_dir"))
         self.assertLess(prepare.index("std::make_unique<Data>()"),
-                        prepare.index("ReadRegionFile("))
+                        prepare.index("RewriteRegionFile("))
         self.assertIn("m_data=std::move(candidate);", prepare)
         publish = service[service.index("boolWorldSaveService::PreparedWorldWrite::publish("):]
         self.assertLess(publish.index("autoprepared=std::move(m_data);"),
-                        publish.index("WriteRegionFile("))
-        self.assertLess(publish.index("WriteRegionFile("),
+                        publish.index("ReplaceRegionFileAtomically("))
+        self.assertLess(publish.index("ReplaceRegionFileAtomically("),
                         publish.index("WriteWorldManifest("))
         self.assertIn("std::recursive_mutex&SaveMutex()", service)
         self.assertIn("m_lock(SaveMutex(),std::defer_lock)", service)
@@ -771,7 +783,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         # Scope includes the real read/merge, not just temporary-file creation.
         upsert = service[service.index("boolWorldSaveService::upsert_container_records("):]
         self.assertLess(upsert.index("constSaveGuardguard;"),
-                        upsert.index("ReadRegionFile("))
+                        upsert.index("RewriteRegionFile("))
         shared = service[service.index("boolWorldSaveService::write_file_durably("):]
         self.assertLess(shared.index("constSaveGuardguard;"),
                         shared.index("ReclaimAbandonedStaging(destination);"))

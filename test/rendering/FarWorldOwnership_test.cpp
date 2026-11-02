@@ -1,7 +1,11 @@
 #include "luminumbra_client/rendering/FarWorldOwnership.h"
+#include "luminumbra_common/world/FarTierTable.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
 
@@ -34,6 +38,10 @@ TEST(FarWorldOwnership, TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndepe
         ASSERT_TRUE(mask.Finish());
         EXPECT_TRUE(mask.Owns({-8, 0, -8}));
         EXPECT_EQ(mask.OwnsWater({-8, 0, -8}), refusal == 4);
+        EXPECT_EQ(mask.OwnsWater({-8, 64, -8}), refusal == 4);
+        EXPECT_EQ(mask.OwnsWater({-8, -64, -8}), refusal == 4);
+        EXPECT_FALSE(mask.Owns({-8, 64, -8}));
+        EXPECT_FALSE(mask.OwnsWater({8, 64, -8}));
     }
     FarWorldOwnership mask;
     mask.Begin(2);
@@ -209,10 +217,10 @@ TEST(FarWorldOwnership, TileLocalCellMirrorRejectsFractionalCameraRoundTrip) {
               -1);
 
     struct Boundary {
-        std::array<double, 3> origin;
-        std::array<float, 3> local;
+        std::array<double, 3> origin{};
+        std::array<float, 3> local{};
         FarWorldLiveCell expected;
-        std::size_t axis;
+        std::size_t axis = 0;
     };
     const std::array boundaries{
         Boundary{{0, -256, -1024}, {8, 256, 824}, {0, 0, -13, 0}, 1},

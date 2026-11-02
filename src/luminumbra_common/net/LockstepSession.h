@@ -623,6 +623,7 @@ public:
 
     // Exchanges Hello and validates protocol/version/seed/preset/tick-rate/config identity.
     // Returns false on a mismatch (rejected loudly) or a peer that never said Hello.
+    // Connected pending/send refusals may retry; identity/protocol refusal is terminal.
     // For LoopbackTransport both ends must have sent their Hello before either completes;
     // the host typically Handshakes both sides in the gate's single-process driver.
     bool Handshake();
@@ -781,6 +782,7 @@ private:
     std::optional<std::uint64_t> m_received_bye_tick;
     std::optional<std::uint64_t> m_transport_close_admission_tick;
     std::uint64_t m_bye_admission_tick = 0;
+    bool m_hello_sent = false;
     bool m_handshaken = false;
     bool m_disconnected = false; // local end issued/observed a disconnect
 };

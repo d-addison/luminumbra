@@ -32,4 +32,17 @@ struct HashCheckpoint {
     std::string entities;
 };
 
+// Shared network/replay localization after a world-hash mismatch. Derived mesh
+// has no checkpoint slot and falls through to the world-level diagnostic.
+[[nodiscard]] inline const char* CheckpointMismatchSection(const HashCheckpoint& local,
+                                                           const HashCheckpoint& peer) {
+    if (local.terrain != peer.terrain)
+        return "terrain";
+    if (local.water != peer.water)
+        return WaterHashDifferenceSection(local.water, peer.water).data();
+    if (local.entities != peer.entities)
+        return "entities";
+    return "world_hash";
+}
+
 } // namespace Luminumbra

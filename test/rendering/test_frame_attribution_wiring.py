@@ -312,7 +312,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('update(registry, std::vector<Vec3>{camera_position}, physics_system, '
                       'advance_simulation);', compact(single))
         multi = block(world, 'const std::vector<Vec3>& anchor_positions,')
-        water = block(multi, 'if (advance_simulation && m_water_system)')
+        water = block(multi, 'if (advance_simulation && m_water_system && !m_retainRegionAuthority)')
         self.assertEqual(compact(water),
                          'm_water_system->update(registry, m_streaming_state.chunks);')
         self.assertEqual(multi.count('m_water_system->update('), water.count('m_water_system->update('))

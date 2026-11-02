@@ -296,8 +296,7 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
         if (reg.all_of<Luminumbra::Components::CreaturePhysicsComponent>(e))
             continue;
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
-        const std::size_t idx = phys->create_avatar_character(
-            glm::vec3(tf.position.x, tf.position.y + 1.0f, tf.position.z));
+        const std::size_t idx = phys->create_avatar_character(tf.position);
         reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
         ++made;
     }
@@ -2581,7 +2580,8 @@ int main(int argc, char* argv[]) {
             g_app.menu.menu_backdrop_active = false;
             g_playerController.reset();
         }
-        scenario_failed = benchmark_v3 || scenario_config.active() ||
+        scenario_failed = benchmark_v3 || runtime_boot_recorder.enabled() ||
+                          scenario_config.active() ||
                           HasCommandLineOption(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
@@ -2650,16 +2650,10 @@ int main(int argc, char* argv[]) {
                               (scenario_config.active() && scenario_config.auto_enter_world));
         if (bypass_loading_ui) {
             LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
-            bool horizon_ready = true;
-            if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                    gameSession->GetMetadata().spawnPoint,
-                    gameSession->GetPhysicsSystem(),
-                    scenario_config.horizon_radius,
-                    scenario_config.collision_radius);
-            }
+            const bool horizon_ready = gameSession->EnsureWorldEntryReady(
+                scenario_config.horizon_radius, scenario_config.collision_radius);
             if (!horizon_ready) {
-                refuse_world_entry("Surface preparation exceeds the supported work budget.", false);
+                refuse_world_entry("World collision horizon could not be prepared.", false);
                 return;
             }
             g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
@@ -4056,9 +4050,7 @@ int main(int argc, char* argv[]) {
         const bool capture_horizon = benchmark_v4 || runtime_boot_recorder.enabled() ||
                                      (scenario_config.active() && scenario_config.auto_enter_world);
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem())
-            return gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                gameSession->GetMetadata().spawnPoint,
-                gameSession->GetPhysicsSystem(),
+            return gameSession->EnsureWorldEntryReady(
                 capture_horizon ? scenario_config.horizon_radius : 12,
                 capture_horizon ? scenario_config.collision_radius : 4);
         return true;

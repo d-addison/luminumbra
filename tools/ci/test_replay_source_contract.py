@@ -278,7 +278,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(primitive.index("SurfaceRadiiSupported"),
                         primitive.index("wait_for_generation_jobs"))
         self.assertRegex(primitive, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;')
+                         r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;')
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
                         primitive.index("chunks_to_build.reserve(surface_capacity)"))
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
@@ -294,7 +294,7 @@ class ReplaySourceContract(unittest.TestCase):
                          r'radius_m > max_edit_radius\)\s*return 0;')
         self.assertLess(edit.index("std::isfinite(radius_m)"), edit.index("world_to_chunk_coords"))
         self.assertRegex(edit, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, remesh_chunks\)\)\s*return 0;')
+                         r'\s*span.min_y, span.max_y, remesh_chunks, m_retainRegionAuthority\)\)\s*return 0;')
         self.assertLess(edit.index("AddSurfaceColumnChunks"), edit.index("chunk->sdf_data[idx] ="))
         budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
         for check in ("kMaxSurfaceRadius = 12", "kMaxSurfaceColumns = 625",
@@ -302,6 +302,25 @@ class ReplaySourceContract(unittest.TestCase):
                       "diameter > max_size / diameter",
                       "count > kMaxSurfaceChunks - total"):
             self.assertIn(check, budget)
+
+    def test_water_owner_union_is_admitted_once_before_drains_and_edits(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        primitive = source.split("bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+            "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
+        self.assertEqual(primitive.count("column_surface_span("), 1)
+        self.assertLess(primitive.index("required.insert("), primitive.index("wait_for_generation_jobs"))
+        self.assertIn("const auto& span = surface_spans[surface_index++];", primitive)
+        self.assertIn("surface_capacity, m_retainRegionAuthority", primitive)
+        edit = source.split("int SHIELD_WorldSystem::EditTerrainVoxel(", 1)[1]
+        self.assertIn("remesh_chunks, m_retainRegionAuthority", edit)
+        budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
+        self.assertIn("retain_water_owner && (min_y > 1 || max_y < -1)", budget)
+        self.assertIn("count > kMaxSurfaceChunks - total", budget)
+        native = read_source("test/common/SurfaceWorkBudget_test.cpp")
+        for name in ("WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints",
+                     "WaterOwnerOverflowRetainsPendingGenerationBeforeAnyPublication",
+                     "LegalOffsetsAndNegativeRadiiKeepTerrainAndWaterOwners"):
+            self.assertIn("TEST(SurfaceWorkBudget, " + name + ")", native)
 
     def test_surface_exact_admission_precedes_all_publication_drains(self):
         source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -311,7 +330,7 @@ class ReplaySourceContract(unittest.TestCase):
         # searching the rest of the translation unit could accept a later call.
         admissions = [re.search(
             r'if \(!World::AddSurfaceColumnChunks\('
-            r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;', primitive)]
+            r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;', primitive)]
         for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
             admissions.append(re.search(
                 rf'if \(surface_capacity > {vector}\.max_size\(\)\)\s*return false;',
@@ -518,8 +537,8 @@ class ReplaySourceContract(unittest.TestCase):
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
             "auto drain_entry =", 1)[0]
-        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([^;]*,\s*'
+        self.assertRegex(horizon, r'return gameSession->'
+                         r'EnsureWorldEntryReady\(\s*'
                          r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
                          r'capture_horizon \? scenario_config.collision_radius : 4\);')
         staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
@@ -530,6 +549,17 @@ class ReplaySourceContract(unittest.TestCase):
             "case GameState::IN_GAME:", 1)[0]
         self.assertRegex(loading, r'if \(!prepare_entry_horizon\(\)\)\s*\{[\s\S]*'
                          r'refuse_world_entry\([^;]*;\s*break;')
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        ready = session.split("bool GameSession::EnsureWorldEntryReady(", 1)[1].split(
+            "std::string GameSession::SystemConfigIdentity()", 1)[0]
+        self.assertRegex(ready, r'if \(!World::SurfaceRadiiSupported\('
+                         r'horizon_radius, collision_radius\)[\s\S]*?return false;')
+        self.assertLess(ready.index("SurfaceRadiiSupported"),
+                        ready.index("PrepareSimulationCollisions();"))
+        self.assertRegex(ready, r'return !m_regionFault &&\s*'
+                         r'm_worldSystem->EnsureSurfaceReadyNear\(\s*'
+                         r'm_metadata.spawnPoint, m_physicsSystem.get\(\), '
+                         r'horizon_radius, collision_radius\);')
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
         self.assertLess(loading.index("if (!prepare_entry_horizon())"),
                         loading.index("activate_loaded_world();"))
@@ -708,7 +738,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 "void WorldSaveService::set_interrupt_before_region_replace_for_testing", 1)[0]
         for recursive_guard in ("SaveGuard ", "SaveOwnership ", "RegionFileWriteGuard "):
             self.assertNotIn(recursive_guard, owned)
-        self.assertIn("WriteRegionFile(region_file, raw_records, errors)", owned)
+        self.assertIn("RewriteRegionFile(region_file, replacements, errors)", owned)
         native = read_source("test/rendering/far_lod_persistence_test.cpp")
         bounded = native.split("FirstWorkerSaveAndFlushCompleteWithinBoundedWait)", 1)[1].split(
             "TEST(FarLodPersistence, QueuedTilesRecheckAuthority", 1)[0]
@@ -745,7 +775,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         adopt.index("m_streaming_state.chunks.emplace("))
         self.assertLess(adopt.index("m_streaming_state.chunks.emplace("),
                         adopt.index("bump_far_lod_authority_revision("))
-        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty())", 1)[1]
+        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty() &&", 1)[1]
         self.assertLess(promotion.index("SaveOwnership ownership;"),
                         promotion.index("chunk->sdf_data ="))
         self.assertLess(promotion.index("chunk->sdf_data ="),
@@ -788,12 +818,16 @@ class SessionUsabilitySourceContract(unittest.TestCase):
 
     def test_saved_input_budgets_precede_allocations_and_publication(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
-        region = source.split("bool ReadRegionFile(", 1)[1].split("bool AdmitRegionWrite(", 1)[0]
-        self.assertLess(region.index("RegionFileLengthAllowed(file_size)"), region.index("std::string manifest("))
-        self.assertLess(region.index("ReadU16(control + 4)"), region.index("std::string manifest("))
+        region = source.split("bool ReadRegionIndex(", 1)[1].split("bool ReadIndexedRecord(", 1)[0]
+        self.assertLess(region.index("RegionFileLengthAllowed(file_bytes)"), region.index("index.records.resize(count)"))
+        self.assertLess(region.index("ReadU16(header.data() + 4)"), region.index("index.records.resize(count)"))
         for budget in ("kRegionRecordBytes", "kRegionCompressedBytes", "kRegionReadWorkBytes",
                        "kRegionCompressedAggregateBytes"):
-            self.assertLess(region.index(budget), region.index("payload.resize("))
+            self.assertIn(budget, region)
+        record = source.split("bool ReadIndexedRecord(", 1)[1].split("// Current lod-0", 1)[0]
+        self.assertLess(record.index("kRegionCompressedBytes"), record.index("record.compressed_payload.resize("))
+        loader = self.function(source, "load_world", "WorldSaveService::")
+        self.assertLess(loader.index("ReadRegionIndex("), loader.index("ReadIndexedRecord("))
         energy_file = read_source("src/luminumbra_common/persistence/SavedEnergyInput.h")
         for budget in ("length > kEnergyReadRecordBytes", "++pages > kEnergyReadPages",
                        "EnergyFieldState::AdmitRecord(header)"):
@@ -819,8 +853,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         metadata_admission = self.function(source, "admit_metadata_bytes", "WorldSaveService::")
         self.assertLess(metadata_admission.index("clock.write_metadata(metadata)"),
                         metadata_admission.index("BoundedJsonDump("))
-        pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
-        self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+        pair = self.function(source, "save_pair_validated", "WorldSaveService::")
+        self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_regions_validated("))
 
     def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
         admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")
@@ -907,7 +941,8 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertNotIn("prepare_plant_entities", publish)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "SaveWorldStateToImpl")
-        self.assertIn("prepared_plants.publish(save_dir, &errors)", session)
+        self.assertIn("prepared_plants.publish(save_dir, &errors, false)", session)
+        self.assertIn("WorldSaveService::SaveBatch::begin(save_dir)", session)
         self.assertNotIn("save_plant_entities(", session)
         self.assertEqual(session.count("SerializeRecord("), 1)
         self.assertIn("write_file_durably(energy_path, energy_bytes)", session)
@@ -964,8 +999,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                      "LoadWorldStateFrom"):
             with self.subTest(consumer=name):
                 body = self.function(source, name)
-                admission = body[:body.index("LoadedWorldState state;")] \
-                    if name == "LoadWorldStateFrom" else body[:body.index("return false;")]
+                admission = body[:body.index("return false;", body.index("!m_worldUsable"))]
                 self.assertIn("!m_worldUsable", admission)
                 self.assertNotIn("m_worldOpenError", admission)
         wrapper = self.function(source, "SaveWorldStateTo")

@@ -9,6 +9,7 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
+#include "../persistence/WorldSaveService.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -201,7 +202,7 @@ public:
     // Full snapshots and persistent active-region save-as exports include every streamed chunk
     // and commit metadata last. Pass full_snapshot=true for a complete regions-disabled export.
     // Save-as exports retain canonical dirty flags and active-region save stamps.
-    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr, bool full_snapshot = false);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr,
                           bool full_snapshot = false);
@@ -265,6 +266,13 @@ public:
     Systems::WaterSystem* GetWaterSystem() {
         return m_waterSystem.get();
     }
+    // Owner-thread simulation preparation. Call after publishing anchors and before
+    // external avatar physics; TickSimulation also calls this before creature physics.
+    void PrepareSimulationCollisions();
+    // Owner-thread entry barrier: admit collision before building the visible
+    // spawn horizon. Returns false on missing systems or an admission fault.
+    bool EnsureWorldEntryReady(int horizon_radius, int collision_radius);
+
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }
@@ -341,6 +349,9 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    [[nodiscard]] std::string LegacyRevision3SystemConfigIdentity() const;
+    // Immutable value captured on the owner thread at a completed tick boundary.
+    [[nodiscard]] Persistence::WorldAuthorityHashes CaptureAuthorityHashes() const;
     // Pre-world admission can supply the calendar selected for the intended world.
     [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
@@ -578,6 +589,7 @@ private:
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
                              Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                               WorldStateSaveReport* report,
                               bool full_snapshot,

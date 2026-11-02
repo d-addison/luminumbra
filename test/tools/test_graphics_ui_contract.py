@@ -26,6 +26,28 @@ def rules(path):
 
 
 class GraphicsUiContract(unittest.TestCase):
+    def test_world_entry_refuses_every_failed_collision_horizon(self):
+        main = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        calls = list(re.finditer(r"const bool horizon_ready = gameSession->EnsureWorldEntryReady\([^;]*;", main))
+        self.assertEqual(len(calls), 1)
+        for call in calls:
+            with self.subTest(call=call.start()):
+                before_camera = main[call.end():main.index("g_camera =", call.end())]
+                self.assertRegex(before_camera, r"if \(!horizon_ready\)\s*\{")
+                self.assertIn('refuse_world_entry("World collision horizon could not be prepared.", false)',
+                              before_camera)
+                self.assertRegex(before_camera, r"(?:return|break);")
+        horizon = main.split("auto prepare_entry_horizon =", 1)[1].split("auto drain_entry =", 1)[0]
+        self.assertIn("return gameSession->EnsureWorldEntryReady(", horizon)
+        for begin, end, refusal in (
+            ("case WorldEntryStage::PrepareHorizon:", "case WorldEntryStage::Activate:", "return WorldEntryResult::Failed;"),
+            ("case GameState::WORLD_LOADING: {", "case GameState::IN_GAME:", "break;"),
+        ):
+            body = main.split(begin, 1)[1].split(end, 1)[0]
+            self.assertRegex(body, r"if \(!prepare_entry_horizon\(\)\)\s*\{")
+            failure = body.split("if (!prepare_entry_horizon())", 1)[1]
+            self.assertLess(failure.index("refuse_world_entry("), failure.index(refusal))
+
     def test_new_presets_are_conservative_and_saved_revisions_stay_explicit(self):
         header = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.h")
         resolver = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.cpp")

@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>

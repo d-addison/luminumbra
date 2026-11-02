@@ -795,7 +795,7 @@ TEST(WaterSeedInputs, ExternalSourcesAndDisplacementsBoundQuantizationAndMirrors
                 const auto entity = registry.create();
                 registry.emplace<Components::TransformComponent>(entity).position =
                     base + Vec3(2 * x + 1, 0, 2 * z + 1);
-                registry.emplace<Components::WaterSourceComponent>(entity).flow_rate = rate;
+                registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = rate;
             }
         }
         chunk.water_depth_mm.assign(cells, kMax - 1);
@@ -840,7 +840,7 @@ TEST(WaterSeedInputs, NegativeSavedDepthSourcesIgnoreEntityInsertionOrder) {
                     registry.emplace<Components::TransformComponent>(entity).position =
                         base + Vec3(2 * x + 1, 0, 2 * z + 1);
                     const int millimetres = order == 0 ? source + 1 : 2 - source;
-                    registry.emplace<Components::WaterSourceComponent>(entity).flow_rate =
+                    registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate =
                         static_cast<float>(millimetres) * 4.0f / (SECONDS_PER_TICK * 1000.0f);
                 }
             }
@@ -1235,7 +1235,8 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
                     sources.emplace<Components::TransformComponent>(entity).position =
                         Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
                         Vec3(8.0f, 0.0f, 8.0f);
-                    sources.emplace<Components::WaterSourceComponent>(entity).flow_rate = 1.0f;
+                    sources.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate =
+                        1.0f;
                     EXPECT_FALSE(fixture.water().ResizeSimulationGrid(
                         *chunk, static_cast<Systems::WaterDetailLevel>(target)));
                 }

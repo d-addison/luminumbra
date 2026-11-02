@@ -1,6 +1,7 @@
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
+    shield/water_column_diagnostics_test.cpp
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
@@ -2266,6 +2267,12 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionAuthorityWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_region_authority_wiring.py")
+set_tests_properties(RegionAuthorityWiringPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
+set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)
 add_test(NAME WorldEntryFilesystemWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/persistence/test_world_entry_filesystem_wiring.py")
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -2668,8 +2675,6 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
-add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
-    ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
 set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)

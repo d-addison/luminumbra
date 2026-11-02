@@ -32,9 +32,11 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
-work limit (u64), hold ticks (u32) and reduced cadence shift (u8). All five values are
-included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The defaults append `0119000000ffffffffffffffff1e00000001`.
+work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
+revision (u32, currently 4). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
+The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
+`0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
 `dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator` and
 `lunarCycleDays`. Epoch v1 means tick zero is midnight on day zero in midwinter,
@@ -51,7 +53,8 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **335 bytes → `49f694fd70645bcc`**. The independent stdlib computation in
+to **339 bytes → `2f2a9405252345a8`** for revision 4.
+The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -87,18 +90,28 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The shipping pins in `SystemConfig_test.cpp`, `GameSessionHeadlessWorld_test.cpp`, this
-document and the independent Python encoder change from `60ab3c242d54ce89` to
-`49f694fd70645bcc` because of the v4 domain, epoch tag and five calendar fields. Hardening
-tests' Hello and desync-record identity literals use the same new shipping value; their codec and
-record assertions are unchanged. `historical-defaults-off.json` contains configuration,
-not an identity pin, and needs no edit: its effective identity is now
-`1aaa90fa5312b089` before world boot, with the independent session options still at their
-defaults and the unmarked legacy presentation calendar. Newly created worlds record the
-new render calendar even when active regions are disabled, so identity follows that marker.
-The identity encoding change updates no world-state, terrain, water or replay checkpoint pins.
+The shipping pins in the C++ tests and independent Python encoder now include
+revision 4 of the simulation authority rules for every current live session with active regions on or off. The previous shipping identity
+`60ab3c242d54ce89` and previous authority identity `49f2cb57730f3caf`, together with revision 2 identity `6a02c73e706e06fc`, are explicitly refused by admission regressions. Shared identity
+validation covers loopback, TCP replication, TCP lockstep and replay; the Hello
+protocol version and wire layout are unchanged. Hardening codec fixtures use
+arbitrary matching identity strings and retain their existing literal values.
+The current historical-defaults-off configuration has identity `25078e8b112a6ebd`.
+Its explicit legacy revision-3 identity remains `74f285c5fa387d66`.
+The revision-3 shipping identity `60ab3c242d54ce89` is refused by current admission,
+and a legacy peer likewise refuses a current identity before ticks or writes.
+Neither admission nor playback retries with the legacy projection after a mismatch.
+Legacy encoders and chunk projections remain available for explicit historical inspection.
+The independent Python encoder pins both profiles without relying on runtime qualification.
 
-The scheduler load correction changes no identity pins: compiled/default schedulers
+The current identity includes both authority revision 4 and the resolved calendar.
+Before world boot, disabled active regions use the unmarked legacy presentation
+calendar. Newly created worlds record the new render calendar even when active
+regions are disabled, so identity follows that marker. The prior calendar-only
+shipping identity `49f694fd70645bcc` is distinct from the current shipping identity
+`2f2a9405252345a8`. Revision-3 inspection retains its frozen byte layout.
+
+Restoring persisted region scheduler configuration does not itself change profile pins: compiled/default schedulers
 still encode the same bytes, and setter-only nondefault identities already encode their
 effective values. Sessions loading a nondefault persisted ledger now identify that
 ledger's settings instead of stale defaults; sessions with an absent ledger keep their
@@ -337,3 +350,26 @@ and excluded from the world hash. The frozen preset also preserves the disabled 
 mask; disabling simulation flags alone would not restore historical terrain. Shipping
 defaults remain exercised by the unpinned headless, moving, and water trace workloads.
 Capturing shipping-default absolute hashes still requires native runs.
+
+## Water scheduling authority
+
+Current revision-4 captures encode `water_schedule:v1:` followed by exactly eight
+unsigned little-endian bytes of the raw water simulation cursor and checksum that
+fixed envelope. Water becomes the checksum of `simulation_water_v5|grids:` plus
+the legacy water hash and `|schedule:` plus the scheduler hash. Chunk authority
+becomes the checksum of `simulation_authority_v5|base:` plus the legacy authority
+hash and `|water:` plus the corrected water hash. Terrain, mesh and frozen regional
+content projections are unchanged. The shared owner-thread capture reads the
+cursor once at a completed simulation boundary, outside per-chunk caches.
+The ledger's per-record `water_cursor` is a separate field and cannot substitute
+for this global solver cursor. Empty, sleeping and below-budget populations retain
+the raw cursor because later activation can expose a different selection.
+
+The seven world-composite inputs, four checkpoint strings, Hello version 4,
+complete replay version 3, elided replay version 4, LMR1 version 2 and ARL layouts
+are unchanged. Legacy streams still parse using their original identities, and
+current playback refuses incompatible identities before advancing ticks.
+Save payloads already persist the cursor and need no new field or format version.
+Absent historical cursors remain zero, and malformed or unrepresentable cursors
+remain refused. No save rewrite selects a projection. Native continuation,
+transport and timing qualification remains pending.

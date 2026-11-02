@@ -871,7 +871,16 @@ class RenderRunnerResidencyTests(unittest.TestCase):
         entry = main[main.index('autofinish_world_entry='):main.index('autostart_world_creation=')]
         cap = 'world_system->debug_set_streaming_radius_cap(scenario_config.benchmark_stream_radius);'
         self.assertIn('if(benchmark_v4)' + cap, entry)
-        self.assertLess(entry.index(cap), entry.index('EnsureSurfaceReadyNear('))
+        self.assertLess(entry.index(cap), entry.index('gameSession->EnsureWorldEntryReady('))
+        self.assertIn('gameSession->EnsureWorldEntryReady(scenario_config.horizon_radius,'
+                      'scenario_config.collision_radius)', entry)
+        session = cpp('src/luminumbra_common/world/GameSession.cpp')
+        readiness = session[session.index('boolGameSession::EnsureWorldEntryReady('):
+                            session.index('std::stringGameSession::SystemConfigIdentity()')]
+        self.assertIn('PrepareSimulationCollisions();', readiness)
+        self.assertIn('return!m_regionFault&&m_worldSystem->EnsureSurfaceReadyNear('
+                      'm_metadata.spawnPoint,m_physicsSystem.get(),horizon_radius,collision_radius);',
+                      readiness)
         creation = main[main.index('autostart_world_creation='):main.index('autostart_world_load=')]
         load = main[main.index('autostart_world_load='):main.index('if(g_uiManager){', main.index('autostart_world_load='))]
         for path in (creation, load):

@@ -498,6 +498,39 @@ ReplicationAdmissionState Waiting(ReplicationAdmissionRole role, const HelloMsg&
     return state;
 }
 
+TEST(ReplicationAdmission, AuthorityProfilesRefuseBothDirectionsForEveryRoleBeforeForwarding) {
+    for (const bool regions : {false, true}) {
+        Luminumbra::world::GameSession session;
+        session.SetActiveRegionsEnabled(regions);
+        for (const bool legacy_local : {false, true}) {
+            for (const auto role :
+                 {ReplicationAdmissionRole::Host, ReplicationAdmissionRole::Joiner}) {
+                auto local = Identity(role == ReplicationAdmissionRole::Host ? 0u : 1u);
+                auto peer = Identity(role == ReplicationAdmissionRole::Host ? 1u : 0u);
+                local.system_config_identity = legacy_local
+                                                   ? session.LegacyRevision3SystemConfigIdentity()
+                                                   : session.SystemConfigIdentity();
+                peer.system_config_identity = legacy_local
+                                                  ? session.SystemConfigIdentity()
+                                                  : session.LegacyRevision3SystemConfigIdentity();
+                ASSERT_NE(local.system_config_identity, peer.system_config_identity);
+                auto state = Waiting(role, local);
+                EXPECT_EQ(state.OnFrame(EncodeHello(peer), FrameDelivery::Reliable),
+                          ReplicationAdmissionAction::Discard);
+                EXPECT_TRUE(state.failed());
+                EXPECT_FALSE(state.admitted());
+                EXPECT_EQ(state.reason(), "SystemConfig identity mismatch");
+                // A retry with the current profile cannot revive the failed admission.
+                peer.system_config_identity = local.system_config_identity;
+                EXPECT_EQ(state.OnFrame(EncodeHello(peer), FrameDelivery::Reliable),
+                          ReplicationAdmissionAction::Discard);
+                EXPECT_TRUE(state.failed());
+                EXPECT_FALSE(state.admitted());
+            }
+        }
+    }
+}
+
 TEST(ReplicationAdmission, HostAndJoinerRejectAllEffectiveConfigAndContentMismatches) {
     const auto variants = Luminumbra::TestSupport::EffectiveIdentityMismatches();
     ASSERT_FALSE(variants.empty());
