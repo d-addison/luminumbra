@@ -204,23 +204,8 @@ enum class SavedJsonFailure {
 
 // Reuse documents only after a fresh bounded read compares every byte. A new open
 // owns a new scope; nested readers share it without extending its lifetime.
-class SavedJsonReadScope {
+class SavedJsonReadCache {
 public:
-    SavedJsonReadScope() {
-        if (s_active == nullptr) {
-            s_active = this;
-            m_owner = true;
-        }
-    }
-    SavedJsonReadScope(const SavedJsonReadScope&) = delete;
-    SavedJsonReadScope& operator=(const SavedJsonReadScope&) = delete;
-    ~SavedJsonReadScope() {
-        if (m_owner)
-            s_active = nullptr;
-    }
-    static SavedJsonReadScope* active() {
-        return s_active;
-    }
     const nlohmann::json* find(const std::string& bytes, bool metadata_input) const {
         for (const auto& entry : m_entries)
             if (entry.metadata_input == metadata_input && entry.bytes == bytes)
@@ -235,16 +220,37 @@ public:
     }
 
 private:
+    friend class SavedJsonReadScope;
     struct Entry {
         std::string bytes;
         bool metadata_input;
         nlohmann::json document;
     };
     static constexpr std::size_t kMaxBytes = std::size_t{8} * 1024 * 1024;
-    static inline thread_local SavedJsonReadScope* s_active = nullptr;
-    bool m_owner = false;
+    std::size_t m_depth = 0;
     std::size_t m_bytes = 0;
     std::vector<Entry> m_entries;
+};
+
+class SavedJsonReadScope {
+public:
+    SavedJsonReadScope() {
+        ++s_cache.m_depth;
+    }
+    SavedJsonReadScope(const SavedJsonReadScope&) = delete;
+    SavedJsonReadScope& operator=(const SavedJsonReadScope&) = delete;
+    ~SavedJsonReadScope() {
+        if (--s_cache.m_depth == 0) {
+            s_cache.m_entries.clear();
+            s_cache.m_bytes = 0;
+        }
+    }
+    static SavedJsonReadCache* active() {
+        return s_cache.m_depth == 0 ? nullptr : &s_cache;
+    }
+
+private:
+    static inline thread_local SavedJsonReadCache s_cache;
 };
 
 inline std::atomic<std::uint64_t>& SavedJsonParseCounter() {
