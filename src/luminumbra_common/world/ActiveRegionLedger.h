@@ -151,6 +151,8 @@ public:
     // record, or move the canonical tick that the hash projection reads.
     void restore_clock(const WorldClock& clock);
     [[nodiscard]] static RegionKey region_at(const Vec3& position);
+    // Shared proximity rule for scheduler visits and authoritative consumers.
+    [[nodiscard]] static std::vector<RegionKey> activation_regions(const Vec3& anchor);
     [[nodiscard]] static std::uint32_t phase(RegionKey key, std::uint8_t shift);
     [[nodiscard]] static RegionResumeWindow resume_window(RegionKey key,
                                                           std::uint64_t frozen_at,
