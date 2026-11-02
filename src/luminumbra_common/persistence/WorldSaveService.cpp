@@ -6258,7 +6258,7 @@ struct WorldSaveService::PreparedWorldWrite::Data {
     std::filesystem::path save_dir;
     std::map<std::filesystem::path, std::vector<RegionRecord>> regions;
     bool write_manifest = false;
-    std::size_t unchanged_regions = 0;
+    std::vector<std::filesystem::path> unchanged_regions;
 };
 
 WorldSaveService::PreparedWorldWrite::PreparedWorldWrite() = default;
@@ -6386,7 +6386,7 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
             if (changed)
                 candidate->regions.emplace(path, std::move(records));
             else
-                ++candidate->unchanged_regions;
+                candidate->unchanged_regions.push_back(path);
         }
         candidate->write_manifest = !dirty_only || !regions.empty();
         m_data = std::move(candidate);
@@ -6419,6 +6419,8 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         if (!scope.ok())
             return false;
         std::filesystem::create_directories(region_directory(prepared->save_dir));
+        for (const auto& path : prepared->unchanged_regions)
+            ReclaimAbandonedStaging(region_staging_path(path));
         for (auto& [path, records] : prepared->regions) {
             if (!WriteRegionFile(path, records, errors))
                 return false;
@@ -6428,7 +6430,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         if (!scope.commit(errors))
             return false;
         if (regions_written)
-            *regions_written = prepared->regions.size() + prepared->unchanged_regions;
+            *regions_written = prepared->regions.size() + prepared->unchanged_regions.size();
         return true;
     } catch (const std::exception& error) {
         AddError(errors, std::string("failed to write world region files: ") + error.what());

@@ -576,6 +576,7 @@ bool OwnedOccupant(const fs::path& destination,
         AddError(errors, "snapshot rollback occupant changed: " + entry.path);
         return false;
     }
+    bool previous_occupant = current == entry.previous_identity;
     if (entry.live_versions != decltype(entry.live_versions){} &&
         current != entry.restored_identity) {
         SavedInputFile::Version version{};
@@ -588,6 +589,8 @@ bool OwnedOccupant(const fs::path& destination,
             AddError(errors, "snapshot rollback occupant changed: " + entry.path);
             return false;
         }
+        // A later publication can reuse the original native identity after its handle closes.
+        previous_occupant = MatchesPublicationVersion(version, entry.live_versions.front());
     }
     if (entry.action == "replace") {
         // Recovery cannot retain pre-crash handles. Verify the prior bytes through the same
@@ -615,7 +618,7 @@ bool OwnedOccupant(const fs::path& destination,
             return false;
         }
         previous_bytes = length == entry.prev_bytes && digest == entry.prev_fnv64;
-        if (current == entry.previous_identity && !previous_bytes) {
+        if (previous_occupant && !previous_bytes) {
             AddError(errors, "snapshot rollback previous occupant changed: " + entry.path);
             return false;
         }
@@ -1541,15 +1544,18 @@ bool SaveTransaction::prepare_publication(const fs::path& destination,
     auto* entry = &transaction->m_entries[position->second];
     if (!check_publication_target(destination, errors))
         return false;
+    // Failed retries must preserve the installed stamp even when its native identity was reused.
+    ArtifactIdentity installed{};
     bool missing = false;
-    if (!WorldSaveService::artifact_identity(destination, entry->installed_identity, missing))
+    if (!WorldSaveService::artifact_identity(destination, installed, missing))
         return false;
     if (missing)
         entry->installed_version = {};
-    else if (entry->installed_identity == entry->incoming_identity)
+    else if (installed == entry->incoming_identity)
         entry->installed_version = entry->incoming_version;
-    else if (entry->installed_identity == entry->previous_identity)
+    else if (installed != entry->installed_identity && installed == entry->previous_identity)
         entry->installed_version = entry->previous_version;
+    entry->installed_identity = installed;
     entry->incoming_identity = {};
     entry->incoming_temporary.clear();
     if (!incoming.empty() &&
@@ -2065,12 +2071,14 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     try {
         report_snapshot_step("before-rollback", m_save_dir);
         m_state = State::RollingBack;
-        for (const auto& entry : m_entries) {
-            if (!check_member_version(entry, errors)) {
-                m_state = State::RolledBack;
-                m_committed_actions.clear();
-                m_ownership.reset();
-                return;
+        if (!m_artifacts || m_previous.generation != 0) {
+            for (const auto& entry : m_entries) {
+                if (!check_member_version(entry, errors)) {
+                    m_state = State::RolledBack;
+                    m_committed_actions.clear();
+                    m_ownership.reset();
+                    return;
+                }
             }
         }
         JournalDocument document;
