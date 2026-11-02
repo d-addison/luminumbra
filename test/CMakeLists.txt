@@ -563,6 +563,13 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
     luminumbra_common
 )
 
+# This large test translation unit also needs room for its COFF sections on MSVC.
+# Keep the option source-local, as for the headless session regressions.
+if(MSVC)
+    set_source_files_properties(rendering/render_smoke_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+endif()
+
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
     rendering/FarWorldShadow_test.cpp
