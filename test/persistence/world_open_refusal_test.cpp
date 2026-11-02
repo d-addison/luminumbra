@@ -135,6 +135,115 @@ void ExpectMissingPresetReason(const std::string& error, const fs::path& expecte
               expected_path.lexically_normal());
 }
 
+// Each pass leaves its read batch, so only the open reader keeps admission warm.
+void ExpectWarmReaderPasses(const fs::path& save_dir,
+                            std::uint32_t count,
+                            WorldSaveService::ChunkReader& reader) {
+    const auto validations = WorldSaveService::decode_count_for_testing();
+    const auto compressions = WorldSaveService::record_compression_count_for_testing();
+    const auto coordinates = Persistence::SyntheticChunkCoords(count);
+    const auto reads_before_passes = WorldSaveService::region_read_count_for_testing();
+    std::set<std::pair<int, int>> touched_regions;
+    // Admit each touched region once, then leave each read pass entirely.
+    for (const auto& coords : coordinates) {
+        int region_x = 0, region_z = 0;
+        WorldSaveService::region_coords_for_chunk(coords, region_x, region_z);
+        touched_regions.emplace(region_x, region_z);
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+        ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
+    }
+    const auto region_reads = WorldSaveService::region_read_count_for_testing();
+    EXPECT_EQ(region_reads, reads_before_passes + touched_regions.size());
+    const auto fingerprints = WorldSaveService::region_fingerprint_count_for_testing();
+    const auto admitted_parses = Persistence::saved_json_parse_count_for_testing();
+    const auto admitted_decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    for (std::uint64_t pass_number = 0; pass_number < 3; ++pass_number) {
+        const WorldSaveService::ChunkReadBatch pass;
+        for (const auto& coords : coordinates) {
+            const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+            ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
+            ASSERT_TRUE(read.chunk);
+            EXPECT_EQ(read.chunk->get_coords(), coords);
+        }
+        EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads);
+        EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), fingerprints);
+        EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), admitted_parses);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
+                  admitted_decodes + (pass_number + 1) * count);
+        EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations);
+        EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+    }
+}
+
+void ExpectReaderRefusesChangedBytes(const fs::path& root,
+                                     const fs::path& save_dir,
+                                     std::uint32_t count,
+                                     WorldSaveService::ChunkReader& reader) {
+    const auto coordinates = Persistence::SyntheticChunkCoords(count);
+    const auto region_reads = WorldSaveService::region_read_count_for_testing();
+    // Even an unrelated publication invalidates this open reader.
+    const auto published = root / "publication.bin";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(published, "published"));
+    const auto reread = WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader);
+    ASSERT_EQ(reread.status, WorldSaveService::ChunkReadStatus::Found) << reread.error;
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads + 1);
+    fs::remove(published);
+    // External edits have no publication revision: fresh bytes must still refuse them.
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coordinates.front(), rx, rz);
+    const auto region_path = WorldSaveService::region_file_path(save_dir, rx, rz);
+    const auto original_region = Read(region_path);
+    auto changed_region = original_region;
+    ASSERT_GT(changed_region.size(), 8u);
+    changed_region[8] ^= 1; // record identity, same file length
+    Write(region_path, changed_region);
+    {
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto refused =
+            WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader);
+        EXPECT_EQ(refused.status, WorldSaveService::ChunkReadStatus::Error);
+        EXPECT_FALSE(refused.chunk);
+        EXPECT_FALSE(refused.error.empty());
+    }
+    Write(region_path, original_region);
+    changed_region = original_region;
+    changed_region.back() ^= 1; // payload-only edit, with an unchanged manifest
+    Write(region_path, changed_region);
+    bool refused_payload = false;
+    for (const auto& coords : coordinates) {
+        int chunk_rx = 0, chunk_rz = 0;
+        WorldSaveService::region_coords_for_chunk(coords, chunk_rx, chunk_rz);
+        if (chunk_rx != rx || chunk_rz != rz)
+            continue;
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+        if (read.status == WorldSaveService::ChunkReadStatus::Error) {
+            refused_payload = true;
+            EXPECT_FALSE(read.chunk);
+            EXPECT_FALSE(read.error.empty());
+        }
+    }
+    EXPECT_TRUE(refused_payload);
+    Write(region_path, original_region);
+    const auto index_path = Persistence::snapshot_index_path(save_dir);
+    const auto original_index = Read(index_path);
+    Write(index_path, "{");
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    Write(index_path, original_index);
+    const IVec3 absent_coords(3200, 0, 3200);
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, absent_coords, true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Absent);
+    int absent_rx = 0, absent_rz = 0;
+    WorldSaveService::region_coords_for_chunk(absent_coords, absent_rx, absent_rz);
+    const auto absent_region = WorldSaveService::region_file_path(save_dir, absent_rx, absent_rz);
+    Write(absent_region, "");
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, absent_coords, true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    fs::remove(absent_region);
+}
+
 struct WorldOpenFixtureState {
     fs::path root;
     fs::path save;
@@ -1304,108 +1413,9 @@ TEST_F(WorldOpenRefusal, IndexedOpenValidatesOnceWithoutCompressionAcrossRepeate
             EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 3);
             EXPECT_EQ(DiskBytes(root), before);
             WorldSaveService::ChunkReader reader;
-            const auto coordinates = Persistence::SyntheticChunkCoords(count);
-            const auto reads_before_passes = WorldSaveService::region_read_count_for_testing();
-            std::set<std::pair<int, int>> touched_regions;
-            // Admit each touched region once, then leave each read pass entirely.
-            for (const auto& coords : coordinates) {
-                int region_x = 0, region_z = 0;
-                WorldSaveService::region_coords_for_chunk(coords, region_x, region_z);
-                touched_regions.emplace(region_x, region_z);
-                const WorldSaveService::ChunkReadBatch pass;
-                const auto read =
-                    WorldSaveService::read_chunk(report.save_dir, coords, true, &reader);
-                ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
-            }
-            const auto region_reads = WorldSaveService::region_read_count_for_testing();
-            EXPECT_EQ(region_reads, reads_before_passes + touched_regions.size());
-            const auto fingerprints = WorldSaveService::region_fingerprint_count_for_testing();
-            const auto admitted_parses = Persistence::saved_json_parse_count_for_testing();
-            const auto admitted_decodes = WorldSaveService::chunk_record_decode_count_for_testing();
-            for (std::uint64_t pass_number = 0; pass_number < 3; ++pass_number) {
-                const WorldSaveService::ChunkReadBatch pass;
-                for (const auto& coords : coordinates) {
-                    const auto read =
-                        WorldSaveService::read_chunk(report.save_dir, coords, true, &reader);
-                    ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
-                    ASSERT_TRUE(read.chunk);
-                    EXPECT_EQ(read.chunk->get_coords(), coords);
-                }
-                EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads);
-                EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), fingerprints);
-                EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), admitted_parses);
-                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
-                          admitted_decodes + (pass_number + 1) * count);
-                EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations + 1);
-                EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
-            }
-            // Even an unrelated publication invalidates this open reader.
-            const auto published = root / "publication.bin";
-            ASSERT_TRUE(WorldSaveService::write_file_durably(published, "published"));
-            const auto reread =
-                WorldSaveService::read_chunk(report.save_dir, coordinates.front(), true, &reader);
-            ASSERT_EQ(reread.status, WorldSaveService::ChunkReadStatus::Found) << reread.error;
-            EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads + 1);
-            fs::remove(published);
-            // External edits have no publication revision: fresh bytes must still refuse them.
-            int rx = 0, rz = 0;
-            WorldSaveService::region_coords_for_chunk(coordinates.front(), rx, rz);
-            const auto region_path = WorldSaveService::region_file_path(report.save_dir, rx, rz);
-            const auto original_region = Read(region_path);
-            auto changed_region = original_region;
-            ASSERT_GT(changed_region.size(), 8u);
-            changed_region[8] ^= 1; // record identity, same file length
-            Write(region_path, changed_region);
-            {
-                const WorldSaveService::ChunkReadBatch pass;
-                const auto refused = WorldSaveService::read_chunk(
-                    report.save_dir, coordinates.front(), true, &reader);
-                EXPECT_EQ(refused.status, WorldSaveService::ChunkReadStatus::Error);
-                EXPECT_FALSE(refused.chunk);
-                EXPECT_FALSE(refused.error.empty());
-            }
-            Write(region_path, original_region);
-            changed_region = original_region;
-            changed_region.back() ^= 1; // payload-only edit, with an unchanged manifest
-            Write(region_path, changed_region);
-            bool refused_payload = false;
-            for (const auto& coords : coordinates) {
-                int chunk_rx = 0, chunk_rz = 0;
-                WorldSaveService::region_coords_for_chunk(coords, chunk_rx, chunk_rz);
-                if (chunk_rx != rx || chunk_rz != rz)
-                    continue;
-                const WorldSaveService::ChunkReadBatch pass;
-                const auto read =
-                    WorldSaveService::read_chunk(report.save_dir, coords, true, &reader);
-                if (read.status == WorldSaveService::ChunkReadStatus::Error) {
-                    refused_payload = true;
-                    EXPECT_FALSE(read.chunk);
-                    EXPECT_FALSE(read.error.empty());
-                }
-            }
-            EXPECT_TRUE(refused_payload);
-            Write(region_path, original_region);
-            const auto index_path = Persistence::snapshot_index_path(report.save_dir);
-            const auto original_index = Read(index_path);
-            Write(index_path, "{");
-            EXPECT_EQ(
-                WorldSaveService::read_chunk(report.save_dir, coordinates.front(), true, &reader)
-                    .status,
-                WorldSaveService::ChunkReadStatus::Error);
-            Write(index_path, original_index);
-            const IVec3 absent_coords(3200, 0, 3200);
-            EXPECT_EQ(
-                WorldSaveService::read_chunk(report.save_dir, absent_coords, true, &reader).status,
-                WorldSaveService::ChunkReadStatus::Absent);
-            int absent_rx = 0, absent_rz = 0;
-            WorldSaveService::region_coords_for_chunk(absent_coords, absent_rx, absent_rz);
-            const auto absent_region =
-                WorldSaveService::region_file_path(report.save_dir, absent_rx, absent_rz);
-            Write(absent_region, "");
-            EXPECT_EQ(
-                WorldSaveService::read_chunk(report.save_dir, absent_coords, true, &reader).status,
-                WorldSaveService::ChunkReadStatus::Error);
-            fs::remove(absent_region);
+            ASSERT_NO_FATAL_FAILURE(ExpectWarmReaderPasses(report.save_dir, count, reader));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectReaderRefusesChangedBytes(root, report.save_dir, count, reader));
             EXPECT_EQ(DiskBytes(root), before);
         }
         const auto region = WorldSaveService::region_file_path(report.save_dir, 0, 0);
