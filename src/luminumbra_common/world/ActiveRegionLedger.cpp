@@ -118,6 +118,25 @@ void ActiveRegionLedger::set_populated(RegionKey key, bool populated) {
 void ActiveRegionLedger::set_water_cursor(RegionKey key, std::uint64_t cursor) {
     m_records.at(key).water_cursor = cursor;
 }
+bool ActiveRegionLedger::set_water_debts(const WaterDebts& debts) {
+    if (debts.size() > kMaxRegions)
+        return false;
+    for (const auto& [key, debt] : debts)
+        if (!m_records.contains(key) || debt == 0 || debt > kMaxWaterDebt)
+            return false;
+    auto next = debts;
+    m_waterDebts.swap(next);
+    return true;
+}
+bool ActiveRegionLedger::acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at) {
+    const auto it = m_records.find(key);
+    if (it == m_records.end() || it->second.state == RegionState::Frozen || frozen_at == 0 ||
+        it->second.frozen_at != frozen_at)
+        return false;
+    it->second.frozen_at = 0;
+    it->second.last_ticked = m_tick;
+    return true;
+}
 void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
     for (auto& [key, record] : m_records) {
         (void)key;
@@ -214,7 +233,8 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
         const bool idle = clock.tick() >= r.last_proximity &&
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !m_energyAges.contains(it->first) && !owned(it->first)) {
+            !m_energyAges.contains(it->first) && !m_waterDebts.contains(it->first) &&
+            !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
         } else
@@ -450,6 +470,15 @@ std::string ActiveRegionLedger::canonical_bytes() const {
             Append(bytes, age, 8);
         }
     }
+    if (!m_waterDebts.empty()) {
+        bytes += "|water_debt:";
+        Append(bytes, m_waterDebts.size(), 4);
+        for (const auto& [key, debt] : m_waterDebts) {
+            Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+            Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+            Append(bytes, debt, 8);
+        }
+    }
     return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
@@ -463,11 +492,12 @@ bool ActiveRegionLedger::any_frozen_history() const {
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
-    const bool extension = declare_projection || !m_energyAges.empty();
+    const bool extension = declare_projection || !m_energyAges.empty() || !m_waterDebts.empty();
     const std::size_t extension_bytes =
         (extension ? 4u : 0u) + (declare_projection ? 7u : 0u) +
-        (m_energyAges.empty() ? 0u : 10u + 16u * m_energyAges.size());
-    // Both maps are bounded by kMaxRegions, so this arithmetic cannot overflow.
+        (m_energyAges.empty() ? 0u : 10u + 16u * m_energyAges.size()) +
+        (m_waterDebts.empty() ? 0u : 10u + 16u * m_waterDebts.size());
+    // All maps are bounded by kMaxRegions, so this arithmetic cannot overflow.
     if (kHeaderBytes + m_records.size() * kRecordBytes + extension_bytes + 8 > kMaxFileBytes)
         throw std::length_error("Active-region ledger file capacity reached");
     std::string bytes = "ARL1";
@@ -490,6 +520,16 @@ std::string ActiveRegionLedger::encode() const {
                 Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
                 Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
                 Append(tlvs, age, 8);
+            }
+        }
+        if (!m_waterDebts.empty()) {
+            Append(tlvs, 5, 2);
+            Append(tlvs, 4 + 16 * m_waterDebts.size(), 4);
+            Append(tlvs, m_waterDebts.size(), 4);
+            for (const auto& [key, debt] : m_waterDebts) {
+                Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
+                Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
+                Append(tlvs, debt, 8);
             }
         }
         Append(bytes, tlvs.size(), 4);
@@ -621,10 +661,33 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 const auto value = extension.substr(at, length);
                 at += length;
                 // Strictly ascending types refuse duplicates; unsupported types refuse.
-                if ((have_previous && type <= previous_type) || (type != 2 && type != 4))
+                if ((have_previous && type <= previous_type) ||
+                    (type != 2 && type != 4 && type != 5))
                     return false;
                 have_previous = true;
                 previous_type = type;
+                if (type == 5) {
+                    if (length < 4)
+                        return false;
+                    Reader debts(value);
+                    const auto owners = debts.read(4);
+                    if (owners == 0 || owners > result.m_records.size() ||
+                        length != 4 + 16 * owners)
+                        return false;
+                    std::optional<RegionKey> prior;
+                    for (std::uint64_t entry = 0; entry < owners; ++entry) {
+                        const RegionKey key{
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(debts.read(4))),
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(debts.read(4)))};
+                        const auto debt = debts.read(8);
+                        if (!result.m_records.contains(key) || (prior && key <= *prior) ||
+                            debt == 0 || debt > kMaxWaterDebt)
+                            return false;
+                        result.m_waterDebts.emplace(key, debt);
+                        prior = key;
+                    }
+                    continue;
+                }
                 if (type == 4) {
                     if (length < 4)
                         return false;
@@ -666,8 +729,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     result.m_legacyFrozenDigests.insert(key);
         }
         // An envelope without a projection TLV preserves historical digests verbatim, even
-        // when energy ages require version 2. Do not label them projection 2 until each has
-        // been recomputed at a later freeze or evicted.
+        // when energy ages or water debt require version 2. Do not label them projection 2
+        // until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;

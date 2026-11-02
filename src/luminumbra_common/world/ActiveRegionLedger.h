@@ -97,8 +97,9 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 2 digest projection
-    // (7 bytes), type 4 energy ages (10 + 16 bytes per owner). The original file cap is
-    // unchanged; encode refuses when the records and extensions together exceed it.
+    // (7 bytes), type 4 energy ages and type 5 water debt (each 10 + 16 bytes per owner).
+    // The original file cap is unchanged; encode refuses when the records and extensions
+    // together exceed it.
     static constexpr std::size_t kMaxFileBytes =
         kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
@@ -135,6 +136,18 @@ public:
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
     }
+    using WaterDebts = std::map<RegionKey, std::uint64_t>;
+    static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
+    [[nodiscard]] const WaterDebts& water_debts() const noexcept {
+        return m_waterDebts;
+    }
+    // Sparse positive Q32 debt owned by known records; zero is represented by absence.
+    // Validation/cap failure changes nothing. Explicitly retain absent due claims.
+    bool set_water_debts(const WaterDebts& debts);
+    // Apply only after every resume consumer succeeds. Refuses frozen/unknown or stale
+    // stamps, so a saved frozen_at cannot cause catch-up twice. Commits last_ticked to tick(),
+    // including a thaw between Reduced due phases, so consumers cannot replay that window.
+    bool acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at);
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
         return m_energyAges;
@@ -192,8 +205,8 @@ private:
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
                                      const OwnershipProbe& owned);
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor
-    // or energy age, including records due in the current schedule.
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
+    // energy age or water debt, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
@@ -201,6 +214,7 @@ private:
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
     EnergyAges m_energyAges;
+    WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.
