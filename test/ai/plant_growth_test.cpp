@@ -330,3 +330,90 @@ TEST(PlantGrowth, IrrigationMoistensCellForGrowth) {
     const int moistFar = F::MoistureAt(grid, 14.5f, 14.5f, 0.0f, 0.0f, 1.0f);
     EXPECT_GT(moistNear, moistFar) << "irrigation raises moisture near the water source";
 }
+
+#include "luminumbra_common/systems/PlantCoarse.h"
+
+TEST(PlantCoarseGrowth, MatchesIndependentExistingSingleTickConsumer) {
+    namespace C = Luminumbra::Components;
+    using namespace luminumbra::foliage;
+    const std::array windows{0u, 1u, 2u, 255u, 256u, 36000u};
+    for (const auto elapsed : windows) {
+        for (const auto tended : {0u, 1u, 255u}) {
+            for (const auto initial : {0u, 999u, 17999u, 0xFFFFFFF0u}) {
+                entt::registry reg;
+                const auto e = reg.create();
+                reg.emplace<C::PlantTag>(e);
+                auto& genome = reg.emplace<C::PlantGenomeComponent>(e);
+                genome.genes.fill(0.6f);
+                auto& original = reg.emplace<C::PlantGrowthComponent>(e);
+                original.growth_points = initial;
+                original.stress_points = initial;
+                original.tended = static_cast<std::uint8_t>(tended);
+                reg.emplace<C::TransformComponent>(e);
+                auto& health = reg.emplace<C::PlantHealthComponent>(e);
+                health.infection = 437;
+                auto bulk = original;
+                const PlantEnvSample env{0.3f, 0.1f, 0.7f, 0.9f};
+                std::uint32_t oracle_advanced = 0;
+                for (std::uint32_t i = 0; i < elapsed; ++i)
+                    oracle_advanced += RunPlantGrowthSystemOnTick(reg, 100 + i, [&](const auto&) {
+                                           return env;
+                                       }).advanced;
+                const auto result = AdvancePlantGrowthCoarse(
+                    bulk, genome, env, health.infection, elapsed, elapsed ? 99 + elapsed : 0);
+                EXPECT_EQ(result, oracle_advanced);
+                EXPECT_EQ(bulk.growth_points, original.growth_points);
+                EXPECT_EQ(bulk.stress_points, original.stress_points);
+                EXPECT_EQ(bulk.stage, original.stage);
+                EXPECT_EQ(bulk.quality, original.quality);
+                EXPECT_EQ(bulk.tended, original.tended);
+                EXPECT_EQ(bulk.last_tick, original.last_tick);
+            }
+        }
+    }
+}
+
+TEST(PlantCoarseGrowth, RefusesBeyondDayBeforeChangingState) {
+    using namespace luminumbra::foliage;
+    Luminumbra::Components::PlantGrowthComponent growth;
+    Luminumbra::Components::PlantGenomeComponent genome;
+    EXPECT_THROW(AdvancePlantGrowthCoarse(growth, genome, {}, 0, 36001, 99), std::invalid_argument);
+    EXPECT_EQ(growth.last_tick, 0u);
+    EXPECT_EQ(growth.growth_points, 0u);
+}
+
+TEST(PlantCoarseGrowth, VaryingInputsStayWithinOneStageForCadencesThrough64Ticks) {
+    // For coherent nonterminal growth state, every tick adds 0..20 points.
+    // At k<=64 either trajectory spans at most 1280 points; adjacent stage
+    // thresholds are >=2000 points apart. Therefore their stage difference is
+    // <=1 even under an adversarial environment, infection or tending change.
+    // This qualifies that range only, not arbitrarily longer configured cadence.
+    for (const auto k : {1u, 4u, 16u, 64u})
+        for (const auto initial : {0u, 999u, 2999u, 5999u, 9999u, 17999u})
+            for (const auto tended : {0u, 255u}) {
+                entt::registry reg;
+                const auto e = reg.create();
+                reg.emplace<C::PlantTag>(e);
+                reg.emplace<C::TransformComponent>(e);
+                auto& genome = reg.emplace<C::PlantGenomeComponent>(e);
+                genome.genes.fill(.5f);
+                genome.genes[static_cast<std::size_t>(C::PlantGene::GrowthRate)] = 1;
+                auto& g = reg.emplace<C::PlantGrowthComponent>(e);
+                g.growth_points = initial;
+                while (g.stage + 1 < C::kPlantStageCount && initial >= F::StageThreshold(g.stage))
+                    ++g.stage;
+                g.tended = static_cast<std::uint8_t>(tended);
+                reg.emplace<C::PlantHealthComponent>(e);
+                auto coarse = g;
+                F::PlantEnvSample current{.5f, .5f, 1, 1};
+                for (std::uint32_t n = 1; n <= k; ++n) {
+                    const bool harsh = n % 2 == 0;
+                    reg.get<C::PlantHealthComponent>(e).infection = harsh ? 1000 : 0;
+                    const F::PlantEnvSample sampled =
+                        harsh ? F::PlantEnvSample{0, 0, 0, 0} : current;
+                    F::RunPlantGrowthSystemOnTick(reg, n, [&](const auto&) { return sampled; });
+                }
+                F::AdvancePlantGrowthCoarse(coarse, genome, current, 0, k, k);
+                EXPECT_LE(std::abs(static_cast<int>(coarse.stage) - static_cast<int>(g.stage)), 1);
+            }
+}
