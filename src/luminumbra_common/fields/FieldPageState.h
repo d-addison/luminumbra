@@ -130,6 +130,7 @@ public:
     bool update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates);
     // Column-major near window, at most 128 x 128 cells. Updates only changed cells,
     // preserves outside authority, and reports the same per-owner work as sparse admissions.
+    // The window must intersect the scent domain; cells beyond its edge must be zero.
     // Invalid input/capacity refusal leaves authority and work unchanged.
     bool capture_scent_window(ScentCellKey origin,
                               int side,
@@ -184,8 +185,10 @@ public:
     // "" when empty, otherwise "field_pages:v2:" + serialize().
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool weather = false) const;
-    // "" when `key` owns no initialized cell, otherwise for every owned initialized cell in
-    // cells_of_region order: i32 cell_x, i32 cell_z, then kChannels u16 (all little endian).
+    // For every owned initialized cell in cells_of_region order: i32 cell_x, i32 cell_z, then
+    // kChannels u16 (all little endian). When the region owns storms, strikes, scent cells or a
+    // weather clock, an "|evolution:v2:" suffix follows with those sections. "" only when the
+    // region owns neither initialized cells nor evolution state.
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
 
 private:

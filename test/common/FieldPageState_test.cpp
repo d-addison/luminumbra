@@ -1008,6 +1008,19 @@ TEST(FieldPageStateTest, ColumnWindowPreservesEmptyWorldEdgesAndRefusesCoordinat
             {std::numeric_limits<std::int32_t>::max(), 0}, side, cells, work));
         EXPECT_FALSE(store.capture_scent_window(
             {0, std::numeric_limits<std::int32_t>::max()}, side, cells, work));
+        // All-zero windows wholly outside the domain refuse rather than skip every cell.
+        const std::vector<ScentCell> empty(std::size_t{side} * side);
+        for (const ScentCellKey outside : {ScentCellKey{16777216, 0},
+                                           {0, 16777216},
+                                           {-16777216 - side, 0},
+                                           {0, -16777216 - side}}) {
+            EXPECT_FALSE(store.capture_scent_window(outside, side, empty, work));
+        }
+        for (const ScentCellKey edge : {ScentCellKey{16777215, 0}, {-16777216 - side + 1, 0}}) {
+            std::map<RegionKey, std::uint64_t> edge_work;
+            EXPECT_TRUE(store.capture_scent_window(edge, side, empty, edge_work));
+            EXPECT_TRUE(edge_work.empty());
+        }
         EXPECT_EQ(store.serialize(), before);
         EXPECT_EQ(work, previous_work);
     }

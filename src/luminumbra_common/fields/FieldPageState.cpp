@@ -358,8 +358,12 @@ auto StormOrder(const RegionalStorm& storm) {
 auto StrikeOrder(const RegionalStrike& strike) {
     return std::tuple(strike.strike_tick, strike.storm_salt, strike.world_x, strike.world_z);
 }
+// Scent cells lie in [-kScentLimit, kScentLimit) on both axes.
+constexpr std::int32_t kScentLimit = 16777216;
+
 bool ValidScent(ScentCellKey key, const ScentCell& cell) {
-    if (key.x < -16777216 || key.x >= 16777216 || key.z < -16777216 || key.z >= 16777216)
+    if (key.x < -kScentLimit || key.x >= kScentLimit || key.z < -kScentLimit ||
+        key.z >= kScentLimit)
         return false;
     for (const auto bits : cell) {
         const double value = std::bit_cast<double>(bits);
@@ -796,6 +800,11 @@ bool FieldPageState::capture_scent_window(ScentCellKey origin,
         cells.size() != static_cast<std::size_t>(side) * static_cast<std::size_t>(side) ||
         origin.x > std::numeric_limits<std::int32_t>::max() - (side - 1) ||
         origin.z > std::numeric_limits<std::int32_t>::max() - (side - 1))
+        return false;
+    // Absent zero cells are skipped below, so refuse a window outside the domain up front.
+    // A window straddling the edge stays valid; its outside cells must be zero.
+    if (origin.x >= kScentLimit || origin.z >= kScentLimit ||
+        origin.x + (side - 1) < -kScentLimit || origin.z + (side - 1) < -kScentLimit)
         return false;
     using Iterator = decltype(m_scent)::iterator;
     struct Change {
