@@ -168,6 +168,7 @@ public:
     void reset_pending_jobs() {
         pending_lod.store(-1, std::memory_order_release);
         pending_mesh_ready.store(false, std::memory_order_release);
+        pending_water_mesh_generated.store(false, std::memory_order_release);
         pending_mesh_failed.store(false, std::memory_order_release);
         pending_promotion_ready.store(false, std::memory_order_release);
         pending_promotion_failed.store(false, std::memory_order_release);
@@ -247,6 +248,7 @@ public:
     // LOD seam cracks) without scanning mesh vertices per frame.
     std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
+    std::atomic<bool> pending_water_mesh_generated{false};
     std::atomic<bool> pending_mesh_failed{false};
     //  ( step 1): completion signals for the sim-truth
     // PROMOTION lane. A promotion generation job stages the full LOD0 voxel

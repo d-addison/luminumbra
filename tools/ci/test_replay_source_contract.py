@@ -745,7 +745,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         adopt.index("m_streaming_state.chunks.emplace("))
         self.assertLess(adopt.index("m_streaming_state.chunks.emplace("),
                         adopt.index("bump_far_lod_authority_revision("))
-        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty())", 1)[1]
+        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty() &&", 1)[1]
         self.assertLess(promotion.index("SaveOwnership ownership;"),
                         promotion.index("chunk->sdf_data ="))
         self.assertLess(promotion.index("chunk->sdf_data ="),
