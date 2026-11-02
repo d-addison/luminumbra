@@ -32,9 +32,11 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
-work limit (u64), hold ticks (u32) and reduced cadence shift (u8). All five values are
-included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The defaults append `0119000000ffffffffffffffff1e00000001`.
+work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
+revision (u32, currently 4). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
+The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
+`0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
 `dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator` and
 `lunarCycleDays`. Epoch v1 means tick zero is midnight on day zero in midwinter,
@@ -51,7 +53,8 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **335 bytes → `49f694fd70645bcc`**. The independent stdlib computation in
+to **339 bytes → `2f2a9405252345a8`** for revision 4.
+The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -87,18 +90,38 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The shipping pins in `SystemConfig_test.cpp`, `GameSessionHeadlessWorld_test.cpp`, this
-document and the independent Python encoder change from `60ab3c242d54ce89` to
-`49f694fd70645bcc` because of the v4 domain, epoch tag and five calendar fields. Hardening
-tests' Hello and desync-record identity literals use the same new shipping value; their codec and
-record assertions are unchanged. `historical-defaults-off.json` contains configuration,
-not an identity pin, and needs no edit: its effective identity is now
-`1aaa90fa5312b089` before world boot, with the independent session options still at their
-defaults and the unmarked legacy presentation calendar. Newly created worlds record the
-new render calendar even when active regions are disabled, so identity follows that marker.
-The identity encoding change updates no world-state, terrain, water or replay checkpoint pins.
+The current encoder appends authority-rules revision 4 so admission can distinguish
+compiled authority rules as well as configured values. It retains the resolved
+calendar that the admission identity already folds in. The shipping identity
+changes once from `49f694fd70645bcc` to `2f2a9405252345a8`, for the four added
+revision bytes. No world-state, terrain, water, save-format or replay checkpoint
+encoding changes in this identity step.
 
-The scheduler load correction changes no identity pins: compiled/default schedulers
+The frozen current vectors in `SystemConfig_test.cpp` cover the complete 339-byte
+encoding: the 297-byte registry/session prefix with the v4 domain, four revision
+bytes, then the 18-byte calendar epoch tag and five u32 calendar values. Older
+301-byte vectors omitted that calendar suffix. Every current per-setting and
+session-option digest is recomputed once with the resolved calendar. With active regions off and no world marker, the calendar is
+`(216000, 8, 1, 2, 8)`; with regions on it is `(162000, 8, 2, 3, 8)`.
+The independent encoder checks every literal in both C++ vector tables, including
+binary32 rounding before adding one to each configuration parameter.
+
+Historical revision-3 bytes and all corresponding frozen vectors remain unchanged.
+`ComputeLegacyRevision3Identity` and `LegacyRevision3SystemConfigIdentity` expose
+that 297-byte projection for explicit inspection only. Live admission continues
+to compare the current identity directly, without retrying the legacy projection.
+The shared mismatch fixture includes the calendar-only identity, historical
+revision-3 identity `60ab3c242d54ce89`, earlier authority identity
+`49f2cb57730f3caf`, and column-ownership identity `6a02c73e706e06fc`.
+Existing matching codec literals are fixtures, not a live admission fallback.
+Hello version and wire layout are unchanged.
+
+The current historical-defaults-off configuration has identity `25078e8b112a6ebd`;
+its explicit revision-3 identity remains `74f285c5fa387d66`. Newly created worlds
+record the current render calendar even when active regions are disabled, so the
+live identity continues to follow that marker.
+
+Restoring persisted region scheduler configuration does not itself change profile pins: compiled/default schedulers
 still encode the same bytes, and setter-only nondefault identities already encode their
 effective values. Sessions loading a nondefault persisted ledger now identify that
 ledger's settings instead of stale defaults; sessions with an absent ledger keep their
