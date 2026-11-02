@@ -186,7 +186,12 @@ public:
                                    BoundPublicationStage& retired);
     static bool check_publication_target(const std::filesystem::path& destination,
                                          std::vector<std::string>* errors);
-    // Commits: validates and re-hashes every protected member via digest_fn, publishes the new
+    // A writer may supply a digest of its admitted output, bound to the installed native
+    // version. Commit reuses it only for the standard member validator and an unchanged file.
+    void remember_written_digest(const std::filesystem::path& destination,
+                                 const MemberDigest& digest,
+                                 const std::array<std::uint64_t, 8>& version);
+    // Commits: validates every protected member, publishes the new
     // index (durable commit point), then deletes the journal. Failure before the commit point rolls
     // back.
     bool commit(std::vector<std::string>* errors);
@@ -204,6 +209,9 @@ public:
     }
     [[nodiscard]] std::uint64_t new_generation() const {
         return m_new_generation;
+    }
+    [[nodiscard]] bool member_is_protected(const std::string& relative) const {
+        return m_protected.contains(relative);
     }
     [[nodiscard]] bool was_indexed() const {
         return m_previous.generation != 0;
@@ -257,6 +265,11 @@ private:
     std::unordered_set<std::string> m_protected;
     std::unordered_map<std::string, std::size_t> m_entry_indices;
     std::vector<std::size_t> m_changed_entries;
+    struct WrittenDigest {
+        MemberDigest digest;
+        std::array<std::uint64_t, 8> version;
+    };
+    std::unordered_map<std::string, WrittenDigest> m_written_digests;
     std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
@@ -272,5 +285,10 @@ private:
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);
+
+// File callbacks can mutate an otherwise exclusively owned publication. A writer
+// may transfer observations across rename only while this revision is unchanged.
+std::uint64_t snapshot_observation_revision();
+void invalidate_snapshot_observations();
 
 } // namespace Luminumbra::Persistence

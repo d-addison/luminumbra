@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +54,11 @@ SaveTransaction*& ActiveTransaction() {
 SnapshotStepHook& StepHook() {
     static SnapshotStepHook hook = nullptr;
     return hook;
+}
+
+std::atomic<std::uint64_t>& ObservationRevision() {
+    static std::atomic<std::uint64_t> revision{0};
+    return revision;
 }
 
 void AddError(std::vector<std::string>* errors, const std::string& message) {
@@ -1408,8 +1414,17 @@ void set_snapshot_step_hook_for_testing(SnapshotStepHook hook) {
 
 void report_snapshot_step(const char* step, const fs::path& path) {
     if (SnapshotStepHook hook = StepHook()) {
+        invalidate_snapshot_observations();
         hook(step, path);
     }
+}
+
+std::uint64_t snapshot_observation_revision() {
+    return ObservationRevision().load(std::memory_order_relaxed);
+}
+
+void invalidate_snapshot_observations() {
+    ObservationRevision().fetch_add(1, std::memory_order_relaxed);
 }
 
 SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
@@ -1859,6 +1874,17 @@ void SaveTransaction::defer_until_commit(std::function<void()> action) {
     m_committed_actions.push_back(std::move(action));
 }
 
+void SaveTransaction::remember_written_digest(const fs::path& destination,
+                                              const MemberDigest& digest,
+                                              const std::array<std::uint64_t, 8>& version) {
+    if (m_state != State::Open || m_digest_fn != &WorldSaveService::member_digest)
+        return;
+    std::string relative;
+    if (RelativePublicationPath(m_save_dir, destination, relative) &&
+        m_protected.contains(relative))
+        m_written_digests.insert_or_assign(relative, WrittenDigest{digest, version});
+}
+
 bool SaveTransaction::commit(std::vector<std::string>* errors) {
     if (m_state != State::Open) {
         AddError(errors, "save transaction is not open");
@@ -1872,6 +1898,15 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         next.anchors = m_anchors;
 
         auto digest_member = [this, errors](const std::string& rel, MemberDigest& digest) {
+            const auto written = m_written_digests.find(rel);
+            if (written != m_written_digests.end()) {
+                const SavedInputFile input(m_save_dir / rel);
+                SavedInputFile::Version version{};
+                if (input.version(version) && version == written->second.version) {
+                    digest = written->second.digest;
+                    return true;
+                }
+            }
             std::string error;
             if (m_digest_fn == nullptr || !m_digest_fn(m_save_dir, rel, digest, error)) {
                 AddError(errors,

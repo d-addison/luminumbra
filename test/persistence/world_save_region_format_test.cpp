@@ -2159,6 +2159,11 @@ TEST(WorldSaveRegionFormat, UnchangedIndexedRegionIsNotReadmittedAtCommit) {
     ASSERT_TRUE(P::read_snapshot_index(save.path, previous, nullptr));
     const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
     const auto bytes = ReadFileBytes(region);
+    const auto manifest = WorldSaveService::world_manifest_path(save.path);
+    Luminumbra::Persistence::SavedInputFile::Version manifest_before{}, manifest_after{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_version(manifest, manifest_before, missing));
+    ASSERT_FALSE(missing);
     P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     WorldSaveService::PreparedWorldWrite prepared;
@@ -2172,6 +2177,8 @@ TEST(WorldSaveRegionFormat, UnchangedIndexedRegionIsNotReadmittedAtCommit) {
     EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
     EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
     EXPECT_EQ(ReadFileBytes(region), bytes);
+    ASSERT_TRUE(WorldSaveService::artifact_version(manifest, manifest_after, missing));
+    EXPECT_EQ(manifest_before, manifest_after);
     P::SnapshotIndex next;
     ASSERT_TRUE(P::read_snapshot_index(save.path, next, nullptr));
     EXPECT_EQ(next.generation, previous.generation + 1);
@@ -2262,4 +2269,195 @@ TEST(WorldSaveRegionFormat, DigestAuthorityInvalidatesAfterRollback) {
     EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), original);
     EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads + 1);
     EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+}
+
+TEST(WorldSaveRegionFormat, StreamingSnapshotArraysMatchCanonicalJsonBytes) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    auto expected = nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+    auto& object = expected["chunks"][0];
+    std::vector<float> floats{0.0f,
+                              -0.0f,
+                              0.1f,
+                              -17.125f,
+                              std::numeric_limits<float>::denorm_min(),
+                              std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()};
+    // More distinct values than the formatter retains, followed by earlier inputs.
+    for (int i = 0; i < 2048; ++i)
+        floats.push_back(static_cast<float>(i) * 0.125f);
+    floats.insert(floats.end(), {0.0f, -0.0f, 0.1f, -17.125f});
+    chunk->sdf_data = floats;
+    chunk->heightmap_data = floats;
+    chunk->water_level_data = floats;
+    chunk->water_sim_terrain_height = floats;
+    chunk->material_data = {0, 1, 255};
+    chunk->water_bed_mm = {0, -1, std::numeric_limits<std::int32_t>::min()};
+    chunk->water_depth_mm = {1, 2, std::numeric_limits<std::int32_t>::max()};
+    chunk->water_edge_flux = {-4, 3};
+    chunk->mesh_vertices = {{Vec3(-0.0f, 0.1f, -17.125f), Vec3(0, 1, 0), 7},
+                            {Vec3(1, 2, 3), Vec3(0.25f, -0.5f, 1), 0}};
+    chunk->water_mesh_vertices = chunk->mesh_vertices;
+    chunk->pending_mesh_vertices = chunk->mesh_vertices;
+    chunk->pending_water_mesh_vertices = chunk->mesh_vertices;
+    chunk->mesh_indices = {0, 1, std::numeric_limits<std::uint32_t>::max()};
+    chunk->water_mesh_indices = chunk->mesh_indices;
+    chunk->pending_mesh_indices = chunk->mesh_indices;
+    chunk->pending_water_mesh_indices = chunk->mesh_indices;
+    chunk->water_flow_data = {Vec2(-0.0f, 0.1f), Vec2(3, -4)};
+    const auto vec3 = [](const Vec3& v) {
+        return nlohmann::json{{"x", v.x}, {"y", v.y}, {"z", v.z}};
+    };
+    nlohmann::json vertices = nlohmann::json::array();
+    for (const auto& vertex : chunk->mesh_vertices)
+        vertices.push_back({{"position", vec3(vertex.position)},
+                            {"normal", vec3(vertex.normal)},
+                            {"material_id", vertex.material_id}});
+    for (const auto* key :
+         {"sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"})
+        object[key] = floats;
+    for (const auto* key : {"mesh_vertices",
+                            "water_mesh_vertices",
+                            "pending_mesh_vertices",
+                            "pending_water_mesh_vertices"})
+        object[key] = vertices;
+    for (const auto* key : {"mesh_indices",
+                            "water_mesh_indices",
+                            "pending_mesh_indices",
+                            "pending_water_mesh_indices"})
+        object[key] = chunk->mesh_indices;
+    object["material_data"] = chunk->material_data;
+    object["water_bed_mm"] = chunk->water_bed_mm;
+    object["water_depth_mm"] = chunk->water_depth_mm;
+    object["water_edge_flux"] = chunk->water_edge_flux;
+    object["water_flow_data"] = nlohmann::json::array();
+    for (const auto& flow : chunk->water_flow_data)
+        object["water_flow_data"].push_back({{"x", flow.x}, {"y", flow.y}});
+    EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(state), expected.dump(4) + "\n");
+    state.clear();
+    expected["chunks"] = nlohmann::json::array();
+    expected["chunk_count"] = 0;
+    EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(state), expected.dump(4) + "\n");
+}
+
+TEST(WorldSaveRegionFormat, WrittenRegionDigestIsReusedOnlyWhileItsFileVersionMatches) {
+    namespace P = Luminumbra::Persistence;
+    for (int change = 0; change < 4; ++change) {
+        SCOPED_TRACE(change);
+        const bool tamper = change >= 2;
+        TempSaveDir save("written_digest");
+        WorldStreamingState state;
+        const auto chunk = state.get_or_create_chunk({0, 0, 0});
+        chunk->sdf_data.assign(17 * 17 * 17, -2.125f);
+        state.get_or_create_chunk({40, 0, 0})->sdf_data.assign(17 * 17 * 17, -3.125f);
+        WorldSaveService::SaveFactsScope facts(save.path);
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+        if (change == 1) {
+            chunk->sdf_data.front() = -7.0f;
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        }
+        if (change == 3) {
+            static bool injected = false;
+            injected = false;
+            struct ResetHook {
+                ~ResetHook() {
+                    P::detail::set_file_publication_hook_for_testing(nullptr);
+                }
+            } reset;
+            P::detail::set_file_publication_hook_for_testing(+[](const std::filesystem::path& path,
+                                                                 bool removing) {
+                if (removing || path.filename() != "r.0.0.lmr")
+                    return true;
+                const auto directory = WorldSaveService::region_staging_path(path).parent_path();
+                for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+                    if (!entry.path().filename().string().starts_with("r.0.0.lmr.tmp."))
+                        continue;
+                    const auto& staged = entry.path();
+                    const auto timestamp = std::filesystem::last_write_time(staged);
+                    auto bytes = ReadFileBytes(staged);
+                    bytes.front() = 'X';
+                    std::ofstream output(staged, std::ios::binary | std::ios::trunc);
+                    output << bytes;
+                    output.close();
+                    injected = output.good();
+                    std::filesystem::last_write_time(staged, timestamp);
+                }
+                return true;
+            });
+            chunk->sdf_data.front() = -7.0f;
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+            ASSERT_TRUE(injected);
+        }
+        if (change == 2) {
+            const auto timestamp = std::filesystem::last_write_time(region);
+            auto bytes = ReadFileBytes(region);
+            bytes.front() = 'X';
+            {
+                std::ofstream output(region, std::ios::binary | std::ios::trunc);
+                output << bytes;
+                output.close();
+                ASSERT_TRUE(output.good());
+            }
+            std::filesystem::last_write_time(region, timestamp);
+        }
+        const auto reads = WorldSaveService::region_read_count_for_testing();
+        std::vector<std::string> errors;
+        EXPECT_EQ(transaction.commit(&errors), !tamper);
+        if (tamper) {
+            EXPECT_GT(WorldSaveService::region_read_count_for_testing(), reads);
+            EXPECT_FALSE(errors.empty());
+        } else {
+#if !defined(_WIN32)
+            EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+#endif
+            P::MemberDigest actual;
+            std::string error;
+            ASSERT_TRUE(WorldSaveService::member_digest(
+                save.path, "chunks/region/r.0.0.lmr", actual, error));
+            P::SnapshotIndex index;
+            ASSERT_TRUE(P::read_snapshot_index(save.path, index, nullptr));
+            const auto member =
+                std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+                    return value.path == "chunks/region/r.0.0.lmr";
+                });
+            ASSERT_NE(member, index.members.end());
+            EXPECT_EQ(member->bytes, actual.bytes);
+            EXPECT_EQ(member->fnv64, actual.fnv64);
+            WorldStreamingState loaded;
+            EXPECT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors));
+            ASSERT_NE(loaded.find_chunk(chunk->get_id()), nullptr);
+            EXPECT_EQ(loaded.find_chunk(chunk->get_id())->sdf_data, chunk->sdf_data);
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, IdenticalContainerUpsertPreservesFileAndChangedRecordReplacesIt) {
+    TempSaveDir save("upsert_same_bytes");
+    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    WorldSaveService::ContainerRecord record;
+    record.id = 1;
+    record.lod_level = 1;
+    record.payload = "container payload";
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+    const auto bytes = ReadFileBytes(region);
+    WorldSaveService::ArtifactIdentity before{}, after{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_identity(region, before, missing));
+    ASSERT_FALSE(missing);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+    ASSERT_TRUE(WorldSaveService::artifact_identity(region, after, missing));
+    EXPECT_EQ(before, after);
+    EXPECT_EQ(ReadFileBytes(region), bytes);
+    record.payload += " changed";
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+    EXPECT_NE(ReadFileBytes(region), bytes);
+    std::vector<WorldSaveService::ContainerRecord> loaded;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, loaded));
+    ASSERT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded.front().payload, record.payload);
 }

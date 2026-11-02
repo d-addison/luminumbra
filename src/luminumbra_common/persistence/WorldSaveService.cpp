@@ -193,8 +193,11 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
     if (!opened && m_missing && leaf_symlinks == LeafSymlinks::Refuse)
         m_missing = MissingSavedInputAncestorsAreValid(m_path);
     if (opened) {
-        if (const auto observer = detail::ReadObserverForTesting().load(std::memory_order_acquire))
+        if (const auto observer =
+                detail::ReadObserverForTesting().load(std::memory_order_acquire)) {
+            invalidate_snapshot_observations();
             observer(m_path, true);
+        }
         if (leaf_symlinks == LeafSymlinks::Refuse)
             m_location_admitted = is_within_save_root();
     }
@@ -216,8 +219,11 @@ SavedInputFile::~SavedInputFile() {
 #endif
 
     if (opened) {
-        if (const auto observer = detail::ReadObserverForTesting().load(std::memory_order_acquire))
+        if (const auto observer =
+                detail::ReadObserverForTesting().load(std::memory_order_acquire)) {
+            invalidate_snapshot_observations();
             observer(m_path, false);
+        }
     }
 }
 
@@ -605,10 +611,13 @@ void AddError(std::vector<std::string>* errors, std::string message) {
 bool AllowPublication(const std::filesystem::path& path,
                       bool removing,
                       std::vector<std::string>* errors) {
-    if (const auto hook = detail::PublicationHookForTesting().load(std::memory_order_acquire);
-        hook && !hook(path, removing)) {
-        AddError(errors, "file publication refused: " + Filesystem::GenericUtf8PathString(path));
-        return false;
+    if (const auto hook = detail::PublicationHookForTesting().load(std::memory_order_acquire)) {
+        invalidate_snapshot_observations();
+        if (!hook(path, removing)) {
+            AddError(errors,
+                     "file publication refused: " + Filesystem::GenericUtf8PathString(path));
+            return false;
+        }
     }
     return true;
 }
@@ -1634,7 +1643,10 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             std::filesystem::path& out_temp,
                             std::vector<std::string>* errors,
                             CreatedWorldArtifacts* artifacts = nullptr,
-                            WorldSaveService::ArtifactIdentity* identity = nullptr) {
+                            WorldSaveService::ArtifactIdentity* identity = nullptr,
+                            SavedInputFile::Version* written_version = nullptr) {
+    if (written_version)
+        *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
     HANDLE file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
@@ -1835,7 +1847,10 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             std::filesystem::path& out_temp,
                             std::vector<std::string>* errors,
                             CreatedWorldArtifacts* artifacts = nullptr,
-                            WorldSaveService::ArtifactIdentity* identity = nullptr) {
+                            WorldSaveService::ArtifactIdentity* identity = nullptr,
+                            SavedInputFile::Version* written_version = nullptr) {
+    if (written_version)
+        *written_version = {};
     LUMIN_PROFILE_ZONE_N("File save write");
     int file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
@@ -1892,6 +1907,9 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             return false;
         }
         offset += static_cast<std::size_t>(written);
+        if (written_version && offset == bytes.size() &&
+            !SavedInputFile::native_version(file, *written_version))
+            *written_version = {};
         try {
             report_snapshot_step("crash-staging-written", out_temp);
         } catch (...) {
@@ -2075,23 +2093,79 @@ WorldSaveService::SaveFactsScope*& ActiveFacts() {
     return active;
 }
 
+struct WrittenRegionDigest {
+    MemberDigest digest;
+    SavedInputFile::Version version{};
+    std::uint64_t observation_revision = 0;
+};
+
 // Every member replacement funnels through here so tests can observe real publication sites.
 bool ReplaceMember(const std::filesystem::path& temp,
                    const std::filesystem::path& destination,
                    std::vector<std::string>* errors,
                    CreatedWorldArtifacts* artifacts = nullptr,
-                   StagingFile* retained_payload = nullptr) {
+                   StagingFile* retained_payload = nullptr,
+                   const WrittenRegionDigest* written = nullptr) {
     if (!SaveTransaction::prepare_publication(destination, temp, errors))
         return false;
     report_snapshot_step("before-replace", destination);
+    bool unchanged_output = false;
+    if (written) {
+        const SavedInputFile input(temp);
+        SavedInputFile::Version version{};
+        unchanged_output = input.version(version) && version == written->version;
+    }
     PublicationRevision().fetch_add(1, std::memory_order_relaxed);
     if (ActiveFacts() != nullptr)
         ActiveFacts()->invalidate_presence_facts();
     if (!ReplaceRegionFileAtomically(temp, destination, errors, artifacts, retained_payload))
         return false;
+    if (unchanged_output) {
+        const SavedInputFile input(destination);
+        SavedInputFile::Version version{};
+        // Publication changes ctime. Identity, length and nanosecond mtime must
+        // still match the write handle; future reuse compares the complete stamp.
+        if (input.version(version) &&
+            snapshot_observation_revision() == written->observation_revision &&
+            std::equal(version.begin(), version.begin() + 6, written->version.begin())) {
+            const auto root = destination.parent_path().parent_path().parent_path();
+            if (auto* transaction = SaveTransaction::active_for(root))
+                transaction->remember_written_digest(destination, written->digest, version);
+        }
+    }
     report_snapshot_step("after-replace", destination);
     return true;
 }
+class AncestorFlushBatch {
+public:
+    explicit AncestorFlushBatch(std::filesystem::path root)
+        : m_root(std::move(root))
+        , m_previous(active()) {
+        active() = this;
+    }
+    ~AncestorFlushBatch() {
+        active() = m_previous;
+    }
+    static AncestorFlushBatch*& active() {
+        static thread_local AncestorFlushBatch* batch = nullptr;
+        return batch;
+    }
+    bool contains(const std::filesystem::path& directory) const {
+        return m_flushed.contains(directory);
+    }
+    void remember(const std::filesystem::path& directory) {
+        // Save-root staging and journal entries change throughout publication.
+        // Only their already-established ancestors can share a completed flush.
+        if (directory != m_root && IsSaveDescendant(m_root, directory))
+            m_flushed.insert(directory);
+    }
+
+private:
+    std::filesystem::path m_root;
+    AncestorFlushBatch* m_previous;
+    std::set<std::filesystem::path> m_flushed;
+};
+
 // Directory traversal is bounded by the supplied path's component count. Repeat
 // it on retries even when a prior attempt already created the directories.
 bool FlushAncestorEntries(const std::filesystem::path& destination,
@@ -2102,8 +2176,13 @@ bool FlushAncestorEntries(const std::filesystem::path& destination,
          ancestor = ancestor.parent_path()) {
         const auto holder =
             ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
+        auto* batch = AncestorFlushBatch::active();
+        if (batch && batch->contains(holder))
+            continue;
         if (!FlushDirectoryEntry(holder, errors))
             return false;
+        if (batch)
+            batch->remember(holder);
     }
 #else
     (void)destination;
@@ -2427,6 +2506,11 @@ bool AdmitRegionWrite(const std::vector<RegionRecord>& records, std::vector<std:
     return true;
 }
 
+bool DigestRegionRecords(const std::filesystem::path& path,
+                         const std::vector<RegionRecord>& records,
+                         MemberDigest& out,
+                         std::string& error);
+
 bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
@@ -2469,10 +2553,17 @@ bool WriteRegionFile(const std::filesystem::path& path,
         bytes.append(record.compressed_payload);
     }
 
+    WrittenRegionDigest written;
+    std::string admission_error;
+    const auto root = path.parent_path().parent_path().parent_path();
+    const bool admitted = SaveTransaction::active_for(root) &&
+                          DigestRegionRecords(path, records, written.digest, admission_error);
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
     ReclaimAbandonedStaging(staging);
-    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
+    written.observation_revision = snapshot_observation_revision();
+    if (!WriteDurableRegionTemp(
+            staging, bytes, temp_path, errors, nullptr, nullptr, &written.version)) {
         return false;
     }
 
@@ -2486,7 +2577,7 @@ bool WriteRegionFile(const std::filesystem::path& path,
         return false;
     }
 
-    if (!ReplaceMember(temp_path, path, errors)) {
+    if (!ReplaceMember(temp_path, path, errors, nullptr, nullptr, admitted ? &written : nullptr)) {
         RemoveTemporaryFile(temp_path);
         return false;
     }
@@ -2859,6 +2950,8 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
            stem == "r." + std::to_string(rx) + "." + std::to_string(rz);
 }
 
+bool FileBytesEqual(const std::filesystem::path& path, const std::string& bytes);
+
 bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                         std::vector<std::string>* errors) {
     const detail::RegionFileWriteGuard transaction(manifest_path);
@@ -2874,12 +2967,17 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
         AddError(errors, "world manifest exceeds 2 MiB compatibility limit");
         return false;
     }
+    if (active)
+        return WorldSaveService::write_member_bytes(
+            save_dir, "chunks/region/world-manifest.json", bytes, errors);
     std::filesystem::path temp;
     const auto staging = WorldSaveService::region_staging_path(manifest_path);
     ReclaimAbandonedStaging(staging);
-    if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
+    // An identical manifest is already durable, so it stays in place.
+    const bool unchanged = FileBytesEqual(manifest_path, bytes);
+    if (!unchanged && !WriteDurableRegionTemp(staging, bytes, temp, errors))
         return false;
-    if (!ReplaceMember(temp, manifest_path, errors)) {
+    if (!unchanged && !ReplaceMember(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
         return false;
     }
@@ -3131,6 +3229,70 @@ MemberDigest RegionLod0Fingerprint(const std::filesystem::path& path,
                                    const std::vector<RegionRecord>& records) {
     static RegionFingerprints fingerprints;
     return fingerprints.fingerprint(path, records);
+}
+
+bool DigestRegionRecords(const std::filesystem::path& path,
+                         const std::vector<RegionRecord>& records,
+                         MemberDigest& out,
+                         std::string& error) {
+    int rx = 0, rz = 0;
+    if (!ParseRegionFileName(path, rx, rz)) {
+        error = "unrecognised region file name";
+        return false;
+    }
+    std::vector<std::string> diagnostics;
+    const auto first_error = [&diagnostics](const char* fallback) {
+        return diagnostics.empty() ? std::string(fallback) : diagnostics.front();
+    };
+    for (const RegionRecord& record : records) {
+        if (record.lod_level == 0) {
+            ChunkRecordFacts facts;
+            if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr)) {
+                error = first_error("corrupt chunk record");
+                return false;
+            }
+            if (!facts.lattice_ok) {
+                error = "corrupt world chunk SDF lattice";
+                return false;
+            }
+            int chunk_rx = 0;
+            int chunk_rz = 0;
+            WorldSaveService::region_coords_for_chunk(facts.coords, chunk_rx, chunk_rz);
+            if (chunk_rx != rx || chunk_rz != rz) {
+                error = "corrupt chunk region identity";
+                return false;
+            }
+        } else {
+            const auto tier = static_cast<World::FarLodTier>(record.lod_level);
+            if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz)) {
+                error = "corrupt far-LOD region identity";
+                return false;
+            }
+            if (!AdmitFarLodRecord(record, rx, rz, &diagnostics)) {
+                error = first_error("corrupt far-LOD record");
+                return false;
+            }
+        }
+    }
+    out = RegionLod0Fingerprint(path, records);
+    return true;
+}
+
+bool FileBytesEqual(const std::filesystem::path& path, const std::string& bytes) {
+    const SavedInputFile input(path);
+    SavedInputFile::Version before{}, after{};
+    std::uint64_t length = 0;
+    if (!input.version(before) || !input.length(length) || length != bytes.size())
+        return false;
+    std::array<char, 65536> buffer{};
+    for (std::size_t offset = 0; offset < bytes.size();) {
+        const auto count = std::min(buffer.size(), bytes.size() - offset);
+        if (!input.read_exact(buffer.data(), count) ||
+            std::memcmp(buffer.data(), bytes.data() + offset, count) != 0)
+            return false;
+        offset += count;
+    }
+    return input.at_end() && input.version(after) && before == after;
 }
 
 // Joins the active transaction for save_dir, else (indexed directory or pending journal) runs an
@@ -3626,8 +3788,6 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
                 return false;
         }
     }
-    if (!transaction->protect({"chunks/region/world-manifest.json"}, errors))
-        return false;
     const nlohmann::json manifest = {{"schema", kIndexedWorldManifestSchema},
                                      {"container", "LMR1"},
                                      {"container_version", kRegionVersion}};
@@ -3648,7 +3808,8 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
                 existing == bytes)
                 return true;
         }
-        return write_file_durably(destination, bytes, errors, artifacts);
+        return transaction->protect({"chunks/region/world-manifest.json"}, errors) &&
+               write_file_durably(destination, bytes, errors, artifacts);
     }
     std::filesystem::create_directories(destination.parent_path());
     return write_member_bytes(save_dir, "chunks/region/world-manifest.json", bytes, errors);
@@ -3722,6 +3883,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         artifacts->reserve_file(destination);
     else
         ReclaimAbandonedStaging(destination);
+    if (!artifacts && FileBytesEqual(destination, output_bytes))
+        return SaveTransaction::check_publication_target(destination, errors) &&
+               scope.commit(errors);
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, output_bytes, temp, errors, artifacts))
         return false;
@@ -3989,7 +4153,7 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     }
     if (!validate_save(save_dir, errors))
         return false;
-    TransactionScope scope(save_dir, {"chunks/region/plant-entities.json"}, errors);
+    TransactionScope scope(save_dir, {}, errors);
     if (!scope.ok())
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
@@ -3998,6 +4162,16 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
     ReclaimAbandonedStaging(staging);
+    if (!m_empty && FileBytesEqual(path, m_bytes)) {
+        if (auto* active = SaveTransaction::active_for(save_dir);
+            active && active->member_is_protected("chunks/region/plant-entities.json") &&
+            !SaveTransaction::check_publication_target(path, errors))
+            return false;
+        return scope.commit(errors);
+    }
+    if (auto* active = SaveTransaction::active_for(save_dir);
+        active && !active->protect({"chunks/region/plant-entities.json"}, errors))
+        return false;
     std::error_code ec;
     if (m_empty) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
@@ -4737,6 +4911,13 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             record_index[{raw_records[i].lod_level, raw_records[i].id}] = i;
         }
 
+        bool changed = raw_records.empty() ||
+                       !std::is_sorted(raw_records.begin(),
+                                       raw_records.end(),
+                                       [](const RegionRecord& lhs, const RegionRecord& rhs) {
+                                           return std::pair{lhs.lod_level, lhs.id} <
+                                                  std::pair{rhs.lod_level, rhs.id};
+                                       });
         for (const ContainerRecord& record : records) {
             RegionRecord raw;
             raw.id = record.id;
@@ -4747,8 +4928,11 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             }
             const auto existing = record_index.find({raw.lod_level, raw.id});
             if (existing != record_index.end()) {
+                changed = changed ||
+                          ChunkRecordKeyOf(raw_records[existing->second]) != ChunkRecordKeyOf(raw);
                 raw_records[existing->second] = std::move(raw);
             } else {
+                changed = true;
                 record_index[{raw.lod_level, raw.id}] = raw_records.size();
                 raw_records.push_back(std::move(raw));
             }
@@ -4756,6 +4940,10 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
 
         if (!AdmitRegionWrite(raw_records, errors))
             return false;
+        if (!changed) {
+            ReclaimAbandonedStaging(region_staging_path(region_file));
+            return !scope || scope->commit(errors);
+        }
         if (!parent.empty())
             std::filesystem::create_directories(parent);
         return WriteRegionFile(region_file, raw_records, errors) &&
@@ -5277,38 +5465,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 error = first_error("unreadable region file");
                 return false;
             }
-            for (const RegionRecord& record : records) {
-                if (record.lod_level == 0) {
-                    ChunkRecordFacts facts;
-                    if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr)) {
-                        error = first_error("corrupt chunk record");
-                        return false;
-                    }
-                    if (!facts.lattice_ok) {
-                        error = "corrupt world chunk SDF lattice";
-                        return false;
-                    }
-                    int chunk_rx = 0;
-                    int chunk_rz = 0;
-                    region_coords_for_chunk(facts.coords, chunk_rx, chunk_rz);
-                    if (chunk_rx != rx || chunk_rz != rz) {
-                        error = "corrupt chunk region identity";
-                        return false;
-                    }
-                } else {
-                    const auto tier = static_cast<World::FarLodTier>(record.lod_level);
-                    if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz)) {
-                        error = "corrupt far-LOD region identity";
-                        return false;
-                    }
-                    if (!AdmitFarLodRecord(record, rx, rz, &diagnostics)) {
-                        error = first_error("corrupt far-LOD record");
-                        return false;
-                    }
-                }
-            }
-            out = RegionLod0Fingerprint(path, records);
-            return true;
+            return DigestRegionRecords(path, records, out, error);
         }
 
         std::uint64_t maximum = SavedInputLimits::kManifestBytes;
@@ -5439,13 +5596,20 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
-    if (SaveTransaction::active_for(save_dir) &&
+    if (auto* transaction = SaveTransaction::active_for(save_dir);
+        transaction && transaction->member_is_protected(relative) &&
         !SaveTransaction::check_publication_target(save_dir / relative, errors))
         return false;
-    TransactionScope scope(save_dir, {relative}, errors);
+    TransactionScope scope(save_dir, {}, errors);
     if (!scope.ok())
         return false;
     const std::filesystem::path destination = save_dir / relative;
+    ReclaimAbandonedStaging(scope.engaged() ? save_dir / destination.filename() : destination);
+    if (FileBytesEqual(destination, bytes))
+        return scope.commit(errors);
+    if (auto* transaction = SaveTransaction::active_for(save_dir);
+        transaction && !transaction->protect({relative}, errors))
+        return false;
     std::error_code ec;
     std::filesystem::create_directories(destination.parent_path(), ec);
     // Before registration, staging must be outside every strict save inventory.
@@ -6461,7 +6625,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
     if (!prepared->write_manifest)
         return true;
     try {
-        std::vector<std::string> members{"chunks/region/world-manifest.json"};
+        std::vector<std::string> members;
         for (const auto& [path, records] : prepared->regions) {
             (void)records;
             members.push_back(
@@ -6471,6 +6635,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         if (!scope.ok())
             return false;
         std::filesystem::create_directories(region_directory(prepared->save_dir));
+        const AncestorFlushBatch directory_flushes(prepared->save_dir);
         for (const auto& path : prepared->unchanged_regions)
             ReclaimAbandonedStaging(region_staging_path(path));
         for (auto& [path, records] : prepared->regions) {

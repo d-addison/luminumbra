@@ -8,7 +8,9 @@
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -222,12 +224,15 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
     return state;
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
+nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_arrays = false) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
     // Snapshot callers retain the complete canonical representation.
-    const auto array_field = [sim_only](const char* field, const auto& build) -> nlohmann::json {
+    const auto array_field = [sim_only, omit_arrays](const char* field,
+                                                     const auto& build) -> nlohmann::json {
+        if (omit_arrays)
+            return nlohmann::json::array();
         if (sim_only) {
             for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
                 if (std::string_view(field) == entry.field &&
@@ -244,11 +249,13 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
         {"state_value", static_cast<int>(state)},
-        {"sdf_data", chunk.sdf_data},
-        {"heightmap_data", chunk.heightmap_data},
+        {"sdf_data", array_field("sdf_data", [&]() -> nlohmann::json { return chunk.sdf_data; })},
+        {"heightmap_data",
+         array_field("heightmap_data", [&]() -> nlohmann::json { return chunk.heightmap_data; })},
         // per-voxel structure material channel. Empty for non-structure
         // chunks => serializes as [] => byte-identical for structures-off worlds.
-        {"material_data", chunk.material_data},
+        {"material_data",
+         array_field("material_data", [&]() -> nlohmann::json { return chunk.material_data; })},
         {"mesh_vertices",
          array_field("mesh_vertices",
                      [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.mesh_vertices); })},
@@ -295,13 +302,16 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         // the AUTHORITATIVE fixed-point water sim state (mm). water_level_data/flow are now
         // render-only mirrors; these are what the sim continues from on load (no re-seed from
         // worldgen).
-        {"water_depth_mm", chunk.water_depth_mm},
-        {"water_bed_mm", chunk.water_bed_mm},
+        {"water_depth_mm",
+         array_field("water_depth_mm", [&]() -> nlohmann::json { return chunk.water_depth_mm; })},
+        {"water_bed_mm",
+         array_field("water_bed_mm", [&]() -> nlohmann::json { return chunk.water_bed_mm; })},
         // / (authoritative-state change): water_edge_flux is the solver's flow MOMENTUM —
         // evolution-relevant sim truth. Dropping it on load made the heavy oracle's
         // resim leg diverge (the loaded session restarted from zero momentum while the
         // original carried its flux), so it is persisted + hashed like depth/bed.
-        {"water_edge_flux", chunk.water_edge_flux},
+        {"water_edge_flux",
+         array_field("water_edge_flux", [&]() -> nlohmann::json { return chunk.water_edge_flux; })},
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution",
@@ -846,28 +856,190 @@ std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
     return bytes;
 }
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
-    auto chunks = state.snapshot_chunks();
-    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
-        if (!lhs || !rhs) {
-            return static_cast<bool>(rhs);
-        }
-        return lhs->get_id() < rhs->get_id();
-    });
+namespace {
 
-    nlohmann::json chunk_array = nlohmann::json::array();
-    for (const auto& chunk : chunks) {
-        if (chunk) {
-            chunk_array.push_back(ChunkToJson(*chunk));
+// Stream large arrays with the canonical JSON serializer's number formatting.
+// The small object supplies the field names and order; no mesh/SDF JSON tree is
+// allocated or copied just to immediately turn it back into text.
+class SnapshotJsonWriter {
+public:
+    explicit SnapshotJsonWriter(std::string& bytes)
+        : m_bytes(bytes)
+        , m_serializer(nlohmann::detail::output_adapter<char>(bytes), ' ') {}
+
+    void value(const nlohmann::json& item, unsigned indent) {
+        m_serializer.dump(item, true, false, 4, indent);
+    }
+
+    template<typename T>
+    void array(const std::vector<T>& items, unsigned indent) {
+        m_bytes += '[';
+        bool first = true;
+        for (const auto& item : items) {
+            m_bytes += first ? "\n" : ",\n";
+            first = false;
+            m_bytes.append(indent + 4u, ' ');
+            element(item, indent + 4u);
+        }
+        if (!first) {
+            m_bytes += '\n';
+            m_bytes.append(indent, ' ');
+        }
+        m_bytes += ']';
+    }
+
+private:
+    template<typename T>
+    void element(const T& item, unsigned indent) {
+        value(item, indent);
+    }
+
+    void element(float item, unsigned indent) {
+        // Mesh coordinates, normals and empty grid cells repeat heavily. Reuse
+        // only the exact float bits, including signed zero and non-finite values.
+        const auto bits = std::bit_cast<std::uint32_t>(item);
+        const auto slot = ((bits ^ (bits >> 16u)) * 2654435761u) >> 22u;
+        auto& cached = m_numbers[slot];
+        if (cached.size != 0 && cached.bits == bits) {
+            m_bytes.append(cached.bytes.data(), cached.size);
+            return;
+        }
+        const auto start = m_bytes.size();
+        value(item, indent);
+        const auto size = m_bytes.size() - start;
+        if (size <= cached.bytes.size()) {
+            cached.bits = bits;
+            cached.size = size;
+            std::copy_n(m_bytes.data() + start, size, cached.bytes.data());
         }
     }
 
-    nlohmann::json snapshot = {{"schema", kSnapshotSchema},
-                               {"order_contract", kOrderContract},
-                               {"chunk_count", chunk_array.size()},
-                               {"persisted_fields", PersistedFields()},
-                               {"chunks", std::move(chunk_array)}};
-    return StableDump(snapshot);
+    template<typename T>
+    void field(const char* name, const T& item, unsigned indent, bool first) {
+        m_bytes += first ? "\n" : ",\n";
+        m_bytes.append(indent, ' ');
+        m_bytes += '"';
+        m_bytes += name;
+        m_bytes += "\": ";
+        element(item, indent);
+    }
+
+    void vector(const Vec3& item, unsigned indent) {
+        m_bytes += '{';
+        field("x", item.x, indent + 4u, true);
+        field("y", item.y, indent + 4u, false);
+        field("z", item.z, indent + 4u, false);
+        close_object(indent);
+    }
+
+    void element(const Vec2& item, unsigned indent) {
+        m_bytes += '{';
+        field("x", item.x, indent + 4u, true);
+        field("y", item.y, indent + 4u, false);
+        close_object(indent);
+    }
+
+    void element(const VoxelVertex& item, unsigned indent) {
+        m_bytes += '{';
+        field("material_id", item.material_id, indent + 4u, true);
+        m_bytes += ",\n";
+        m_bytes.append(indent + 4u, ' ');
+        m_bytes += "\"normal\": ";
+        vector(item.normal, indent + 4u);
+        m_bytes += ",\n";
+        m_bytes.append(indent + 4u, ' ');
+        m_bytes += "\"position\": ";
+        vector(item.position, indent + 4u);
+        close_object(indent);
+    }
+
+    void close_object(unsigned indent) {
+        m_bytes += '\n';
+        m_bytes.append(indent, ' ');
+        m_bytes += '}';
+    }
+
+    void element(const std::shared_ptr<Chunk>& chunk, unsigned indent) {
+        const auto object = ChunkToJson(*chunk, false, true);
+        m_bytes += '{';
+        bool first = true;
+        for (const auto& [key, item] : object.items()) {
+            m_bytes += first ? "\n" : ",\n";
+            first = false;
+            m_bytes.append(indent + 4u, ' ');
+            value(key, 0);
+            m_bytes += ": ";
+            if (key == "sdf_data")
+                array(chunk->sdf_data, indent + 4u);
+            else if (key == "heightmap_data")
+                array(chunk->heightmap_data, indent + 4u);
+            else if (key == "material_data")
+                array(chunk->material_data, indent + 4u);
+            else if (key == "mesh_vertices")
+                array(chunk->mesh_vertices, indent + 4u);
+            else if (key == "mesh_indices")
+                array(chunk->mesh_indices, indent + 4u);
+            else if (key == "water_mesh_vertices")
+                array(chunk->water_mesh_vertices, indent + 4u);
+            else if (key == "water_mesh_indices")
+                array(chunk->water_mesh_indices, indent + 4u);
+            else if (key == "pending_mesh_vertices")
+                array(chunk->pending_mesh_vertices, indent + 4u);
+            else if (key == "pending_mesh_indices")
+                array(chunk->pending_mesh_indices, indent + 4u);
+            else if (key == "pending_water_mesh_vertices")
+                array(chunk->pending_water_mesh_vertices, indent + 4u);
+            else if (key == "pending_water_mesh_indices")
+                array(chunk->pending_water_mesh_indices, indent + 4u);
+            else if (key == "water_level_data")
+                array(chunk->water_level_data, indent + 4u);
+            else if (key == "water_flow_data")
+                array(chunk->water_flow_data, indent + 4u);
+            else if (key == "water_sim_terrain_height")
+                array(chunk->water_sim_terrain_height, indent + 4u);
+            else if (key == "water_depth_mm")
+                array(chunk->water_depth_mm, indent + 4u);
+            else if (key == "water_bed_mm")
+                array(chunk->water_bed_mm, indent + 4u);
+            else if (key == "water_edge_flux")
+                array(chunk->water_edge_flux, indent + 4u);
+            else
+                value(item, indent + 4u);
+        }
+        close_object(indent);
+    }
+
+    struct Number {
+        std::uint32_t bits = 0;
+        std::size_t size = 0;
+        std::array<char, 32> bytes{};
+    };
+    std::string& m_bytes;
+    nlohmann::detail::serializer<nlohmann::json> m_serializer;
+    std::array<Number, 1024> m_numbers{};
+};
+
+} // namespace
+
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
+    auto chunks = state.snapshot_chunks();
+    std::erase(chunks, nullptr);
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    std::string bytes = "{\n    \"chunk_count\": ";
+    SnapshotJsonWriter writer(bytes);
+    writer.value(chunks.size(), 4);
+    bytes += ",\n    \"chunks\": ";
+    writer.array(chunks, 4);
+    bytes += ",\n    \"order_contract\": ";
+    writer.value(kOrderContract, 4);
+    bytes += ",\n    \"persisted_fields\": ";
+    writer.value(PersistedFields(), 4);
+    bytes += ",\n    \"schema\": ";
+    writer.value(kSnapshotSchema, 4);
+    bytes += "\n}\n";
+    return bytes;
 }
 
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
