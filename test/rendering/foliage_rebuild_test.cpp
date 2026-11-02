@@ -1993,7 +1993,7 @@ protected:
         context.lit_scene = Luminumbra::Rendering::FboHandle{target.framebuffer()};
         const Luminumbra::Rendering::Camera camera(kCamera);
         const auto chunks = Chunks(1);
-        Rebuild(pass, chunks, 1);
+        RebuildAttributed(pass, chunks, 1);
         const auto original = Records(pass, gpu);
         ASSERT_FALSE(original.empty());
         const auto generation = pass.build_generation();
