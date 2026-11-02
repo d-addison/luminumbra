@@ -72,7 +72,7 @@ struct FoliageRebuild {
     double upload_ms = 0;
     double palette_scratch_ms = 0;
     double dispatch_ms = 0;
-    // Inclusive of CPU surface misses and mapped copies; other stages are disjoint.
+    // CPU fallback housekeeping, excluding surface builds, repacking and uploads.
     double cpu_fallback_ms = 0;
     std::uint64_t rebuild_calls = 0;
     std::uint32_t reasons = 0;
@@ -96,6 +96,11 @@ struct FoliageRebuild {
     bool backlog = false;
     FoliagePath path = FoliagePath::NotCalled;
     FallbackReason fallback = FallbackReason::None;
+    // Stage times exclude child stages and nested shader-first-use phases.
+    double sum() const;
+    double other(double total_ms) const {
+        return total_ms - sum();
+    }
 };
 
 struct RenderUploads {
@@ -164,6 +169,26 @@ private:
     double& m_ms;
     std::chrono::steady_clock::time_point m_start{};
     bool m_running;
+};
+
+// Uses the same opt-in clock as StageTimer. Completed child stages and phases
+// are removed on stop, including early returns; no global timer stack is needed.
+class FoliageStageTimer {
+public:
+    FoliageStageTimer(const FoliageRebuild& rebuild, double& milliseconds, bool enabled);
+    ~FoliageStageTimer();
+    void stop();
+    FoliageStageTimer(const FoliageStageTimer&) = delete;
+    FoliageStageTimer& operator=(const FoliageStageTimer&) = delete;
+
+private:
+    const FoliageRebuild& m_rebuild;
+    double& m_ms;
+    bool m_running;
+    double m_stages_before;
+    double m_phases_before;
+    double m_elapsed = 0;
+    StageTimer m_timer;
 };
 
 // Remove nested foliage rebuild time from a timed render/menu scope.
