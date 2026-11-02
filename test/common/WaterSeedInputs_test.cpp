@@ -795,7 +795,7 @@ TEST(WaterSeedInputs, ExternalSourcesAndDisplacementsBoundQuantizationAndMirrors
                 const auto entity = registry.create();
                 registry.emplace<Components::TransformComponent>(entity).position =
                     base + Vec3(2 * x + 1, 0, 2 * z + 1);
-                registry.emplace<Components::WaterSourceComponent>(entity).flow_rate = rate;
+                registry.emplace<Components::WaterFlowSourceComponent>(entity).flow_rate = rate;
             }
         }
         chunk.water_depth_mm.assign(cells, kMax - 1);
@@ -840,7 +840,7 @@ TEST(WaterSeedInputs, NegativeSavedDepthSourcesIgnoreEntityInsertionOrder) {
                     registry.emplace<Components::TransformComponent>(entity).position =
                         base + Vec3(2 * x + 1, 0, 2 * z + 1);
                     const int millimetres = order == 0 ? source + 1 : 2 - source;
-                    registry.emplace<Components::WaterSourceComponent>(entity).flow_rate =
+                    registry.emplace<Components::WaterFlowSourceComponent>(entity).flow_rate =
                         static_cast<float>(millimetres) * 4.0f / (SECONDS_PER_TICK * 1000.0f);
                 }
             }
@@ -891,10 +891,12 @@ TEST(WaterSeedInputs, SeedAndLegacyQuantizationBoundExtremeSurfaces) {
         ASSERT_TRUE(fixture.water().ResizeSimulationGrid(chunk, Systems::WaterDetailLevel::Medium));
         for (const auto depth : chunk.water_depth_mm) {
             EXPECT_GE(depth, 0);
-            if (std::isfinite(height) && height > 2147484.0f)
+            if (std::isfinite(height) && height > 2147484.0f) {
                 EXPECT_EQ(depth, kMax);
-            if (height < -2147484.0f || std::isnan(height))
+            }
+            if (height < -2147484.0f || std::isnan(height)) {
                 EXPECT_EQ(depth, 0);
+            }
         }
     }
 }
@@ -930,8 +932,9 @@ TEST(WaterSeedInputs, MaximumWeatherRainSaturatesAtTheDepthLimit) {
         for (const auto depth : chunk.water_depth_mm)
             EXPECT_GE(depth, initial);
         EXPECT_LE(fixture.water().dbg_last_source_mm(), 4);
-        if (initial == kMax - 1)
+        if (initial == kMax - 1) {
             EXPECT_GE(fixture.water().dbg_last_source_mm(), 1);
+        }
     }
 }
 
@@ -1235,7 +1238,7 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
                     sources.emplace<Components::TransformComponent>(entity).position =
                         Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
                         Vec3(8.0f, 0.0f, 8.0f);
-                    sources.emplace<Components::WaterSourceComponent>(entity).flow_rate = 1.0f;
+                    sources.emplace<Components::WaterFlowSourceComponent>(entity).flow_rate = 1.0f;
                     EXPECT_FALSE(fixture.water().ResizeSimulationGrid(
                         *chunk, static_cast<Systems::WaterDetailLevel>(target)));
                 }
@@ -1323,8 +1326,9 @@ TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) 
         EXPECT_EQ(fixture.water().dbg_seam_wet_pairs(), 0);
         for (const auto& [id, chunk] : fixture.chunks()) {
             (void)id;
-            if (chunk.get() != &malformed)
+            if (chunk.get() != &malformed) {
                 EXPECT_TRUE(chunk->is_water_sleeping.load());
+            }
         }
     }
 }
@@ -1415,9 +1419,10 @@ TEST(WaterSeedInputs, SourceReadinessRequiresTheSameArraysAsInjection) {
                 chunk.water_sim_terrain_height.resize(length);
             const bool ready = field < 2 ? length == 64u : length >= 64u;
             EXPECT_EQ(fixture.world().debug_water_grid_at(position.x, position.z), ready);
-            if (ready)
+            if (ready) {
                 EXPECT_FLOAT_EQ(fixture.world().live_water_surface_at(position.x, position.z),
                                 expected_surface);
+            }
         }
     }
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {

@@ -5,9 +5,10 @@ namespace Luminumbra::Components {
 
 /**
  * @brief A tag component attached to entities that generate water (e.g., a spring).
+ * Distinct from irrigation WaterSourceComponent (u16 moisture output).
  * The WaterSystem will use this entity's position as a source point.
  */
-struct WaterSourceComponent {
+struct WaterFlowSourceComponent {
     /**
      * @brief The volume of water (in cubic meters) to add to the simulation per second.
      */
