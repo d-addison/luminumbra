@@ -29,6 +29,7 @@
 
 #include <cmath>
 #include <memory>
+#include <unordered_map>
 
 namespace {
 
@@ -61,7 +62,8 @@ std::shared_ptr<Chunk> MakeRampChunk(const IVec3& coords) {
     chunk->heightmap_data.resize(static_cast<std::size_t>(side) * static_cast<std::size_t>(side));
     for (int z = 0; z < side; ++z) {
         for (int x = 0; x < side; ++x) {
-            chunk->heightmap_data[static_cast<std::size_t>(z) * side + x] =
+            chunk->heightmap_data[static_cast<std::size_t>(z) * static_cast<std::size_t>(side) +
+                                  static_cast<std::size_t>(x)] =
                 4.0f + 0.5f * static_cast<float>(x);
         }
     }
@@ -93,6 +95,33 @@ TEST(SurfaceQuery, FlatFloorReportsUpwardNormal) {
     EXPECT_NEAR(result.surface_normal.y, 1.0f, 1e-3f);
     EXPECT_NEAR(result.surface_normal.z, 0.0f, 1e-3f);
 
+    physics.shutdown();
+}
+
+TEST(SurfaceQuery, AvatarFeetSettleAboveNewlyAdmittedFloor) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr float kFloorHeight = 256.0f;
+    for (const int column : {-5121, 0, 5120}) {
+        const IVec3 coords(column, 16, column);
+        const float centre = static_cast<float>(column * Luminumbra::CHUNK_SIZE_X) + 8.0f;
+        const glm::vec3 feet(centre, kFloorHeight + 0.25f, centre);
+        const auto avatar = physics.create_avatar_character(feet);
+        EXPECT_EQ(physics.get_avatar_position(avatar), feet);
+        auto floor = MakeFlatFloorChunk(coords, kFloorHeight);
+        physics.add_chunk_collision(*floor);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        physics.update_avatars(1.0f / 30.0f);
+        for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+            EXPECT_GT(physics.get_avatar_position(avatar).y, kFloorHeight - 0.25f);
+        }
+    }
+    for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+        EXPECT_NEAR(physics.get_avatar_position(avatar).y, kFloorHeight, 0.1f);
+        EXPECT_TRUE(physics.is_avatar_grounded(avatar));
+    }
     physics.shutdown();
 }
 
@@ -223,4 +252,56 @@ TEST(SurfaceQuery, TerrainMaterialMatchesSurfaceVertexMaterial) {
                     physics.get_material_audio_absorption(result.material_type));
 
     physics.shutdown();
+}
+
+TEST(SurfaceQuery, IncompleteHeightmapsNeverCreateCollision) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr std::size_t side = Luminumbra::CHUNK_SIZE_X + 1;
+    for (const auto count : {std::size_t{0}, std::size_t{1}, side * side - 1, side * side + 1}) {
+        auto chunk = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+        chunk->heightmap_data.resize(count, 8.0f);
+        physics.add_chunk_collision(*chunk);
+        EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    }
+    auto complete = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    physics.add_chunk_collision(*complete);
+    EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    physics.shutdown();
+}
+
+TEST(SurfaceQuery, RetainedCollisionsFollowChunkIdentityAndReleaseUnownedBodies) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    auto retained = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    auto removed = MakeFlatFloorChunk(IVec3(1, 0, 0), 8.0f);
+    auto released = MakeFlatFloorChunk(IVec3(2, 0, 0), 8.0f);
+    physics.add_chunk_collision(*retained);
+    physics.add_chunk_collision(*removed);
+    physics.add_chunk_collision(*released);
+    for (const float centre : {8.0f, 24.0f, 40.0f}) {
+        ASSERT_TRUE(physics.audio_raycast({centre, 12, 8}, {centre, 4, 8}).hit);
+    }
+    released.reset();
+    // Ownership is keyed by chunk identity, independent of the source object's lifetime.
+    const auto replacement = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    const auto unprepared = MakeFlatFloorChunk(IVec3(3, 0, 0), 8.0f);
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> owners{
+        {replacement->get_id(), replacement}, {unprepared->get_id(), unprepared}};
+    retained.reset();
+    physics.retain_chunk_collisions(owners);
+    physics.retain_chunk_collisions(owners);
+    EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    for (const float centre : {24.0f, 40.0f, 56.0f}) {
+        EXPECT_FALSE(physics.audio_raycast({centre, 12, 8}, {centre, 4, 8}).hit);
+    }
+    physics.add_chunk_collision(*removed);
+    EXPECT_TRUE(physics.audio_raycast({24, 12, 8}, {24, 4, 8}).hit);
+    physics.retain_chunk_collisions({});
+    EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    EXPECT_FALSE(physics.audio_raycast({24, 12, 8}, {24, 4, 8}).hit);
+    physics.shutdown();
+    physics.retain_chunk_collisions({});
 }
