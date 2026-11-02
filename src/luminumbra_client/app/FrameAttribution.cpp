@@ -81,6 +81,29 @@ const char* fallback_name(FallbackReason reason) {
     }
     return "unknown";
 }
+double FoliageRebuild::sum() const {
+    return signature_ms + sort_ms + surface_ms + repack_ms + hash_ms + upload_ms +
+           palette_scratch_ms + dispatch_ms + cpu_fallback_ms;
+}
+FoliageStageTimer::FoliageStageTimer(const FoliageRebuild& rebuild,
+                                     double& milliseconds,
+                                     bool enabled)
+    : m_rebuild(rebuild)
+    , m_ms(milliseconds)
+    , m_running(enabled)
+    , m_stages_before(enabled ? rebuild.sum() : 0)
+    , m_phases_before(enabled ? phase_total_ms() : 0)
+    , m_timer(m_elapsed, enabled) {}
+FoliageStageTimer::~FoliageStageTimer() {
+    stop();
+}
+void FoliageStageTimer::stop() {
+    if (!m_running)
+        return;
+    m_timer.stop();
+    m_ms += m_elapsed - (m_rebuild.sum() - m_stages_before) - (phase_total_ms() - m_phases_before);
+    m_running = false;
+}
 namespace {
 FoliageFrame*& current_foliage_frame() {
     thread_local FoliageFrame* frame = nullptr;
@@ -270,7 +293,7 @@ void write_csv_header(std::ostream& out) {
            "water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms,"
            "water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns,"
            "water_stale_columns,worker_dispatched,worker_completed,worker_stale_rejected,"
-           "worker_queue_age_frames\n";
+           "worker_queue_age_frames,foliage_other_ms\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -318,7 +341,8 @@ bool write_csv_row(std::ostream& out,
         << water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns
         << ',' << water.stale_columns;
     out << ',' << foliage.worker_dispatched << ',' << foliage.worker_completed << ','
-        << foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << '\n';
+        << foliage.worker_stale_rejected << ',' << foliage.worker_queue_age_frames << ','
+        << foliage.other(buckets.foliage) << '\n';
 
     return out.good();
 }
