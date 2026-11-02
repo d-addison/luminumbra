@@ -44,7 +44,7 @@ class FramePacingSourceContract(unittest.TestCase):
             "constluminumbra::core::FramePacingOverridespacing_overrides{"
             ".benchmark_active=!g_app.capture.render_benchmark_path.empty(),"
             ".scenario_active=scenario_config.active(),"
-            ".profiling_active=g_app.capture.profile_fly_seconds>0.0};", source)
+            ".profiling_active=g_app.capture.profile_fly_seconds>0.0||frame_csv_enabled};", source)
         # Startup, loop-top cap selection and post-UI present must all resolve
         # live player choices with the same measurement override.
         self.assertEqual(source.count("luminumbra::core::ResolveFramePacing("), 3)
@@ -115,6 +115,13 @@ class FramePacingSourceContract(unittest.TestCase):
 
     def test_all_measurement_overrides_reach_all_production_calls(self):
         self.assert_measurement_wiring(self.main)
+
+    def test_csv_recording_requires_explicit_opt_in_and_uncaps_presentation(self):
+        flag = 'constboolframe_csv_enabled=HasCommandLineFlag(argc,argv,"--frame-attribution-csv");'
+        self.assertIn(flag, self.main)
+        self.assertLess(self.main.index(flag), self.main.index("FramePacingOverridespacing_overrides{"))
+        with self.assertRaises(AssertionError):
+            self.assert_measurement_wiring(self.main.replace("||frame_csv_enabled", "", 1))
 
     def test_wait_is_excluded_from_work_timers(self):
         self.assert_wait_precedes_timers(self.main)

@@ -35,6 +35,78 @@
 
 namespace FoliageTest {
 
+TEST_F(FoliageRebuildTest, CpuCountersDescribeInitialReusedAndCameraRebuilds) {
+    using namespace Luminumbra::TestSupport;
+    ScopedPass scoped;
+    auto& pass = scoped.pass();
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass, false));
+    pass.set_density_scale(1.0f);
+    const auto chunks = Chunks(2);
+    const auto rebuild = [&](const glm::vec3& camera) {
+        pass.rebuild_instances(
+            chunks,
+            +[](void*, float, float) {
+                return FoliagePass::SurfaceSample{10.0f, 0.0f, 1.0f, true};
+            },
+            nullptr,
+            camera);
+    };
+    // Each column emits all 4096 candidates: flat, wet ground saturates acceptance.
+    constexpr std::uint64_t expected_instances = 2 * 4096;
+    constexpr std::uint64_t expected_bytes =
+        expected_instances * sizeof(FoliagePass::InstanceRecord);
+    {
+        const Attribution::FoliageFrameScope frame(true);
+        rebuild(kCamera);
+        const auto& work = pass.rebuild_attribution();
+        EXPECT_EQ(work.rebuild_calls, 1u);
+        EXPECT_EQ(work.reasons, Attribution::Initial);
+        EXPECT_EQ(work.admitted_columns, 2u);
+        EXPECT_EQ(work.surface_misses, 2u);
+        EXPECT_EQ(work.surface_samples, expected_instances);
+        EXPECT_EQ(work.uploaded_bytes, expected_bytes);
+        EXPECT_EQ(work.uploads, 1u);
+        EXPECT_EQ(work.deferred_columns, 0u);
+        EXPECT_FALSE(work.backlog);
+        EXPECT_EQ(work.path, Attribution::FoliagePath::Cpu);
+        EXPECT_EQ(work.fallback, Attribution::FallbackReason::GpuDisabled);
+        EXPECT_EQ(pass.frame_instance_count(), expected_instances);
+        EXPECT_EQ(frame.snapshot().rebuild.uploaded_bytes, expected_bytes);
+        EXPECT_TRUE(CheckWork({{"surface_misses", work.surface_misses},
+                               {"surface_samples", work.surface_samples},
+                               {"uploaded_bytes", work.uploaded_bytes},
+                               {"uploads", work.uploads},
+                               {"copied_bytes", work.copied_bytes},
+                               {"hashed_bytes", work.hashed_bytes},
+                               {"deferred_columns", work.deferred_columns},
+                               {"backlog_growth", work.deferred_columns},
+                               {"drain_steps", 1}},
+                              "foliage"));
+    }
+    {
+        const Attribution::FoliageFrameScope frame(true);
+        rebuild(kCamera);
+        const auto& work = pass.rebuild_attribution();
+        ExpectReused(work, false);
+        EXPECT_EQ(work.admitted_columns, 0u);
+        EXPECT_EQ(work.uploads, 0u);
+        EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
+    }
+    {
+        const Attribution::FoliageFrameScope frame(true);
+        rebuild({kCamera.x + 16, kCamera.y, kCamera.z});
+        const auto& work = pass.rebuild_attribution();
+        EXPECT_EQ(work.reasons, Attribution::CameraCell);
+        EXPECT_EQ(work.admitted_columns, 2u);
+        EXPECT_EQ(work.surface_misses, 0u);
+        EXPECT_EQ(work.uploaded_bytes, expected_bytes);
+        EXPECT_EQ(work.uploads, 1u);
+        EXPECT_FALSE(work.backlog);
+        EXPECT_EQ(work.path, Attribution::FoliagePath::Cpu);
+        EXPECT_EQ(frame.snapshot().rebuild.reasons, Attribution::CameraCell);
+    }
+}
+
 // Count the public GL entry points, forwarding every call to the real context.
 class RebuildGlCalls {
 public:
