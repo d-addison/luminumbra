@@ -249,13 +249,13 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
         {"state_value", static_cast<int>(state)},
-        {"sdf_data", array_field("sdf_data", [&]() -> nlohmann::json { return chunk.sdf_data; })},
+        {"sdf_data", omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.sdf_data)},
         {"heightmap_data",
-         array_field("heightmap_data", [&]() -> nlohmann::json { return chunk.heightmap_data; })},
+         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.heightmap_data)},
         // per-voxel structure material channel. Empty for non-structure
         // chunks => serializes as [] => byte-identical for structures-off worlds.
         {"material_data",
-         array_field("material_data", [&]() -> nlohmann::json { return chunk.material_data; })},
+         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.material_data)},
         {"mesh_vertices",
          array_field("mesh_vertices",
                      [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.mesh_vertices); })},
@@ -303,15 +303,15 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
         // render-only mirrors; these are what the sim continues from on load (no re-seed from
         // worldgen).
         {"water_depth_mm",
-         array_field("water_depth_mm", [&]() -> nlohmann::json { return chunk.water_depth_mm; })},
+         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_depth_mm)},
         {"water_bed_mm",
-         array_field("water_bed_mm", [&]() -> nlohmann::json { return chunk.water_bed_mm; })},
+         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_bed_mm)},
         // / (authoritative-state change): water_edge_flux is the solver's flow MOMENTUM —
         // evolution-relevant sim truth. Dropping it on load made the heavy oracle's
         // resim leg diverge (the loaded session restarted from zero momentum while the
         // original carried its flux), so it is persisted + hashed like depth/bed.
         {"water_edge_flux",
-         array_field("water_edge_flux", [&]() -> nlohmann::json { return chunk.water_edge_flux; })},
+         omit_arrays ? nlohmann::json::array() : nlohmann::json(chunk.water_edge_flux)},
         {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
         {"water_mesh_generated", chunk.water_mesh_generated.load(std::memory_order_acquire)},
         {"current_water_resolution",
@@ -1020,6 +1020,16 @@ private:
 };
 
 } // namespace
+
+std::string SerializeChunkSnapshotJson(const Chunk& chunk) {
+    nlohmann::json chunks = nlohmann::json::array();
+    chunks.push_back(ChunkToJson(chunk));
+    return StableDump(nlohmann::json{{"schema", kSnapshotSchema},
+                                     {"order_contract", kOrderContract},
+                                     {"chunk_count", chunks.size()},
+                                     {"persisted_fields", PersistedFields()},
+                                     {"chunks", std::move(chunks)}});
+}
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();

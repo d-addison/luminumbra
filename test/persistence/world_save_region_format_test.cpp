@@ -2336,6 +2336,9 @@ TEST(WorldSaveRegionFormat, StreamingSnapshotArraysMatchCanonicalJsonBytes) {
     for (const auto& flow : chunk->water_flow_data)
         object["water_flow_data"].push_back({{"x", flow.x}, {"y", flow.y}});
     EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(state), expected.dump(4) + "\n");
+    EXPECT_EQ(P::SerializeChunkSnapshotJson(*chunk), expected.dump(4) + "\n");
+    EXPECT_EQ(P::SerializeChunkSnapshotJson(*chunk),
+              P::SerializeWorldStreamingStateSnapshotJson(state));
     state.clear();
     expected["chunks"] = nlohmann::json::array();
     expected["chunk_count"] = 0;

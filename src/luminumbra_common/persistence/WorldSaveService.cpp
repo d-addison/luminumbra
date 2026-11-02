@@ -2561,9 +2561,15 @@ bool WriteRegionFile(const std::filesystem::path& path,
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
     ReclaimAbandonedStaging(staging);
-    written.observation_revision = snapshot_observation_revision();
-    if (!WriteDurableRegionTemp(
-            staging, bytes, temp_path, errors, nullptr, nullptr, &written.version)) {
+    if (admitted)
+        written.observation_revision = snapshot_observation_revision();
+    if (!WriteDurableRegionTemp(staging,
+                                bytes,
+                                temp_path,
+                                errors,
+                                nullptr,
+                                nullptr,
+                                admitted ? &written.version : nullptr)) {
         return false;
     }
 
@@ -2584,8 +2590,10 @@ bool WriteRegionFile(const std::filesystem::path& path,
     return true;
 }
 
-// Current lod-0 records retain canonical in-memory chunk serialization.
-std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
+// Full snapshots retain the streaming formatter; incremental records use one dump.
+std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk, bool dirty_only) {
+    if (dirty_only)
+        return SerializeChunkSnapshotJson(*chunk);
     WorldStreamingState single;
     single.insert_chunk(chunk);
     return SerializeWorldStreamingStateSnapshotJson(single);
@@ -6580,7 +6588,7 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                         ChunkRecordKeyOf(records[existing->second]), inputs))
                     continue;
                 const bool water_authority = chunk->has_water_authority();
-                const std::string payload = SerializeSingleChunkSnapshot(chunk);
+                const std::string payload = SerializeSingleChunkSnapshot(chunk, dirty_only);
                 if (!CompressPayload(payload, record, errors)) {
                     return false;
                 }
