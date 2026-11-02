@@ -1,9 +1,11 @@
 """Independent stdlib computation of SystemConfig's canonical session identity."""
 
+from collections import Counter
 import copy
 import json
 import math
 from pathlib import Path
+import re
 import struct
 import unittest
 
@@ -17,8 +19,8 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, calendar=None):
-    result = bytearray(b"system-config:v4:")
+                    region_reduced_shift=1, authority_rules_revision=4, calendar=None):
+    result = bytearray(b"system-config:v3:" if authority_rules_revision == 3 else b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
             continue
@@ -50,13 +52,15 @@ def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                                           int(resolved) if ticks else resolved))
     result.extend(struct.pack("<BiQIB", int(finite_hydrology), rain_scale_mm,
                               region_work_limit, region_hold_ticks, region_reduced_shift))
-    # A session without a world/marker uses the legacy presentation calendar
-    # when active regions are disabled. Booted sessions supply their calendar.
-    if calendar is None:
-        active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
-        calendar = (162000, 8, 2, 3, 8) if active else (216000, 8, 1, 2, 8)
-    result.extend(b"calendar-epoch:v1:")
-    result.extend(struct.pack("<IIIII", *calendar))
+    if authority_rules_revision != 3:
+        result.extend(struct.pack("<I", authority_rules_revision))
+        # A session without a world/marker uses the legacy presentation calendar
+        # when active regions are disabled. Booted sessions supply their calendar.
+        if calendar is None:
+            active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
+            calendar = (162000, 8, 2, 3, 8) if active else (216000, 8, 1, 2, 8)
+        result.extend(b"calendar-epoch:v1:")
+        result.extend(struct.pack("<IIIII", *calendar))
     return bytes(result)
 
 
@@ -67,7 +71,88 @@ def identity(document, **session_options):
     return f"{value:016x}"
 
 
+def applied_setting_variants():
+    """Mirror the effective inputs, independently of the C++ digest literals."""
+    def binary32(value):
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+
+    for key in SCHEMA["keys"]:
+        if key["enum"] in {"SimHydrologyWeather", "SimWeatherEvents", "SimAetherState",
+                           "SimWaterHighRes", "SimActiveRegions"}:
+            yield key["json_name"], {key["section"]: {key["json_name"]: {"enabled": False}}}
+    for param in SCHEMA["params"]:
+        key = next(key for key in SCHEMA["keys"] if key["enum"] == param["owner"])
+        if key["section"] != "sim" and key["enum"] != "RenderCircadian":
+            continue
+        value = param["default"]
+        # The C++ fixture adds 1.0f to a binary32 default before JSON serialization.
+        value = ([binary32(binary32(value[0]) + 1), *value[1:]] if isinstance(value, list)
+                 else binary32(binary32(value) + 1))
+        yield param["json_name"], {
+            key["section"]: {key["json_name"]: {"params": {param["json_name"]: value}}}
+        }
+
+
 class SystemConfigIdentityTest(unittest.TestCase):
+    def test_cpp_frozen_setting_vectors_match_independent_encoding(self):
+        source = (ROOT / "test/common/SystemConfig_test.cpp").read_text(encoding="utf-8")
+        table = source.split("constexpr Vector vectors[]{", 1)[1].split("};", 1)[0]
+        rows = re.findall(r'\{"([^"]+)",\s*\{([^}]+)\}\}', table)
+        variants = list(applied_setting_variants())
+        self.assertEqual(len(rows), len(variants))
+        for (name, literals), (expected_name, config) in zip(rows, variants):
+            with self.subTest(setting=name):
+                self.assertEqual(name, expected_name)
+                expected = []
+                for regions in (False, True):
+                    document = copy.deepcopy(config)
+                    document.setdefault("sim", {}).setdefault("active_regions", {})[
+                        "enabled"] = regions
+                    expected.extend(identity(document, authority_rules_revision=revision)
+                                    for revision in (3, 4))
+                self.assertEqual(re.findall(r'"([0-9a-f]{16})"', literals), expected)
+
+    def test_cpp_frozen_session_vectors_match_independent_encoding(self):
+        source = (ROOT / "test/common/SystemConfig_test.cpp").read_text(encoding="utf-8")
+        table = source.split("constexpr std::array<const char*, 2> expected[]{", 1)[1].split("};", 1)[0]
+        expected = []
+        for regions in (False, True):
+            document = {"sim": {"active_regions": {"enabled": regions}}}
+            for options in ({"finite_hydrology": False}, {"rain_scale_mm": 26},
+                            {"rain_scale_mm": -(1 << 31)},
+                            {"region_work_limit": (1 << 64) - 2},
+                            {"region_hold_ticks": 31}, {"region_reduced_shift": 2}):
+                expected.extend(identity(document, authority_rules_revision=revision, **options)
+                                for revision in (3, 4))
+        self.assertEqual(re.findall(r'"([0-9a-f]{16})"', table), expected)
+
+    def test_literal_ctest_names_are_unique_in_each_registration_directory(self):
+        # Check each first-party registration directory separately: CTest names
+        # are directory-scoped. Variable-generated names are reviewed at their
+        # foreach source; this check covers explicit NAME registrations.
+        for relative in ("test/CMakeLists.txt", "tools/CMakeLists.txt",
+                         "tools/static_preview/CMakeLists.txt"):
+            with self.subTest(path=relative):
+                source = (ROOT / relative).read_text(encoding="utf-8")
+                names = re.findall(
+                    r'(?im)^\s*add_test\s*\(\s*NAME\s+"?([^\s"$()]+)"?\s', source)
+                self.assertTrue(names, "No literal CTest registrations found")
+                duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+                self.assertEqual(duplicates, [], f"Duplicate CTest names in {relative}")
+
+    def test_identity_ctest_retains_isolation_and_properties(self):
+        source = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        normalized = " ".join(source.split())
+        registration = (
+            'add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B '
+            '"${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py") '
+            'set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)'
+        )
+        self.assertIn(registration, normalized)
+        self.assertEqual(source.count("/test/tools/test_system_config_identity.py"), 1)
+        self.assertLess(normalized.index("find_package(Python3 COMPONENTS Interpreter REQUIRED)"),
+                        normalized.index(registration))
+
     def test_historical_workload_explicitly_covers_every_registered_flag(self):
         historical = json.loads(
             (ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8")
@@ -87,10 +172,67 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertEqual(canonical_bytes(historical), canonical_bytes(expected))
         self.assertNotEqual(identity(historical), identity(SHIPPED))
 
+    def test_frozen_historical_bytes_cover_both_region_profiles(self):
+        # Fixed pre-revision-field bytes; neither current encoder computes this oracle.
+        frozen = (
+            bytes.fromhex(
+                "73797374656d2d636f6e6669673a76333a00010000cdcc4c3d010102010300a69bc43b04000ad7a33d05000ad7233e06"
+                "000ad7a33c07000000003f08009a99993e0900cdcccc3d0a00cdcc4c3f0b000000003f0c00cdcc0c400d00cdcc4c3f0e"
+                "00000040410f000000404010009a99193f11003333b33f03011200000040401300cdcc4c3d14000ad7233c15000ad7a3"
+                "3c040116000ad7233d17000000003f18009a99993e050119009a99993e1a000000c03f1b00cdcc4c3d06011c035a0000"
+                "001d032c0100001e000000003f1f000000344220006666264021035a00000022009a99993f07012302000000000000f0"
+                "3f240200000000000020402502000000000000f03f080109010a010b010c00120126000000803f0119000000ffffffff"
+                "ffffffff1e00000001"
+            ),
+            bytes.fromhex(
+                "73797374656d2d636f6e6669673a76333a00010000cdcc4c3d010102010300a69bc43b04000ad7a33d05000ad7233e06"
+                "000ad7a33c07000000003f08009a99993e0900cdcccc3d0a00cdcc4c3f0b000000003f0c00cdcc0c400d00cdcc4c3f0e"
+                "00000040410f000000404010009a99193f11003333b33f03011200000040401300cdcc4c3d14000ad7233c15000ad7a3"
+                "3c040116000ad7233d17000000003f18009a99993e050119009a99993e1a000000c03f1b00cdcc4c3d06011c035a0000"
+                "001d032c0100001e000000003f1f000000344220006666264021035a00000022009a99993f07012302000000000000f0"
+                "3f240200000000000020402502000000000000f03f080109010a010b010c01120126000000803f0119000000ffffffff"
+                "ffffffff1e00000001"
+            ),
+        )
+        for regions, expected in zip((False, True), frozen):
+            document = copy.deepcopy(SHIPPED)
+            document["sim"]["active_regions"]["enabled"] = regions
+            self.assertEqual(canonical_bytes(document, authority_rules_revision=3), expected)
+            self.assertEqual(canonical_bytes(document), b"system-config:v4:" + expected[17:] + b"\x04\0\0\0" +
+                             b"calendar-epoch:v1:" + struct.pack("<IIIII", *(
+                                 (162000, 8, 2, 3, 8) if regions else (216000, 8, 1, 2, 8))))
+        source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
+        self.assertIn('legacy ? "system-config:v3:" : "system-config:v4:"', source)
+        self.assertRegex(source, r"if \(!legacy\)\s*\{\s*integer\(revision, 32\);")
+
     def test_exact_shipping_pin(self):
-        self.assertEqual(len(canonical_bytes(SHIPPED)), 335)
-        self.assertEqual(identity(SHIPPED), "49f694fd70645bcc")
+        self.assertEqual(len(canonical_bytes(SHIPPED)), 339)
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "60ab3c242d54ce89")
+        self.assertEqual(identity(SHIPPED), "2f2a9405252345a8")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
+
+    def test_authority_rules_revision_is_bound(self):
+        self.assertEqual(len(canonical_bytes(SHIPPED, authority_rules_revision=3)), 297)
+        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 4))
+        self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
+        self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
+        header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
+        self.assertIn("kAuthorityRulesRevision = 4;", header)
+        # The previously admitted shipping rules must fail compatibility.
+        self.assertNotEqual(identity(SHIPPED), "60ab3c242d54ce89")
+
+    def test_current_profile_pins_are_independently_encoded(self):
+        historical = json.loads((ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=4), "2f2a9405252345a8")
+        self.assertEqual(identity(historical, authority_rules_revision=3), '74f285c5fa387d66')
+        self.assertEqual(identity(historical, authority_rules_revision=4), "25078e8b112a6ebd")
+        self.assertEqual(canonical_bytes(SHIPPED, authority_rules_revision=3)[17:],
+                         canonical_bytes(SHIPPED, authority_rules_revision=4)[17:297])
+        source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
+        self.assertIn("return ComputeIdentityForRevision(kAuthorityRulesRevision);", source)
+        self.assertIn("return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);", source)
+        self.assertIn("integer(revision, 32);", source)
+        self.assertNotIn("water_scheduler_cursor", source)
 
     def test_every_applied_flag_and_parameter(self):
         baseline = identity(SHIPPED)

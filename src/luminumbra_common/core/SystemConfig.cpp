@@ -708,6 +708,14 @@ SimulationIdentityValues::SimulationIdentityValues() {
 }
 
 std::string SimulationIdentityValues::ComputeIdentity() const {
+    return ComputeIdentityForRevision(kAuthorityRulesRevision);
+}
+
+std::string SimulationIdentityValues::ComputeLegacyRevision3Identity() const {
+    return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);
+}
+
+std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t revision) const {
     static_assert(sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559);
     static_assert(sizeof(double) == sizeof(std::uint64_t) &&
                   std::numeric_limits<double>::is_iec559);
@@ -716,7 +724,11 @@ std::string SimulationIdentityValues::ComputeIdentity() const {
         hash ^= static_cast<std::uint64_t>(value);
         hash *= 1099511628211ull;
     };
-    for (const char ch : std::string("system-config:v4:"))
+    // Revision 3 predates the trailing authority revision field and the calendar
+    // epoch. Its complete byte projection, including the domain prefix, is a
+    // saved-data contract.
+    const bool legacy = revision == kLegacyAuthorityRulesRevision;
+    for (const char ch : std::string(legacy ? "system-config:v3:" : "system-config:v4:"))
         byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
     const auto integer = [&byte](std::uint64_t bits, unsigned width) {
         for (unsigned shift = 0; shift < width; shift += 8)
@@ -762,15 +774,18 @@ std::string SimulationIdentityValues::ComputeIdentity() const {
     integer(region_work_limit, 64);
     integer(region_hold_ticks, 32);
     byte(region_reduced_shift);
-    // Epoch v1: tick zero is midnight, day zero, midwinter, lunar phase zero.
-    // The epoch is fixed by WorldClock, rather than supplied by save metadata.
-    for (const char ch : std::string("calendar-epoch:v1:"))
-        byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
-    integer(day_length_ticks, 32);
-    integer(days_per_year, 32);
-    integer(daylight_numerator, 32);
-    integer(daylight_denominator, 32);
-    integer(lunar_cycle_days, 32);
+    if (!legacy) {
+        integer(revision, 32);
+        // Epoch v1: tick zero is midnight, day zero, midwinter, lunar phase zero.
+        // The epoch is fixed by WorldClock, rather than supplied by save metadata.
+        for (const char ch : std::string("calendar-epoch:v1:"))
+            byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
+        integer(day_length_ticks, 32);
+        integer(days_per_year, 32);
+        integer(daylight_numerator, 32);
+        integer(daylight_denominator, 32);
+        integer(lunar_cycle_days, 32);
+    }
     // Hex digits are emitted explicitly so even the result is independent of locale.
     constexpr char digits[] = "0123456789abcdef";
     std::string result(16, '0');

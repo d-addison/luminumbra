@@ -2262,10 +2262,11 @@ TEST_P(SavedWorldPresetTest, CandidateSchedulerRefusalsPreservePendingLiveState)
             EXPECT_FALSE(explicit_root
                              ? live.LoadWorldFrom(candidate.GetMetadata().worldId, Root().path())
                              : live.LoadWorld(candidate.GetMetadata().worldId));
-            if (GetParam() && !malformed)
+            if (GetParam() && !malformed) {
                 EXPECT_NE(live.GetWorldOpenError().find("scheduler differs"), std::string::npos);
-            else
+            } else {
                 EXPECT_FALSE(live.GetWorldOpenError().empty());
+            }
             retained.ExpectUnchanged(live);
             pending.ExpectUnchanged(live, *chunk);
             const auto residents = live.GetWorldSystem()->snapshot_streamed_chunks();
@@ -2390,13 +2391,14 @@ TEST_P(SavedWorldPresetTest, NonRegularPlantFilesRefuseAllLoadPathsBeforeAdoptio
     for (const int kind : {0, 1, 2, 3}) {
         SCOPED_TRACE(kind);
         ASSERT_TRUE(fs::remove(path));
-        if (kind == 0)
+        if (kind == 0) {
             ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
-        else
+        } else {
             fs::create_symlink(kind == 1   ? target
                                : kind == 2 ? fs::path("/dev/zero")
                                            : save / "absent-roster",
                                path);
+        }
         const int keeper = kind == 0 ? ::open(path.c_str(), O_RDONLY | O_NONBLOCK) : -1;
         struct CloseReader {
             int descriptor;
@@ -5320,7 +5322,8 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "49f694fd70645bcc");
+    EXPECT_EQ(baseline, "2f2a9405252345a8");
+    EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
         EXPECT_NE(identity, baseline);
