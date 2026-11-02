@@ -795,6 +795,75 @@ TEST(FarLodStoreTest, MalformedPristineAndAuthorityAreHardErrors) {
     EXPECT_FALSE(errors.empty());
 }
 
+TEST(FarLodStoreTest, AdmissionReusesExactRecordsAndRejectsChangedBytes) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    auto tile = BuildPristineFarLodTile(world, FarLodTier::F1, 6, -5, params_hash);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(
+                  tile, AuthoritativeSdfSnapshot(IVec3(192, 1, -160), 113u), &error),
+              FarLodSdfReduceResult::Inserted);
+    TempSaveDir save_dir("admitted_far_records");
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save_dir.path).save_tile(tile, &errors));
+    const auto path = WorldSaveService::region_file_path(save_dir.path, tile.rx, tile.rz);
+    const auto relative = std::filesystem::relative(path, save_dir.path).generic_string();
+    Luminumbra::Persistence::MemberDigest digest;
+    const auto before = FarLodStore::brick_validation_count_for_testing();
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error)) << error;
+    const auto admitted = FarLodStore::brick_validation_count_for_testing();
+    EXPECT_EQ(admitted, before + 1);
+    EXPECT_FALSE(digest.present); // Far-LOD validation does not create lod-0 membership.
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors));
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing(), admitted);
+
+    const auto original = ReadTestFileBytes(path);
+    const auto original_time = std::filesystem::last_write_time(path);
+    const auto replace = [&](const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        ASSERT_TRUE(output);
+        std::filesystem::last_write_time(path, original_time);
+    };
+    // Same path, length and timestamp; change only one record header byte.
+    ASSERT_GT(original.size(), 26u);
+    for (const std::size_t offset : {8u, 16u, 17u, 18u}) {
+        auto changed = original;
+        changed[offset] = static_cast<char>(static_cast<unsigned char>(changed[offset]) ^ 1u);
+        replace(changed);
+        error.clear();
+        EXPECT_FALSE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+        EXPECT_FALSE(error.empty());
+        errors.clear();
+        EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path, &errors));
+        EXPECT_FALSE(errors.empty());
+        replace(original);
+    }
+
+    // LZ4 ends with literals: the last byte is the last SDF material. Retain
+    // the file size, timestamp and record header while leaving its CRC stale.
+    auto changed_payload = original;
+    changed_payload.back() ^= 1;
+    replace(changed_payload);
+    error.clear();
+    EXPECT_FALSE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_NE(error.find("CRC mismatch"), std::string::npos) << error;
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("CRC mismatch"), std::string::npos) << errors.front();
+
+    replace(original);
+    errors.clear();
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors));
+    error.clear();
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_TRUE(errors.empty());
+}
+
 TEST(FarLodStoreTest, Fsd2AuthorityRejectsEveryMalformedStreamClass) {
     const TerrainGenParams params = FixtureParams();
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);

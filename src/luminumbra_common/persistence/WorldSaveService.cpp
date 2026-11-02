@@ -2574,6 +2574,66 @@ ChunkRecordKey ChunkRecordKeyOf(const RegionRecord& record) {
                           record.compressed_payload};
 }
 
+// Validation still reads the current file and checks region/index identity.
+// Only the pure decompression and tile checks are reused, after comparing every
+// header and compressed payload byte with a successfully admitted record.
+class AdmittedFarLodRecords {
+public:
+    bool contains(const RegionRecord& record, int rx, int rz) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_records.find(record.id);
+        return found != m_records.end() && found->second.rx == rx && found->second.rz == rz &&
+               ChunkRecordKeyOf(found->second.record) == ChunkRecordKeyOf(record);
+    }
+
+    void remember(const RegionRecord& record, int rx, int rz) {
+        const auto bytes = record.compressed_payload.size();
+        if (bytes > kMaxBytes)
+            return;
+        const std::lock_guard lock(m_mutex);
+        if (const auto previous = m_records.find(record.id); previous != m_records.end()) {
+            m_bytes -= previous->second.record.compressed_payload.size();
+            m_records.erase(previous);
+        }
+        while (!m_records.empty() &&
+               (m_records.size() >= kMaxRecords || bytes > kMaxBytes - m_bytes)) {
+            m_bytes -= m_records.begin()->second.record.compressed_payload.size();
+            m_records.erase(m_records.begin());
+        }
+        m_records.emplace(record.id, Entry{record, rx, rz});
+        m_bytes += bytes;
+    }
+
+private:
+    struct Entry {
+        RegionRecord record;
+        int rx;
+        int rz;
+    };
+    static constexpr std::size_t kMaxRecords = 1024;
+    static constexpr std::size_t kMaxBytes = std::size_t{64} * 1024 * 1024;
+    std::mutex m_mutex;
+    std::unordered_map<std::uint64_t, Entry> m_records;
+    std::size_t m_bytes = 0;
+};
+
+bool AdmitFarLodRecord(const RegionRecord& record,
+                       int rx,
+                       int rz,
+                       std::vector<std::string>* errors) {
+    static AdmittedFarLodRecords admitted;
+    if (admitted.contains(record, rx, rz))
+        return true;
+    const auto tier = static_cast<World::FarLodTier>(record.lod_level);
+    std::string payload;
+    World::FarLodTile tile;
+    if (!DecompressPayload(record, payload, errors) ||
+        !World::FarLodStore::decode_payload(payload, tier, rx, rz, record.flags, tile, errors))
+        return false;
+    admitted.remember(record, rx, rz);
+    return true;
+}
+
 struct PendingChunkAdmission {
     RegionRecord record;
     ChunkRecordFacts facts;
@@ -5241,11 +5301,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                         error = "corrupt far-LOD region identity";
                         return false;
                     }
-                    std::string payload;
-                    World::FarLodTile tile;
-                    if (!DecompressPayload(record, payload, &diagnostics) ||
-                        !World::FarLodStore::decode_payload(
-                            payload, tier, rx, rz, record.flags, tile, &diagnostics)) {
+                    if (!AdmitFarLodRecord(record, rx, rz, &diagnostics)) {
                         error = first_error("corrupt far-LOD record");
                         return false;
                     }
@@ -6156,11 +6212,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))
                         return reject("corrupt far-LOD region identity: " +
                                       Filesystem::GenericUtf8PathString(path));
-                    std::string payload;
-                    World::FarLodTile tile;
-                    if (!DecompressPayload(record, payload, &errors) ||
-                        !World::FarLodStore::decode_payload(
-                            payload, tier, rx, rz, record.flags, tile, &errors))
+                    if (!AdmitFarLodRecord(record, rx, rz, &errors))
                         return reject("");
                 }
             }

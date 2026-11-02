@@ -337,7 +337,7 @@ struct SurfaceBreakFeature {
 // Decode the feature (if any) authored in doline cell (cx, cz). Pure fn of seed +
 // cell coords. The same decode runs on CPU and GPU.
 SurfaceBreakFeature
-DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params) {
+CalculateSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params) {
     SurfaceBreakFeature f;
     SbSplitMix64 rng(SbCellSeed(seed, kSurfaceBreakSalt, cx, cz));
     const float accept = rng.next_unit();
@@ -366,6 +366,42 @@ DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params)
     f.shaft = rng.next_unit() < 0.25f; // a quarter are deep cenote shafts
     f.valid = true;
     return f;
+}
+
+SurfaceBreakFeature
+DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params) {
+    // Scalar density queries revisit the same 3x3 neighborhood at every height.
+    // Keep the pure decoder's complete input, including float bits, so reuse is
+    // independent of world lifetime, parameter changes and worker scheduling.
+    struct Key {
+        int seed = 0;
+        int x = 0;
+        int z = 0;
+        u32 density = 0;
+        u32 cell_size = 0;
+        u32 max_radius = 0;
+        bool operator==(const Key&) const = default;
+    };
+    struct Entry {
+        Key key;
+        SurfaceBreakFeature feature;
+        bool occupied = false;
+    };
+    static thread_local std::array<Entry, 64> entries{};
+    const Key key{seed,
+                  cx,
+                  cz,
+                  std::bit_cast<u32>(params.surface_break_density),
+                  std::bit_cast<u32>(params.feature_cell_size),
+                  std::bit_cast<u32>(params.max_feature_radius)};
+    const auto index = (static_cast<u32>(cx) & 7u) | ((static_cast<u32>(cz) & 7u) << 3u);
+    auto& entry = entries[index];
+    if (!entry.occupied || entry.key != key) {
+        entry.feature = CalculateSurfaceBreakCell(seed, cx, cz, params);
+        entry.key = key;
+        entry.occupied = true;
+    }
+    return entry.feature;
 }
 
 // Fixed per-call working sets: misses replace FIFO, never grow with vertex count.
