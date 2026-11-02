@@ -1029,9 +1029,8 @@ void WaterSystem::update(entt::registry& registry,
     if (WaterAttribution::CurrentFrame())
         dbg_split(m_dbg_water.selection);
 
-    auto source_view =
-        registry
-            .view<const Components::TransformComponent, const Components::WaterSourceComponent>();
+    auto source_view = registry.view<const Components::TransformComponent,
+                                     const Components::FlowingWaterSourceComponent>();
 
     initialize_water_chunks(to_init);
     if (WaterAttribution::CurrentFrame()) {
@@ -1044,7 +1043,7 @@ void WaterSystem::update(entt::registry& registry,
 
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
-        auto& source = source_view.get<const Components::WaterSourceComponent>(entity);
+        auto& source = source_view.get<const Components::FlowingWaterSourceComponent>(entity);
         ++m_debug_sources_seen; // water-source diagnostics
         IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(transform.position);
         auto it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
