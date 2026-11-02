@@ -26,6 +26,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -573,6 +574,85 @@ TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
     EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Error);
     EXPECT_FALSE(error.empty());
     EXPECT_EQ(ComputeFarLodTileHash(tile), before);
+}
+
+TEST(FarLodStoreTest, ValidatedTileReductionMatchesPerCallValidationAndValidatesOnce) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile seeded = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot seed = AuthoritativeSdfSnapshot(IVec3(0, 0, 0), 1u);
+    FillFlatSdf(seed);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(seeded, seed, &error), FarLodSdfReduceResult::Inserted)
+        << error;
+
+    std::vector<FarLodSdfSnapshot> overlays;
+    overlays.reserve(8);
+    for (int index = 0; index < 6; ++index) {
+        FarLodSdfSnapshot overlay = AuthoritativeSdfSnapshot(IVec3(1 + index, index % 2, 3), 1u);
+        FillFlatSdf(overlay, 4 + index);
+        overlays.push_back(std::move(overlay));
+    }
+    FarLodSdfSnapshot replacement = AuthoritativeSdfSnapshot(IVec3(0, 0, 0), 2u);
+    FillFlatSdf(replacement, 9);
+    overlays.push_back(replacement);
+    overlays.push_back(replacement);
+
+    FarLodTile per_call = seeded;
+    std::vector<FarLodSdfReduceResult> per_call_results;
+    per_call_results.reserve(overlays.size());
+    const u64 per_call_start = FarLodStore::brick_validation_count_for_testing();
+    for (const FarLodSdfSnapshot& overlay : overlays) {
+        per_call_results.push_back(ReduceChunkSdfIntoFarTile(per_call, overlay, &error));
+    }
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - per_call_start, overlays.size());
+
+    FarLodTile validated_once = seeded;
+    std::vector<FarLodSdfReduceResult> validated_once_results;
+    validated_once_results.reserve(overlays.size());
+    const u64 validated_once_start = FarLodStore::brick_validation_count_for_testing();
+    validated_once_results.push_back(
+        ReduceChunkSdfIntoFarTile(validated_once, overlays.front(), &error));
+    for (std::size_t index = 1; index < overlays.size(); ++index) {
+        validated_once_results.push_back(
+            ReduceChunkSdfIntoValidatedFarTile(validated_once, overlays[index], &error));
+    }
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - validated_once_start, 1u);
+
+    EXPECT_EQ(validated_once_results, per_call_results);
+    EXPECT_EQ(per_call_results.front(), FarLodSdfReduceResult::Inserted);
+    EXPECT_EQ(per_call_results[overlays.size() - 2], FarLodSdfReduceResult::Replaced);
+    EXPECT_EQ(per_call_results.back(), FarLodSdfReduceResult::Unchanged);
+    EXPECT_EQ(validated_once.sdf_density_q, per_call.sdf_density_q);
+    EXPECT_EQ(validated_once.sdf_material, per_call.sdf_material);
+    ASSERT_EQ(validated_once.sdf_bricks.size(), per_call.sdf_bricks.size());
+    EXPECT_EQ(per_call.sdf_bricks.size(), seeded.sdf_bricks.size() + 6u);
+    for (std::size_t index = 0; index < per_call.sdf_bricks.size(); ++index) {
+        const FarLodSdfBrickDescriptor& expected = per_call.sdf_bricks[index];
+        const FarLodSdfBrickDescriptor& actual = validated_once.sdf_bricks[index];
+        EXPECT_EQ(actual.local_chunk_x, expected.local_chunk_x);
+        EXPECT_EQ(actual.local_chunk_z, expected.local_chunk_z);
+        EXPECT_EQ(actual.source_kind, expected.source_kind);
+        EXPECT_EQ(actual.reserved, expected.reserved);
+        EXPECT_EQ(actual.chunk_y, expected.chunk_y);
+        EXPECT_EQ(actual.revision, expected.revision);
+        EXPECT_EQ(actual.payload_crc32, expected.payload_crc32);
+    }
+    EXPECT_EQ(ComputeFarLodTileHash(validated_once), ComputeFarLodTileHash(per_call));
+
+    // A tampered home tile is refused by the validating first reduction,
+    // before anything is merged into it.
+    FarLodTile tampered = seeded;
+    tampered.sdf_material[0] = static_cast<u8>(tampered.sdf_material[0] ^ 1u);
+    const u64 tampered_hash = ComputeFarLodTileHash(tampered);
+    const u64 tampered_start = FarLodStore::brick_validation_count_for_testing();
+    error.clear();
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tampered, overlays.front(), &error),
+              FarLodSdfReduceResult::Error);
+    EXPECT_NE(error.find("CRC"), std::string::npos) << error;
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - tampered_start, 1u);
+    EXPECT_EQ(ComputeFarLodTileHash(tampered), tampered_hash);
 }
 
 TEST(FarLodStoreTest, BrickUpsertsUseCanonicalOrderAndRejectDuplicateStreams) {
