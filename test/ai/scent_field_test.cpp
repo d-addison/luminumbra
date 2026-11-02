@@ -309,7 +309,9 @@ TEST(ScentField, GatedDiffusionKeepsRoundoffIntermediatesLikeTheLegacySolver) {
     ScentField gated(3, 3, 1);
     legacy_call.Deposit(0, 1, 1, center);
     gated.Deposit(0, 1, 1, center);
-    const ScentField::EdgeGate all_edges = [](int, int, int, int) { return true; };
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) {
+        return true;
+    };
 
     EXPECT_NO_THROW(legacy_call.Step(0.25, 1, 0.0));
     EXPECT_NO_THROW(gated.Step(0.25, 1, 0.0, 0.0, 0.0, {}, all_edges));

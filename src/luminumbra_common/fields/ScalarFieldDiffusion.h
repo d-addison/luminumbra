@@ -55,9 +55,8 @@ public:
     // Same solver, but an edge also needs `admits(lhs, rhs)` (row-major cell
     // indices) to exchange. Intermediate cells are stored exactly as in diffuse.
     using EdgeFilter = std::function<bool(std::size_t lhs, std::size_t rhs)>;
-    [[nodiscard]] ScalarDiffusionReport diffuse(std::size_t iterations,
-                                                double diffusion_rate,
-                                                const EdgeFilter& admits);
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, const EdgeFilter& admits);
 
 private:
     [[nodiscard]] std::size_t index(std::size_t x, std::size_t y) const;
