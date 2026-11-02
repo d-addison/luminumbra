@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
 #include "luminumbra/core/Types.h"
@@ -111,6 +112,20 @@ TEST(WindFieldSystem, GeometryMatchesPinnedShape) {
     EXPECT_EQ(kWindLayerCount, 3);
 }
 
+TEST(WindFieldSystem, RegionalBackendRefusesUnpairedCallbacks) {
+    WindFieldSystem wind(kSeed);
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f, 5.0f); },
+                             [] { return std::string("regional wind"); });
+    EXPECT_THROW(
+        wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(1.0f, 0.0f); }, {}),
+        std::invalid_argument);
+    EXPECT_THROW(wind.BindRegionalBackend({}, [] { return std::string("other wind"); }),
+                 std::invalid_argument);
+    // A refused binding leaves the previous backend in place.
+    EXPECT_EQ(wind.ComputeWindSubHash(), "regional wind");
+    EXPECT_EQ(wind.SampleWind(Vec3(0.0f), WindLayer::Ground).y, 5.0f);
+}
+
 TEST(WindFieldSystem, RegionalCallbacksReceivePositionAndSelectedLayer) {
     WindFieldSystem wind(kSeed);
     int sample_calls = 0;
@@ -144,7 +159,8 @@ TEST(WindFieldSystem, RegionalCallbacksReceivePositionAndSelectedLayer) {
     }
     EXPECT_EQ(sample_calls, 10);
 
-    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f); }, {});
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f); },
+                             [] { return std::string("regional wind"); });
     wind.Update(18, kAnchor);
     EXPECT_EQ(wind.BaseDirection().x, 0.0f);
     EXPECT_EQ(wind.BaseDirection().y, 0.0f);

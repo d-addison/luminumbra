@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -227,7 +228,7 @@ TEST(WeatherSystem, RegionalRebindIndexesCurrentStormsAfterLegacyUpdates) {
     const auto sampler = [](const Vec3&) {
         return WeatherSample{.precip_intensity = 0.125f};
     };
-    weather.BindRegionalBackend(sampler, {});
+    weather.BindRegionalBackend(sampler, [] { return std::string("regional hash"); });
     const StormCell expired{.center_world = Vec2(0.0f),
                             .velocity = Vec2(0.0f),
                             .intensity = 0.5f,
@@ -249,7 +250,7 @@ TEST(WeatherSystem, RegionalRebindIndexesCurrentStormsAfterLegacyUpdates) {
     EXPECT_FLOAT_EQ(current.center_world.x, 3072.0f);
     EXPECT_FLOAT_EQ(current.intensity, 15.0f / 45.0f);
 
-    weather.BindRegionalBackend(sampler, {});
+    weather.BindRegionalBackend(sampler, [] { return std::string("regional hash"); });
     for (const float x : {0.0f, 2048.0f}) {
         const Vec3 position(x, 0.0f, 0.0f);
         ASSERT_EQ(weather.storm_candidates_at(position), 0u);
@@ -268,7 +269,7 @@ TEST(WeatherSystem, RegionalRebindIndexesCurrentStormsAfterLegacyUpdates) {
     weather.BindRegionalBackend({}, {});
     weather.Update(301, kAnchor, nullptr);
     ASSERT_TRUE(weather.StormCells().empty());
-    weather.BindRegionalBackend(sampler, {});
+    weather.BindRegionalBackend(sampler, [] { return std::string("regional hash"); });
     ASSERT_EQ(weather.storm_candidates_at(position), 0u);
     EXPECT_FLOAT_EQ(weather.PrecipitationAt(position), 0.125f);
     EXPECT_FLOAT_EQ(weather.SampleAt(position).storm_intensity, 0.0f);
@@ -291,8 +292,10 @@ TEST(WeatherSystem, RegionalClockUpdatesPreserveLegacyWindPerturbations) {
             baseline_wind.InjectStormPerturbation(retained);
         }
         weather.BindRegionalBackend(
-            [](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; }, {});
-        wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); }, {});
+            [](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; },
+            [] { return std::string("regional hash"); });
+        wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); },
+                                 [] { return std::string("regional wind"); });
         const StormCell storm{.center_world = Vec2(kAnchor.x, kAnchor.z),
                               .velocity = Vec2(-2.0f, 7.0f),
                               .intensity = 0.5f,
@@ -319,6 +322,22 @@ TEST(WeatherSystem, RegionalClockUpdatesPreserveLegacyWindPerturbations) {
     }
 }
 
+TEST(WeatherSystem, RegionalBackendRefusesUnpairedCallbacks) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::WeatherSample;
+    WeatherSystem weather(kSeed);
+    weather.BindRegionalBackend([](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; },
+                                [] { return std::string("regional hash"); });
+    EXPECT_THROW(weather.BindRegionalBackend(
+                     [](const Vec3&) { return WeatherSample{.wind = Vec2(-1.0f, 0.0f)}; }, {}),
+                 std::invalid_argument);
+    EXPECT_THROW(weather.BindRegionalBackend({}, [] { return std::string("other hash"); }),
+                 std::invalid_argument);
+    // A refused binding leaves the previous backend in place.
+    EXPECT_EQ(weather.ComputeWeatherSubHash(), "regional hash");
+    EXPECT_FLOAT_EQ(weather.SampleAt(Vec3(0.0f)).wind.x, 3.0f);
+}
+
 TEST(WeatherSystem, RegionalRestoreAdvancesWindToRestoredTick) {
     using Luminumbra::Vec2;
     using Luminumbra::Systems::StormCell;
@@ -327,8 +346,9 @@ TEST(WeatherSystem, RegionalRestoreAdvancesWindToRestoredTick) {
     WeatherSystem weather(kSeed);
     WindFieldSystem wind(kSeed);
     weather.BindRegionalBackend([](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; },
-                                {});
-    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); }, {});
+                                [] { return std::string("regional hash"); });
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); },
+                             [] { return std::string("regional wind"); });
     const StormCell storm{.center_world = Vec2(kAnchor.x, kAnchor.z),
                           .velocity = Vec2(-2.0f, 7.0f),
                           .intensity = 0.5f,
@@ -366,7 +386,7 @@ TEST(WeatherSystem, RegionalSampleUsesOneBackendSnapshotPerQuery) {
                                  .storm_intensity = 0.9f,
                                  .wind = Vec2(value, -value)};
         },
-        {});
+        [] { return std::string("regional hash"); });
     ASSERT_EQ(calls, 0u);
     for (std::uint32_t query = 1; query <= 3; ++query) {
         const auto sample = weather.SampleAt(Vec3(0.0f));

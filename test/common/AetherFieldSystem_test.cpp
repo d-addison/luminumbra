@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 #include "luminumbra/core/Types.h"
@@ -80,7 +81,7 @@ TEST(AetherFieldSystem, RegionalCallbacksPopulateRenderGridAndDirectSamples) {
             ++wind_calls;
             return Luminumbra::Vec2(100.0f);
         },
-        {});
+        [] { return std::string("regional wind"); });
     std::size_t sample_calls = 0;
     aether.BindRegionalBackend(
         [&sample_calls](const Vec3& position) {
@@ -148,6 +149,19 @@ TEST(AetherFieldSystem, EmptyRegionalCallbacksPreserveLegacySamplesAndHash) {
             EXPECT_EQ(aether.SampleAether(Vec3(1000000.0f)), 0.0f);
         }
     }
+}
+
+TEST(AetherFieldSystem, RegionalBackendRefusesUnpairedCallbacks) {
+    AetherFieldSystem aether(kSeed);
+    aether.BindRegionalBackend([](const Vec3&) { return 0.75f; },
+                               [] { return std::string("regional aether"); });
+    EXPECT_THROW(aether.BindRegionalBackend([](const Vec3&) { return 0.5f; }, {}),
+                 std::invalid_argument);
+    EXPECT_THROW(aether.BindRegionalBackend({}, [] { return std::string("other aether"); }),
+                 std::invalid_argument);
+    // A refused binding leaves the previous backend in place.
+    EXPECT_EQ(aether.ComputeAetherSubHash(), "regional aether");
+    EXPECT_EQ(aether.SampleAether(Vec3(0.0f)), 0.75f);
 }
 
 TEST(AetherFieldSystem, RegionalRenderGridRejectsUnrepresentableAnchors) {

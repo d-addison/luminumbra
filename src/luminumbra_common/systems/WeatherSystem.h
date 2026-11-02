@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -136,6 +137,8 @@ public:
     explicit WeatherSystem(int world_seed);
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash) {
+        if (static_cast<bool>(sample) != static_cast<bool>(hash))
+            throw std::invalid_argument("regional backend needs both a sampler and a hash");
         if (sample) {
             // Legacy updates may have moved or removed storms since the last binding.
             auto storm_index = BuildRegionalStormIndex(m_storm_cells);

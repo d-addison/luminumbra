@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,6 +67,8 @@ public:
     explicit AetherFieldSystem(int world_seed);
     void BindRegionalBackend(std::function<float(const Vec3&)> sample,
                              std::function<std::string()> hash) {
+        if (static_cast<bool>(sample) != static_cast<bool>(hash))
+            throw std::invalid_argument("regional backend needs both a sampler and a hash");
         m_regional_sample = std::move(sample);
         m_regional_hash = std::move(hash);
     }
