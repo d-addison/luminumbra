@@ -1647,21 +1647,32 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
             stop,
             Persistence::SavedWorldValidation::DeferredToPreparation);
     }
+    // Refusals ahead of preparation's validation still report saved-world damage first.
+    const auto refuse_before_validation = [&](const std::string& message) {
+        const auto validated =
+            Persistence::InspectSavedWorld(options.save_root,
+                                           RuntimeRoot(options.root_path),
+                                           worldId,
+                                           stop,
+                                           Persistence::SavedWorldValidation::Complete);
+        prepared->error = validated.error.empty() ? message : validated.error;
+    };
     prepared->error = saved.error;
     if (prepared->error.empty() && saved.requires_active_regions && !options.active_regions)
-        prepared->error = "Incompatible configuration: this world requires sim.active_regions.";
+        refuse_before_validation(
+            "Incompatible configuration: this world requires sim.active_regions.");
     if (!prepared->error.empty()) {
         LUMINUMBRA_CORE_ERROR("World open refused: {}", prepared->error);
         return prepared;
     }
     if (!options.job_system_available) {
-        prepared->error = "JobSystem not set before loading world.";
+        refuse_before_validation("JobSystem not set before loading world.");
         return prepared;
     }
     for (const auto& asset : options.required_assets) {
         if (!fs::exists(RuntimeRoot(options.root_path) / asset)) {
-            prepared->error =
-                "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
+            refuse_before_validation("Missing required runtime asset: " +
+                                     Filesystem::GenericUtf8PathString(asset));
             return prepared;
         }
     }
