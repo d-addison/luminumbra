@@ -579,7 +579,8 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
     if (m_regional_sample) {
-        m_last_tick = tick;
+        // Storms are adopted projections; wind still has to reach the restored tick.
+        UpdateFromClock(tick, region_anchor, wind);
         return;
     }
     // At most ceil(240/45) storms can coexist, below the cap. Motion samples

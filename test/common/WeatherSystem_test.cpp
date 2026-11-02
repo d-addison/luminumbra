@@ -319,6 +319,30 @@ TEST(WeatherSystem, RegionalClockUpdatesPreserveLegacyWindPerturbations) {
     }
 }
 
+TEST(WeatherSystem, RegionalRestoreAdvancesWindToRestoredTick) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    using Luminumbra::Systems::WeatherSample;
+    using Luminumbra::Systems::WindLayer;
+    WeatherSystem weather(kSeed);
+    WindFieldSystem wind(kSeed);
+    weather.BindRegionalBackend([](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; },
+                                {});
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); }, {});
+    const StormCell storm{.center_world = Vec2(kAnchor.x, kAnchor.z),
+                          .velocity = Vec2(-2.0f, 7.0f),
+                          .intensity = 0.5f,
+                          .spawn_tick = 1,
+                          .lifetime_ticks = 240,
+                          .seed_salt = 1};
+    weather.AdoptRegionalWeather(60, kAnchor, {storm}, {});
+    weather.RestoreAtTick(90, kAnchor, wind);
+    EXPECT_EQ(weather.last_tick(), 90u);
+    EXPECT_EQ(wind.last_tick(), 90u);
+    ASSERT_EQ(weather.StormCells().size(), 1u);
+    EXPECT_EQ(weather.StormCells().front().seed_salt, storm.seed_salt);
+}
+
 TEST(WeatherSystem, RegionalSampleUsesOneBackendSnapshotPerQuery) {
     using Luminumbra::Vec2;
     using Luminumbra::Systems::StormCell;
