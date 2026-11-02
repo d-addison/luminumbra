@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <latch>
 #include <limits>
 #include <memory>
@@ -756,6 +757,84 @@ TEST(WorldSaveRegionFormat, ChunkReadBatchVerifiesEachRegionOnceUntilAPublicatio
                   WorldSaveService::ChunkReadStatus::Error);
         EXPECT_EQ(region_opens - opens, 1);
     }
+}
+
+TEST(WorldSaveRegionFormat, RegionFingerprintIsReusedOnlyForIdenticalLod0Bytes) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("fingerprint_reuse");
+    WorldStreamingState state;
+    for (int x = 0; x != 2; ++x) {
+        const auto chunk = state.get_or_create_chunk({x, 0, 0});
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -1.0f - static_cast<float>(x));
+        chunk->mark_voxel_data_dirty();
+    }
+    {
+        P::SaveTransaction baseline(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(baseline.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(baseline.commit(nullptr));
+    }
+    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto read_every_path = [&save, &region]() {
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        std::vector<WorldSaveService::ContainerRecord> records;
+        return WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status ==
+                   WorldSaveService::ChunkReadStatus::Found &&
+               WorldSaveService::read_chunk(save.path, {1, 0, 0}, true).status ==
+                   WorldSaveService::ChunkReadStatus::Found &&
+               WorldSaveService::read_container_records(region, records) &&
+               WorldSaveService::read_region_chunks(region, chunks) &&
+               WorldSaveService::read_authoritative_region_chunks(region, 0, 31, 0, 31, chunks);
+    };
+    const auto first = WorldSaveService::region_fingerprint_count_for_testing();
+    ASSERT_TRUE(read_every_path());
+    // The commit may have hashed these bytes under another member path; the published path
+    // hashes at most once, then every entry point reuses it.
+    const auto hashed = WorldSaveService::region_fingerprint_count_for_testing();
+    EXPECT_LE(hashed - first, 1u);
+    for (int repeat = 0; repeat != 3; ++repeat) {
+        ASSERT_TRUE(read_every_path());
+    }
+    EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), hashed);
+
+    // Flip one lod-0 payload byte in place: same path, identity and length.
+    const auto bytes = ReadFileBytes(region);
+    ASSERT_GE(bytes.size(), 8u);
+    const auto* control = reinterpret_cast<const unsigned char*>(bytes.data());
+    const std::size_t count = control[6] | (std::size_t{control[7]} << 8);
+    std::size_t payload_offset = 8 + count * 18;
+    std::size_t flipped = bytes.size();
+    for (std::size_t index = 0; index != count; ++index) {
+        const auto* entry = control + 8 + index * 18;
+        if (entry[8] == 0) {
+            flipped = payload_offset;
+            break;
+        }
+        payload_offset += std::size_t{entry[14]} | (std::size_t{entry[15]} << 8) |
+                          (std::size_t{entry[16]} << 16) | (std::size_t{entry[17]} << 24);
+    }
+    ASSERT_LT(flipped, bytes.size());
+    const auto write_byte_in_place = [&region](std::size_t offset, char value) {
+        std::fstream file(region, std::ios::binary | std::ios::in | std::ios::out);
+        file.seekp(static_cast<std::streamoff>(offset));
+        file.put(value);
+        return static_cast<bool>(file);
+    };
+    ASSERT_TRUE(write_byte_in_place(flipped, static_cast<char>(bytes[flipped] ^ 0x5a)));
+    EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    std::vector<WorldSaveService::ContainerRecord> tampered;
+    EXPECT_FALSE(WorldSaveService::read_container_records(region, tampered));
+    // The tampered bytes are hashed once; reusing that digest still fails the index comparison.
+    EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), hashed + 1);
+
+    // Restored bytes match the index again; they are hashed once more and then reused.
+    ASSERT_TRUE(write_byte_in_place(flipped, bytes[flipped]));
+    ASSERT_EQ(ReadFileBytes(region), bytes);
+    ASSERT_TRUE(read_every_path());
+    ASSERT_TRUE(read_every_path());
+    EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), hashed + 2);
 }
 
 TEST(WorldSaveRegionFormat, IndexedCommitRefusesMalformedLatticeWithoutAcknowledgement) {

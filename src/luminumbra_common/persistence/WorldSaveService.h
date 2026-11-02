@@ -447,6 +447,9 @@ public:
     static std::uint64_t decode_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
+    // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since
+    // process start.
+    static std::uint64_t region_fingerprint_count_for_testing();
     // Compares the admitted-check entry of every lod-0 record in a region file with a fresh
     // decode of that record (which advances the decode counter). False when the file is
     // unreadable.

@@ -121,7 +121,12 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertIn("SaveTransaction::publication_stages(path, unused_stage, retired_stage)", removing)
         bound_removal = body(self.journal, "void remove_owned(").split("#else", 1)[0]
         self.assertLess(bound_removal.index("identity_from(owned.get())"),
-                        bound_removal.index("FileDispositionInfo"))
+                        bound_removal.index("Detail::WindowsDisposeLink(owned.get())"))
+        disposal = body(self.journal, "inline bool WindowsDisposeLink(")
+        self.assertIn("FILE_INFO_BY_HANDLE_CLASS>(21)", disposal)
+        self.assertIn("0x1 | 0x2", disposal)
+        self.assertLess(disposal.index("FILE_INFO_BY_HANDLE_CLASS>(21)"),
+                        disposal.index("FileDispositionInfo,"))
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", removing)
         self.assertNotIn("::MoveFileExW(", writer.replace(promotion, "").replace(replacing, "").replace(removing, ""))
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):

@@ -1264,10 +1264,14 @@ TEST(SaveTransaction, RecoveryRetiresTheRecordedPublicationAliasAndRefusesForeig
             ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
             ASSERT_TRUE(
                 WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+            // The publication record is the last one appended before the replacement.
+            const auto records = JournalRecords(save.path());
+            ASSERT_FALSE(records.empty());
             std::string incoming;
-            for (const auto& entry : JournalRecords(save.path()).back().at("entries"))
+            for (const auto& entry : records.back().at("entries")) {
                 if (entry.at("path") == "world_info.json")
                     incoming = entry.at("incoming_temporary").get<std::string>();
+            }
             ASSERT_FALSE(incoming.empty());
             const auto alias = save.path() / incoming;
             ASSERT_FALSE(fs::exists(alias));

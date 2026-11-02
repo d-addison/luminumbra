@@ -122,6 +122,30 @@ inline DWORD WindowsPublicationLinkCount(HANDLE file) {
     return info.NumberOfLinks;
 }
 
+// A legacy disposition keeps a last link delete-pending, and therefore occupied, until every
+// handle closes, including retained open-by-ID identity handles. POSIX semantics remove the
+// name at once while those handles still pin the object. Volumes without POSIX deletion
+// reject the extended class, so they keep the legacy disposition.
+inline bool WindowsDisposeLink(HANDLE file) {
+    struct DispositionInformationEx {
+        DWORD flags;
+    };
+    // FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.
+    DispositionInformationEx posix{0x1 | 0x2};
+    // FILE_INFO_BY_HANDLE_CLASS FileDispositionInfoEx (21).
+    if (::SetFileInformationByHandle(
+            file, static_cast<FILE_INFO_BY_HANDLE_CLASS>(21), &posix, sizeof(posix)))
+        return true;
+    const auto error = ::GetLastError();
+    if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED &&
+        error != ERROR_INVALID_FUNCTION) {
+        ::SetLastError(error);
+        return false;
+    }
+    FILE_DISPOSITION_INFO legacy{.DeleteFile = TRUE};
+    return ::SetFileInformationByHandle(file, FileDispositionInfo, &legacy, sizeof(legacy)) != 0;
+}
+
 // Recovery adds the retired source link through the bound object. Renaming back
 // would consume the other owner's destination link. FileLinkInformation requires
 // DELETE access, already held by the publication handle; ReplaceIfExists is false.
@@ -1175,9 +1199,7 @@ private:
                                      Filesystem::GenericUtf8PathString(artifact.path));
         if (stage && stage->report)
             stage->report("crash-retirement-bound", artifact.path);
-        FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
-        if (!::SetFileInformationByHandle(
-                owned.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
+        if (!Detail::WindowsDisposeLink(owned.get()))
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
                                     "Could not remove world artifact");

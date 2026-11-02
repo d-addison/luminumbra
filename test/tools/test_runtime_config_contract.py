@@ -303,7 +303,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         native = service[service.index("classStagingFile{"):service.index("std::filesystem::pathOwnershipPath(")]
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
-                         "FILE_DISPOSITION_INFO", "ReadFileIdentity(path,named)",
+                         "Detail::WindowsDisposeLink(retiring)", "ReadFileIdentity(path,named)",
                          "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
         self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))

@@ -1399,6 +1399,47 @@ TEST(WaterSeedInputs, NeighborWakeMarksOnlyDurableWater) {
     }
 }
 
+TEST(WaterSeedInputs, DrySlopeTentativeFlowLeavesPristineWaterClean) {
+    constexpr int kResolution = 8;
+    constexpr std::size_t kCells = std::size_t{kResolution} * kResolution;
+    for (const bool wet : {false, true}) {
+        SCOPED_TRACE(wet);
+        SeedFixture fixture;
+        auto& chunk = *fixture.chunks().begin()->second;
+        chunk.set_state(ChunkState::Idle);
+        chunk.mark_sdf_generated_current_params();
+        chunk.is_water_sleeping.store(true);
+        fixture.water().SetSimResolution(kResolution);
+        fixture.water().SetHydrology(true, 0, 0);
+        fixture.tick();
+        ASSERT_FALSE(chunk.needs_authority());
+        // Every internal +X edge faces a 1 m rise, so the pipe step proposes flow on each one and
+        // the outflow clamp of the dry source cell must return it to zero.
+        chunk.water_bed_mm.resize(kCells);
+        for (std::size_t cell = 0; cell != kCells; ++cell)
+            chunk.water_bed_mm[cell] =
+                4000 + 1000 * static_cast<std::int32_t>(cell % std::size_t{kResolution});
+        chunk.water_depth_mm.assign(kCells, 0);
+        if (wet)
+            chunk.water_depth_mm[kResolution - 1] = 500;
+        chunk.water_edge_flux.assign(2 * kCells, 0);
+        chunk.is_water_sleeping.store(false);
+        const auto revision = chunk.water_revision();
+        fixture.tick();
+        if (!wet) {
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(kCells, 0));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * kCells, 0));
+        } else {
+            EXPECT_LT(chunk.water_depth_mm[kResolution - 1], 500);
+        }
+        EXPECT_EQ(chunk.is_water_state_dirty(), wet);
+        EXPECT_EQ(chunk.water_revision() != revision, wet);
+        fixture.world().sync_water_authority();
+        EXPECT_EQ(chunk.has_water_authority(), wet);
+        EXPECT_EQ(chunk.needs_authority(), wet);
+    }
+}
+
 TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) {
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {
         SeedFixture fixture(2);

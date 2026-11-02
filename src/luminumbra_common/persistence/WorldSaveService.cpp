@@ -1028,20 +1028,14 @@ public:
         if (retiring == INVALID_HANDLE_VALUE)
             return false;
         BY_HANDLE_FILE_INFORMATION info{};
-        FILE_DISPOSITION_INFO disposition{TRUE};
-        const bool removed = ::GetFileInformationByHandle(retiring, &info) &&
-                             (info.dwFileAttributes &
-                              (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-                             info.nNumberOfLinks > 0 && info.nNumberOfLinks <= links &&
-                             info.dwVolumeSerialNumber == held[0] &&
-                             info.nFileIndexHigh == held[1] && info.nFileIndexLow == held[2] &&
-                             ::SetFileInformationByHandle(retiring,
-                                                          FileDispositionInfo,
-                                                          &disposition,
-                                                          static_cast<DWORD>(sizeof(disposition)));
-        // Disposition alone leaves the name enumerable until ALL retained
-        // handles close, including the creation journal's open-by-ID handle.
-        // Keep retiring open while releasing those references, so identity
+        const bool removed =
+            ::GetFileInformationByHandle(retiring, &info) &&
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ==
+                0 &&
+            info.nNumberOfLinks > 0 && info.nNumberOfLinks <= links &&
+            info.dwVolumeSerialNumber == held[0] && info.nFileIndexHigh == held[1] &&
+            info.nFileIndexLow == held[2] && Detail::WindowsDisposeLink(retiring);
+        // Keep retiring open while releasing the staged references, so identity
         // cannot be recycled between the removal and journal retirement.
         const bool finished = removed && finish_removal();
         const bool closed = ::CloseHandle(retiring) != 0;
@@ -2939,6 +2933,99 @@ MemberDigest Lod0Fingerprint(const std::vector<RegionRecord>& records) {
     return digest;
 }
 
+std::atomic<std::uint64_t>& RegionFingerprintCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
+// Lod0Fingerprint is a pure function of the lod-0 records. A region whose lod-0 records equal,
+// byte for byte, the ones last hashed at the same path reuses that digest; any changed header or
+// payload byte misses and is hashed again, so tamper evidence is compared on every validation.
+class RegionFingerprints {
+public:
+    MemberDigest fingerprint(const std::filesystem::path& path,
+                             const std::vector<RegionRecord>& records) {
+        std::vector<const RegionRecord*> lod0;
+        std::size_t lod0_bytes = 0;
+        for (const RegionRecord& record : records) {
+            if (record.lod_level != 0)
+                continue;
+            lod0.push_back(&record);
+            lod0_bytes += record.compressed_payload.size();
+        }
+        if (const auto known = find(path); known && Matches(*known, lod0))
+            return known->digest;
+        RegionFingerprintCounter().fetch_add(1, std::memory_order_acq_rel);
+        const MemberDigest digest = Lod0Fingerprint(records);
+        if (digest.present && lod0_bytes <= kMaxBytes)
+            remember(path, lod0, lod0_bytes, digest);
+        return digest;
+    }
+
+private:
+    struct Entry {
+        std::vector<RegionRecord> lod0;
+        std::size_t bytes = 0;
+        MemberDigest digest;
+    };
+    static constexpr std::size_t kMaxRegions = 32;
+    static constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
+
+    static bool Matches(const Entry& entry, const std::vector<const RegionRecord*>& lod0) {
+        if (entry.lod0.size() != lod0.size())
+            return false;
+        for (std::size_t index = 0; index < lod0.size(); ++index) {
+            const RegionRecord& known = entry.lod0[index];
+            const RegionRecord& current = *lod0[index];
+            if (known.id != current.id || known.flags != current.flags ||
+                known.uncompressed_size != current.uncompressed_size ||
+                known.compressed_payload != current.compressed_payload)
+                return false;
+        }
+        return true;
+    }
+
+    std::shared_ptr<const Entry> find(const std::filesystem::path& path) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_entries.find(path);
+        return found == m_entries.end() ? nullptr : found->second;
+    }
+
+    void remember(const std::filesystem::path& path,
+                  const std::vector<const RegionRecord*>& lod0,
+                  std::size_t lod0_bytes,
+                  const MemberDigest& digest) {
+        auto entry = std::make_shared<Entry>();
+        entry->lod0.reserve(lod0.size());
+        for (const RegionRecord* record : lod0)
+            entry->lod0.push_back(*record);
+        entry->bytes = lod0_bytes;
+        entry->digest = digest;
+        const std::lock_guard lock(m_mutex);
+        if (const auto previous = m_entries.find(path); previous != m_entries.end()) {
+            m_bytes -= previous->second->bytes;
+            m_entries.erase(previous);
+        }
+        while (!m_entries.empty() &&
+               (m_entries.size() >= kMaxRegions || m_bytes + lod0_bytes > kMaxBytes)) {
+            m_bytes -= m_entries.begin()->second->bytes;
+            m_entries.erase(m_entries.begin());
+        }
+        m_bytes += lod0_bytes;
+        m_entries.emplace(path, std::move(entry));
+    }
+
+    std::mutex m_mutex;
+    std::size_t m_bytes = 0;
+    std::map<std::filesystem::path, std::shared_ptr<const Entry>> m_entries;
+};
+
+MemberDigest RegionLod0Fingerprint(const std::filesystem::path& path,
+                                   const std::vector<RegionRecord>& records) {
+    static RegionFingerprints fingerprints;
+    return fingerprints.fingerprint(path, records);
+}
+
 // Joins the active transaction for save_dir, else (indexed directory or pending journal) runs an
 // implicit one-writer transaction, else is inert and the caller keeps its legacy code path.
 // Owner thread only. Construct BEFORE the first member write; call commit() after the last one.
@@ -3142,7 +3229,7 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
         relative,
         [](const SnapshotMember& value, const std::string& path) { return value.path < path; });
     const bool listed = member != index.members.end() && member->path == relative;
-    const auto digest = Lod0Fingerprint(records);
+    const auto digest = RegionLod0Fingerprint(region_file, records);
     if ((!listed && digest.present) ||
         (listed &&
          (member->present != digest.present ||
@@ -4471,6 +4558,10 @@ std::uint64_t WorldSaveService::chunk_record_decode_count_for_testing() {
     return ChunkRecordDecodeCounter().load(std::memory_order_acquire);
 }
 
+std::uint64_t WorldSaveService::region_fingerprint_count_for_testing() {
+    return RegionFingerprintCounter().load(std::memory_order_acquire);
+}
+
 bool WorldSaveService::audit_admitted_chunk_records_for_testing(
     const std::filesystem::path& region_file, AdmittedChunkRecordAudit& audit) {
     audit = {};
@@ -4974,7 +5065,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                     }
                 }
             }
-            out = Lod0Fingerprint(records);
+            out = RegionLod0Fingerprint(path, records);
             return true;
         }
 
@@ -5709,7 +5800,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (!ReadRegionFile(path, records, &errors, stop))
                 return reject("");
             if (indexed) {
-                const MemberDigest digest = Lod0Fingerprint(records);
+                const MemberDigest digest = RegionLod0Fingerprint(path, records);
                 if (digest.present)
                     region_digests[RelativeRegionMember(rx, rz)] = digest;
             }
