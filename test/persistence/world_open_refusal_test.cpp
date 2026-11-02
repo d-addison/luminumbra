@@ -2199,7 +2199,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     // Declare after the runner so even a fatal assertion releases the obstruction
     // before its destructor attempts a shutdown save.
     SiblingWriteFailure failure;
-    ASSERT_NO_FATAL_FAILURE(failure.Arm(*session, destination, energy_failure));
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
     world::WorldStateSaveReport report;
     if (save_path == 0)
         EXPECT_FALSE(session->SaveWorldState(&report));

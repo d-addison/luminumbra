@@ -1084,7 +1084,7 @@ TEST_F(ReplayStreamTest, CurrentAndLegacyProfilesParseFrozenLayoutsAndRefusePlay
             } else {
                 replay::BoundedReplayRecorder recorder;
                 ASSERT_TRUE(recorder.Configure(18, 0));
-                ASSERT_TRUE(recorder.Open(m_path, header));
+                ASSERT_TRUE(recorder.Open(m_path, header)) << recorder.OpenRefusal();
                 // Two bounded segments rotate the first 1024 ticks into the
                 // version-4 prefix record, exercising the actual suffix parser.
                 for (std::uint64_t tick = 1; tick <= 2048; ++tick)

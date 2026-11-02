@@ -2549,7 +2549,7 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
     }
 }
 
-TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
+TEST(WorldSaveService, DirectLegacySnapshotsKeepLargeMetadata) {
     const TempSaveDir destination("large_metadata");
     const nlohmann::json metadata = {{"container_version", 2},
                                      {"extension", std::string(std::size_t{1024} * 1024u, 'x')}};
@@ -3209,7 +3209,7 @@ TEST(WorldSaveService, WaterCursorMetadataChecksTypeAndNativeSizeBeforeConversio
         Luminumbra::world::WorldClock clock;
         bool required = false;
         return WorldSaveService::read_clock_metadata(
-            save_dir.path(), clock, required, nullptr, nullptr, nullptr, nullptr, &cursor);
+            save_dir.path(), clock, required, nullptr, nullptr, nullptr, &cursor);
     };
     std::size_t cursor = 19;
     ASSERT_TRUE(read_cursor(cursor));

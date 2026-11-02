@@ -574,7 +574,8 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
 }
 
 SHIELD_WorldSystem::SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag)
-    : m_job_system(nullptr)
+    : m_retainRegionAuthority(source.m_retainRegionAuthority)
+    , m_job_system(nullptr)
     , m_params(source.m_params)
     , m_seed(source.m_seed)
     , m_terrain_generator(source.m_terrain_generator)
@@ -4005,12 +4006,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
                     const int ring_distance = horizontal_ring_distance(dx, dz);
                     if (m_retainRegionAuthority)
-                        add_candidate(IVec3(chunk_x, 0, chunk_z),
-                                      true,
-                                      ring_distance,
-                                      horizontal_dist2,
-                                      0,
-                                      anchor_pos);
+                        add_candidate(
+                            IVec3(chunk_x, 0, chunk_z), true, ring_distance, horizontal_dist2, 0);
 
                     ++m_last_streaming_budget_stats.target_surface_columns;
                     // Activate EVERY chunk-Y the column's isosurface passes through,

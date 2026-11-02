@@ -941,8 +941,14 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("new_resolution == current_resolution && "
                       "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
         update = compact(body(source, "void WaterSystem::update("))
-        self.assertIn("chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()",
-                      update)
+        self.assertIn("auto to_init = PrepareWaterGrids(deterministic_authority);", update)
+        prepare = compact(body(source, "std::vector<Chunk*> WaterSystem::PrepareWaterGrids("))
+        self.assertIn("required_detail != WaterDetailLevel::Off && "
+                      "(static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load() || "
+                      "(chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()))", prepare)
+        self.assertIn("resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});",
+                      prepare)
+        self.assertIn("ResizeSimulationGrid(*req.chunk, req.level);", prepare)
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
         for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
                            "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):
