@@ -145,6 +145,16 @@ public:
             if (did_diffuse) {
                 if (exchange) {
                     DiffuseSealed(field, diffusion_iters, diffusion_rate, exchange);
+                    // Smoothing and evaporation skip nonparticipants, so an open border
+                    // edge can leave diffusion roundoff below zero there. Settle it at
+                    // zero so a later advection or clamp never reads a negative cell.
+                    if (participants) {
+                        for (std::size_t y = 0; y < H; ++y)
+                            for (std::size_t x = 0; x < W; ++x)
+                                if (field.at(x, y) < 0.0 &&
+                                    !participants(static_cast<int>(x), static_cast<int>(y)))
+                                    field.set(x, y, 0.0);
+                    }
                 } else {
                     (void)field.diffuse(diffusion_iters, diffusion_rate);
                 }
