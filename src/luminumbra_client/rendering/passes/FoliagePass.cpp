@@ -67,7 +67,7 @@ public:
     explicit RebuildAttributionScope(const FoliagePass& pass)
         : m_pass(pass)
         , m_enabled(Attribution::foliage_frame_active())
-        , m_phases_before(Attribution::phase_total_ms()) {
+        , m_phases_before(m_enabled ? Attribution::phase_total_ms() : 0) {
         if (m_enabled)
             m_start = std::chrono::steady_clock::now();
     }
@@ -725,8 +725,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         m_rebuild_attribution.fallback =
             m_gpu_active ? Attribution::FallbackReason::None : m_last_fallback;
     }
-    Attribution::StageTimer signature_timer(m_rebuild_attribution.signature_ms,
-                                            collect_attribution);
+    Attribution::FoliageStageTimer signature_timer(
+        m_rebuild_attribution, m_rebuild_attribution.signature_ms, collect_attribution);
     poll_ground_builds(chunks, camera_pos);
     if (preparation == Preparation::Complete)
         m_worker_ground_active = false;
@@ -900,7 +900,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     }
 
     // Stable chunk order also fixes capped membership in the CPU fallback.
-    Attribution::StageTimer sort_timer(m_rebuild_attribution.sort_ms, collect_attribution);
+    Attribution::FoliageStageTimer sort_timer(
+        m_rebuild_attribution, m_rebuild_attribution.sort_ms, collect_attribution);
     auto& ordered_chunks = m_ordered_chunks;
     ordered_chunks.assign(chunks.begin(), chunks.end());
     if (collect_attribution)
@@ -936,8 +937,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             m_rebuild_attribution.fallback = Attribution::FallbackReason::GpuDisabled;
         m_last_fallback = m_rebuild_attribution.fallback;
     }
-    const Attribution::StageTimer cpu_timer(m_rebuild_attribution.cpu_fallback_ms,
-                                            collect_attribution);
+    const Attribution::FoliageStageTimer cpu_timer(
+        m_rebuild_attribution, m_rebuild_attribution.cpu_fallback_ms, collect_attribution);
 
     // CPU fallback path: builds m_instances directly this frame.
     m_instances.clear();
@@ -984,8 +985,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 deferred_any = true;
                 continue;
             }
-            const Attribution::StageTimer timer(m_rebuild_attribution.surface_ms,
-                                                collect_attribution);
+            const Attribution::FoliageStageTimer timer(
+                m_rebuild_attribution, m_rebuild_attribution.surface_ms, collect_attribution);
             LUMIN_PROFILE_ZONE_N("Foliage CPU surface miss");
             if (collect_attribution)
                 ++m_rebuild_attribution.surface_misses;
@@ -1000,6 +1001,9 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
 
         if (collect_attribution)
             ++m_rebuild_attribution.admitted_columns;
+        const Attribution::FoliageStageTimer repack_timer(
+            m_rebuild_attribution, m_rebuild_attribution.repack_ms, collect_attribution);
+        LUMIN_PROFILE_ZONE_N("Foliage CPU repack");
         const std::vector<InstanceRecord>& cached = *cachedp;
         m_candidate_slots += kMaxCandidatesPerChunk;
         m_candidate_count += std::min<std::size_t>(
@@ -1063,7 +1067,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     m_instances_from_gpu_readback = false;
     m_instance_available_frame = m_evidence_frame;
     {
-        const Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
+        const Attribution::FoliageStageTimer timer(
+            m_rebuild_attribution, m_rebuild_attribution.upload_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage mapped upload");
         map_instances_for_frame();
         if (m_instance_ptr[m_ring_cursor] != nullptr) {
@@ -1304,9 +1309,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         m_rebuild_attribution.path = Attribution::FoliagePath::Gpu;
     if (collect_attribution)
         m_rebuild_attribution.fallback = Attribution::FallbackReason::None;
-    Attribution::StageTimer repack_timer(m_rebuild_attribution.repack_ms, collect_attribution);
-    const double prior_surface_ms = m_rebuild_attribution.surface_ms;
-    const double prior_storage_ms = m_rebuild_attribution.palette_scratch_ms;
+    Attribution::FoliageStageTimer repack_timer(
+        m_rebuild_attribution, m_rebuild_attribution.repack_ms, collect_attribution);
     auto& chunk_params = m_chunk_params;
     chunk_params.clear();
     m_slot_order.clear();
@@ -1338,8 +1342,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     // Growth discards GL storage, then repopulates every referenced slot from
     // CPU authority. No old GPU bytes are ever read or copied back to the CPU.
     if (m_surface_slots.capacity() > m_surface_storage_slots) {
-        const Attribution::StageTimer timer(m_rebuild_attribution.palette_scratch_ms,
-                                            collect_attribution);
+        const Attribution::FoliageStageTimer timer(
+            m_rebuild_attribution, m_rebuild_attribution.palette_scratch_ms, collect_attribution);
         m_surface_storage_slots = m_surface_slots.capacity();
         const auto bytes = m_surface_storage_slots * kMaxCandidatesPerChunk * sizeof(glm::vec4);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_surf_ssbo);
@@ -1376,8 +1380,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                 continue;
             }
         } else if (builds_left > 0) {
-            const Attribution::StageTimer timer(m_rebuild_attribution.surface_ms,
-                                                collect_attribution);
+            const Attribution::FoliageStageTimer timer(
+                m_rebuild_attribution, m_rebuild_attribution.surface_ms, collect_attribution);
             LUMIN_PROFILE_ZONE_N("Foliage GPU surface miss");
             if (collect_attribution)
                 ++m_rebuild_attribution.surface_misses;
@@ -1439,10 +1443,6 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             chunk_params.size() * (sizeof(GpuChunk) + sizeof(std::uint32_t));
     repack_timer.stop();
     if (collect_attribution)
-        m_rebuild_attribution.repack_ms -= m_rebuild_attribution.surface_ms - prior_surface_ms +
-                                           m_rebuild_attribution.palette_scratch_ms -
-                                           prior_storage_ms;
-    if (collect_attribution)
         m_rebuild_attribution.backlog = deferred_any;
     // Suppress scatter-cache elision next frame while builds remain pending (drain the backlog even
     // if the camera holds still); prune cache entries for chunks no longer renderable past a soft
@@ -1470,7 +1470,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     m_candidate_slots = static_cast<std::uint64_t>(chunk_count) * kMaxCandidatesPerChunk;
     if (chunk_count == 0) {
         // Nothing to scatter (all chunks culled). Empty build; gate sees 0.
-        const Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
+        const Attribution::FoliageStageTimer timer(
+            m_rebuild_attribution, m_rebuild_attribution.upload_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage empty upload");
         if (collect_attribution)
             m_rebuild_attribution.uploaded_bytes += 5 * sizeof(GLuint);
@@ -1492,8 +1493,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         return true;
     }
 
-    Attribution::StageTimer palette_timer(m_rebuild_attribution.palette_scratch_ms,
-                                          collect_attribution);
+    Attribution::FoliageStageTimer palette_timer(
+        m_rebuild_attribution, m_rebuild_attribution.palette_scratch_ms, collect_attribution);
     // Archetype palette: 2 vec4 per archetype.
     auto& pal = m_palette;
     if (m_palette_dirty) {
@@ -1532,7 +1533,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     collect_input_hash();
     m_uploaded_wind = m_wind_xz;
 
-    Attribution::StageTimer upload_timer(m_rebuild_attribution.upload_ms, collect_attribution);
+    Attribution::FoliageStageTimer upload_timer(
+        m_rebuild_attribution, m_rebuild_attribution.upload_ms, collect_attribution);
     {
         LUMIN_PROFILE_ZONE_N("Foliage dirty slot upload");
         const auto param_bytes = chunk_params.size() * sizeof(GpuChunk);
@@ -1543,8 +1545,11 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             std::memcmp(m_uploaded_metadata.params.data(), chunk_params.data(), param_bytes) != 0 ||
             std::memcmp(m_uploaded_metadata.slots.data(), m_slot_order.data(), slot_bytes) != 0;
         if (metadata_changed) {
+            Attribution::FoliageStageTimer metadata_timer(
+                m_rebuild_attribution, m_rebuild_attribution.repack_ms, collect_attribution);
             std::copy(chunk_params.begin(), chunk_params.end(), m_uploaded_metadata.params.begin());
             std::copy(m_slot_order.begin(), m_slot_order.end(), m_uploaded_metadata.slots.begin());
+            metadata_timer.stop();
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
             glBufferSubData(GL_SHADER_STORAGE_BUFFER,
                             0,
@@ -1563,9 +1568,12 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         // Sorting only the bounded dirty descriptors leaves logical scatter order
         // unchanged. Batch runs of three or more to retain the four-transfer
         // budget for the four-column admission workload, without copying clean slots.
+        Attribution::FoliageStageTimer dirty_sort_timer(
+            m_rebuild_attribution, m_rebuild_attribution.sort_ms, collect_attribution);
         std::sort(m_dirty_surfaces.begin(),
                   m_dirty_surfaces.end(),
                   [](const auto& a, const auto& b) { return a.slot < b.slot; });
+        dirty_sort_timer.stop();
         for (std::size_t first = 0; first < m_dirty_surfaces.size();) {
             std::size_t end = first + 1;
             while (end < m_dirty_surfaces.size() &&
@@ -1576,6 +1584,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             const auto count = end - first;
             const auto* data = m_dirty_surfaces[first].samples->data();
             if (count > 1) {
+                const Attribution::FoliageStageTimer scratch_copy_timer(
+                    m_rebuild_attribution, m_rebuild_attribution.repack_ms, collect_attribution);
                 m_dirty_surface_scratch.clear();
                 m_dirty_surface_scratch.reserve(count * kMaxCandidatesPerChunk);
                 for (std::size_t index = first; index < end; ++index) {
@@ -1630,7 +1640,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     }
 
     upload_timer.stop();
-    Attribution::StageTimer dispatch_timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
+    Attribution::FoliageStageTimer dispatch_timer(
+        m_rebuild_attribution, m_rebuild_attribution.dispatch_ms, collect_attribution);
     // --- Dispatch. ---
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.chunk_count, chunk_count);
@@ -1644,8 +1655,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     glUniform2f(m_scatter_uniforms.wind_xz, m_wind_xz.x, m_wind_xz.y);
 
     dispatch_timer.stop();
-    Attribution::StageTimer scratch_timer(m_rebuild_attribution.palette_scratch_ms,
-                                          collect_attribution);
+    Attribution::FoliageStageTimer scratch_timer(
+        m_rebuild_attribution, m_rebuild_attribution.palette_scratch_ms, collect_attribution);
     // At most 512 * 128 uints per buffer; count/prefix overwrite every
     // active entry before emit reads it. Retained tail entries are never read.
     constexpr std::size_t groups_per_chunk = (kMaxCandidatesPerChunk + 63) / 64;
@@ -1669,7 +1680,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     m_group_storage_bytes = std::max(m_group_storage_bytes, group_bytes);
     scratch_timer.stop();
     {
-        const Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
+        const Attribution::FoliageStageTimer timer(
+            m_rebuild_attribution, m_rebuild_attribution.dispatch_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage dispatch submission");
         dispatch_scatter();
     }
@@ -1727,7 +1739,8 @@ void FoliagePass::collect_input_hash() {
     if (!m_evidence_enabled || m_uploaded_input_hash)
         return;
     const bool collect_attribution = Attribution::foliage_frame_active();
-    const Attribution::StageTimer timer(m_rebuild_attribution.hash_ms, collect_attribution);
+    const Attribution::FoliageStageTimer timer(
+        m_rebuild_attribution, m_rebuild_attribution.hash_ms, collect_attribution);
     LUMIN_PROFILE_ZONE_N("Foliage evidence hash");
     if (collect_attribution)
         m_rebuild_attribution.hashed_bytes +=
@@ -2070,7 +2083,8 @@ void FoliagePass::rebuild_frozen_inputs() {
         m_rebuild_attribution.path = Attribution::FoliagePath::FrozenGpu;
     if (collect_attribution)
         m_rebuild_attribution.admitted_columns = static_cast<std::uint64_t>(m_uploaded_chunk_count);
-    const Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
+    const Attribution::FoliageStageTimer timer(
+        m_rebuild_attribution, m_rebuild_attribution.dispatch_ms, collect_attribution);
     LUMIN_PROFILE_ZONE_N("Foliage frozen submission");
     // Reuse only the immutable INPUT buffers. Clear all prior OUTPUT bytes and
     // counters; both count and emit kernels execute again with a fresh generation.

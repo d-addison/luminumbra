@@ -404,7 +404,21 @@ std::string GameSession::SystemConfigIdentity() const {
     return SystemConfigIdentity(GetRenderCalendar());
 }
 
+std::string GameSession::LegacyRevision3SystemConfigIdentity() const {
+    return EffectiveIdentityValues().ComputeLegacyRevision3Identity();
+}
+
 std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) const {
+    auto values = EffectiveIdentityValues();
+    values.day_length_ticks = calendar.dayLengthTicks;
+    values.days_per_year = calendar.daysPerYear;
+    values.daylight_numerator = calendar.daylightNumerator;
+    values.daylight_denominator = calendar.daylightDenominator;
+    values.lunar_cycle_days = calendar.lunarCycleDays;
+    return values.ComputeIdentity();
+}
+
+luminumbra::core::SimulationIdentityValues GameSession::EffectiveIdentityValues() const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;
     luminumbra::core::SimulationIdentityValues values;
@@ -414,11 +428,6 @@ std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) con
     values.region_work_limit = scheduler.work_limit;
     values.region_hold_ticks = scheduler.hold_ticks;
     values.region_reduced_shift = scheduler.reduced_shift;
-    values.day_length_ticks = calendar.dayLengthTicks;
-    values.days_per_year = calendar.daysPerYear;
-    values.daylight_numerator = calendar.daylightNumerator;
-    values.daylight_denominator = calendar.daylightDenominator;
-    values.lunar_cycle_days = calendar.lunarCycleDays;
     // Tuning-only gates resolve to values in ApplySystemConfig; their flags are
     // normalized to true. Erosion has no session gate. Preserve the canonical slots.
     values.enabled[static_cast<std::size_t>(SysKey::SimHydrologyWeather)] = m_weatherRainEnabled;
@@ -493,7 +502,7 @@ std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) con
     values.scalars[static_cast<std::size_t>(SysParam::ForagingGoalWeight)] =
         m_foragingTuning.goal_weight;
     values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
-    return values.ComputeIdentity();
+    return values;
 }
 
 // apply the session water-sim resolution when the owner opted in
