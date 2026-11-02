@@ -931,12 +931,48 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("new_resolution == current_resolution && "
                       "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
         update = compact(body(source, "void WaterSystem::update("))
-        self.assertIn("chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()",
-                      update)
+        self.assertIn("auto to_init = PrepareWaterGrids(deterministic_authority);", update)
+        prepare = compact(body(source, "std::vector<Chunk*> WaterSystem::PrepareWaterGrids("))
+        self.assertIn("required_detail != WaterDetailLevel::Off && "
+                      "(static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load() || "
+                      "(chunk_ptr->water_bed_mm.empty() && chunk_ptr->water_depth_mm.empty()))", prepare)
+        self.assertIn("resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});",
+                      prepare)
+        self.assertIn("ResizeSimulationGrid(*req.chunk, req.level);", prepare)
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
         for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
                            "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):
             self.assertIn(regression, native)
+
+    def test_water_authority_keeps_legacy_arithmetic_and_voxel_independence(self):
+        source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        header = read(ROOT / "src/luminumbra_common/systems/WaterSystem.h")
+        self.assertIn("bool deterministic_authority = false", header)
+        prepare = compact(body(source, "std::vector<Chunk*> WaterSystem::PrepareWaterGrids("))
+        self.assertIn("deterministic_authority ? 0 : m_water_resize_cursor % total", prepare)
+        self.assertIn("if (!deterministic_authority) m_water_resize_cursor = (start + budget) % total;",
+                      prepare)
+        self.assertLess(prepare.index("std::sort(to_init.begin()"),
+                        prepare.index("to_init.resize(MAX_WATER_INITS_PER_TICK)"))
+        step = compact(body(source, "void StepChunkWaterFixed("))
+        self.assertIn("thread_local std::vector<std::int64_t> next_depth;", step)
+        self.assertIn("depth[i] = ClampWaterDepth(next_depth[i]);", step)
+        self.assertIn("out_sink += next_depth[i] - depth[i];", step)
+        self.assertIn("if (bed[i] <= sea_mm)", step)
+        self.assertLess(step.index("out_sink += next_depth[i] - depth[i];"),
+                        step.index("if (bed[i] <= sea_mm)"))
+        edit = compact(body(source, "int WaterSystem::EditTerrainBed("))
+        self.assertIn("const auto* owners = chunks ? chunks : m_active_chunks;", edit)
+        self.assertIn("bed = ClampWaterBed(static_cast<std::int64_t>(bed) + delta_mm); "
+                      "edited = true; ++edited_total;", edit)
+        self.assertNotIn("m_active_chunks =", edit)
+        self.assertNotIn("mark_voxel_data_dirty", source)
+        for signature in ("void WaterSystem::update(",
+                          "void WaterSystem::InitializeGeneratedWater(",
+                          "void WaterSystem::apply_displacement(",
+                          "int WaterSystem::EditTerrainBed(",
+                          "bool WaterSystem::ResizeSimulationGrid("):
+            self.assertIn("mark_water_data_dirty()", body(source, signature))
 
     def test_legacy_surface_migration_does_not_require_flow(self):
         source = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
