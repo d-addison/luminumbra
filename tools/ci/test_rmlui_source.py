@@ -1384,6 +1384,70 @@ class DeliveryRefusals(unittest.TestCase):
                             M.inventory(root, live_git=live)
                 self.assertEqual(hits, 1)
 
+    def test_file_inventory_tolerates_only_vanished_ignored_git_entry(self):
+        cases = itertools.product((".git", "nested/.git", ".git-other", "required.txt"),
+                                  (False, True), (False, True), (FileNotFoundError, PermissionError))
+        for name, ignore_git, populated, error in cases:
+            with self.subTest(name=name, ignore_git=ignore_git, populated=populated, error=error), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if name == ".git":
+                    target.mkdir()
+                else:
+                    target.write_bytes(b"required source")
+                if populated:
+                    (root / "retained.txt").write_bytes(b"retained source")
+                lstat = os.lstat
+                hits = 0
+                def inspect(candidate, *args, **kwargs):
+                    nonlocal hits
+                    if Path(candidate) == target:
+                        hits += 1
+                        if error is PermissionError:
+                            raise PermissionError("unreadable entry")
+                        # Remove the entry after listing, before its metadata lookup.
+                        if name == ".git":
+                            target.rmdir()
+                        else:
+                            target.unlink()
+                    return lstat(candidate, *args, **kwargs)
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    if ignore_git and name == ".git" and error is FileNotFoundError:
+                        self.assertEqual(set(M.inventory(root, ignore_git=True)),
+                                         {"retained.txt"} if populated else set())
+                    else:
+                        with self.assertRaises(error):
+                            M.inventory(root, ignore_git=ignore_git)
+                self.assertEqual(hits, 1)
+                if populated:
+                    self.assertEqual((root / "retained.txt").read_bytes(), b"retained source")
+
+    def test_ignored_git_entry_still_requires_an_ordinary_directory(self):
+        for directory_entry, reparse in itertools.product((False, True), (False, True)):
+            with self.subTest(directory=directory_entry, reparse=reparse), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                admin = root / ".git"
+                if directory_entry:
+                    admin.mkdir()
+                else:
+                    admin.write_bytes(b"external administration")
+                lstat = os.lstat
+                def inspect(candidate, *args, **kwargs):
+                    info = lstat(candidate, *args, **kwargs)
+                    if Path(candidate) == admin and reparse:
+                        return StatFields(info, st_file_attributes=M.REPARSE,
+                                          st_reparse_tag=0xA000000C)
+                    return info
+                with mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    if directory_entry and not reparse:
+                        self.assertEqual(M.inventory(root, ignore_git=True), {})
+                    else:
+                        with self.assertRaisesRegex(M.Refusal, "Git administration must be a local directory"):
+                            M.inventory(root, ignore_git=True)
+
     def test_live_scan_skips_vanished_worktree_entries_but_refuses_surviving_ones_and_final_scan_is_strict(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
