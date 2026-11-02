@@ -2286,12 +2286,18 @@ bool DecompressPayload(const RegionRecord& record,
     return true;
 }
 
+std::atomic<std::uint64_t>& RegionReadCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
                     std::vector<std::string>* errors,
                     const std::stop_token& stop = {},
                     bool missing_allowed = false) {
     LUMIN_PROFILE_ZONE_N("File save read");
+    RegionReadCounter().fetch_add(1, std::memory_order_relaxed);
     if (stop.stop_requested()) {
         AddError(errors, "Saved-world validation cancelled.");
         return false;
@@ -4508,6 +4514,10 @@ std::uint64_t WorldSaveService::region_fingerprint_count_for_testing() {
     return RegionFingerprintCounter().load(std::memory_order_acquire);
 }
 
+std::uint64_t WorldSaveService::region_read_count_for_testing() {
+    return RegionReadCounter().load(std::memory_order_relaxed);
+}
+
 bool WorldSaveService::audit_admitted_chunk_records_for_testing(
     const std::filesystem::path& region_file, AdmittedChunkRecordAudit& audit) {
     audit = {};
@@ -4540,9 +4550,9 @@ bool WorldSaveService::durable_flush_directory(const std::filesystem::path& dire
                                                std::vector<std::string>* errors) {
 #if defined(_WIN32)
     // Windows has no supported FlushFileBuffers operation on an ordinary directory
-    // handle. Namespace publication/removal uses same-volume, write-through moves;
-    // undo bytes are flushed first. Native power-loss qualification remains a
-    // separate requirement for each supported filesystem/storage stack.
+    // handle. Protected publications flush the bound published file after linking;
+    // other replacements use write-through moves. Undo bytes are flushed first. Native power-loss
+    // qualification remains a separate requirement for each supported filesystem/storage stack.
     (void)directory;
     (void)errors;
     return true;
@@ -5441,12 +5451,28 @@ struct ChunkReadCache {
     struct Admission {
         WorldSaveService::SaveFormat format;
         SnapshotIndex index;
+        std::array<std::optional<std::string>, 3> envelope;
+    };
+    struct Region {
+        std::vector<RegionRecord> records;
+        std::string header;
+        std::map<ChunkID, std::pair<std::size_t, std::uint64_t>> positions;
+        std::uint64_t file_bytes = 0;
+        std::size_t payload_bytes = 0;
     };
     static constexpr std::size_t kMaxRegions = 16;
+    static constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
 
     std::uint64_t revision = PublicationRevision().load(std::memory_order_relaxed);
     std::map<std::filesystem::path, Admission> admissions;
-    std::map<std::filesystem::path, std::vector<RegionRecord>> regions;
+    std::map<std::filesystem::path, Region> regions;
+    std::size_t payload_bytes = 0;
+
+    void clear() {
+        admissions.clear();
+        regions.clear();
+        payload_bytes = 0;
+    }
 };
 
 // Any publication may change an index or region file; drop everything verified before it.
@@ -5454,9 +5480,77 @@ void RefreshChunkReadCache(ChunkReadCache& cache) {
     const auto current = PublicationRevision().load(std::memory_order_relaxed);
     if (current == cache.revision)
         return;
-    cache.admissions.clear();
-    cache.regions.clear();
+    cache.clear();
     cache.revision = current;
+}
+
+bool ReadChunkEnvelope(const std::filesystem::path& save_dir,
+                       std::array<std::optional<std::string>, 3>& envelope) {
+    const std::array paths{save_dir / "world_info.json",
+                           WorldSaveService::world_manifest_path(save_dir),
+                           snapshot_index_path(save_dir)};
+    const std::array limits{
+        SavedInputLimits::kMetadataBytes, SavedInputLimits::kManifestBytes, kMaxSnapshotIndexBytes};
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const SavedInputFile input(paths[i]);
+        if (input.missing()) {
+            envelope[i].reset();
+        } else {
+            std::string bytes;
+            if (!input.read(bytes, limits[i]))
+                return false;
+            envelope[i] = std::move(bytes);
+        }
+    }
+    return true;
+}
+
+ChunkReadCache::Region IndexChunkReadRegion(std::vector<RegionRecord> records) {
+    ChunkReadCache::Region region;
+    region.header.append(kRegionMagic, sizeof(kRegionMagic));
+    AppendU16(region.header, kRegionVersion);
+    AppendU16(region.header, static_cast<std::uint16_t>(records.size()));
+    std::uint64_t offset = kRegionFileHeaderSize + records.size() * kRecordHeaderSize;
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const auto& record = records[i];
+        AppendU64(region.header, record.id);
+        region.header.push_back(static_cast<char>(record.lod_level));
+        region.header.push_back(static_cast<char>(record.flags));
+        AppendU32(region.header, record.uncompressed_size);
+        AppendU32(region.header, static_cast<std::uint32_t>(record.compressed_payload.size()));
+        if (record.lod_level == 0)
+            region.positions.emplace(record.id, std::pair{i, offset});
+        offset += record.compressed_payload.size();
+        region.payload_bytes += record.compressed_payload.size();
+    }
+    region.file_bytes = offset;
+    region.records = std::move(records);
+    return region;
+}
+
+// Admission covers the container and its membership. A subsequent read checks the
+// complete manifest and the exact requested payload on one fresh, admitted handle.
+// Unrequested payloads are checked when used; no cached chunk bytes escape unchecked.
+bool CurrentRecordMatches(const std::filesystem::path& path,
+                          const ChunkReadCache::Region& region,
+                          ChunkID id) {
+    const SavedInputFile input(path);
+    if (input.missing())
+        return region.file_bytes == 0;
+    std::uint64_t length = 0;
+    if (region.file_bytes == 0 || !input.length(length) || length != region.file_bytes)
+        return false;
+    std::string header(region.header.size(), '\0');
+    if (!input.read_exact(header.data(), header.size()) || header != region.header)
+        return false;
+    const auto found = region.positions.find(id);
+    if (found == region.positions.end())
+        return input.length(length) && length == region.file_bytes;
+    const auto& [index, offset] = found->second;
+    const auto& payload = region.records[index].compressed_payload;
+    std::string current(payload.size(), '\0');
+    return input.seek(offset) && input.read_exact(current.data(), current.size()) &&
+           current == payload && input.length(length) && length == region.file_bytes;
 }
 
 std::optional<ChunkReadCache>& ActiveChunkReadCache() {
@@ -5464,6 +5558,14 @@ std::optional<ChunkReadCache>& ActiveChunkReadCache() {
     return active;
 }
 } // namespace
+
+struct WorldSaveService::ChunkReader::Impl {
+    ChunkReadCache cache;
+};
+
+WorldSaveService::ChunkReader::ChunkReader()
+    : m_impl(std::make_unique<Impl>()) {}
+WorldSaveService::ChunkReader::~ChunkReader() = default;
 
 WorldSaveService::ChunkReadBatch::ChunkReadBatch() {
     if (ActiveChunkReadCache())
@@ -5477,10 +5579,14 @@ WorldSaveService::ChunkReadBatch::~ChunkReadBatch() {
         ActiveChunkReadCache().reset();
 }
 
-WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
-    const std::filesystem::path& save_dir, const IVec3& coords, bool require_index) {
+WorldSaveService::ChunkReadResult
+WorldSaveService::read_chunk(const std::filesystem::path& save_dir,
+                             const IVec3& coords,
+                             bool require_index,
+                             ChunkReader* reader) {
     const detail::SnapshotReadOwnership ownership;
-    auto& batch = ActiveChunkReadCache();
+    auto& active = ActiveChunkReadCache();
+    auto* batch = reader ? &reader->m_impl->cache : (active ? &active.value() : nullptr);
     if (batch)
         RefreshChunkReadCache(*batch);
     ChunkReadResult result;
@@ -5496,16 +5602,24 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
         ChunkReadCache::Admission read_admission;
+        if (!ReadChunkEnvelope(save_dir, read_admission.envelope))
+            return fail("unreadable snapshot envelope");
         const ChunkReadCache::Admission* admission = nullptr;
         if (batch) {
             if (const auto cached = batch->admissions.find(save_dir);
-                cached != batch->admissions.end())
+                cached != batch->admissions.end() &&
+                cached->second.envelope == read_admission.envelope)
                 admission = &cached->second;
+            else
+                batch->clear();
         }
         if (!admission) {
             if (!read_save_format(
                     save_dir, read_admission.format, &errors, {}, &read_admission.index))
                 return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
+            std::array<std::optional<std::string>, 3> current;
+            if (!ReadChunkEnvelope(save_dir, current) || current != read_admission.envelope)
+                return fail("snapshot envelope changed during admission");
             admission =
                 batch
                     ? &batch->admissions.emplace(save_dir, std::move(read_admission)).first->second
@@ -5513,26 +5627,41 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         }
         if (require_index && !admission->format.indexed)
             return fail("inconsistent snapshot: index missing");
-        std::vector<RegionRecord> read_records;
-        const std::vector<RegionRecord>* records = nullptr;
+        ChunkReadCache::Region read_region;
+        const ChunkReadCache::Region* region = nullptr;
         if (batch) {
             if (const auto cached = batch->regions.find(path); cached != batch->regions.end())
-                records = &cached->second;
+                region = &cached->second;
         }
-        if (!records) {
+        const bool cached_region = region != nullptr;
+        if (!region) {
+            std::vector<RegionRecord> read_records;
             if (!ReadRegionFile(path, read_records, &errors, {}, true))
                 return fail(errors.empty() ? "unreadable chunk region" : errors.front());
             if (!VerifyRegionMembership(path, read_records, &errors, &admission->index))
                 return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
-            if (batch && batch->regions.size() >= ChunkReadCache::kMaxRegions)
-                batch->regions.erase(batch->regions.begin());
-            records = batch ? &batch->regions.emplace(path, std::move(read_records)).first->second
-                            : &read_records;
+            read_region = IndexChunkReadRegion(std::move(read_records));
+            if (read_region.records.empty() && SavedInputFile(path).missing())
+                read_region = {};
+            if (batch && read_region.payload_bytes <= ChunkReadCache::kMaxBytes) {
+                while (!batch->regions.empty() &&
+                       (batch->regions.size() >= ChunkReadCache::kMaxRegions ||
+                        batch->payload_bytes + read_region.payload_bytes >
+                            ChunkReadCache::kMaxBytes)) {
+                    batch->payload_bytes -= batch->regions.begin()->second.payload_bytes;
+                    batch->regions.erase(batch->regions.begin());
+                }
+                batch->payload_bytes += read_region.payload_bytes;
+                region = &batch->regions.emplace(path, std::move(read_region)).first->second;
+            } else {
+                region = &read_region;
+            }
         }
         const auto id = Chunk::calculate_id(coords);
-        for (const auto& record : *records) {
-            if (record.lod_level != 0 || record.id != id)
-                continue;
+        if (cached_region && !CurrentRecordMatches(path, *region, id))
+            return fail("durable chunk region changed since admission");
+        if (const auto found = region->positions.find(id); found != region->positions.end()) {
+            const auto& record = region->records[found->second.first];
             result.chunk = DecodeChunkRecord(record, path, &errors);
             constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                              (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);

@@ -914,7 +914,7 @@ private:
         auto destination = handle_path(parent.get()) / target.path.filename();
         destination.make_preferred();
         ScopedFile bound(::CreateFileW(source.path.c_str(),
-                                       FILE_READ_ATTRIBUTES | DELETE,
+                                       GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE,
                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
                                        nullptr,
                                        OPEN_EXISTING,
@@ -929,7 +929,16 @@ private:
                                      Filesystem::GenericUtf8PathString(source.path));
         try {
             const ScopedFile published(Detail::WindowsPublishWithoutReplacement(
-                bound.release(), source.path, destination, FILE_READ_ATTRIBUTES | DELETE, stage));
+                bound.release(),
+                source.path,
+                destination,
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE,
+                stage));
+            target.identity = source.identity;
+            if (!::FlushFileBuffers(published.get()))
+                throw std::system_error(static_cast<int>(::GetLastError()),
+                                        std::system_category(),
+                                        "Could not flush published world artifact");
         } catch (const Detail::WindowsPublicationRecoveryError& error) {
             // A verified alias created by this call is safe to retain for
             // rollback even when source retirement or recovery failed. This

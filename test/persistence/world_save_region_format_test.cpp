@@ -728,12 +728,15 @@ TEST(WorldSaveRegionFormat, ChunkReadBatchVerifiesEachRegionOnceUntilAPublicatio
     {
         const WorldSaveService::ChunkReadBatch batch;
         EXPECT_EQ(read_front(0, -1.0f), 1);
-        EXPECT_EQ(read_front(1, -2.0f), 0);
+        const auto full_reads = WorldSaveService::region_read_count_for_testing();
+        // Cache hits still open a fresh handle for exact manifest and record comparison.
+        EXPECT_EQ(read_front(1, -2.0f), 1);
         {
             const WorldSaveService::ChunkReadBatch nested;
-            EXPECT_EQ(read_front(0, -1.0f), 0);
+            EXPECT_EQ(read_front(0, -1.0f), 1);
         }
-        EXPECT_EQ(read_front(1, -2.0f), 0);
+        EXPECT_EQ(read_front(1, -2.0f), 1);
+        EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), full_reads);
         // A commit on this thread replaces verified members; the next read re-admits them.
         const auto first = state.get_or_create_chunk({0, 0, 0});
         first->sdf_data.front() = -9.0f;
@@ -745,7 +748,7 @@ TEST(WorldSaveRegionFormat, ChunkReadBatchVerifiesEachRegionOnceUntilAPublicatio
             ASSERT_TRUE(transaction.commit(nullptr));
         }
         EXPECT_EQ(read_front(0, -9.0f), 1);
-        EXPECT_EQ(read_front(1, -2.0f), 0);
+        EXPECT_EQ(read_front(1, -2.0f), 1);
     }
     std::ofstream(counted, std::ios::binary | std::ios::trunc) << "invalid";
     EXPECT_EQ(WorldSaveService::read_chunk(save.path, {0, 0, 0}, true).status,

@@ -274,13 +274,29 @@ public:
         std::shared_ptr<Chunk> chunk;
         std::string error;
     };
+    // Owner-thread state retained by an open world's loader, released with that loader.
+    // At most 16 regions / 256 MiB of compressed payload and one admitted envelope.
+    class ChunkReader {
+    public:
+        ChunkReader();
+        ~ChunkReader();
+        ChunkReader(const ChunkReader&) = delete;
+        ChunkReader& operator=(const ChunkReader&) = delete;
+
+    private:
+        friend class WorldSaveService;
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
+    };
     // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
     // missing records are distinct from corrupt/unreadable expected authority.
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
-                                      bool require_index = false);
+                                      bool require_index = false,
+                                      ChunkReader* reader = nullptr);
     // While alive, read_chunk calls on this thread admit each index and verify each region
-    // file once, until any publication changes the snapshot. Nested batches share the outer.
+    // file once, until any publication changes the snapshot. Every use checks fresh bytes.
+    // Nested batches share the outer; a supplied ChunkReader persists across batches.
     class ChunkReadBatch {
     public:
         ChunkReadBatch();
@@ -452,6 +468,8 @@ public:
     // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since
     // process start.
     static std::uint64_t region_fingerprint_count_for_testing();
+    // Full-container reads, excluding fresh manifest/requested-record checks.
+    static std::uint64_t region_read_count_for_testing();
     // Compares the admitted-check entry of every lod-0 record in a region file with a fresh
     // decode of that record (which advances the decode counter). False when the file is
     // unreadable.

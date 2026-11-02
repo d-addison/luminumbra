@@ -1951,12 +1951,13 @@ void GameSession::AttachRegionEditObserver() {
     if (m_activeRegionsEnabled && m_worldSystem) {
         m_worldSystem->set_durable_residency(true);
         m_worldSystem->set_parked_bytes_limit(m_parkedBytesLimit);
+        auto reader = std::make_shared<Persistence::WorldSaveService::ChunkReader>();
         m_worldSystem->set_durable_chunk_loader(
-            [this](const IVec3& coords) {
+            [this, reader](const IVec3& coords) {
                 const auto directory =
                     m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
                 const auto result = Persistence::WorldSaveService::read_chunk(
-                    directory, coords, m_regionRequiresIndex);
+                    directory, coords, m_regionRequiresIndex, reader.get());
                 if (result.status != Persistence::WorldSaveService::ChunkReadStatus::Found)
                     throw std::runtime_error(
                         result.error.empty() ? "expected durable chunk is missing" : result.error);

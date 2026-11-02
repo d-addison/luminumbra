@@ -163,6 +163,20 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool seek(std::uint64_t offset) const {
+        std::uint64_t size = 0;
+        if (!length(size) || offset > size)
+            return false;
+#if defined(_WIN32)
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        return ::SetFilePointerEx(m_handle, position, nullptr, FILE_BEGIN) != 0;
+#else
+        return ::lseek(m_descriptor, static_cast<off_t>(offset), SEEK_SET) ==
+               static_cast<off_t>(offset);
+#endif
+    }
+
     [[nodiscard]] bool rewind() const {
 #if defined(_WIN32)
         LARGE_INTEGER origin{};

@@ -51,9 +51,27 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertLess(binding, identity)
         self.assertLess(identity, link)
         self.assertNotIn("FILE_SHARE_DELETE", publication[binding:identity])
-        self.assertIn("bound.release(), source.path, destination", publication[link:])
+        self.assertRegex(publication[link:], r"bound\.release\(\),\s*source\.path,\s*destination")
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
+
+    def test_windows_bound_publication_flushes_before_success(self):
+        publication = body(self.journal, "void publish_windows(")
+        link = publication.index("Detail::WindowsPublishWithoutReplacement(")
+        flush = publication.index("::FlushFileBuffers(published.get())")
+        self.assertIn("GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE", publication[:link])
+        self.assertIn("GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE", publication[link:flush])
+        self.assertLess(link, publication.index("target.identity = source.identity;"))
+        self.assertLess(publication.index("target.identity = source.identity;"), flush)
+        self.assertRegex(publication[flush:], r"throw std::system_error")
+        service = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
+        protected = body(service, "bool PublishProtectedMember(")
+        self.assertIn("source.publish_bound(destination, source_stage)", protected)
+        transaction = (PERSISTENCE / "SaveTransaction.cpp").read_text(encoding="utf-8")
+        commit = body(transaction, "bool SaveTransaction::commit(")
+        self.assertLess(commit.index("if (!published)"), commit.index("m_state = State::Committed"))
+        self.assertLess(commit.index("m_state = State::Committed"),
+                        commit.index("recover_pending_journal(m_save_dir, errors)"))
 
     def test_publication_checks_source_retirement_and_retains_verified_cleanup_ownership(self):
         publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
