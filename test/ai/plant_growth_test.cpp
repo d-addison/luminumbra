@@ -356,9 +356,10 @@ TEST(PlantCoarseGrowth, MatchesIndependentExistingSingleTickConsumer) {
                 const PlantEnvSample env{0.3f, 0.1f, 0.7f, 0.9f};
                 std::uint32_t oracle_advanced = 0;
                 for (std::uint32_t i = 0; i < elapsed; ++i)
-                    oracle_advanced += RunPlantGrowthSystemOnTick(reg, 100 + i, [&](const auto&) {
-                                           return env;
-                                       }).advanced;
+                    oracle_advanced += static_cast<std::uint32_t>(
+                        RunPlantGrowthSystemOnTick(reg, 100 + i, [&](const auto&) {
+                            return env;
+                        }).advanced);
                 const auto result = AdvancePlantGrowthCoarse(
                     bulk, genome, env, health.infection, elapsed, elapsed ? 99 + elapsed : 0);
                 EXPECT_EQ(result, oracle_advanced);
