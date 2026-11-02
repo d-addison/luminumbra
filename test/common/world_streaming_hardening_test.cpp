@@ -693,6 +693,57 @@ TEST(StreamingHardening, PendingLodPreventsStreamingQuiescence) {
     EXPECT_FALSE(stats.quiescent());
 }
 
+TEST(StreamingHardening, RestoredPendingJobsResetOnlyBeforeExplicitAdoption) {
+    WorldStreamingState saved;
+    const auto original = std::make_shared<Chunk>(IVec3(0));
+    StampChunk(*original, 2u);
+    original->pending_promotion_ready.store(true);
+    original->pending_promotion_failed.store(true);
+    original->pending_generation_ready.store(true);
+    original->pending_sdf_data = {1.0f};
+    original->pending_heightmap_data = {2.0f};
+    original->pending_material_data = {3u};
+    ASSERT_TRUE(saved.insert_chunk(original));
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+        Persistence::SerializeWorldStreamingStateSnapshotJson(saved, true), restored, errors));
+    const auto loaded = restored.find_chunk(original->get_id());
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(loaded->pending_lod.load(), 0);
+    EXPECT_TRUE(loaded->pending_mesh_ready.load());
+    // This newly decoded owner has no workers. Only the adoption boundary may
+    // retire serialized reservations; ordinary live adoption preserves them.
+    loaded->pending_water_mesh_generated.store(true);
+    const auto stamp = loaded->authority_stamp();
+    const auto sdf = loaded->sdf_data;
+    const auto terrain_version = loaded->mesh_version.load();
+    const auto water_version = loaded->water_mesh_version.load();
+    loaded->reset_pending_jobs();
+    EXPECT_EQ(loaded->pending_lod.load(), -1);
+    EXPECT_FALSE(loaded->pending_mesh_ready.load());
+    EXPECT_FALSE(loaded->pending_water_mesh_generated.load());
+    EXPECT_FALSE(loaded->pending_mesh_failed.load());
+    EXPECT_FALSE(loaded->pending_promotion_ready.load());
+    EXPECT_FALSE(loaded->pending_promotion_failed.load());
+    EXPECT_FALSE(loaded->pending_generation_ready.load());
+    EXPECT_TRUE(loaded->pending_mesh_vertices.empty());
+    EXPECT_TRUE(loaded->pending_mesh_indices.empty());
+    EXPECT_TRUE(loaded->pending_water_mesh_vertices.empty());
+    EXPECT_TRUE(loaded->pending_water_mesh_indices.empty());
+    EXPECT_TRUE(loaded->pending_sdf_data.empty());
+    EXPECT_TRUE(loaded->pending_heightmap_data.empty());
+    EXPECT_TRUE(loaded->pending_material_data.empty());
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), 42);
+    ASSERT_TRUE(world.adopt_streamed_chunk(loaded));
+    EXPECT_EQ(loaded->authority_stamp(), stamp);
+    EXPECT_EQ(loaded->sdf_data, sdf);
+    EXPECT_EQ(loaded->mesh_version.load(), terrain_version);
+    EXPECT_EQ(loaded->water_mesh_version.load(), water_version);
+    EXPECT_EQ(original->pending_lod.load(), 0);
+    EXPECT_TRUE(original->pending_mesh_ready.load());
+}
+
 TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
