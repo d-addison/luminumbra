@@ -1,6 +1,7 @@
 #include "foliage_rebuild_fixture.h"
 
 #include "../support/DeterministicWorkBudget.h"
+#include "../support/UniqueTempPath.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_client/app/FrameAttribution.h"
 #include "luminumbra_client/rendering/Camera.h"
@@ -29,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -1944,6 +1946,121 @@ private:
     GLuint m_framebuffer = 0;
     GLuint m_color = 0;
 };
+
+class FoliagePaletteReloadTest : public FoliageRebuildTest {
+protected:
+    static void ExpectNoDraws(FoliagePass& pass,
+                              const Luminumbra::Rendering::RenderContext& context,
+                              const Luminumbra::Rendering::Camera& camera) {
+        EXPECT_TRUE(pass.instances().empty());
+        EXPECT_EQ(pass.frame_instance_count(), 0u);
+        EXPECT_FALSE(pass.instances_from_gpu_readback());
+        EXPECT_FALSE(pass.uploaded_input_hash().has_value());
+        EXPECT_FALSE(pass.build_pending());
+        pass.execute(context, camera);
+        EXPECT_EQ(pass.last_draw_calls(), 0u);
+    }
+
+    // Loads with no current context: the failure path must not touch GL objects.
+    static bool LoadWithoutContext(FoliagePass& pass, const std::filesystem::path& path) {
+        auto* const current = glfwGetCurrentContext();
+        glfwMakeContextCurrent(nullptr);
+        const bool loaded = pass.load_scatter_set(path);
+        glfwMakeContextCurrent(current);
+        return loaded;
+    }
+
+    void ExpectFailedReloadRetiresDraws(bool gpu, const char* contents) {
+        const Luminumbra::TestSupport::ScopedTempFile file("foliage-palette-", ".json");
+        if (contents) {
+            std::ofstream out(file.Path());
+            out << contents;
+            out.close();
+            ASSERT_TRUE(out.good());
+        }
+        ScopedPass scoped;
+        auto& pass = scoped.pass();
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.shader()->IsValid());
+        pass.set_evidence_enabled(true);
+        pass.set_readback_enabled(true);
+        const ScopedDrawTarget target;
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+                  static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+        Luminumbra::Rendering::RenderContext context;
+        context.screen_width = context.screen_height = 64;
+        context.lit_scene = Luminumbra::Rendering::FboHandle{target.framebuffer()};
+        const Luminumbra::Rendering::Camera camera(kCamera);
+        const auto chunks = Chunks(1);
+        Rebuild(pass, chunks, 1);
+        const auto original = Records(pass, gpu);
+        ASSERT_FALSE(original.empty());
+        const auto generation = pass.build_generation();
+        const auto input_hash = pass.uploaded_input_hash();
+        glFinish();
+        ExpectReused(RebuildAttributed(pass, chunks, 2), gpu);
+        EXPECT_EQ(pass.build_generation(), generation);
+        EXPECT_EQ(pass.uploaded_input_hash(), input_hash);
+        ASSERT_FALSE(pass.instances().empty());
+        pass.execute(context, camera);
+        ASSERT_EQ(pass.last_draw_calls(), 1u);
+
+        if (gpu) {
+            ASSERT_TRUE(input_hash.has_value());
+            ASSERT_TRUE(pass.instances_from_gpu_readback());
+            // Keep a held snapshot and another pending copy of the old build.
+            pass.set_readback_enabled(false);
+            pass.set_readback_enabled(true);
+            ExpectReused(RebuildAttributed(pass, chunks, 3), gpu);
+        }
+        ASSERT_FALSE(LoadWithoutContext(pass, file.Path()));
+        const auto failed_generation = pass.build_generation();
+        EXPECT_GT(failed_generation, generation);
+        EXPECT_EQ(pass.archetype_count(), 0u);
+        ExpectNoDraws(pass, context, camera);
+        glFinish();
+        const auto inactive = RebuildAttributed(pass, chunks, 4);
+        EXPECT_EQ(inactive.path, Attribution::FoliagePath::Inactive);
+        EXPECT_EQ(pass.build_generation(), failed_generation + 1);
+        ExpectNoDraws(pass, context, camera);
+        Rebuild(pass, chunks, 5);
+        ExpectNoDraws(pass, context, camera);
+
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        const auto restored = RebuildAttributed(pass, chunks, 6);
+        EXPECT_EQ(restored.path,
+                  gpu ? Attribution::FoliagePath::Gpu : Attribution::FoliagePath::Cpu);
+        ExpectSame(original, Records(pass, gpu));
+        EXPECT_EQ(pass.uploaded_input_hash(), input_hash);
+        pass.execute(context, camera);
+        EXPECT_EQ(pass.last_draw_calls(), 1u);
+        const auto restored_generation = pass.build_generation();
+        glFinish();
+        ExpectReused(RebuildAttributed(pass, chunks, 7), gpu);
+        EXPECT_EQ(pass.build_generation(), restored_generation);
+        ExpectSame(original, pass.instances());
+        EXPECT_EQ(pass.instance_generation(), restored_generation);
+    }
+};
+
+TEST_F(FoliagePaletteReloadTest, FailedPaletteReloadRetiresDrawsAndReadbacksUntilValidReload) {
+    const std::array<const char*, 7> invalid_palettes{nullptr,
+                                                      "{",
+                                                      "{}",
+                                                      R"({"archetypes": {}})",
+                                                      R"({"archetypes": []})",
+                                                      R"({"archetypes": [null]})",
+                                                      R"({"archetypes": [{}, null]})"};
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        for (const char* contents : invalid_palettes) {
+            SCOPED_TRACE(contents ? contents : "missing file");
+            ASSERT_NO_FATAL_FAILURE(ExpectFailedReloadRetiresDraws(gpu, contents));
+        }
+    }
+}
 
 TEST_F(FoliageRebuildTest, GpuDrawsSurviveChurnBeforeFirstSnapshotAndAfterEmptySnapshot) {
     ScopedPass scoped;
