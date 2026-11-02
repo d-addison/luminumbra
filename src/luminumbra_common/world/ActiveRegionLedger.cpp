@@ -139,6 +139,27 @@ void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
 void ActiveRegionLedger::acknowledge_world_clock(const WorldClock& clock) noexcept {
     m_headerTick = std::max(m_headerTick, clock.tick());
 }
+bool ActiveRegionLedger::energy_age(const RegionKey& key, std::uint64_t& age) const noexcept {
+    const auto found = m_energyAges.find(key);
+    if (found == m_energyAges.end())
+        return false;
+    age = found->second;
+    return true;
+}
+bool ActiveRegionLedger::set_energy_age(const RegionKey& key, std::uint64_t age) {
+    if (!m_records.contains(key) || age >= WorldClock::kTickLimit)
+        return false;
+    m_energyAges.insert_or_assign(key, age);
+    return true;
+}
+bool ActiveRegionLedger::set_energy_ages(const EnergyAges& ages) {
+    for (const auto& [key, age] : ages)
+        if (!m_records.contains(key) || age >= WorldClock::kTickLimit)
+            return false;
+    auto next = ages;
+    m_energyAges.swap(next);
+    return true;
+}
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
     if (shift > 16)
         throw std::invalid_argument("Invalid region cadence shift");
@@ -193,7 +214,7 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
         const bool idle = clock.tick() >= r.last_proximity &&
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !owned(it->first)) {
+            !m_energyAges.contains(it->first) && !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
         } else
@@ -272,8 +293,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     const bool over = result.work > m_config.work_limit;
     for (const auto& row : rows) {
         auto& r = *row.record;
-        const bool near = r.visited && r.last_proximity == clock.tick();
-        if (near || r.wake_pending) {
+        const bool nearby = r.visited && r.last_proximity == clock.tick();
+        if (nearby || r.wake_pending) {
             r.over_hold = r.under_hold = 0;
         } else if (over) {
             r.over_hold = std::min(r.over_hold, m_config.hold_ticks - 1) + 1;
@@ -371,6 +392,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     result.digest = Persistence::StableChecksum(trace);
     // Retention runs after the digest so the digest and trace describe the pre-eviction state.
     evict_idle(clock, owned);
+    std::erase_if(result.due, [this](const RegionKey& key) { return !m_records.contains(key); });
     result.ledger_records = m_records.size();
     return result;
 }
@@ -416,7 +438,19 @@ std::string ActiveRegionLedger::payload(bool observational) const {
     return bytes;
 }
 std::string ActiveRegionLedger::canonical_bytes() const {
-    return m_records.empty() ? std::string{} : "active_regions:v1:" + payload(false);
+    if (m_records.empty())
+        return {};
+    std::string bytes = "active_regions:v1:" + payload(false);
+    if (!m_energyAges.empty()) {
+        bytes += "|energy_age:";
+        Append(bytes, m_energyAges.size(), 4);
+        for (const auto& [key, age] : m_energyAges) {
+            Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+            Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+            Append(bytes, age, 8);
+        }
+    }
+    return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
     for (const auto& [key, r] : m_records) {
@@ -429,16 +463,37 @@ bool ActiveRegionLedger::any_frozen_history() const {
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
+    const bool extension = declare_projection || !m_energyAges.empty();
+    const std::size_t extension_bytes =
+        (extension ? 4u : 0u) + (declare_projection ? 7u : 0u) +
+        (m_energyAges.empty() ? 0u : 10u + 16u * m_energyAges.size());
+    // Both maps are bounded by kMaxRegions, so this arithmetic cannot overflow.
+    if (kHeaderBytes + m_records.size() * kRecordBytes + extension_bytes + 8 > kMaxFileBytes)
+        throw std::length_error("Active-region ledger file capacity reached");
     std::string bytes = "ARL1";
-    Append(bytes, declare_projection ? 2 : 1, 2);
+    Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
-    if (declare_projection) {
-        // Extension block: u32 length, then one TLV (u16 type, u32 length, value).
-        Append(bytes, 7, 4);
-        Append(bytes, 2, 2);
-        Append(bytes, 1, 4);
-        Append(bytes, kDigestProjection, 1);
+    if (extension) {
+        // Extension block: u32 length, then ascending TLVs (u16 type, u32 length, value).
+        std::string tlvs;
+        if (declare_projection) {
+            Append(tlvs, 2, 2);
+            Append(tlvs, 1, 4);
+            Append(tlvs, kDigestProjection, 1);
+        }
+        if (!m_energyAges.empty()) {
+            Append(tlvs, 4, 2);
+            Append(tlvs, 4 + 16 * m_energyAges.size(), 4);
+            Append(tlvs, m_energyAges.size(), 4);
+            for (const auto& [key, age] : m_energyAges) {
+                Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
+                Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
+                Append(tlvs, age, 8);
+            }
+        }
+        Append(bytes, tlvs.size(), 4);
+        bytes += tlvs;
     }
     Append(bytes, Hash(bytes), 8);
     return bytes;
@@ -542,10 +597,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 (r.state == RegionState::Frozen && r.last_ticked >= r.frozen_at))
                 return false;
             result.m_records.emplace(key, r);
-            if (version == 1 &&
-                (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0))
-                result.m_legacyFrozenDigests.insert(key);
         }
+        bool declared_projection = false;
         if (version == 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
@@ -567,11 +620,35 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                // Strictly ascending types refuse duplicates; type 2 is the only known type.
-                if ((have_previous && type <= previous_type) || type != 2 || length != 1)
+                // Strictly ascending types refuse duplicates; unsupported types refuse.
+                if ((have_previous && type <= previous_type) || (type != 2 && type != 4))
                     return false;
                 have_previous = true;
                 previous_type = type;
+                if (type == 4) {
+                    if (length < 4)
+                        return false;
+                    Reader ages(value);
+                    const auto owners = ages.read(4);
+                    if (owners == 0 || owners > result.m_records.size() ||
+                        length != 4 + 16 * owners)
+                        return false;
+                    std::optional<RegionKey> prior;
+                    for (std::uint64_t entry = 0; entry < owners; ++entry) {
+                        const RegionKey key{
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(ages.read(4))),
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(ages.read(4)))};
+                        const auto age = ages.read(8);
+                        if (!result.m_records.contains(key) || (prior && key <= *prior) ||
+                            age >= WorldClock::kTickLimit)
+                            return false;
+                        result.m_energyAges.emplace(key, age);
+                        prior = key;
+                    }
+                    continue;
+                }
+                if (length != 1)
+                    return false;
                 const auto projection = static_cast<unsigned char>(value[0]);
                 if (projection > 2) {
                     error = kProjectionMessage;
@@ -579,10 +656,18 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 }
                 if (projection < 2)
                     return false;
+                declared_projection = true;
             }
         }
-        // A v1 envelope preserves its historical digests verbatim. Do not label them
-        // projection 2 until each has been recomputed at a later freeze or evicted.
+        if (!declared_projection) {
+            for (const auto& [key, record] : result.m_records)
+                if (record.state == RegionState::Frozen || record.frozen_at != 0 ||
+                    record.frozen_digest != 0)
+                    result.m_legacyFrozenDigests.insert(key);
+        }
+        // An envelope without a projection TLV preserves historical digests verbatim, even
+        // when energy ages require version 2. Do not label them projection 2 until each has
+        // been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;
