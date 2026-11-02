@@ -92,6 +92,103 @@ TEST(ActiveRegionLedgerTest, RegionAddressingAndFixedDiscIgnoreHeight) {
     EXPECT_EQ(a.records().at({0, 0}).first_active, 1u);
 }
 
+TEST(ActiveRegionLedgerTest, SharedActivationRegionsPreserveClosedDiscAndPackedEdges) {
+    const std::vector<std::pair<Vec3, std::vector<RegionKey>>> cases{
+        {Vec3(256, 0, 256),
+         {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 0}, {0, 1}, {1, -1}, {1, 0}, {1, 1}}},
+        {Vec3(-256, 9000, -256),
+         {{-2, -2}, {-2, -1}, {-2, 0}, {-1, -2}, {-1, -1}, {-1, 0}, {0, -2}, {0, -1}, {0, 0}}},
+        {Vec3(0, 0, 0),
+         {{-2, -1},
+          {-2, 0},
+          {-1, -2},
+          {-1, -1},
+          {-1, 0},
+          {-1, 1},
+          {0, -2},
+          {0, -1},
+          {0, 0},
+          {0, 1},
+          {1, -1},
+          {1, 0}}},
+        {Vec3(-16777216.0f, 0, -16777216.0f),
+         {{-32768, -32768}, {-32768, -32767}, {-32767, -32768}}},
+        {Vec3(16777215.0f, 0, 16777215.0f), {{32766, 32767}, {32767, 32766}, {32767, 32767}}},
+        {Vec3(-16777216.0f, 0, 16777215.0f), {{-32768, 32766}, {-32768, 32767}, {-32767, 32767}}}};
+    for (const auto& [anchor, expected] : cases) {
+        SCOPED_TRACE(::testing::Message() << anchor.x << ", " << anchor.z);
+        EXPECT_EQ(ActiveRegionLedger::activation_regions(anchor), expected);
+        EXPECT_EQ(ActiveRegionLedger::activation_regions(Vec3(anchor.x, -1e30f, anchor.z)),
+                  expected);
+        ActiveRegionLedger local, replicated;
+        local.set_local_anchor(anchor);
+        const std::array anchors{anchor};
+        const auto local_schedule = local.schedule(WorldClock(1));
+        const auto replicated_schedule = replicated.schedule(WorldClock(1), anchors);
+        EXPECT_EQ(local_schedule, replicated_schedule);
+        EXPECT_EQ(local_schedule.due, expected);
+        EXPECT_EQ(local_schedule.rejected, RegionRejections{});
+        ASSERT_EQ(local.records().size(), expected.size());
+        for (const auto& region : expected) {
+            ASSERT_TRUE(local.records().contains(region));
+            const auto& record = local.records().at(region);
+            EXPECT_TRUE(record.visited);
+            EXPECT_EQ(record.first_active, 1u);
+            EXPECT_EQ(record.last_proximity, 1u);
+        }
+    }
+}
+
+TEST(ActiveRegionLedgerTest, SharedActivationRegionsRefuseInvalidAnchors) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (const auto& anchor : {Vec3(16777216.0f, 0, 0),
+                               Vec3(0, 0, 16777216.0f),
+                               Vec3(-16777218.0f, 0, 0),
+                               Vec3(0, 0, -16777218.0f),
+                               Vec3(nan, 0, 0),
+                               Vec3(0, nan, 0),
+                               Vec3(0, 0, nan),
+                               Vec3(inf, 0, 0),
+                               Vec3(0, inf, 0),
+                               Vec3(0, 0, inf),
+                               Vec3(-inf, 0, 0),
+                               Vec3(0, -inf, 0),
+                               Vec3(0, 0, -inf)}) {
+        EXPECT_TRUE(ActiveRegionLedger::activation_regions(anchor).empty());
+    }
+}
+
+TEST(ActiveRegionLedgerTest, SharedActivationVisitsRespectCapacityAndRefreshExistingRegions) {
+    ActiveRegionLedger ledger;
+    // Leave one slot for a new visit and one for an already known nearby region.
+    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions - 2; ++index) {
+        const RegionKey distant{100 + static_cast<std::int32_t>(index / 1024u),
+                                100 + static_cast<std::int32_t>(index % 1024u)};
+        ledger.mark_edited(distant, WorldClock{});
+    }
+    ledger.mark_edited({0, 0}, WorldClock{});
+    ledger.set_local_anchor(Vec3(256, 0, 256));
+    const auto result = ledger.schedule(WorldClock(1));
+    EXPECT_EQ(result.rejected.anchors, 0u);
+    EXPECT_EQ(result.rejected.work, 0u);
+    EXPECT_EQ(result.rejected.capacity, 7u);
+    EXPECT_EQ(result.ledger_records, ActiveRegionLedger::kMaxRegions);
+    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    for (const auto& region : {RegionKey{-1, -1}, RegionKey{0, 0}}) {
+        ASSERT_TRUE(ledger.records().contains(region));
+        EXPECT_TRUE(ledger.records().at(region).visited);
+        EXPECT_EQ(ledger.records().at(region).last_proximity, 1u);
+    }
+    EXPECT_EQ(ledger.records().at({-1, -1}).first_active, 1u);
+    EXPECT_EQ(ledger.records().at({0, 0}).first_active, 0u);
+    EXPECT_FALSE(ledger.records().contains({-1, 0}));
+    EXPECT_FALSE(ledger.records().contains({1, 1}));
+    EXPECT_THROW(ledger.mark_edited({1, 1}, WorldClock(1)), std::length_error);
+    EXPECT_NO_THROW(ledger.mark_edited({0, 0}, WorldClock(1)));
+    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+}
+
 TEST(ActiveRegionLedgerTest, FullTickIntegerSumsAreStrictAndOrderIndependent) {
     auto a = Distant(), b = a;
     const std::array work{RegionWork{kFar, 2, 1, 1, 1}, RegionWork{kFar, 0, 0, 0, 5}};
