@@ -3,6 +3,7 @@
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::Persistence {
 
@@ -200,6 +202,60 @@ enum class SavedJsonFailure {
     Cancelled
 };
 
+// Reuse documents only after a fresh bounded read compares every byte. A new open
+// owns a new scope; nested readers share it without extending its lifetime.
+class SavedJsonReadScope {
+public:
+    SavedJsonReadScope() {
+        if (s_active == nullptr) {
+            s_active = this;
+            m_owner = true;
+        }
+    }
+    SavedJsonReadScope(const SavedJsonReadScope&) = delete;
+    SavedJsonReadScope& operator=(const SavedJsonReadScope&) = delete;
+    ~SavedJsonReadScope() {
+        if (m_owner)
+            s_active = nullptr;
+    }
+    static SavedJsonReadScope* active() {
+        return s_active;
+    }
+    const nlohmann::json* find(const std::string& bytes, bool metadata_input) const {
+        for (const auto& entry : m_entries)
+            if (entry.metadata_input == metadata_input && entry.bytes == bytes)
+                return &entry.document;
+        return nullptr;
+    }
+    void remember(const std::string& bytes, bool metadata_input, const nlohmann::json& document) {
+        if (m_entries.size() < 8 && bytes.size() <= kMaxBytes - m_bytes) {
+            m_entries.push_back({bytes, metadata_input, document});
+            m_bytes += bytes.size();
+        }
+    }
+
+private:
+    struct Entry {
+        std::string bytes;
+        bool metadata_input;
+        nlohmann::json document;
+    };
+    static constexpr std::size_t kMaxBytes = std::size_t{8} * 1024 * 1024;
+    static inline thread_local SavedJsonReadScope* s_active = nullptr;
+    bool m_owner = false;
+    std::size_t m_bytes = 0;
+    std::vector<Entry> m_entries;
+};
+
+inline std::atomic<std::uint64_t>& SavedJsonParseCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
+inline std::uint64_t saved_json_parse_count_for_testing() {
+    return SavedJsonParseCounter().load(std::memory_order_relaxed);
+}
+
 inline bool ReadSavedJson(const std::filesystem::path& path,
                           std::size_t maximum,
                           nlohmann::json& value,
@@ -244,12 +300,21 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
             *failure = SavedJsonFailure::Unreadable;
         return false;
     }
-    if (!SavedInputLimits::JsonDepthAllowed(bytes) ||
-        (metadata_input && !AdmitMetadataText(bytes))) {
+    auto* scope = SavedJsonReadScope::active();
+    if (scope) {
+        if (const auto* document = scope->find(bytes, metadata_input)) {
+            if (cancelled())
+                return false;
+            value = *document;
+            return true;
+        }
+    }
+    if (metadata_input ? !AdmitMetadataText(bytes) : !SavedInputLimits::JsonDepthAllowed(bytes)) {
         if (failure)
             *failure = SavedJsonFailure::Limit;
         return false;
     }
+    SavedJsonParseCounter().fetch_add(1, std::memory_order_relaxed);
     auto candidate = nlohmann::json::parse(bytes, nullptr, false);
     if (candidate.is_discarded()) {
         if (failure)
@@ -258,6 +323,8 @@ inline bool ReadSavedJson(const std::filesystem::path& path,
     }
     if (cancelled())
         return false;
+    if (scope)
+        scope->remember(bytes, metadata_input, candidate);
     value = std::move(candidate);
     return true;
 }

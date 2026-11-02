@@ -1274,6 +1274,71 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, IndexedOpenValidatesOnceWithoutCompressionAcrossRepeatedOpens) {
+    for (const std::uint32_t count : {4u, 32u}) {
+        SCOPED_TRACE(count);
+        Persistence::SyntheticSaveSpec spec;
+        spec.world_id = "indexed-open-" + std::to_string(count);
+        spec.chunk_count = count;
+        spec.payload = Persistence::FixturePayload::Flat;
+        spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
+        const auto report = Persistence::WriteSyntheticSave(spec, root);
+        ASSERT_TRUE(report.ok) << report.error;
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(report.save_dir, [] { return true; }));
+        const auto before = DiskBytes(root);
+        GameSession reopened;
+        reopened.SetRootPath(RootString());
+        reopened.SetJobSystem(&jobs);
+        for (int opening = 0; opening < 3; ++opening) {
+            SCOPED_TRACE(opening);
+            const auto validations = WorldSaveService::decode_count_for_testing();
+            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+            const auto compressions = WorldSaveService::record_compression_count_for_testing();
+            const auto parses = Persistence::saved_json_parse_count_for_testing();
+            ASSERT_TRUE(reopened.LoadWorld(spec.world_id)) << reopened.GetWorldOpenError();
+            EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations + 1);
+            EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + count);
+            EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+            // Metadata, embedded preset and manifest: each DOM is parsed once per open.
+            EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 3);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        const auto region = WorldSaveService::region_file_path(report.save_dir, 0, 0);
+        auto damaged = Read(region);
+        ASSERT_FALSE(damaged.empty());
+        damaged.back() ^= 1;
+        Write(region, damaged);
+        const auto damaged_bytes = DiskBytes(root);
+        const auto* previous_world = reopened.GetWorldSystem();
+        EXPECT_FALSE(reopened.LoadWorld(spec.world_id));
+        EXPECT_FALSE(reopened.GetWorldOpenError().empty());
+        EXPECT_EQ(reopened.GetWorldSystem(), previous_world);
+        EXPECT_EQ(DiskBytes(root), damaged_bytes);
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, spec.world_id).error.empty());
+    }
+}
+
+TEST_F(WorldOpenRefusal, ParsedSavedJsonReuseStillChecksChangedBytesAndLimits) {
+    const Persistence::SavedJsonReadScope scope;
+    nlohmann::json document;
+    bool missing = false;
+    Persistence::SavedJsonFailure failure = Persistence::SavedJsonFailure::None;
+    const auto path = save / "world_info.json";
+    const auto parses = Persistence::saved_json_parse_count_for_testing();
+    ASSERT_TRUE(Persistence::ReadSavedJson(path, 4096, document, missing));
+    ASSERT_FALSE(missing);
+    const auto original = document;
+    ASSERT_TRUE(Persistence::ReadSavedJson(path, 4096, document, missing));
+    EXPECT_EQ(document, original);
+    EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 1);
+    EXPECT_FALSE(Persistence::ReadSavedJson(path, 1, document, missing, true, &failure));
+    EXPECT_EQ(failure, Persistence::SavedJsonFailure::Limit);
+    Write(path, "{");
+    EXPECT_FALSE(Persistence::ReadSavedJson(path, 4096, document, missing, true, &failure));
+    EXPECT_EQ(failure, Persistence::SavedJsonFailure::Malformed);
+    EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 2);
+}
+
 TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnything) {
     Persistence::SyntheticSaveSpec spec;
     spec.world_id = "synthetic-lifecycle";

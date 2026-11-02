@@ -1618,13 +1618,18 @@ std::shared_ptr<GameSession::WorldPreparation>
 GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
                               const std::string& worldId,
                               const std::stop_token& stop) {
+    const Persistence::SavedJsonReadScope json_reads;
     auto prepared = std::make_shared<WorldPreparation>();
     prepared->options = options;
     prepared->stop = stop;
     if (stop.stop_requested())
         return prepared;
-    auto saved = Persistence::InspectSavedWorld(
-        options.save_root, RuntimeRoot(options.root_path), worldId, stop);
+    auto saved =
+        Persistence::InspectSavedWorld(options.save_root,
+                                       RuntimeRoot(options.root_path),
+                                       worldId,
+                                       stop,
+                                       Persistence::SavedWorldValidation::DeferredToPreparation);
     if (saved.pending_recovery && saved.error.empty()) {
         const Persistence::WorldSaveService::SaveOwnership ownership;
         std::vector<std::string> errors;
@@ -1636,7 +1641,11 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
             return prepared;
         }
         saved = Persistence::InspectSavedWorld(
-            options.save_root, RuntimeRoot(options.root_path), worldId, stop);
+            options.save_root,
+            RuntimeRoot(options.root_path),
+            worldId,
+            stop,
+            Persistence::SavedWorldValidation::DeferredToPreparation);
     }
     prepared->error = saved.error;
     if (prepared->error.empty() && saved.requires_active_regions && !options.active_regions)
@@ -2770,6 +2779,7 @@ bool GameSession::ReadPreparedWorldState(
     bool resetting_clock,
     const std::stop_token& stop,
     const luminumbra::fields::EnergyFieldState* current_energy) {
+    const Persistence::SavedJsonReadScope json_reads;
     const Persistence::WorldSaveService service;
     const auto cancelled = [&] {
         if (!stop.stop_requested())

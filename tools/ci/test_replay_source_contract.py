@@ -947,8 +947,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             self.assertNotIn("clear_world(", body)
             self.assertIn("!IsSimulationTickBoundary()", body)
         self.assertIn("options.save_root = save_root;", self.function(source, "LoadWorldFrom"))
-        self.assertRegex(prepare, r"Persistence::InspectSavedWorld\(\s*options.save_root, "
-                         r"RuntimeRoot\(options.root_path\), worldId, stop\)")
+        self.assertRegex(prepare, r"Persistence::InspectSavedWorld\(\s*options.save_root,\s*"
+                         r"RuntimeRoot\(options.root_path\),\s*worldId,\s*stop,\s*"
+                         r"Persistence::SavedWorldValidation::DeferredToPreparation\)")
         adoption = self.function(source, "AdoptLoadedWorld")
         self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         adoption.index("m_worldUsable = true;"))

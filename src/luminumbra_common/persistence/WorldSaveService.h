@@ -445,6 +445,8 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    // Number of region record payload compressions since process start.
+    static std::uint64_t record_compression_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
     // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since

@@ -124,7 +124,9 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
 SavedWorld InspectSavedWorld(const fs::path& root,
                              const fs::path& runtime_root,
                              const std::string& world_id,
-                             const std::stop_token& stop) {
+                             const std::stop_token& stop,
+                             SavedWorldValidation validation) {
+    const SavedJsonReadScope json_reads;
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -229,7 +231,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                 result.error = "Saved-world validation cancelled.";
             return result;
         }
-        if (current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
+        if (current_container && validation == SavedWorldValidation::Complete &&
+            !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }

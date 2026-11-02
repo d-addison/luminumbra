@@ -2235,6 +2235,11 @@ private:
 #endif
 };
 
+std::atomic<std::uint64_t>& RecordCompressionCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
                      std::vector<std::string>* errors) {
@@ -2242,6 +2247,7 @@ bool CompressPayload(const std::string& payload,
         AddError(errors, "region record payload exceeds the 64 MiB compatibility limit");
         return false;
     }
+    RecordCompressionCounter().fetch_add(1, std::memory_order_relaxed);
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
     std::string compressed(static_cast<std::size_t>(bound), '\0');
     const int written = LZ4_compress_default(
@@ -2528,90 +2534,9 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
     return chunks.front();
 }
 
-constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-
-// Every admitted payload byte passes through here, including in unoptimized
-// builds, so the rounds use plain locals and inline rotates rather than calls.
-void Sha256Compress(std::uint32_t* state, const unsigned char* block) {
-    std::uint32_t words[64];
-    for (std::size_t i = 0; i < 16; ++i) {
-        const unsigned char* word = block + i * 4;
-        words[i] = (std::uint32_t{word[0]} << 24) | (std::uint32_t{word[1]} << 16) |
-                   (std::uint32_t{word[2]} << 8) | std::uint32_t{word[3]};
-    }
-    for (std::size_t i = 16; i < 64; ++i) {
-        const std::uint32_t x = words[i - 15];
-        const std::uint32_t y = words[i - 2];
-        words[i] = words[i - 16] + (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) +
-                   words[i - 7] + (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10));
-    }
-    const std::uint32_t* constants = kSha256RoundConstants.data();
-    std::uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-    std::uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-    for (std::size_t i = 0; i < 64; ++i) {
-        const std::uint32_t first =
-            h + (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) +
-            ((e & f) ^ (~e & g)) + constants[i] + words[i];
-        const std::uint32_t second =
-            (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) +
-            ((a & b) ^ (a & c) ^ (b & c));
-        h = g;
-        g = f;
-        f = e;
-        e = d + first;
-        d = c;
-        c = b;
-        b = a;
-        a = first + second;
-    }
-    state[0] += a;
-    state[1] += b;
-    state[2] += c;
-    state[3] += d;
-    state[4] += e;
-    state[5] += f;
-    state[6] += g;
-    state[7] += h;
-}
-
-std::array<std::uint32_t, 8> Sha256(std::string_view bytes) {
-    std::array<std::uint32_t, 8> state = {0x6a09e667,
-                                          0xbb67ae85,
-                                          0x3c6ef372,
-                                          0xa54ff53a,
-                                          0x510e527f,
-                                          0x9b05688c,
-                                          0x1f83d9ab,
-                                          0x5be0cd19};
-    const auto bit_count = static_cast<std::uint64_t>(bytes.size()) * 8;
-    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
-    std::size_t remaining = bytes.size();
-    for (; remaining >= 64; remaining -= 64, data += 64)
-        Sha256Compress(state.data(), data);
-    std::array<unsigned char, 64> block{};
-    std::copy_n(data, remaining, block.begin());
-    block[remaining] = 0x80;
-    if (remaining >= 56) {
-        Sha256Compress(state.data(), block.data());
-        block.fill(0);
-    }
-    for (std::size_t i = 0; i < 8; ++i)
-        block[63 - i] = static_cast<unsigned char>(bit_count >> (i * 8));
-    Sha256Compress(state.data(), block.data());
-    return state;
-}
-
 // What admission of one lod-0 record established. DecodeChunkRecord is a pure
 // function of the record header and payload bytes, so these facts hold for any
-// later record with the same header and payload digest.
+// later record with the same header and exact payload bytes.
 struct ChunkRecordFacts {
     IVec3 coords{0};
     bool lattice_ok = false;
@@ -2623,51 +2548,68 @@ struct ChunkRecordKey {
     std::uint8_t lod_level = 0;
     std::uint8_t flags = 0;
     std::uint32_t uncompressed_size = 0;
-    std::array<std::uint32_t, 8> payload_sha256{};
+    std::string_view compressed_payload;
     friend bool operator==(const ChunkRecordKey&, const ChunkRecordKey&) = default;
 };
-
-struct ChunkRecordKeyHash {
-    std::size_t operator()(const ChunkRecordKey& key) const noexcept {
-        return static_cast<std::size_t>(
-            ((static_cast<std::uint64_t>(key.payload_sha256[0]) << 32) | key.payload_sha256[1]) ^
-            key.id);
-    }
-};
-
-class AdmittedChunkRecords {
-public:
-    std::optional<ChunkRecordFacts> find(const ChunkRecordKey& key) {
-        const std::lock_guard lock(m_mutex);
-        const auto found = m_facts.find(key);
-        if (found == m_facts.end())
-            return std::nullopt;
-        return found->second;
-    }
-    void remember(const ChunkRecordKey& key, const ChunkRecordFacts& facts) {
-        const std::lock_guard lock(m_mutex);
-        if (m_facts.size() >= kMaxRecords)
-            m_facts.clear();
-        m_facts.insert_or_assign(key, facts);
-    }
-
-private:
-    static constexpr std::size_t kMaxRecords = 65536;
-    std::mutex m_mutex;
-    std::unordered_map<ChunkRecordKey, ChunkRecordFacts, ChunkRecordKeyHash> m_facts;
-};
-
-AdmittedChunkRecords& AdmittedChunkRecordCache() {
-    static AdmittedChunkRecords cache;
-    return cache;
-}
 
 ChunkRecordKey ChunkRecordKeyOf(const RegionRecord& record) {
     return ChunkRecordKey{record.id,
                           record.lod_level,
                           record.flags,
                           record.uncompressed_size,
-                          Sha256(record.compressed_payload)};
+                          record.compressed_payload};
+}
+
+class AdmittedChunkRecords {
+public:
+    std::optional<ChunkRecordFacts> find(const ChunkRecordKey& key) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_facts.find(key.id);
+        if (found == m_facts.end() || ChunkRecordKeyOf(found->second.record) != key)
+            return std::nullopt;
+        return found->second.facts;
+    }
+    void remember(const ChunkRecordKey& key, const ChunkRecordFacts& facts) {
+        const std::lock_guard lock(m_mutex);
+        if (key.compressed_payload.size() > kMaxBytes)
+            return;
+        if (const auto previous = m_facts.find(key.id); previous != m_facts.end()) {
+            if (ChunkRecordKeyOf(previous->second.record) == key) {
+                previous->second.facts = facts;
+                return;
+            }
+            m_bytes -= previous->second.record.compressed_payload.size();
+            m_facts.erase(previous);
+        }
+        if (m_facts.size() >= kMaxRecords || m_bytes + key.compressed_payload.size() > kMaxBytes) {
+            m_facts.clear();
+            m_bytes = 0;
+        }
+        m_bytes += key.compressed_payload.size();
+        RegionRecord record;
+        record.id = key.id;
+        record.lod_level = key.lod_level;
+        record.flags = key.flags;
+        record.uncompressed_size = key.uncompressed_size;
+        record.compressed_payload = key.compressed_payload;
+        m_facts.emplace(key.id, Entry{std::move(record), facts});
+    }
+
+private:
+    struct Entry {
+        RegionRecord record;
+        ChunkRecordFacts facts;
+    };
+    static constexpr std::size_t kMaxRecords = 65536;
+    static constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
+    std::mutex m_mutex;
+    std::size_t m_bytes = 0;
+    std::unordered_map<ChunkID, Entry> m_facts;
+};
+
+AdmittedChunkRecords& AdmittedChunkRecordCache() {
+    static AdmittedChunkRecords cache;
+    return cache;
 }
 
 bool SdfLatticeAdmissible(const Chunk& chunk) {
@@ -4554,6 +4496,10 @@ std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
 
+std::uint64_t WorldSaveService::record_compression_count_for_testing() {
+    return RecordCompressionCounter().load(std::memory_order_relaxed);
+}
+
 std::uint64_t WorldSaveService::chunk_record_decode_count_for_testing() {
     return ChunkRecordDecodeCounter().load(std::memory_order_acquire);
 }
@@ -5637,6 +5583,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::vector<IVec3>* authoritative_inventory,
                                   std::size_t* decoded_chunk_count) const {
     const detail::SnapshotReadOwnership ownership;
+    const SavedJsonReadScope json_reads;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     LUMIN_PROFILE_ZONE_N("File world load");
     // Staging lives outside the strict region inventory. Each published file
@@ -6005,7 +5952,7 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
 
             // What DecodeChunkRecord will find in each record encoded here. Admitted only
             // after the region passes the writer limits that decoding also enforces.
-            std::vector<std::pair<ChunkRecordKey, ChunkRecordFacts>> encoded;
+            std::vector<std::pair<std::size_t, ChunkRecordFacts>> encoded;
             encoded.reserve(region_chunks.size());
             for (const auto& chunk : region_chunks) {
                 RegionRecord record;
@@ -6029,7 +5976,7 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 if (water_authority == chunk->has_water_authority() &&
                     payload.find("null") == std::string::npos) {
                     encoded.emplace_back(
-                        ChunkRecordKeyOf(record),
+                        existing != record_index.end() ? existing->second : records.size(),
                         ChunkRecordFacts{chunk->get_coords(),
                                          SdfLatticeAdmissible(*chunk),
                                          water_authority ||
@@ -6046,8 +5993,9 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
 
             if (!AdmitRegionWrite(records, errors))
                 return false;
-            for (const auto& [key, facts] : encoded)
-                AdmittedChunkRecordCache().remember(key, facts);
+            for (const auto& [record_offset, facts] : encoded)
+                AdmittedChunkRecordCache().remember(ChunkRecordKeyOf(records[record_offset]),
+                                                    facts);
             candidate->regions.emplace(path, std::move(records));
         }
         candidate->write_manifest = !dirty_only || !regions.empty();
