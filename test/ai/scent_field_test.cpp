@@ -324,10 +324,9 @@ TEST(ScentField, GatedDiffusionKeepsRoundoffIntermediatesLikeTheLegacySolver) {
 }
 
 TEST(ScentField, GatedDiffusionSettlesRoundoffInNonparticipatingCells) {
-    // An open border edge diffuses into cells whose owner is not due; those cells
-    // skip smoothing, so the -0x1p-53 intermediate must not survive the step.
-    ScentField f(3, 3, 1);
-    f.Deposit(0, 1, 1, 0x1.0000000000003p0);
+    // Open edges diffuse into cells whose owner is not due; those cells skip
+    // smoothing, so the -0x1p-53 intermediate must not survive the step. An
+    // empty exchange gate opens every edge and must settle the same way.
     const ScentField::CellGate none = [](int, int) {
         return false;
     };
@@ -337,13 +336,20 @@ TEST(ScentField, GatedDiffusionSettlesRoundoffInNonparticipatingCells) {
     const ScentField::EdgeGate all_edges = [](int, int, int, int) {
         return true;
     };
+    for (const ScentField::EdgeGate& exchange : {ScentField::EdgeGate{}, all_edges}) {
+        SCOPED_TRACE(exchange ? "callback exchange" : "empty exchange");
+        ScentField f(3, 3, 1);
+        f.Deposit(0, 1, 1, 0x1.0000000000003p0);
 
-    EXPECT_NO_THROW(f.Step(0.25, 1, 0.0, 0.0, 0.0, none, all_edges));
-    for (int z = 0; z < 3; ++z) {
-        for (int x = 0; x < 3; ++x) {
-            EXPECT_GE(f.Sample(0, x, z), 0.0);
+        EXPECT_NO_THROW(f.Step(0.25, 1, 0.0, 0.0, 0.0, none, exchange));
+        for (int z = 0; z < 3; ++z) {
+            for (int x = 0; x < 3; ++x) {
+                EXPECT_GE(f.Sample(0, x, z), 0.0);
+            }
         }
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(f.Sample(0, 1, 1)),
+                  std::bit_cast<std::uint64_t>(0.0));
+        EXPECT_NO_THROW(f.Step(0.25, 0, 0.1, 0.0, 0.0, all, exchange));
+        EXPECT_NO_THROW(f.Step(0.25, 0, 0.0, 0.5, -0.5, all, exchange));
     }
-    EXPECT_EQ(std::bit_cast<std::uint64_t>(f.Sample(0, 1, 1)), std::bit_cast<std::uint64_t>(0.0));
-    EXPECT_NO_THROW(f.Step(0.25, 0, 0.0, 0.5, -0.5, all, all_edges));
 }

@@ -108,9 +108,16 @@ public:
               std::size_t diffusion_iters,
               double evaporation,
               double wind_cx = 0.0,
-              double wind_cz = 0.0,
-              const CellGate& participants = {},
-              const EdgeGate& exchange = {}) {
+              double wind_cz = 0.0) {
+        Step(diffusion_rate, diffusion_iters, evaporation, wind_cx, wind_cz, {}, {});
+    }
+    void Step(double diffusion_rate,
+              std::size_t diffusion_iters,
+              double evaporation,
+              double wind_cx,
+              double wind_cz,
+              const CellGate& participants,
+              const EdgeGate& exchange) {
         const double keep =
             1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
         const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
@@ -143,20 +150,19 @@ public:
                 }
             }
             if (did_diffuse) {
-                if (exchange) {
+                if (exchange)
                     DiffuseSealed(field, diffusion_iters, diffusion_rate, exchange);
-                    // Smoothing and evaporation skip nonparticipants, so an open border
-                    // edge can leave diffusion roundoff below zero there. Settle it at
-                    // zero so a later advection or clamp never reads a negative cell.
-                    if (participants) {
-                        for (std::size_t y = 0; y < H; ++y)
-                            for (std::size_t x = 0; x < W; ++x)
-                                if (field.at(x, y) < 0.0 &&
-                                    !participants(static_cast<int>(x), static_cast<int>(y)))
-                                    field.set(x, y, 0.0);
-                    }
-                } else {
+                else
                     (void)field.diffuse(diffusion_iters, diffusion_rate);
+                // Smoothing and evaporation skip nonparticipants, so diffusion through
+                // an open edge can leave roundoff below zero there. Settle it at zero
+                // so a later advection or clamp never reads a negative cell.
+                if (participants) {
+                    for (std::size_t y = 0; y < H; ++y)
+                        for (std::size_t x = 0; x < W; ++x)
+                            if (field.at(x, y) < 0.0 &&
+                                !participants(static_cast<int>(x), static_cast<int>(y)))
+                                field.set(x, y, 0.0);
                 }
                 // The conservative 4-neighbour solver leaves a parity (checkerboard)
                 // artifact — after even iterations, odd-Manhattan-distance cells are
@@ -212,7 +218,10 @@ public:
     // follow-probability strictly above zero so agents never lock permanently onto
     // one trail (prevents premature convergence); tau_max caps unbounded deposit
     // buildup. Apply AFTER Step. Deterministic. Default args = no-op.
-    void Clamp(double tau_min = 0.0, double tau_max = 1.0e300, const CellGate& participants = {}) {
+    void Clamp(double tau_min = 0.0, double tau_max = 1.0e300) {
+        Clamp(tau_min, tau_max, {});
+    }
+    void Clamp(double tau_min, double tau_max, const CellGate& participants) {
         for (auto& field : m_ch) {
             for (std::size_t y = 0; y < static_cast<std::size_t>(m_h); ++y) {
                 for (std::size_t x = 0; x < static_cast<std::size_t>(m_w); ++x) {
