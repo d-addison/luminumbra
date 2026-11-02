@@ -341,6 +341,8 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Explicit historical inspection only; never a fallback for live admission.
+    [[nodiscard]] std::string LegacyRevision3SystemConfigIdentity() const;
     // Pre-world admission can supply the calendar selected for the intended world.
     [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
@@ -575,6 +577,7 @@ private:
     std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
                              Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
