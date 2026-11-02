@@ -448,4 +448,48 @@ TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedPromotionBatch) {
     EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
 }
 
+TEST(SurfaceWorkBudget, WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints) {
+    for (const bool retain : {false, true}) {
+        for (const auto& [low, high] : {std::pair{2, 8191}, std::pair{-8192, -3}}) {
+            std::size_t total = 0;
+            EXPECT_EQ(budget::AddSurfaceColumnChunks(low, high, total, retain), !retain);
+            EXPECT_EQ(total, retain ? 0u : budget::kMaxSurfaceChunks);
+            total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(low, high - 1, total, retain));
+            EXPECT_EQ(total, retain ? budget::kMaxSurfaceChunks : budget::kMaxSurfaceChunks - 1);
+        }
+        for (const auto& [low, high] : {std::pair{-4096, 4093},
+                                        std::pair{-1, 8188},
+                                        std::pair{-8188, 1},
+                                        std::pair{1, 8190},
+                                        std::pair{-8190, -1}}) {
+            std::size_t total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(low, high, total, retain));
+            EXPECT_EQ(total, budget::kMaxSurfaceChunks);
+        }
+        for (const int endpoint :
+             {std::numeric_limits<int>::min() + 1, std::numeric_limits<int>::max() - 2}) {
+            std::size_t total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(endpoint, endpoint, total, retain));
+            EXPECT_EQ(total, retain ? 4u : 3u);
+        }
+        for (const auto& [low, high] :
+             {std::pair{1, 0},
+              std::pair{std::numeric_limits<int>::min(), 0},
+              std::pair{0, std::numeric_limits<int>::max() - 1},
+              std::pair{0, std::numeric_limits<int>::max()},
+              std::pair{std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}}) {
+            std::size_t total = 7;
+            EXPECT_FALSE(budget::AddSurfaceColumnChunks(low, high, total, retain));
+            EXPECT_EQ(total, 7u);
+        }
+        std::size_t total = budget::kMaxSurfaceChunks - 3;
+        EXPECT_EQ(budget::AddSurfaceColumnChunks(2, 2, total, retain), !retain);
+        EXPECT_EQ(total, retain ? budget::kMaxSurfaceChunks - 3 : budget::kMaxSurfaceChunks);
+        total = budget::kMaxSurfaceChunks + 1;
+        EXPECT_FALSE(budget::AddSurfaceColumnChunks(0, 0, total, retain));
+        EXPECT_EQ(total, budget::kMaxSurfaceChunks + 1);
+    }
+}
+
 } // namespace
