@@ -262,6 +262,8 @@ struct JournalEntry {
     std::string undo_temporary;
     std::string incoming_temporary;
     std::string restored_temporary;
+    // Derived from preceding records, without changing the journal encoding.
+    bool installed_from_incoming = false;
     // Live rollback also checks publication stamps. Recovery retains its journal byte checks.
     std::array<SavedInputFile::Version, 3> live_versions{};
 };
@@ -476,6 +478,11 @@ bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& err
                 error = "journal undo identity changed";
                 return false;
             }
+            entry.installed_from_incoming =
+                entry.installed_identity != decltype(entry.installed_identity){} &&
+                (entry.installed_identity == previous.incoming_identity ||
+                 (previous.installed_from_incoming &&
+                  entry.installed_identity == previous.installed_identity));
             out.entries[known->second] = std::move(entry);
         }
     }
@@ -576,7 +583,12 @@ bool OwnedOccupant(const fs::path& destination,
         AddError(errors, "snapshot rollback occupant changed: " + entry.path);
         return false;
     }
-    bool previous_occupant = current == entry.previous_identity;
+    // An incoming publication can reuse the original native identity. A later record
+    // can move that identity to installed and clear incoming before publication fails.
+    // Only the current publication roles qualify; an older identity alone is not enough.
+    bool previous_occupant =
+        current == entry.previous_identity && current != entry.incoming_identity &&
+        !(entry.installed_from_incoming && current == entry.installed_identity);
     if (entry.live_versions != decltype(entry.live_versions){} &&
         current != entry.restored_identity) {
         SavedInputFile::Version version{};

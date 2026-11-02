@@ -1655,6 +1655,67 @@ TEST(SaveTransaction, FullForwardJournalRetainsRollbackCapacity) {
     ASSERT_TRUE(CommitOnce(save.path(), 3, {{"world_info.json", "next"}}));
 }
 
+TEST(SaveTransaction, RecoveryTracksReusedInstalledIdentityAcrossJournalRecords) {
+    for (const std::string_view occupant : {"installed", "foreign", "historical"}) {
+        SCOPED_TRACE(occupant);
+        TempSave save, displaced;
+        ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+        const auto baseline = Tree(save.path());
+        const auto member = save.path() / "world_info.json";
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "first"));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "second"));
+        // Preparing a removal records the installed occupant and clears incoming. Repeat
+        // that record to exercise replay after the incoming identity has been superseded.
+        ASSERT_TRUE(SaveTransaction::prepare_publication(member, {}, nullptr));
+        ASSERT_TRUE(SaveTransaction::prepare_publication(member, {}, nullptr));
+        const auto installed = JournalRecords(save.path()).back().at("entries").at(0);
+        const auto original_identity = installed.at("previous_identity");
+        const auto reused_identity = installed.at("installed_identity");
+        if (occupant != "installed") {
+            fs::rename(member, displaced.path() / "retained");
+            if (occupant == "historical") {
+                ASSERT_TRUE(
+                    WorldSaveService::write_member_bytes(save.path(), "world_info.json", "third"));
+                fs::rename(member, displaced.path() / "latest");
+                fs::rename(displaced.path() / "retained", member);
+            }
+            Put(member, "foreign occupant");
+        }
+        // Model original-identity reuse by the second publication independently of the
+        // filesystem's allocator. All incoming identities still name actual writer output.
+        auto records = JournalRecords(save.path());
+        for (auto& record : records) {
+            for (auto& entry : record["entries"]) {
+                if (entry.at("path") == "world_info.json") {
+                    entry["previous_identity"] = reused_identity;
+                    if (entry.at("installed_identity") == original_identity)
+                        entry["installed_identity"] = reused_identity;
+                }
+            }
+        }
+        Put(journal_directory(save.path()) / "txn.json", EncodeJournalRecords(records));
+        const auto evidence = Tree(save.path());
+        std::vector<std::string> errors;
+        if (occupant == "installed") {
+            ASSERT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack)
+                << (errors.empty() ? "" : errors.front());
+            EXPECT_TRUE(errors.empty());
+            EXPECT_EQ(Tree(save.path()), baseline);
+            EXPECT_FALSE(journal_pending(save.path()));
+        } else {
+            EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(Tree(save.path()), evidence);
+            EXPECT_EQ(Get(member), "foreign occupant");
+            EXPECT_TRUE(journal_pending(save.path()));
+        }
+        transaction.abort(nullptr);
+    }
+}
+
 TEST(SaveTransaction, RepeatedRecoveryReusesPublishedRetirementAndRestoration) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
