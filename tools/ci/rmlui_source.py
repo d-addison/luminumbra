@@ -148,7 +148,10 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                 try:
                     info = os.lstat(entry.path)
                 except FileNotFoundError:
-                    if live_git:
+                    # File-only verification permits absent administration,
+                    # including a .git entry removed after scandir yielded it.
+                    # Required source entries and strict Git scans stay strict.
+                    if live_git or (ignore_git and name == ".git"):
                         continue
                     raise
                 if ignore_git and name == ".git":
