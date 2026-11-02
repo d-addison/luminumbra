@@ -136,6 +136,11 @@ public:
     explicit WeatherSystem(int world_seed);
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash) {
+        if (sample) {
+            // Legacy updates may have moved or removed storms since the last binding.
+            auto storm_index = BuildRegionalStormIndex(m_storm_cells);
+            m_regionalStormIndex.swap(storm_index);
+        }
         m_regional_sample = std::move(sample);
         m_regional_hash = std::move(hash);
     }

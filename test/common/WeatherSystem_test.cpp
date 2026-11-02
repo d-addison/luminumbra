@@ -219,6 +219,143 @@ TEST(WeatherSystem, RegionalStormIndexHandlesExtremeAndNonfiniteCoordinates) {
     EXPECT_EQ(weather.storm_candidates_at(Vec3(0.0f, 0.0f, invalid)), 0u);
 }
 
+TEST(WeatherSystem, RegionalRebindIndexesCurrentStormsAfterLegacyUpdates) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    using Luminumbra::Systems::WeatherSample;
+    WeatherSystem weather(kSeed);
+    const auto sampler = [](const Vec3&) {
+        return WeatherSample{.precip_intensity = 0.125f};
+    };
+    weather.BindRegionalBackend(sampler, {});
+    const StormCell expired{.center_world = Vec2(0.0f),
+                            .velocity = Vec2(0.0f),
+                            .intensity = 0.5f,
+                            .spawn_tick = 0,
+                            .lifetime_ticks = 60,
+                            .seed_salt = 1};
+    const StormCell survivor{.center_world = Vec2(2048.0f, 0.0f),
+                             .velocity = Vec2(30720.0f, 0.0f),
+                             .intensity = 0.5f,
+                             .spawn_tick = 46,
+                             .lifetime_ticks = 240,
+                             .seed_salt = 2};
+    weather.AdoptRegionalWeather(60, kAnchor, {expired, survivor}, {});
+    weather.BindRegionalBackend({}, {});
+    weather.Update(61, kAnchor, nullptr);
+    ASSERT_EQ(weather.StormCells().size(), 1u);
+    ASSERT_EQ(weather.StormCells().front().seed_salt, survivor.seed_salt);
+    const auto current = weather.StormCells().front();
+    EXPECT_FLOAT_EQ(current.center_world.x, 3072.0f);
+    EXPECT_FLOAT_EQ(current.intensity, 15.0f / 45.0f);
+
+    weather.BindRegionalBackend(sampler, {});
+    for (const float x : {0.0f, 2048.0f}) {
+        const Vec3 position(x, 0.0f, 0.0f);
+        ASSERT_EQ(weather.storm_candidates_at(position), 0u);
+        EXPECT_FLOAT_EQ(weather.PrecipitationAt(position), 0.125f);
+        const auto sample = weather.SampleAt(position);
+        EXPECT_FLOAT_EQ(sample.precip_intensity, 0.125f);
+        EXPECT_FLOAT_EQ(sample.storm_intensity, 0.0f);
+    }
+    const Vec3 position(current.center_world.x, 0.0f, current.center_world.y);
+    ASSERT_EQ(weather.storm_candidates_at(position), 1u);
+    EXPECT_FLOAT_EQ(weather.PrecipitationAt(position), 0.125f + current.intensity);
+    const auto sample = weather.SampleAt(position);
+    EXPECT_FLOAT_EQ(sample.precip_intensity, 0.125f + current.intensity);
+    EXPECT_FLOAT_EQ(sample.storm_intensity, current.intensity);
+
+    weather.BindRegionalBackend({}, {});
+    weather.Update(301, kAnchor, nullptr);
+    ASSERT_TRUE(weather.StormCells().empty());
+    weather.BindRegionalBackend(sampler, {});
+    ASSERT_EQ(weather.storm_candidates_at(position), 0u);
+    EXPECT_FLOAT_EQ(weather.PrecipitationAt(position), 0.125f);
+    EXPECT_FLOAT_EQ(weather.SampleAt(position).storm_intensity, 0.0f);
+}
+
+TEST(WeatherSystem, RegionalClockUpdatesPreserveLegacyWindPerturbations) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    using Luminumbra::Systems::WeatherSample;
+    using Luminumbra::Systems::WindLayer;
+    for (const bool populated : {false, true}) {
+        SCOPED_TRACE(populated);
+        WeatherSystem weather(kSeed);
+        WindFieldSystem wind(kSeed);
+        WindFieldSystem baseline_wind(kSeed);
+        if (populated) {
+            const WindFieldSystem::StormPerturbation retained{
+                Vec2(kAnchor.x, kAnchor.z), 192.0f, Vec2(8.0f, -3.0f), 0.75f};
+            wind.InjectStormPerturbation(retained);
+            baseline_wind.InjectStormPerturbation(retained);
+        }
+        weather.BindRegionalBackend(
+            [](const Vec3&) { return WeatherSample{.wind = Vec2(3.0f, 4.0f)}; }, {});
+        wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(3.0f, 4.0f); }, {});
+        const StormCell storm{.center_world = Vec2(kAnchor.x, kAnchor.z),
+                              .velocity = Vec2(-2.0f, 7.0f),
+                              .intensity = 0.5f,
+                              .spawn_tick = 1,
+                              .lifetime_ticks = 240,
+                              .seed_salt = 1};
+        weather.AdoptRegionalWeather(60, kAnchor, {storm, storm}, {});
+        for (std::uint64_t tick = 61; tick <= 62; ++tick) {
+            weather.UpdateFromClock(tick, kAnchor, wind);
+            EXPECT_EQ(weather.last_tick(), tick);
+            EXPECT_EQ(wind.last_tick(), tick);
+            EXPECT_EQ(weather.StormCells().size(), 2u);
+        }
+        // Returning to legacy wind makes any queued perturbations observable in the grid.
+        wind.BindRegionalBackend({}, {});
+        wind.Update(63, kAnchor);
+        baseline_wind.Update(63, kAnchor);
+        EXPECT_EQ(wind.ComputeWindSubHash(), baseline_wind.ComputeWindSubHash());
+        if (populated) {
+            WindFieldSystem empty_wind(kSeed);
+            empty_wind.Update(63, kAnchor);
+            EXPECT_NE(baseline_wind.ComputeWindSubHash(), empty_wind.ComputeWindSubHash());
+        }
+    }
+}
+
+TEST(WeatherSystem, RegionalSampleUsesOneBackendSnapshotPerQuery) {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    using Luminumbra::Systems::WeatherSample;
+    WeatherSystem weather(kSeed);
+    const StormCell storm{.center_world = Vec2(0.0f),
+                          .velocity = Vec2(0.0f),
+                          .intensity = 0.5f,
+                          .spawn_tick = 1,
+                          .lifetime_ticks = 240,
+                          .seed_salt = 1};
+    weather.AdoptRegionalWeather(60, kAnchor, {storm}, {});
+    std::uint32_t calls = 0;
+    weather.BindRegionalBackend(
+        [&calls](const Vec3&) {
+            ++calls;
+            const float value = static_cast<float>(calls) * 0.25f;
+            return WeatherSample{.category =
+                                     calls % 2 == 1 ? WeatherCategory::Rain : WeatherCategory::Snow,
+                                 .precip_intensity = value,
+                                 .storm_intensity = 0.9f,
+                                 .wind = Vec2(value, -value)};
+        },
+        {});
+    ASSERT_EQ(calls, 0u);
+    for (std::uint32_t query = 1; query <= 3; ++query) {
+        const auto sample = weather.SampleAt(Vec3(0.0f));
+        EXPECT_EQ(calls, query);
+        const float value = static_cast<float>(query) * 0.25f;
+        EXPECT_EQ(sample.category, query % 2 == 1 ? WeatherCategory::Rain : WeatherCategory::Snow);
+        EXPECT_FLOAT_EQ(sample.precip_intensity, (std::min)(1.0f, value + storm.intensity));
+        EXPECT_FLOAT_EQ(sample.storm_intensity, storm.intensity);
+        EXPECT_FLOAT_EQ(sample.wind.x, value);
+        EXPECT_FLOAT_EQ(sample.wind.y, -value);
+    }
+}
+
 TEST(WeatherSystem, EmptyRegionalCallbacksPreserveLegacySamplesAndHash) {
     WeatherSystem baseline(kSeed);
     WeatherSystem weather(kSeed);

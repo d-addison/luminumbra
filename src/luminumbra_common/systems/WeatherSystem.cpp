@@ -560,6 +560,11 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
 void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
+    if (m_regional_sample) {
+        m_last_tick = tick;
+        wind.Update(tick, region_anchor);
+        return;
+    }
     wind.ClearStormPerturbations();
     wind.Update(tick, region_anchor);
     Update(tick, region_anchor, &wind);
@@ -645,11 +650,18 @@ float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
 }
 
 WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
+    if (m_regional_sample) {
+        auto sample = m_regional_sample(world_pos);
+        sample.precip_intensity =
+            (std::min)(1.0f, sample.precip_intensity + StormPrecipAt(world_pos));
+        sample.storm_intensity = StormIntensityAt(world_pos);
+        return sample;
+    }
     WeatherSample sample;
     sample.category = CategoryAt(world_pos);
     sample.precip_intensity = PrecipitationAt(world_pos);
     sample.storm_intensity = StormIntensityAt(world_pos);
-    sample.wind = m_regional_sample ? m_regional_sample(world_pos).wind : m_anchor_wind;
+    sample.wind = m_anchor_wind;
     return sample;
 }
 
