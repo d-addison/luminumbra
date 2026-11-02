@@ -252,6 +252,7 @@ public:
         return m_lastLoadedChunkCount;
     }
     std::filesystem::path GetWorldSaveDir() const;
+    std::vector<IVec3> TakeInitialChunkLoadList();
 
     // --- Asset-manifest split ---
     // The engine validates SIMULATION requirements only: a safe world type
@@ -283,6 +284,7 @@ public:
     // Update spawn point (useful for debugging)
     void SetSpawnPoint(const Vec3& new_spawn) {
         m_metadata.spawnPoint = new_spawn;
+        m_preparedInitialChunks.reset();
     }
 
     // Get the world system for chunk generation
@@ -712,6 +714,7 @@ private:
     // diagnostics alone never change this; only coherent adoption enables it.
     bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
+    std::optional<std::vector<IVec3>> m_preparedInitialChunks;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed

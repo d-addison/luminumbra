@@ -796,6 +796,56 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
+std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
+    std::string bytes;
+    const auto scalar = [&bytes](const auto& value) {
+        bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    const auto array = [&bytes, &scalar](const auto& values) {
+        scalar(values.size());
+        if (!values.empty())
+            bytes.append(reinterpret_cast<const char*>(values.data()),
+                         values.size() * sizeof(values.front()));
+    };
+    scalar(chunk.get_coords());
+    scalar(chunk.get_id());
+    scalar(chunk.get_state());
+    array(chunk.sdf_data);
+    array(chunk.heightmap_data);
+    array(chunk.material_data);
+    array(chunk.mesh_vertices);
+    array(chunk.mesh_indices);
+    array(chunk.water_mesh_vertices);
+    array(chunk.water_mesh_indices);
+    array(chunk.pending_mesh_vertices);
+    array(chunk.pending_mesh_indices);
+    array(chunk.pending_water_mesh_vertices);
+    array(chunk.pending_water_mesh_indices);
+    array(chunk.water_level_data);
+    array(chunk.water_flow_data);
+    array(chunk.water_sim_terrain_height);
+    array(chunk.water_depth_mm);
+    array(chunk.water_bed_mm);
+    array(chunk.water_edge_flux);
+    scalar(chunk.has_collision.load(std::memory_order_acquire));
+    scalar(chunk.current_lod.load(std::memory_order_acquire));
+    scalar(chunk.pending_lod.load(std::memory_order_acquire));
+    scalar(chunk.pending_mesh_ready.load(std::memory_order_acquire));
+    scalar(chunk.pending_mesh_failed.load(std::memory_order_acquire));
+    scalar(chunk.mesh_version.load(std::memory_order_acquire));
+    scalar(chunk.water_mesh_version.load(std::memory_order_acquire));
+    scalar(chunk.has_water_sim.load(std::memory_order_acquire));
+    scalar(chunk.water_mesh_generated.load(std::memory_order_acquire));
+    scalar(chunk.current_water_resolution.load(std::memory_order_acquire));
+    scalar(chunk.is_water_sleeping.load(std::memory_order_acquire));
+    scalar(chunk.max_water_delta_last_tick);
+    scalar(chunk.ticks_below_threshold);
+    scalar(chunk.water_mesh_dirty_ticks);
+    scalar(chunk.has_water_authority());
+    scalar(chunk.has_terrain_authority());
+    return bytes;
+}
+
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {

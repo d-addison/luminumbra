@@ -3,9 +3,13 @@
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
+#include "../support/PersistenceFileOps.h"
+
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -33,6 +37,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/resource.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -333,6 +342,72 @@ public:
     HookGuard(const HookGuard&) = delete;
     HookGuard& operator=(const HookGuard&) = delete;
 };
+
+#if defined(__linux__)
+std::size_t OpenDescriptorCount() {
+    std::error_code error;
+    std::size_t count = 0;
+    for (fs::directory_iterator it("/proc/self/fd", error), end; !error && it != end;
+         it.increment(error))
+        ++count;
+    return error ? std::numeric_limits<std::size_t>::max() : count;
+}
+
+std::size_t& DescriptorPeak() {
+    static std::size_t peak = 0;
+    return peak;
+}
+
+void ObserveTransactionDescriptors(const char* step, const fs::path&) {
+    const std::string_view phase(step);
+    if (phase == "journal-published" || phase == "after-replace" || phase == "rollback-entry")
+        DescriptorPeak() = std::max(DescriptorPeak(), OpenDescriptorCount());
+}
+
+void RollbackWithExhaustedDescriptors(const fs::path& save_dir) {
+    struct rlimit limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0)
+        std::_Exit(1);
+    limit.rlim_cur = std::min<rlim_t>(limit.rlim_cur, 128);
+    if (::setrlimit(RLIMIT_NOFILE, &limit) != 0)
+        std::_Exit(2);
+    SaveTransaction transaction(save_dir, 2, {}, &RawDigest);
+    std::vector<std::string> errors;
+    if (!transaction.begin(&errors) ||
+        !transaction.protect({"world_info.json", "aether_state.efs"}, &errors) ||
+        !WorldSaveService::write_member_bytes(
+            save_dir, "world_info.json", "replacement", &errors) ||
+        !WorldSaveService::write_member_bytes(save_dir, "aether_state.efs", "created", &errors))
+        std::_Exit(3);
+    std::vector<int> descriptors;
+    int descriptor = -1;
+    while ((descriptor = ::open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0)
+        descriptors.push_back(descriptor);
+    if (errno != EMFILE)
+        std::_Exit(4);
+    transaction.abort(&errors);
+    for (const auto held : descriptors)
+        ::close(held);
+    std::_Exit(errors.empty() && !journal_pending(save_dir) ? 0 : 5);
+}
+#endif
+
+struct RollbackMutationState {
+    fs::path target;
+    bool changed = false;
+};
+
+RollbackMutationState& RollbackMutation() {
+    static RollbackMutationState state;
+    return state;
+}
+
+void ChangeLaterRollbackOccupant(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "rollback-entry" && path.filename() == "aether_state.efs") {
+        Put(RollbackMutation().target, "changed after rollback preflight");
+        RollbackMutation().changed = true;
+    }
+}
 
 struct JournalCaptureState {
     fs::path source;
@@ -655,6 +730,100 @@ TEST(SaveTransaction, UnprotectedMemberAndEscapingPublicationRefuseWithoutMutati
         SaveTransaction::prepare_publication(outside.path() / "world_info.json", {}, &errors));
     EXPECT_FALSE(errors.empty());
     EXPECT_EQ(Tree(save.path()), before);
+}
+
+#if defined(__linux__)
+TEST(SaveTransaction, ManyMembersKeepDescriptorsBoundedThroughPublicationAndRollback) {
+    constexpr std::size_t kMembers = 1200;
+    for (const bool existing : {false, true}) {
+        for (const bool commit : {false, true}) {
+            SCOPED_TRACE(existing);
+            SCOPED_TRACE(commit);
+            TempSave save;
+            std::vector<std::string> members;
+            for (std::size_t index = 0; index < kMembers; ++index) {
+                members.push_back("chunks/region/r." + std::to_string(index) + ".0.lmr");
+                if (existing)
+                    Put(save.path() / members.back(), "previous");
+            }
+            const auto baseline = Tree(save.path());
+            const auto descriptors = OpenDescriptorCount();
+            ASSERT_NE(descriptors, std::numeric_limits<std::size_t>::max());
+            DescriptorPeak() = descriptors;
+            const HookGuard hook(&ObserveTransactionDescriptors);
+            {
+                SaveTransaction transaction(save.path(), 1, {}, &RawDigest);
+                std::vector<std::string> errors;
+                ASSERT_TRUE(transaction.begin(&errors));
+                ASSERT_TRUE(transaction.protect(members, &errors));
+                EXPECT_LE(OpenDescriptorCount(), descriptors + 24);
+                for (const auto& member : members) {
+                    ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                        save.path(), member, "incoming", &errors));
+                }
+                EXPECT_LE(OpenDescriptorCount(), descriptors + 24);
+                if (commit) {
+                    ASSERT_TRUE(transaction.commit(&errors));
+                } else {
+                    transaction.abort(&errors);
+                    EXPECT_EQ(Tree(save.path()), baseline);
+                }
+                EXPECT_TRUE(errors.empty());
+                EXPECT_FALSE(journal_pending(save.path()));
+                EXPECT_LE(DescriptorPeak(), descriptors + 24);
+            }
+            EXPECT_EQ(OpenDescriptorCount(), descriptors);
+        }
+    }
+}
+
+TEST(SaveTransactionDeathTest, RollbackReleasesDescriptorReserveUnderExhaustion) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "previous"}}));
+    const auto baseline = Tree(save.path());
+    EXPECT_EXIT(RollbackWithExhaustedDescriptors(save.path()), ::testing::ExitedWithCode(0), "");
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+#endif
+
+TEST(SaveTransaction, RetryAfterFailedReplacementRetainsInstalledVersion) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "previous"}}));
+    const auto baseline = Tree(save.path());
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "first"));
+    detail::set_file_publication_hook_for_testing(
+        +[](const fs::path& path, bool) { return path.filename() != "world_info.json"; });
+    EXPECT_FALSE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "second"));
+    detail::set_file_publication_hook_for_testing(nullptr);
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "third"));
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "third");
+    std::vector<std::string> errors;
+    transaction.abort(&errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(Tree(save.path()), baseline);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, RollbackRechecksVersionsAfterPreflight) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "previous"}}));
+    SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(transaction.protect({"world_info.json", "aether_state.efs"}, nullptr));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "incoming"));
+    ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "aether_state.efs", "created"));
+    RollbackMutation() = {save.path() / "world_info.json", false};
+    const HookGuard hook(&ChangeLaterRollbackOccupant);
+    std::vector<std::string> errors;
+    transaction.abort(&errors);
+    EXPECT_TRUE(RollbackMutation().changed);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(Get(RollbackMutation().target), "changed after rollback preflight");
+    EXPECT_TRUE(journal_pending(save.path()));
 }
 
 TEST(SaveTransaction, AbortRefusesForeignCreatedAndReplacedOccupants) {

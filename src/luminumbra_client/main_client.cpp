@@ -2724,13 +2724,10 @@ int main(int argc, char* argv[]) {
             SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
 
         // 3. Get the list of chunks to generate and start the visualizer
-        auto* world_system = gameSession->GetWorldSystem();
-        // Use the actual spawn position for initial chunk loading
-        Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
         if (runtime_boot_recorder.enabled()) {
             g_app.loading.initial_chunks_to_load.clear();
         } else {
-            g_app.loading.initial_chunks_to_load = world_system->GetInitialChunkLoadList(spawn_pos);
+            g_app.loading.initial_chunks_to_load = gameSession->TakeInitialChunkLoadList();
         }
 
         g_app.loading.generation_dispatch_index = 0;

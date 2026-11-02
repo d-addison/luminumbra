@@ -784,6 +784,14 @@ public:
         return true;
     }
 
+    bool version(SavedInputFile::Version& result) const {
+#if defined(_WIN32)
+        return SavedInputFile::native_version(m_handle, result);
+#else
+        return SavedInputFile::native_version(m_descriptor, result);
+#endif
+    }
+
     bool write(const std::string& bytes) const {
         std::size_t offset = 0;
         // Bounded by the admitted ledger size (or the 512-byte sidecar bound).
@@ -2566,6 +2574,17 @@ ChunkRecordKey ChunkRecordKeyOf(const RegionRecord& record) {
                           record.compressed_payload};
 }
 
+struct PendingChunkAdmission {
+    RegionRecord record;
+    ChunkRecordFacts facts;
+    std::shared_ptr<Chunk> chunk;
+};
+
+std::optional<std::unordered_map<ChunkID, PendingChunkAdmission>>& PendingChunkAdmissions() {
+    static thread_local std::optional<std::unordered_map<ChunkID, PendingChunkAdmission>> pending;
+    return pending;
+}
+
 class AdmittedChunkRecords {
 public:
     std::optional<ChunkRecordFacts> find(const ChunkRecordKey& key) {
@@ -2575,41 +2594,94 @@ public:
             return std::nullopt;
         return found->second.facts;
     }
-    void remember(const ChunkRecordKey& key, const ChunkRecordFacts& facts) {
+    bool matches_serialized(const ChunkRecordKey& key, const std::string& inputs) {
         const std::lock_guard lock(m_mutex);
-        if (key.compressed_payload.size() > kMaxBytes)
+        const auto found = m_facts.find(key.id);
+        return found != m_facts.end() && ChunkRecordKeyOf(found->second.record) == key &&
+               found->second.serialization_inputs == inputs;
+    }
+    std::shared_ptr<Chunk> take_decoded(const ChunkRecordKey& key) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_facts.find(key.id);
+        if (found == m_facts.end() || ChunkRecordKeyOf(found->second.record) != key)
+            return {};
+        m_decoded_bytes -= found->second.decoded_bytes;
+        found->second.decoded_bytes = 0;
+        return std::move(found->second.decoded);
+    }
+    void remember_decoded(const ChunkRecordKey& key, const std::shared_ptr<Chunk>& chunk) {
+        const std::lock_guard lock(m_mutex);
+        const auto found = m_facts.find(key.id);
+        const auto bytes = sizeof(Chunk) + chunk->estimated_heap_bytes();
+        if (found == m_facts.end() || ChunkRecordKeyOf(found->second.record) != key ||
+            found->second.decoded || bytes > kMaxDecodedBytes)
+            return;
+        if (bytes > kMaxDecodedBytes - m_decoded_bytes) {
+            for (auto& [id, entry] : m_facts) {
+                (void)id;
+                entry.decoded.reset();
+                entry.decoded_bytes = 0;
+            }
+            m_decoded_bytes = 0;
+        }
+        found->second.decoded = chunk;
+        found->second.decoded_bytes = bytes;
+        m_decoded_bytes += bytes;
+    }
+    void remember(const ChunkRecordKey& key,
+                  const ChunkRecordFacts& facts,
+                  const std::string& inputs = {}) {
+        const std::lock_guard lock(m_mutex);
+        const auto bytes = key.compressed_payload.size();
+        if (bytes > kMaxBytes)
             return;
         if (const auto previous = m_facts.find(key.id); previous != m_facts.end()) {
-            if (ChunkRecordKeyOf(previous->second.record) == key) {
+            if (ChunkRecordKeyOf(previous->second.record) == key && inputs.empty()) {
                 previous->second.facts = facts;
                 return;
             }
             m_bytes -= previous->second.record.compressed_payload.size();
+            m_input_bytes -= previous->second.serialization_inputs.size();
+            m_decoded_bytes -= previous->second.decoded_bytes;
             m_facts.erase(previous);
         }
-        if (m_facts.size() >= kMaxRecords || m_bytes + key.compressed_payload.size() > kMaxBytes) {
+        if (m_facts.size() >= kMaxRecords || m_bytes + bytes > kMaxBytes) {
             m_facts.clear();
             m_bytes = 0;
+            m_input_bytes = 0;
+            m_decoded_bytes = 0;
         }
-        m_bytes += key.compressed_payload.size();
+        m_bytes += bytes;
         RegionRecord record;
         record.id = key.id;
         record.lod_level = key.lod_level;
         record.flags = key.flags;
         record.uncompressed_size = key.uncompressed_size;
         record.compressed_payload = key.compressed_payload;
-        m_facts.emplace(key.id, Entry{std::move(record), facts});
+        // Optional serialization reuse must never evict facts needed by commit admission.
+        const bool retain_inputs = inputs.size() <= kMaxInputBytes - m_input_bytes;
+        if (retain_inputs)
+            m_input_bytes += inputs.size();
+        m_facts.emplace(
+            key.id, Entry{std::move(record), facts, retain_inputs ? inputs : std::string{}, {}, 0});
     }
 
 private:
     struct Entry {
         RegionRecord record;
         ChunkRecordFacts facts;
+        std::string serialization_inputs;
+        std::shared_ptr<Chunk> decoded;
+        std::size_t decoded_bytes = 0;
     };
     static constexpr std::size_t kMaxRecords = 65536;
     static constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
+    static constexpr std::size_t kMaxInputBytes = std::size_t{64} * 1024 * 1024;
+    static constexpr std::size_t kMaxDecodedBytes = std::size_t{256} * 1024 * 1024;
     std::mutex m_mutex;
     std::size_t m_bytes = 0;
+    std::size_t m_input_bytes = 0;
+    std::size_t m_decoded_bytes = 0;
     std::unordered_map<ChunkID, Entry> m_facts;
 };
 
@@ -2630,15 +2702,35 @@ ChunkRecordFacts DecodedChunkRecordFacts(const Chunk& chunk) {
                             chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited};
 }
 
-// Admits one lod-0 record. Callers that keep the chunk get a fresh decode;
-// otherwise a record whose exact bytes were admitted before is not re-parsed.
+// Exact record bytes gate both facts and the transfer of a cold validation decode.
+// Transferred chunks leave the cache before the caller can mutate them.
 bool AdmitChunkRecord(const RegionRecord& record,
                       const std::filesystem::path& path,
                       std::vector<std::string>* errors,
                       ChunkRecordFacts& facts,
-                      std::shared_ptr<Chunk>* decoded) {
+                      std::shared_ptr<Chunk>* decoded,
+                      bool validation_only = false,
+                      bool cache_unretained = false) {
     const ChunkRecordKey key = ChunkRecordKeyOf(record);
-    if (!decoded) {
+    auto& pending = PendingChunkAdmissions();
+    if (pending) {
+        const auto found = pending->find(record.id);
+        if (found != pending->end() && ChunkRecordKeyOf(found->second.record) == key) {
+            facts = found->second.facts;
+            if (decoded) {
+                *decoded = std::move(found->second.chunk);
+                pending->erase(found);
+            }
+            return true;
+        }
+    }
+    if (decoded) {
+        if (auto admitted = AdmittedChunkRecordCache().take_decoded(key)) {
+            facts = DecodedChunkRecordFacts(*admitted);
+            *decoded = std::move(admitted);
+            return true;
+        }
+    } else {
         if (const auto admitted = AdmittedChunkRecordCache().find(key)) {
             facts = *admitted;
             return true;
@@ -2651,6 +2743,13 @@ bool AdmitChunkRecord(const RegionRecord& record,
     AdmittedChunkRecordCache().remember(key, facts);
     if (decoded)
         *decoded = std::move(chunk);
+    else if (pending && validation_only)
+        pending->insert_or_assign(record.id,
+                                  PendingChunkAdmission{record, facts, std::move(chunk)});
+    else if (cache_unretained)
+        // Cold admission also visits chunks outside the initial retain set. Transfer those
+        // decodes to later activation reads, including reads on the adopting owner thread.
+        AdmittedChunkRecordCache().remember_decoded(key, chunk);
     return true;
 }
 
@@ -4123,6 +4222,108 @@ std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
     return WorldSaveService::region_simulation_digest(m_save_dir, key, inputs, &m_index);
 }
 
+namespace {
+using DigestVersions = std::array<SavedInputFile::Version, 4>;
+
+bool ReadDigestVersions(const std::filesystem::path& save_dir,
+                        const std::filesystem::path& region_path,
+                        DigestVersions& versions) {
+    const std::array paths{region_path,
+                           save_dir / "world_info.json",
+                           WorldSaveService::world_manifest_path(save_dir),
+                           snapshot_index_path(save_dir)};
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const SavedInputFile input(paths[i]);
+        if (input.missing())
+            versions[i] = {};
+        else if (!input.version(versions[i]))
+            return false;
+    }
+    return true;
+}
+
+std::array<std::uint64_t, 5> DigestMembership(const SnapshotIndex* index,
+                                              const world::RegionKey& key) {
+    if (!index)
+        return {};
+    const auto relative = RelativeRegionMember(key.x, key.z);
+    const auto found = std::lower_bound(
+        index->members.begin(),
+        index->members.end(),
+        relative,
+        [](const SnapshotMember& member, const std::string& path) { return member.path < path; });
+    if (found == index->members.end() || found->path != relative)
+        return {1, index->generation, 0, 0, 0};
+    return {1, index->generation, found->present ? 2u : 1u, found->bytes, found->fnv64};
+}
+
+struct DigestAuthorityCache {
+    struct Entry {
+        DigestVersions versions;
+        std::array<std::uint64_t, 5> membership;
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        std::size_t bytes = 0;
+    };
+    std::uint64_t revision = 0;
+    std::size_t bytes = 0;
+    std::map<std::filesystem::path, Entry> regions;
+};
+
+bool ReadDigestAuthority(const std::filesystem::path& save_dir,
+                         const world::RegionKey& key,
+                         std::vector<std::shared_ptr<Chunk>>& chunks,
+                         std::vector<std::string>* errors,
+                         const SnapshotIndex* admitted_index) {
+    static thread_local DigestAuthorityCache cache;
+    constexpr std::size_t kMaxRegions = 16;
+    constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
+    const auto revision = PublicationRevision().load(std::memory_order_relaxed);
+    if (cache.revision != revision) {
+        cache = {};
+        cache.revision = revision;
+    }
+    const auto path = WorldSaveService::region_file_path(save_dir, key.x, key.z);
+    DigestVersions versions{};
+    const bool versioned = ReadDigestVersions(save_dir, path, versions);
+    const auto membership = DigestMembership(admitted_index, key);
+    if (const auto found = cache.regions.find(path); found != cache.regions.end()) {
+        if (versioned && found->second.versions == versions &&
+            found->second.membership == membership) {
+            chunks = found->second.chunks;
+            return true;
+        }
+        cache.bytes -= found->second.bytes;
+        cache.regions.erase(found);
+    }
+    constexpr auto span = WorldSaveService::kRegionChunkSpan;
+    if (!WorldSaveService::read_authoritative_region_chunks(path,
+                                                            key.x * span,
+                                                            key.x * span + span - 1,
+                                                            key.z * span,
+                                                            key.z * span + span - 1,
+                                                            chunks,
+                                                            errors,
+                                                            admitted_index))
+        return false;
+    DigestVersions after{};
+    if (!versioned || !ReadDigestVersions(save_dir, path, after) || versions != after)
+        return true;
+    std::size_t bytes = 0;
+    for (const auto& chunk : chunks)
+        bytes += sizeof(Chunk) + chunk->estimated_heap_bytes();
+    if (bytes > kMaxBytes)
+        return true;
+    while (!cache.regions.empty() &&
+           (cache.regions.size() >= kMaxRegions || cache.bytes + bytes > kMaxBytes)) {
+        cache.bytes -= cache.regions.begin()->second.bytes;
+        cache.regions.erase(cache.regions.begin());
+    }
+    cache.bytes += bytes;
+    cache.regions.emplace(path, DigestAuthorityCache::Entry{versions, membership, chunks, bytes});
+    return true;
+}
+} // namespace
+
 std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
                                                          world::RegionKey key,
                                                          const RegionDigestInputs& inputs,
@@ -4153,14 +4354,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
             throw std::runtime_error("inconsistent snapshot: index missing");
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
-        if (!read_authoritative_region_chunks(region_file_path(save_dir, key.x, key.z),
-                                              key.x * kRegionChunkSpan,
-                                              key.x * kRegionChunkSpan + kRegionChunkSpan - 1,
-                                              key.z * kRegionChunkSpan,
-                                              key.z * kRegionChunkSpan + kRegionChunkSpan - 1,
-                                              durable_chunks,
-                                              &errors,
-                                              admitted_index))
+        if (!ReadDigestAuthority(save_dir, key, durable_chunks, &errors, admitted_index))
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
         for (const auto& chunk : durable_chunks) {
@@ -4211,6 +4405,27 @@ bool SameSaveDirectory(const std::filesystem::path& lhs, const std::filesystem::
     return a == b;
 }
 } // namespace
+
+WorldSaveService::WorldReadScope::WorldReadScope() {
+    if (!PendingChunkAdmissions()) {
+        PendingChunkAdmissions().emplace();
+        m_owner = true;
+    }
+}
+
+WorldSaveService::WorldReadScope::~WorldReadScope() {
+    if (m_owner) {
+        auto& pending = PendingChunkAdmissions();
+        if (pending) {
+            for (const auto& [id, admission] : *pending) {
+                (void)id;
+                AdmittedChunkRecordCache().remember_decoded(ChunkRecordKeyOf(admission.record),
+                                                            admission.chunk);
+            }
+        }
+        pending.reset();
+    }
+}
 
 WorldSaveService::SaveFactsScope::SaveFactsScope(const std::filesystem::path& save_dir)
     : m_save_dir(save_dir)
@@ -4850,6 +5065,21 @@ bool WorldSaveService::artifact_identity(const std::filesystem::path& path,
         std::copy_n(identity.begin(), result.size(), result.begin());
         return true;
     }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    missing = error == std::errc::no_such_file_or_directory ||
+              (!error && !std::filesystem::exists(status));
+    return missing;
+}
+
+bool WorldSaveService::artifact_version(const std::filesystem::path& path,
+                                        std::array<std::uint64_t, 8>& version,
+                                        bool& missing) {
+    version = {};
+    missing = false;
+    const StagingFile bound(path, StagingFile::Mode::Inspect);
+    if (bound.version(version))
+        return true;
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     missing = error == std::errc::no_such_file_or_directory ||
@@ -5662,10 +5892,11 @@ WorldSaveService::read_chunk(const std::filesystem::path& save_dir,
             return fail("durable chunk region changed since admission");
         if (const auto found = region->positions.find(id); found != region->positions.end()) {
             const auto& record = region->records[found->second.first];
-            result.chunk = DecodeChunkRecord(record, path, &errors);
+            ChunkRecordFacts facts;
+            const bool admitted = AdmitChunkRecord(record, path, &errors, facts, &result.chunk);
             constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                              (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-            if (!result.chunk || result.chunk->get_coords() != coords ||
+            if (!admitted || !result.chunk || result.chunk->get_coords() != coords ||
                 (!result.chunk->sdf_data.empty() && result.chunk->sdf_data.size() != kLattice))
                 return fail(errors.empty() ? "corrupt exact chunk identity or SDF lattice"
                                            : errors.front());
@@ -5894,7 +6125,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                           path,
                                           &errors,
                                           facts,
-                                          retain || promote_legacy_water ? &chunk : nullptr))
+                                          retain || promote_legacy_water ? &chunk : nullptr,
+                                          retain_chunks && retain_chunks->empty() &&
+                                              !authoritative_inventory,
+                                          true))
                         return reject("");
                     // Promoted chunks are adopted so the upgrade save records their authority.
                     const bool promoted =
@@ -5914,6 +6148,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         ++*decoded_chunk_count;
                     if (retain || promoted)
                         state.insert_chunk(chunk);
+                    else if (chunk)
+                        AdmittedChunkRecordCache().remember_decoded(ChunkRecordKeyOf(record),
+                                                                    chunk);
                 } else {
                     const auto tier = static_cast<World::FarLodTier>(record.lod_level);
                     if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))
@@ -6021,6 +6258,7 @@ struct WorldSaveService::PreparedWorldWrite::Data {
     std::filesystem::path save_dir;
     std::map<std::filesystem::path, std::vector<RegionRecord>> regions;
     bool write_manifest = false;
+    std::size_t unchanged_regions = 0;
 };
 
 WorldSaveService::PreparedWorldWrite::PreparedWorldWrite() = default;
@@ -6081,7 +6319,18 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
 
             // What DecodeChunkRecord will find in each record encoded here. Admitted only
             // after the region passes the writer limits that decoding also enforces.
-            std::vector<std::pair<std::size_t, ChunkRecordFacts>> encoded;
+            struct EncodedChunk {
+                std::size_t offset;
+                ChunkRecordFacts facts;
+                std::string inputs;
+            };
+            std::vector<EncodedChunk> encoded;
+            bool changed = !std::is_sorted(records.begin(),
+                                           records.end(),
+                                           [](const RegionRecord& lhs, const RegionRecord& rhs) {
+                                               return std::pair{lhs.lod_level, lhs.id} <
+                                                      std::pair{rhs.lod_level, rhs.id};
+                                           });
             encoded.reserve(region_chunks.size());
             for (const auto& chunk : region_chunks) {
                 RegionRecord record;
@@ -6095,6 +6344,11 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 }
                 record.flags = ChunkRecordFlags(*chunk, previous_flags);
 
+                const auto inputs = ChunkSnapshotInputBytes(*chunk);
+                if (existing != record_index.end() && record.flags == previous_flags &&
+                    AdmittedChunkRecordCache().matches_serialized(
+                        ChunkRecordKeyOf(records[existing->second]), inputs))
+                    continue;
                 const bool water_authority = chunk->has_water_authority();
                 const std::string payload = SerializeSingleChunkSnapshot(chunk);
                 if (!CompressPayload(payload, record, errors)) {
@@ -6104,17 +6358,21 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 // authority change leaves the encoded field unknown. Both stay with a real decode.
                 if (water_authority == chunk->has_water_authority() &&
                     payload.find("null") == std::string::npos) {
-                    encoded.emplace_back(
-                        existing != record_index.end() ? existing->second : records.size(),
-                        ChunkRecordFacts{chunk->get_coords(),
-                                         SdfLatticeAdmissible(*chunk),
-                                         water_authority ||
-                                             (record.flags & kRecordFlagEdited) != 0u});
+                    encoded.push_back(
+                        {existing != record_index.end() ? existing->second : records.size(),
+                         ChunkRecordFacts{chunk->get_coords(),
+                                          SdfLatticeAdmissible(*chunk),
+                                          water_authority ||
+                                              (record.flags & kRecordFlagEdited) != 0u},
+                         inputs == ChunkSnapshotInputBytes(*chunk) ? inputs : std::string{}});
                 }
 
                 if (existing != record_index.end()) {
+                    changed = changed || ChunkRecordKeyOf(records[existing->second]) !=
+                                             ChunkRecordKeyOf(record);
                     records[existing->second] = std::move(record);
                 } else {
+                    changed = true;
                     record_index[{record.lod_level, record.id}] = records.size();
                     records.push_back(std::move(record));
                 }
@@ -6122,10 +6380,13 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
 
             if (!AdmitRegionWrite(records, errors))
                 return false;
-            for (const auto& [record_offset, facts] : encoded)
-                AdmittedChunkRecordCache().remember(ChunkRecordKeyOf(records[record_offset]),
-                                                    facts);
-            candidate->regions.emplace(path, std::move(records));
+            for (const auto& entry : encoded)
+                AdmittedChunkRecordCache().remember(
+                    ChunkRecordKeyOf(records[entry.offset]), entry.facts, entry.inputs);
+            if (changed)
+                candidate->regions.emplace(path, std::move(records));
+            else
+                ++candidate->unchanged_regions;
         }
         candidate->write_manifest = !dirty_only || !regions.empty();
         m_data = std::move(candidate);
@@ -6167,7 +6428,7 @@ bool WorldSaveService::PreparedWorldWrite::publish(std::vector<std::string>* err
         if (!scope.commit(errors))
             return false;
         if (regions_written)
-            *regions_written = prepared->regions.size();
+            *regions_written = prepared->regions.size() + prepared->unchanged_regions;
         return true;
     } catch (const std::exception& error) {
         AddError(errors, std::string("failed to write world region files: ") + error.what());

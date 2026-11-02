@@ -262,6 +262,8 @@ struct JournalEntry {
     std::string undo_temporary;
     std::string incoming_temporary;
     std::string restored_temporary;
+    // Live rollback also checks publication stamps. Recovery retains its journal byte checks.
+    std::array<SavedInputFile::Version, 3> live_versions{};
 };
 
 struct JournalDocument {
@@ -549,6 +551,12 @@ bool MatchesIdentity(const fs::path& path,
            actual == expected;
 }
 
+bool MatchesPublicationVersion(const SavedInputFile::Version& current,
+                               const SavedInputFile::Version& expected) {
+    // Rename changes ctime; native identity, size and nanosecond mtime survive publication.
+    return std::equal(current.begin(), current.begin() + 6, expected.begin());
+}
+
 bool OwnedOccupant(const fs::path& destination,
                    const JournalEntry& entry,
                    ArtifactIdentity& current,
@@ -567,6 +575,19 @@ bool OwnedOccupant(const fs::path& destination,
          current != entry.incoming_identity && current != entry.restored_identity)) {
         AddError(errors, "snapshot rollback occupant changed: " + entry.path);
         return false;
+    }
+    if (entry.live_versions != decltype(entry.live_versions){} &&
+        current != entry.restored_identity) {
+        SavedInputFile::Version version{};
+        if (!input.version(version) || std::none_of(entry.live_versions.begin(),
+                                                    entry.live_versions.end(),
+                                                    [&version](const auto& expected) {
+                                                        return MatchesPublicationVersion(version,
+                                                                                         expected);
+                                                    })) {
+            AddError(errors, "snapshot rollback occupant changed: " + entry.path);
+            return false;
+        }
     }
     if (entry.action == "replace") {
         // Recovery cannot retain pre-crash handles. Verify the prior bytes through the same
@@ -1476,6 +1497,18 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
             abort(errors);
             return false;
         }
+        // A fixed reserve is released before rollback, even if other work consumes the
+        // remaining process descriptors. Member protection itself retains no handles.
+        {
+            const SavedInputFile control(journal_directory(m_save_dir) / "txn.json");
+            for (auto& handle : m_rollback_handles) {
+                handle = control.retain_identity();
+                if (!handle) {
+                    AddError(errors, "cannot reserve snapshot rollback handles");
+                    throw std::runtime_error("cannot reserve snapshot rollback handles");
+                }
+            }
+        }
         report_snapshot_step("journal-published", journal_directory(m_save_dir) / "txn.json");
         return true;
     } catch (const std::exception& ex) {
@@ -1511,9 +1544,12 @@ bool SaveTransaction::prepare_publication(const fs::path& destination,
     bool missing = false;
     if (!WorldSaveService::artifact_identity(destination, entry->installed_identity, missing))
         return false;
-    entry->installed_retention = entry->installed_identity == entry->incoming_identity
-                                     ? entry->incoming_retention
-                                     : entry->previous_retention;
+    if (missing)
+        entry->installed_version = {};
+    else if (entry->installed_identity == entry->incoming_identity)
+        entry->installed_version = entry->incoming_version;
+    else if (entry->installed_identity == entry->previous_identity)
+        entry->installed_version = entry->previous_version;
     entry->incoming_identity = {};
     entry->incoming_temporary.clear();
     if (!incoming.empty() &&
@@ -1521,11 +1557,10 @@ bool SaveTransaction::prepare_publication(const fs::path& destination,
         AddError(errors, "snapshot incoming path escapes transaction root");
         return false;
     }
-    entry->incoming_retention.reset();
+    entry->incoming_version = {};
     if (!incoming.empty()) {
         const SavedInputFile input(incoming);
-        if (!input.identity(entry->incoming_identity) ||
-            !(entry->incoming_retention = input.retain_identity()))
+        if (!input.identity(entry->incoming_identity) || !input.version(entry->incoming_version))
             return false;
     }
     transaction->m_changed_entries.push_back(position->second);
@@ -1568,6 +1603,23 @@ bool SaveTransaction::publication_stages(const fs::path& destination,
     return true;
 }
 
+bool SaveTransaction::check_member_version(const Entry& entry,
+                                           std::vector<std::string>* errors) const {
+    SavedInputFile::Version current{};
+    bool missing = false;
+    const bool inspected =
+        WorldSaveService::artifact_version(m_save_dir / entry.path, current, missing);
+    if (inspected && missing)
+        return true;
+    if (!inspected || (!MatchesPublicationVersion(current, entry.previous_version) &&
+                       !MatchesPublicationVersion(current, entry.installed_version) &&
+                       !MatchesPublicationVersion(current, entry.incoming_version))) {
+        AddError(errors, "snapshot publication occupant changed: " + entry.path);
+        return false;
+    }
+    return true;
+}
+
 bool SaveTransaction::check_publication_target(const fs::path& destination,
                                                std::vector<std::string>* errors) {
     auto* transaction = ActiveTransaction();
@@ -1588,6 +1640,18 @@ bool SaveTransaction::check_publication_target(const fs::path& destination,
         return control;
     }
     const auto* entry = &transaction->m_entries[position->second];
+    if (!transaction->check_member_version(*entry, errors))
+        return false;
+    if (!entry->incoming_temporary.empty()) {
+        SavedInputFile::Version incoming{};
+        bool missing_incoming = false;
+        if (!WorldSaveService::artifact_version(
+                transaction->m_save_dir / entry->incoming_temporary, incoming, missing_incoming) ||
+            (!missing_incoming && !MatchesPublicationVersion(incoming, entry->incoming_version))) {
+            AddError(errors, "snapshot publication occupant changed: " + relative);
+            return false;
+        }
+    }
     std::array<std::uint64_t, 3> current{};
     bool missing = false;
     if (!WorldSaveService::artifact_identity(destination, current, missing) ||
@@ -1635,7 +1699,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                 const SavedInputFile input(destination);
                 missing = input.missing();
                 if (!missing && (!input.identity(entry.previous_identity) ||
-                                 !(entry.previous_retention = input.retain_identity()) ||
+                                 !input.version(entry.previous_version) ||
                                  !input.read(previous, kMaxUndoBytes))) {
                     AddError(errors, "unreadable or oversized transaction member: " + rel);
                     return false;
@@ -1967,6 +2031,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
         m_state = State::Committed;
+        m_rollback_handles = {};
         auto actions = std::move(m_committed_actions);
         for (auto& action : actions) {
             try {
@@ -1996,9 +2061,18 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     if (m_state != State::Open && m_state != State::Committing) {
         return;
     }
+    m_rollback_handles = {};
     try {
         report_snapshot_step("before-rollback", m_save_dir);
         m_state = State::RollingBack;
+        for (const auto& entry : m_entries) {
+            if (!check_member_version(entry, errors)) {
+                m_state = State::RolledBack;
+                m_committed_actions.clear();
+                m_ownership.reset();
+                return;
+            }
+        }
         JournalDocument document;
         document.txn_id = m_txn_id;
         document.base_generation = m_previous.generation;
@@ -2021,6 +2095,8 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
             copy.undo_temporary = entry.undo_temporary;
             copy.incoming_temporary = entry.incoming_temporary;
             copy.restored_temporary = entry.restored_temporary;
+            copy.live_versions = {
+                entry.previous_version, entry.installed_version, entry.incoming_version};
             document.entries.push_back(std::move(copy));
         }
         if (m_artifacts && m_previous.generation == 0) {

@@ -234,10 +234,11 @@ private:
         std::string incoming_temporary;
         std::string restored_temporary;
         std::size_t rollback_reserve = 0;
-        std::shared_ptr<const void> previous_retention;
-        std::shared_ptr<const void> installed_retention;
-        std::shared_ptr<const void> incoming_retention;
+        std::array<std::uint64_t, 8> previous_version{};
+        std::array<std::uint64_t, 8> installed_version{};
+        std::array<std::uint64_t, 8> incoming_version{};
     };
+    bool check_member_version(const Entry& entry, std::vector<std::string>* errors) const;
     bool write_journal(std::vector<std::string>* errors);
 
     std::unique_ptr<TransactionOwnership> m_ownership;
@@ -252,6 +253,7 @@ private:
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
     std::size_t m_rollback_reserve = 0;
+    std::array<std::shared_ptr<const void>, 16> m_rollback_handles;
     std::unordered_set<std::string> m_protected;
     std::unordered_map<std::string, std::size_t> m_entry_indices;
     std::vector<std::size_t> m_changed_entries;

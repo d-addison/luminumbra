@@ -7,6 +7,7 @@
 #include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 #include "persistence/SaveTransaction.h"
+#include "persistence/SavedInputFile.h"
 
 #include "ecs/EntitySnapshot.h"
 #include "persistence/SavedJsonAdmission.h"
@@ -21,15 +22,18 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <latch>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -1980,4 +1984,282 @@ TEST(WorldSaveRegionFormat, LedgerReadsRefuseWrongTypesAndPartialDataWithoutChan
     EXPECT_FALSE(WorldSaveService::load_active_regions(ledger, directory.path));
     EXPECT_FALSE(ledger.local_anchor().has_value());
 #endif
+}
+
+TEST(WorldSaveRegionFormat, ColdValidationTransfersRetainedDecodesOnlyForExactRecordBytes) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("validation_transfer");
+    WorldStreamingState source;
+    const auto original = source.get_or_create_chunk({7, 0, 9});
+    original->sdf_data.assign(17 * 17 * 17, -7.8125f);
+    WorldSaveService::ContainerRecord record;
+    record.id = original->get_id();
+    record.flags = 1;
+    record.payload = P::SerializeWorldStreamingStateSnapshotJson(source);
+    const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    const auto bytes = ReadFileBytes(path);
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    const WorldSaveService::WorldReadScope read_scope;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    {
+        WorldSaveService::SaveFactsScope facts(save.path);
+        ASSERT_TRUE(facts.validate(&errors));
+    }
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    WorldStreamingState loaded;
+    const std::unordered_set<Luminumbra::ChunkID> wanted{original->get_id()};
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    ASSERT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded.find_chunk(original->get_id())->sdf_data, original->sdf_data);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
+    // An adopted chunk is no longer a cache entry that can be handed to another reader.
+    loaded.find_chunk(original->get_id())->sdf_data.front() = 99.0f;
+    WorldStreamingState another;
+    ASSERT_TRUE(WorldSaveService{}.load_world(another, save.path, errors, {}, &wanted));
+    EXPECT_EQ(another.find_chunk(original->get_id())->sdf_data.front(), -7.8125f);
+
+    // A new cold validation must not lend its chunk after even one compressed byte changes.
+    original->sdf_data.front() = -8.8125f;
+    record.payload = P::SerializeWorldStreamingStateSnapshotJson(source);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    auto damaged = ReadFileBytes(path);
+    ASSERT_GT(damaged.size(), 28u);
+    damaged[26] = 0; // LZ4 token followed by an invalid offset, independent of JSON validity.
+    damaged[27] = 0;
+    damaged[28] = 0;
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(damaged.data(), static_cast<std::streamsize>(damaged.size()));
+        ASSERT_TRUE(output.good());
+    }
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(loaded.size(), 0u);
+}
+
+TEST(WorldSaveRegionFormat, ColdUnretainedDecodeTransfersFromPreparationToActivation) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("activation_transfer");
+    WorldStreamingState source;
+    const Luminumbra::IVec3 coords{65, 0, 70};
+    const auto chunk = source.get_or_create_chunk(coords);
+    chunk->sdf_data.assign(17 * 17 * 17, -13.8125f);
+    WorldSaveService::ContainerRecord record;
+    record.id = chunk->get_id();
+    record.flags = 1;
+    record.payload = P::SerializeWorldStreamingStateSnapshotJson(source);
+    const auto path = WorldSaveService::region_file_path(save.path, 2, 2);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    bool prepared = false;
+    std::vector<std::string> errors;
+    std::thread worker([&] {
+        const WorldSaveService::WorldReadScope scope;
+        WorldStreamingState initial;
+        const std::unordered_set<Luminumbra::ChunkID> retain_none;
+        std::vector<Luminumbra::IVec3> inventory;
+        prepared = WorldSaveService::validate_save(save.path, &errors) &&
+                   WorldSaveService{}.load_world(
+                       initial, save.path, errors, {}, &retain_none, &inventory) &&
+                   initial.size() == 0 && inventory.size() == 1;
+    });
+    worker.join();
+    ASSERT_TRUE(prepared);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    const auto activated = WorldSaveService::read_chunk(save.path, coords, false);
+    ASSERT_EQ(activated.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(activated.chunk, nullptr);
+    EXPECT_EQ(activated.chunk->sdf_data, chunk->sdf_data);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    activated.chunk->sdf_data.front() = 42.0f;
+    const auto fresh = WorldSaveService::read_chunk(save.path, coords, false);
+    ASSERT_EQ(fresh.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(fresh.chunk, nullptr);
+    EXPECT_EQ(fresh.chunk->sdf_data.front(), -13.8125f);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 2);
+}
+
+TEST(WorldSaveRegionFormat, UnchangedSnapshotReusesSerializationAndPreservesPublishedRegion) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("reuse_serialization");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -9.625f);
+    chunk->mark_voxel_data_dirty();
+    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    const auto bytes = ReadFileBytes(region);
+    WorldSaveService::ArtifactIdentity before{}, after{};
+    bool missing = false;
+    ASSERT_TRUE(WorldSaveService::artifact_identity(region, before, missing));
+    ASSERT_FALSE(missing);
+    const auto compressions = WorldSaveService::record_compression_count_for_testing();
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+    ASSERT_TRUE(WorldSaveService::artifact_identity(region, after, missing));
+    EXPECT_EQ(before, after);
+    EXPECT_EQ(ReadFileBytes(region), bytes);
+
+    // These writes deliberately bypass voxel/water revision counters. Every persisted input,
+    // including presentation bookkeeping, must still defeat serialization reuse.
+    const std::vector<std::function<void()>> edits{
+        [&] { chunk->sdf_data.front() = -2.0f; },
+        [&] { chunk->material_data = {3}; },
+        [&] { chunk->heightmap_data = {2.0f}; },
+        [&] { chunk->mesh_vertices.push_back({Vec3(1), Vec3(0, 1, 0), 2}); },
+        [&] { chunk->mesh_vertices.front().normal.x = 0.5f; },
+        [&] { chunk->mesh_indices = {0}; },
+        [&] { chunk->has_collision.store(true); },
+        [&] { chunk->set_state(ChunkState::Meshing); },
+        [&] { chunk->pending_mesh_ready.store(true); },
+        [&] { chunk->mesh_version.fetch_add(1); },
+        [&] { chunk->water_depth_mm = {17}; },
+        [&] { chunk->water_edge_flux = {2, 3}; },
+        [&] { chunk->max_water_delta_last_tick = 0.25f; },
+        [&] { chunk->ticks_below_threshold = 7; },
+        [&] { chunk->set_water_authority(); },
+    };
+    for (const auto& edit : edits) {
+        edit();
+        const auto expected = P::SerializeWorldStreamingStateSnapshotJson(state);
+        const auto count = WorldSaveService::record_compression_count_for_testing();
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), count + 1);
+        std::vector<WorldSaveService::ContainerRecord> records;
+        ASSERT_TRUE(WorldSaveService::read_container_records(region, records));
+        ASSERT_EQ(records.size(), 1u);
+        EXPECT_EQ(records.front().payload, expected);
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), count + 1);
+    }
+}
+
+TEST(WorldSaveRegionFormat, UnchangedIndexedRegionIsNotReadmittedAtCommit) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("unchanged_indexed");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -6.125f);
+    chunk->mark_voxel_data_dirty();
+    {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    P::SnapshotIndex previous;
+    ASSERT_TRUE(P::read_snapshot_index(save.path, previous, nullptr));
+    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto bytes = ReadFileBytes(region);
+    P::SaveTransaction transaction(save.path, 2, {}, &WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    WorldSaveService::PreparedWorldWrite prepared;
+    ASSERT_TRUE(prepared.prepare(state, save.path, false));
+    const auto reads = WorldSaveService::region_read_count_for_testing();
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    const auto compressions = WorldSaveService::record_compression_count_for_testing();
+    ASSERT_TRUE(prepared.publish());
+    ASSERT_TRUE(transaction.commit(nullptr));
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+    EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+    EXPECT_EQ(ReadFileBytes(region), bytes);
+    P::SnapshotIndex next;
+    ASSERT_TRUE(P::read_snapshot_index(save.path, next, nullptr));
+    EXPECT_EQ(next.generation, previous.generation + 1);
+    ASSERT_EQ(next.members.size(), previous.members.size());
+    for (std::size_t i = 0; i < previous.members.size(); ++i) {
+        EXPECT_EQ(next.members[i].path, previous.members[i].path);
+        EXPECT_EQ(next.members[i].generation, previous.members[i].generation);
+        EXPECT_EQ(next.members[i].bytes, previous.members[i].bytes);
+        EXPECT_EQ(next.members[i].fnv64, previous.members[i].fnv64);
+    }
+}
+
+TEST(WorldSaveRegionFormat, DigestAuthorityReusesReadsAndDecodesUntilPublicationOrExternalChange) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("digest_cache");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -3.875f);
+    chunk->mark_voxel_data_dirty();
+    chunk->set_state(ChunkState::Idle);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    const P::RegionDigestInputs inputs{{}, {}, {}, false};
+    const auto first = WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs);
+    const auto reads = WorldSaveService::region_read_count_for_testing();
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), first);
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+    // Live authority is always projected afresh even when durable authority is cached.
+    const P::RegionDigestInputs live{{chunk}, {}, {}, false};
+    chunk->sdf_data.front() = -11.0f;
+    EXPECT_NE(WorldSaveService::region_simulation_digest(save.path, {0, 0}, live), first);
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+    // A publication with identical content still invalidates durable admission.
+    ASSERT_TRUE(WorldSaveService::write_file_durably(save.path / "probe", "published"));
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), first);
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads + 1);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    ASSERT_TRUE(std::filesystem::remove(save.path / "probe"));
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    const auto changed = WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs);
+    EXPECT_NE(changed, first);
+    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto timestamp = std::filesystem::last_write_time(region);
+    auto bytes = ReadFileBytes(region);
+    ASSERT_GT(bytes.size(), 28u);
+    bytes[26] = bytes[27] = bytes[28] = 0;
+    {
+        std::ofstream output(region, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        ASSERT_TRUE(output.good());
+    }
+    std::filesystem::last_write_time(region, timestamp);
+    EXPECT_THROW((void)WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs),
+                 std::runtime_error);
+}
+
+TEST(WorldSaveRegionFormat, DigestAuthorityInvalidatesAfterRollback) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("digest_rollback");
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->sdf_data.assign(17 * 17 * 17, -4.875f);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+    const P::RegionDigestInputs inputs{{}, {}, {}, false};
+    const auto original = WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs);
+    P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    chunk->sdf_data.front() = -12.0f;
+    WorldSaveService::ContainerRecord record;
+    record.id = chunk->get_id();
+    record.flags = 1;
+    record.payload = P::SerializeWorldStreamingStateSnapshotJson(state);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(save.path, 0, 0), {record}));
+    EXPECT_NE(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), original);
+    const auto reads = WorldSaveService::region_read_count_for_testing();
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    std::vector<std::string> errors;
+    transaction.abort(&errors);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_FALSE(P::journal_pending(save.path));
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), original);
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads + 1);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs), original);
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads + 1);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1);
 }

@@ -48,8 +48,8 @@ struct RegionDigestInputs {
     bool require_index = true;
 };
 
-// One owner-thread digest operation admits the index once, then verifies actual region bytes
-// on every read. Owner-thread publication invalidates the admitted index.
+// One owner-thread digest operation admits the index once. Durable authority is cached by
+// publication revision and native file versions; live and parked inputs are always projected.
 class RegionDigestOperation {
 public:
     RegionDigestOperation(const std::filesystem::path& save_dir, bool require_index);
@@ -435,6 +435,10 @@ public:
                                   bool& missing,
                                   bool directory = false,
                                   unsigned max_links = std::numeric_limits<unsigned>::max());
+    // Caller owns publication; this inspection does not reacquire the file's read lock.
+    static bool artifact_version(const std::filesystem::path& path,
+                                 std::array<std::uint64_t, 8>& version,
+                                 bool& missing);
     static bool remove_owned_entry(const std::filesystem::path& path,
                                    const ArtifactIdentity& identity,
                                    std::vector<std::string>* errors,
@@ -499,6 +503,19 @@ public:
     static bool remove_member(const std::filesystem::path& save_dir,
                               std::string_view relative_path,
                               std::vector<std::string>* errors = nullptr);
+    // Shares cold validation decodes with the read that adopts them during one world open.
+    // Nested scopes join the outer scope; no mutable adopted chunks remain cached.
+    class WorldReadScope {
+    public:
+        WorldReadScope();
+        ~WorldReadScope();
+        WorldReadScope(const WorldReadScope&) = delete;
+        WorldReadScope& operator=(const WorldReadScope&) = delete;
+
+    private:
+        bool m_owner = false;
+    };
+
     // Thread-local per-save facts. While live for a directory, validate_save / has_world_save /
     // has_chunk_snapshot reuse the first load_world result instead of decoding the world again, and
     // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.

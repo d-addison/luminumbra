@@ -214,6 +214,7 @@ struct GameSession::WorldPreparation {
     std::string preset_json;
     fs::path state_directory;
     LoadedWorldState loaded;
+    std::optional<std::vector<IVec3>> initial_chunks;
     int world_seed = 0;
     bool create = false;
     bool state_only = false;
@@ -238,6 +239,16 @@ GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions
             .aether_state = m_aetherStateEnabled,
             .job_system_available = m_jobSystem != nullptr,
             .transient_creation = false};
+}
+
+std::vector<IVec3> GameSession::TakeInitialChunkLoadList() {
+    if (m_preparedInitialChunks) {
+        auto result = std::move(*m_preparedInitialChunks);
+        m_preparedInitialChunks.reset();
+        return result;
+    }
+    return m_worldSystem ? m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint)
+                         : std::vector<IVec3>{};
 }
 
 std::string GameSession::WorldPreparationError(const WorldPreparation& prepared) {
@@ -318,6 +329,7 @@ void GameSession::ResetWorldSystems() {
     m_regionRequiresIndex = false;
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
+    m_preparedInitialChunks.reset();
     m_lastSaveTick = -1;
     m_lastSaveMs = 0.0;
     m_saveFailures = 0;
@@ -1619,6 +1631,7 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
                               const std::string& worldId,
                               const std::stop_token& stop) {
     const Persistence::SavedJsonReadScope json_reads;
+    const Persistence::WorldSaveService::WorldReadScope chunk_reads;
     auto prepared = std::make_shared<WorldPreparation>();
     prepared->options = options;
     prepared->stop = stop;
@@ -1705,6 +1718,7 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
                 ? saved.metadata.spawnPoint
                 : Vec3(8.0f, sampler.GetTerrainHeightAt(8.0f, 8.0f) + kSpawnEyeHeight, 8.0f);
         state_options.wanted_chunks = sampler.GetInitialChunkLoadList(spawn);
+        prepared->initial_chunks = state_options.wanted_chunks;
     }
     // Validate all refusing state readers before replacing the live world.
     auto& loaded = prepared->loaded;
@@ -1807,6 +1821,7 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     m_worldOpenError.clear();
     AttachRegionEditObserver();
     AdoptWorldStateFrom(worldPath, loaded);
+    m_preparedInitialChunks = std::move(prepared.initial_chunks);
     m_worldUsable = true;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
@@ -2792,6 +2807,7 @@ bool GameSession::ReadPreparedWorldState(
     const std::stop_token& stop,
     const luminumbra::fields::EnergyFieldState* current_energy) {
     const Persistence::SavedJsonReadScope json_reads;
+    const Persistence::WorldSaveService::WorldReadScope chunk_reads;
     const Persistence::WorldSaveService service;
     const auto cancelled = [&] {
         if (!stop.stop_requested())
@@ -2819,8 +2835,8 @@ bool GameSession::ReadPreparedWorldState(
                                : errors.front();
         return false;
     }
-    // The 25-by-25 initial surface-column set bounds retained chunks; all other
-    // records are still decoded and validated, then released during this pass.
+    // The 25-by-25 initial surface-column set bounds retained chunks. Cold decodes
+    // outside it remain available in the bounded cache for subsequent activation.
     std::unordered_set<ChunkID> wanted;
     for (const auto& coords : options.wanted_chunks)
         wanted.insert(Chunk::calculate_id(coords));
