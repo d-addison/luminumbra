@@ -8,12 +8,90 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
+
+#if !defined(_WIN32) || defined(__CYGWIN__)
+#include <sys/stat.h>
+#endif
 
 namespace fs = std::filesystem;
 namespace paths = Luminumbra::Filesystem;
+
+namespace {
+struct InputFileRoot {
+    fs::path path = Luminumbra::TestSupport::CreateUniqueTempDirectory("input-file-");
+    ~InputFileRoot() {
+        std::error_code error;
+        fs::remove_all(path, error);
+    }
+};
+} // namespace
+
+TEST(FilesystemPath, InputFileRetainsOpenedImageAcrossReplacementAndMove) {
+    const InputFileRoot root;
+    const auto original = root.path / "image";
+    const auto replacement = root.path / "replacement";
+    std::ofstream(original, std::ios::binary) << "old";
+    std::ofstream(replacement, std::ios::binary) << "newer";
+    std::optional<paths::ReplacementSafeInputFile> input(std::in_place);
+    ASSERT_TRUE(input->open(original));
+    std::error_code error;
+    EXPECT_EQ(input->size(error), 3u);
+    EXPECT_FALSE(error);
+    ASSERT_TRUE(fs::remove(original));
+    fs::rename(replacement, original);
+    std::optional<paths::ReplacementSafeInputFile> moved(std::in_place, std::move(*input));
+    // Destroying the moved-from reader must leave the transferred image open.
+    input.reset();
+    char bytes[3]{};
+    ASSERT_TRUE(moved->read(bytes, sizeof(bytes)));
+    EXPECT_EQ(std::string(bytes, sizeof(bytes)), "old");
+    EXPECT_FALSE(moved->read(bytes, 1));
+    EXPECT_FALSE(moved->seek(std::numeric_limits<std::uint64_t>::max()));
+    ASSERT_TRUE(moved->seek(0));
+    ASSERT_TRUE(moved->read(bytes, sizeof(bytes)));
+    EXPECT_EQ(std::string(bytes, sizeof(bytes)), "old");
+    paths::ReplacementSafeInputFile assigned;
+    ASSERT_TRUE(assigned.open(original));
+    assigned = std::move(*moved);
+    moved.reset();
+    EXPECT_EQ(assigned.size(error), 3u);
+    EXPECT_FALSE(error);
+    ASSERT_TRUE(assigned.seek(0));
+    ASSERT_TRUE(assigned.read(bytes, sizeof(bytes)));
+    EXPECT_EQ(std::string(bytes, sizeof(bytes)), "old");
+    ASSERT_TRUE(assigned.open(original));
+    EXPECT_EQ(assigned.size(error), 5u);
+    EXPECT_FALSE(error);
+    EXPECT_FALSE(assigned.open(root.path / "missing"));
+    EXPECT_FALSE(assigned.is_open());
+    EXPECT_EQ(assigned.size(error), 0u);
+    EXPECT_EQ(error, std::make_error_code(std::errc::bad_file_descriptor));
+    EXPECT_FALSE(assigned.read(bytes, sizeof(bytes)));
+    EXPECT_FALSE(assigned.seek(0));
+}
+
+TEST(FilesystemPath, InputFileRefusesDirectoriesDevicesAndSpecialFiles) {
+    const InputFileRoot root;
+    paths::ReplacementSafeInputFile input;
+    EXPECT_FALSE(input.open(root.path));
+    EXPECT_FALSE(input.is_open());
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    EXPECT_FALSE(input.open(L"NUL"));
+#else
+    EXPECT_FALSE(input.open("/dev/null"));
+    const auto fifo = root.path / "fifo";
+    ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
+    // There is deliberately no writer: a blocking open would hang this test.
+    EXPECT_FALSE(input.open(fifo));
+#endif
+    EXPECT_FALSE(input.is_open());
+}
 
 TEST(FilesystemPath, OrdinaryLongNamesDoNotProbeForExpansion) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
