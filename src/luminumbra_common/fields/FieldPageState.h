@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../world/ActiveRegionLedger.h"
+#include "FieldCellTypes.h"
+#include "FoliageFieldPages.h"
 
 #include <array>
 #include <compare>
@@ -17,12 +19,6 @@ namespace Luminumbra::world {
 // World-anchored sparse field pages (S6). A cell is 24 m square; a page is 16x16 cells. A cell is
 // OWNED by the region (512 m square) that contains its centre, and only the owner's due ticks may
 // change it. Nothing here reads a wall clock, a player position or a floating point value.
-struct FieldPageKey {
-    std::int32_t x = 0;
-    std::int32_t z = 0;
-    auto operator<=>(const FieldPageKey&) const = default;
-};
-
 struct FieldPage {
     static constexpr std::size_t kCells = 256; // 16 x 16, index = local_z * 16 + local_x
     // Bit i of word i / 64 set = cell i is initialized. Uninitialized cells hold zero.
@@ -46,10 +42,6 @@ struct RegionalStrike {
     std::uint64_t strike_tick = 0;
     std::uint32_t world_x = 0, world_z = 0, magnitude = 0, storm_salt = 0, active_age = 0;
     bool operator==(const RegionalStrike&) const = default;
-};
-struct ScentCellKey {
-    std::int32_t x = 0, z = 0; // Existing scent geometry: one-metre world cells.
-    auto operator<=>(const ScentCellKey&) const = default;
 };
 using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative binary64 concentrations
 
@@ -88,7 +80,7 @@ public:
 
     [[nodiscard]] bool empty() const {
         return m_pages.empty() && m_storms.empty() && m_strikes.empty() && m_scent.empty() &&
-               m_weatherClocks.empty();
+               m_weatherClocks.empty() && m_soil.empty() && m_irrigation.empty();
     }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
@@ -104,6 +96,8 @@ public:
         m_ownerStrikes.clear();
         m_scent.clear();
         m_weatherClocks.clear();
+        m_soil = {};
+        m_irrigation = {};
     }
 
     [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
@@ -117,6 +111,23 @@ public:
     }
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& weather_clocks() const {
         return m_weatherClocks;
+    }
+    static constexpr std::int32_t kSoilBaseline = 1000000, kIrrigationLimit = 4000000;
+    [[nodiscard]] const FoliageFieldPages& soil() const {
+        return m_soil;
+    }
+    [[nodiscard]] const FoliageFieldPages& irrigation() const {
+        return m_irrigation;
+    }
+    // Foliage evolution and admission write only soil/irrigation. Retain these
+    // channels for both border reads and rollback, without copying ambient state.
+    [[nodiscard]] FieldPageState foliage_snapshot() const;
+    void restore_foliage(FieldPageState&& snapshot) noexcept;
+    bool set_soil(const ScentCellKey& cell, std::int32_t value) {
+        return m_soil.set(cell, value, kSoilBaseline);
+    }
+    bool set_irrigation(const ScentCellKey& cell, std::int32_t value) {
+        return m_irrigation.set(cell, value, kIrrigationLimit);
     }
     bool set_weather_age(RegionKey owner, std::uint64_t active_age);
     // Transactional admission, canonical ordering and bounded exact-state validation.
@@ -188,7 +199,8 @@ public:
     // For every owned initialized cell in cells_of_region order: i32 cell_x, i32 cell_z, then
     // kChannels u16 (all little endian). When the region owns storms, strikes, scent cells or a
     // weather clock, an "|evolution:v2:" suffix follows with those sections. "" only when the
-    // region owns neither initialized cells nor evolution state.
+    // region owns neither initialized cells nor evolution state. Soil and irrigation
+    // append a "|foliage:v1:" suffix containing their owned exact integer cells.
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
 
 private:
@@ -200,6 +212,7 @@ private:
     std::map<RegionKey, std::vector<std::size_t>> m_ownerStorms, m_ownerStrikes;
     std::map<ScentCellKey, ScentCell> m_scent;
     std::map<RegionKey, std::uint64_t> m_weatherClocks;
+    FoliageFieldPages m_soil, m_irrigation;
 };
 
 } // namespace Luminumbra::world

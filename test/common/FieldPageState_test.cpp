@@ -1025,3 +1025,144 @@ TEST(FieldPageStateTest, ColumnWindowPreservesEmptyWorldEdgesAndRefusesCoordinat
         EXPECT_EQ(work, previous_work);
     }
 }
+
+TEST(FieldPageStateTest, FoliageSnapshotAndRollbackPreserveAllBytesWithoutCopyingAmbientState) {
+    auto store = ActivatedStore();
+    ASSERT_TRUE(store.set_scent({-1, -1}, {std::bit_cast<std::uint64_t>(1.25), 0, 0, 0}));
+    ASSERT_TRUE(store.set_weather_age({0, 0}, 13));
+    ASSERT_TRUE(store.set_soil({-1, -1}, 999997));
+    ASSERT_TRUE(store.set_irrigation({0, 0}, 12345));
+    const auto before = store.serialize();
+    auto saved = store.foliage_snapshot();
+    EXPECT_TRUE(saved.pages().empty());
+    EXPECT_TRUE(saved.scent_cells().empty());
+    EXPECT_TRUE(saved.storms().empty());
+    EXPECT_TRUE(saved.strikes().empty());
+    EXPECT_TRUE(saved.weather_clocks().empty());
+    EXPECT_EQ(saved.soil().records(), store.soil().records());
+    EXPECT_EQ(saved.irrigation().records(), store.irrigation().records());
+    // Cover both existing-cell evolution and admission of new pages during a birth.
+    ASSERT_TRUE(store.set_soil({-1, -1}, 888888));
+    ASSERT_TRUE(store.set_irrigation({512, 512}, 100));
+    EXPECT_EQ(saved.soil().sample({-1, -1}, 0), 999997);
+    EXPECT_FALSE(saved.irrigation().initialized({512, 512}));
+    store.restore_foliage(std::move(saved));
+    EXPECT_EQ(store.serialize(), before);
+}
+
+TEST(FieldPageStateTest, RecordsWithoutFoliageSectionsKeepExactEncoding) {
+    // Fixed FPG1 v2 records for sections 1, 2, 3, 4 and 7. Build the wire fixture
+    // independently of serialize(), including every combination of absent sections.
+    const std::array<unsigned, 5> types{1, 2, 3, 4, 7};
+    std::array<std::string, 5> records{std::string(2600, '\0'),
+                                       std::string(48, '\0'),
+                                       std::string(36, '\0'),
+                                       std::string(40, '\0'),
+                                       std::string(16, '\0')};
+    WriteU(records[0], 8, 1, 8); // One initialized ambient cell.
+    WriteU(records[0], 40, 0x1234, 2);
+    WriteU(records[1], 28, 20, 8);
+    WriteU(records[1], 36, 100, 4);
+    WriteU(records[1], 40, 31, 4);
+    WriteU(records[1], 44, 9, 4);
+    WriteU(records[2], 8, 29, 8);
+    WriteU(records[2], 24, 0x3f000000, 4);
+    WriteU(records[2], 28, 31, 4);
+    WriteU(records[2], 32, 1, 4);
+    WriteU(records[3], 0, 0xffffffff, 4);
+    WriteU(records[3], 4, 512, 4);
+    WriteU(records[3], 8, 0x3fc0000000000000ULL, 8);
+    WriteU(records[3], 16, 0x4059200000000000ULL, 8);
+    WriteU(records[4], 8, 13, 8);
+    for (unsigned present = 1; present < 32; ++present) {
+        SCOPED_TRACE(present);
+        std::string expected("FPG1\x02\x00\x1f\x00", 8);
+        expected.resize(12, '\0');
+        WriteU(expected, 8, static_cast<unsigned>(std::popcount(present)), 4);
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            if ((present & (1u << index)) == 0) {
+                continue;
+            }
+            const auto offset = expected.size();
+            expected.resize(offset + 10, '\0');
+            WriteU(expected, offset, types[index], 2);
+            WriteU(expected, offset + 2, records[index].size() + 4, 4);
+            WriteU(expected, offset + 6, 1, 4);
+            expected += records[index];
+        }
+        expected.resize(expected.size() + 8, '\0');
+        Reseal(expected);
+        if (present == 31) {
+            ASSERT_EQ(expected.size(), 2810u);
+            EXPECT_EQ(ReadU(expected, expected.size() - 8, 8), 0x1697a10d6dc9b053ULL);
+        }
+        FieldPageState restored;
+        std::string error;
+        ASSERT_TRUE(FieldPageState::parse(expected, restored, error)) << error;
+        EXPECT_TRUE(restored.soil().empty());
+        EXPECT_TRUE(restored.irrigation().empty());
+        EXPECT_EQ(restored.serialize(), expected);
+        EXPECT_EQ(restored.canonical_bytes(), "field_pages:v2:" + expected);
+    }
+}
+
+TEST(FieldPageStateTest, AllSevenSectionsRoundTripAndFoliageCorruptionRefusesAtomically) {
+    auto store = ActivatedStore();
+    RegionalStorm storm;
+    storm.lifetime_ticks = 100;
+    RegionalStrike strike;
+    ASSERT_TRUE(store.replace_weather({storm}, {strike}));
+    ASSERT_TRUE(store.set_scent({0, 0}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    ASSERT_TRUE(store.set_weather_age({0, 0}, 13));
+    ASSERT_TRUE(store.set_soil({-1, -1}, 999997));
+    ASSERT_TRUE(store.set_irrigation({0, 0}, 3999999));
+    const auto bytes = store.serialize();
+    ASSERT_EQ(ReadU(bytes, 8, 4), 7u);
+    std::array<std::size_t, 7> offsets{};
+    std::size_t cursor = 12;
+    for (std::size_t index = 0; index < offsets.size(); ++index) {
+        offsets[index] = cursor;
+        ASSERT_EQ(ReadU(bytes, cursor, 2), index + 1);
+        cursor += 6 + static_cast<std::size_t>(ReadU(bytes, cursor + 2, 4));
+    }
+    ASSERT_EQ(cursor, bytes.size() - 8);
+    EXPECT_EQ(ReadU(bytes, offsets[4] + 10 + 40 + 255 * 4, 4), 999997u);
+    EXPECT_EQ(ReadU(bytes, offsets[5] + 10 + 40, 4), 3999999u);
+    FieldPageState destination;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, destination, error)) << error;
+    EXPECT_EQ(destination.serialize(), bytes);
+    EXPECT_EQ(destination.region_bytes({-1, -1}), store.region_bytes({-1, -1}));
+    EXPECT_EQ(destination.region_bytes({0, 0}), store.region_bytes({0, 0}));
+    ASSERT_TRUE(destination.set_soil({512, 512}, 7));
+    ASSERT_TRUE(destination.set_weather_age({1, 1}, 42));
+    const auto before = destination.serialize();
+    const auto refuses = [&](std::size_t offset, std::uint64_t value, std::size_t width) {
+        auto corrupt = bytes;
+        WriteU(corrupt, offset, value, width);
+        Reseal(corrupt);
+        EXPECT_FALSE(FieldPageState::parse(corrupt, destination, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(destination.serialize(), before);
+    };
+    for (const std::size_t index : {std::size_t{4}, std::size_t{5}}) {
+        SCOPED_TRACE(index);
+        const auto section = offsets[index];
+        const auto record = section + 10;
+        const auto cell = index == 4 ? std::size_t{255} : std::size_t{0};
+        const auto limit =
+            index == 4 ? FieldPageState::kSoilBaseline : FieldPageState::kIrrigationLimit;
+        refuses(section, 8, 2);     // Unsupported section.
+        refuses(section, index, 2); // Duplicate section.
+        refuses(section + 2, 4, 4);
+        refuses(section + 6, 0, 4);
+        refuses(section + 6, FoliageFieldPages::kMaxPages + 1, 4);
+        refuses(record, 1048576, 4);                    // Exclusive world edge.
+        refuses(record + 4, 0xffefffff, 4);             // Below the negative world edge.
+        refuses(record + 8 + (cell / 64) * 8, 0, 8);    // Empty mask.
+        refuses(record + 40 + cell * 4, 0xffffffff, 4); // Negative units.
+        refuses(record + 40 + cell * 4, static_cast<std::uint32_t>(limit) + 1u, 4);
+        refuses(record + 40 + 4, 1, 4); // Nonzero uninitialized slot.
+    }
+    refuses(8, 8, 4);
+}

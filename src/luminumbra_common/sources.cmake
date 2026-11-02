@@ -12,6 +12,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/fields/ScalarFieldDiffusion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/fields/EnergyFieldState.cpp
     ${CMAKE_CURRENT_LIST_DIR}/fields/FieldPageState.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/fields/FoliageFieldPages.cpp
 
     # Animation
     ${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
