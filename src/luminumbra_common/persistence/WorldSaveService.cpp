@@ -571,6 +571,19 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     }
 }
 
+// A ledger that grew past the file cap is a save refusal, not an exception from the writer.
+bool EncodeActiveRegionsForSave(const world::ActiveRegionLedger& ledger,
+                                std::string& bytes,
+                                std::vector<std::string>* errors) {
+    try {
+        bytes = ledger.encode();
+    } catch (const std::length_error& capacity) {
+        AddError(errors, capacity.what());
+        return false;
+    }
+    return true;
+}
+
 bool AllowPublication(const std::filesystem::path& path,
                       bool removing,
                       std::vector<std::string>* errors) {
@@ -2642,8 +2655,11 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     }
     auto saved = ledger;
     saved.mark_saved(clock);
+    std::string encoded;
+    if (!EncodeActiveRegionsForSave(saved, encoded, errors))
+        return false;
     world::ActiveRegionLedger checked;
-    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
+    if (!world::ActiveRegionLedger::decode(encoded, checked, error) ||
         ledger.header_tick() > clock.tick()) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
@@ -3021,7 +3037,9 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         return true;
     auto saved = ledger;
     saved.mark_saved(clock);
-    const auto bytes = saved.encode();
+    std::string bytes;
+    if (!EncodeActiveRegionsForSave(saved, bytes, errors))
+        return false;
     world::ActiveRegionLedger checked;
     std::string error;
     if (!world::ActiveRegionLedger::decode(bytes, checked, error) ||

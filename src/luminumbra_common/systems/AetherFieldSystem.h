@@ -33,7 +33,10 @@
 // +11 wind, +12 weather, +13 lightning, +14 aether).
 
 #include <cstdint>
+#include <functional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "FastNoise/FastNoise.h"
@@ -62,6 +65,13 @@ public:
     // seed is the WORLD seed; the emission noise uses seed + 14 (append-only
     // seed-offset registry: +11 wind, +12 weather, +13 lightning, +14 aether).
     explicit AetherFieldSystem(int world_seed);
+    void BindRegionalBackend(std::function<float(const Vec3&)> sample,
+                             std::function<std::string()> hash) {
+        if (static_cast<bool>(sample) != static_cast<bool>(hash))
+            throw std::invalid_argument("regional backend needs both a sampler and a hash");
+        m_regional_sample = std::move(sample);
+        m_regional_hash = std::move(hash);
+    }
 
     // Advance the field to `tick` anchored on the streamed region around
     // `region_anchor`. Pure function of (seed, tick, anchored origin[, wind]);
@@ -106,6 +116,8 @@ public:
     }
 
 private:
+    std::function<float(const Vec3&)> m_regional_sample;
+    std::function<std::string()> m_regional_hash;
     // World-pos -> local cell indices for the current origin (clamped result
     // reported via in_region). Mirrors WindFieldSystem::LocalCell.
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
