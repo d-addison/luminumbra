@@ -352,21 +352,7 @@ void StepChunkWaterFixed(Chunk& c,
     // Durable change is judged on the final state against kernel entry; tentative edge flux that
     // the outflow clamp returns to its entry value leaves the chunk clean.
     thread_local std::array<std::int32_t, 2 * 32 * 32> tl_flux_entry{};
-    thread_local std::array<bool, 2 * 32 * 32> tl_flux_written{};
-    thread_local std::vector<std::size_t> tl_flux_edges;
-    for (const auto edge : tl_flux_edges)
-        tl_flux_written[edge] = false;
-    tl_flux_edges.clear();
-    const auto write_flux = [&](std::size_t edge, std::int32_t value) {
-        if (flux[edge] == value)
-            return;
-        if (!tl_flux_written[edge]) {
-            tl_flux_edges.push_back(edge);
-            tl_flux_entry[edge] = flux[edge];
-            tl_flux_written[edge] = true;
-        }
-        flux[edge] = value;
-    };
+    std::copy(flux.begin(), flux.end(), tl_flux_entry.begin());
     for (auto& d : depth)
         out_src += AddWaterDepth(d, 0);
 
@@ -451,7 +437,7 @@ void StepChunkWaterFixed(Chunk& c,
             q = 2000000000LL;
         if (q < -2000000000LL)
             q = -2000000000LL;
-        write_flux(eidx, static_cast<std::int32_t>(q));
+        flux[eidx] = static_cast<std::int32_t>(q);
     };
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
@@ -459,11 +445,11 @@ void StepChunkWaterFixed(Chunk& c,
             if (x + 1 < res)
                 compute_edge(i, IDX(x + 1, z), 2 * i + 0);
             else
-                write_flux(2 * i + 0, 0);
+                flux[2 * i + 0] = 0;
             if (z + 1 < res)
                 compute_edge(i, IDX(x, z + 1), 2 * i + 1);
             else
-                write_flux(2 * i + 1, 0);
+                flux[2 * i + 1] = 0;
         }
 
     // --- : K outflow-clamp per cell (Sigma_out <= depth -> non-negative + mass-exact) ---
@@ -501,8 +487,7 @@ void StepChunkWaterFixed(Chunk& c,
                 for (int k = 0; k < ne; ++k) {
                     const std::int64_t mag = static_cast<std::int64_t>(*e[k]) * sgn[k]; // positive
                     const std::int64_t scaled = (mag * d) / out; // floor toward 0
-                    write_flux(static_cast<std::size_t>(e[k] - flux.data()),
-                               static_cast<std::int32_t>(scaled * sgn[k]));
+                    *e[k] = static_cast<std::int32_t>(scaled * sgn[k]);
                 }
             }
         }
@@ -579,11 +564,7 @@ void StepChunkWaterFixed(Chunk& c,
             c.water_mesh_dirty_ticks = 0;
         }
     }
-    const bool flux_changed =
-        std::any_of(tl_flux_edges.begin(), tl_flux_edges.end(), [&](std::size_t edge) {
-            return flux[edge] != tl_flux_entry[edge];
-        });
-    if (max_delta > 0 || flux_changed) {
+    if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {
         c.mark_water_state_dirty();
     }
 }
