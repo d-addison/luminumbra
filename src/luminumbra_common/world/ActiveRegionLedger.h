@@ -141,8 +141,9 @@ public:
     }
     // Missing register returns false without changing age.
     bool energy_age(const RegionKey& key, std::uint64_t& age) const noexcept;
-    // Ages are durable even at zero energy. Both setters refuse unknown owners
-    // and ages >= WorldClock::kTickLimit without changing any register.
+    // Ages are durable even at zero energy. Both setters refuse unknown owners,
+    // ages >= WorldClock::kTickLimit and owner counts the file cap cannot encode,
+    // without changing any register.
     bool set_energy_age(const RegionKey& key, std::uint64_t age);
     bool set_energy_ages(const EnergyAges& ages);
     void reset_energy_ages() noexcept {
@@ -200,6 +201,8 @@ private:
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
+    // Whether this ledger would still encode within kMaxFileBytes with that many energy owners.
+    bool encodable_with_energy_owners(std::size_t owners) const;
     EnergyAges m_energyAges;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;

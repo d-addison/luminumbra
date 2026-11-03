@@ -1064,17 +1064,35 @@ TEST(ActiveRegionLedgerTest, EnergyAgePreservesLegacyFrozenProjectionUntilRefres
     EXPECT_EQ(Reload(restored).encode(), refreshed);
 }
 
-TEST(ActiveRegionLedgerTest, EnergyAgeEncodingRefusesBeyondExistingFileCap) {
+namespace {
+RegionKey CapacityKey(std::uint32_t index) {
+    return {static_cast<std::int32_t>(index % 1024u), static_cast<std::int32_t>(index / 1024u)};
+}
+} // namespace
+
+TEST(ActiveRegionLedgerTest, EnergyAgesThePersistedFileCannotHoldAreRefused) {
     EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes, 109051979u);
     ActiveRegionLedger ledger;
-    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index) {
-        const RegionKey key{static_cast<std::int32_t>(index % 1024u),
-                            static_cast<std::int32_t>(index / 1024u)};
-        ledger.mark_edited(key, WorldClock{});
-    }
+    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
     ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
-    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
     // 56 + 104 * 2^20 + 4 + (6 + 4 + 16) + 8 = 109051998 > 109051979.
+    EXPECT_FALSE(ledger.set_energy_age({0, 0}, 0));
+    EXPECT_FALSE(ledger.set_energy_ages({{{0, 0}, 0}}));
+    EXPECT_TRUE(ledger.energy_ages().empty());
+    EXPECT_NO_THROW({
+        const auto bytes = ledger.encode();
+        (void)bytes;
+    });
+}
+
+TEST(ActiveRegionLedgerTest, EncodingRefusesWhenLaterRecordsOutgrowStoredEnergyAges) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
+    ledger.mark_edited(CapacityKey(ActiveRegionLedger::kMaxRegions - 1), WorldClock{});
+    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
     EXPECT_THROW(
         {
             const auto bytes = ledger.encode();

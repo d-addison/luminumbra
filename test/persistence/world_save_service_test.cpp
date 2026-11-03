@@ -2655,11 +2655,15 @@ TEST(WorldSaveService, LedgerPastTheFileCapIsASaveRefusalForBothWriters) {
     using Luminumbra::world::WorldClock;
     TempSaveDir save_dir("ledger_capacity");
     ActiveRegionLedger ledger;
-    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
-        ledger.mark_edited(
-            {static_cast<std::int32_t>(index % 1024u), static_cast<std::int32_t>(index / 1024u)},
-            WorldClock{});
+    const auto key = [](std::uint32_t index) {
+        return Luminumbra::world::RegionKey{static_cast<std::int32_t>(index % 1024u),
+                                            static_cast<std::int32_t>(index / 1024u)};
+    };
+    // The age fits while one record is missing; the last record then outgrows the file cap.
+    for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(key(index), WorldClock{});
     ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
+    ledger.mark_edited(key(ActiveRegionLedger::kMaxRegions - 1), WorldClock{});
 
     std::vector<std::string> errors;
     bool saved = true;
