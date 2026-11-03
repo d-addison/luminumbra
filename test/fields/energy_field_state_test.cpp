@@ -1164,55 +1164,65 @@ TEST(RegionalEnergy, CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPa
     EXPECT_EQ(field.SerializeRegionalRecord(), "EFS1 1 0\nP 3 0 15:16000\n");
 }
 
+namespace {
+void ExpectSameRegionalResult(const EnergyResult& actual, const EnergyResult& expected) {
+    EXPECT_EQ(actual.ages, expected.ages);
+    EXPECT_EQ(actual.staged_pages, expected.staged_pages);
+    EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
+    ASSERT_EQ(actual.work.size(), expected.work.size());
+    for (std::size_t i = 0; i < actual.work.size(); ++i) {
+        EXPECT_EQ(actual.work[i].key, expected.work[i].key);
+        EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
+    }
+}
+
+void CheckLegacyEmptyNeighbor(bool ledger_path, bool populate) {
+    ActiveRegionLedger ledger;
+    ledger.pin({2, 0}, true, WorldClock{});
+    ledger.pin({3, 0}, true, WorldClock{});
+    EnergyFieldState live, reopened;
+    ASSERT_TRUE(live.DeserializeRecord("EFS1 1 8\nP 3 0 15:16000\nP 4 0\n", 0));
+    const auto saved = live.SerializeRegionalRecord();
+    ASSERT_EQ(saved, "EFS1 1 0\nP 3 0 15:16000\n");
+    ASSERT_TRUE(reopened.DeserializeRegionalRecord(saved));
+    ASSERT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
+    const EnergyAges ages{{{2, 0}, 3}, {{3, 0}, 5}};
+    std::vector<RegionKey> due;
+    if (populate) {
+        ASSERT_TRUE(live.QueueRegionalDeposit(1, 64, 0, 0, 1));
+        ASSERT_TRUE(reopened.QueueRegionalDeposit(1, 64, 0, 0, 1));
+        due.push_back({3, 0});
+    }
+    EnergyResult actual, expected;
+    if (ledger_path) {
+        ASSERT_TRUE(live.TickRegional(1, ledger, due, ages, actual));
+        ASSERT_TRUE(reopened.TickRegional(1, ledger, due, ages, expected));
+    } else {
+        ASSERT_TRUE(live.TickRegional(1, ledger.records(), due, ages, actual));
+        ASSERT_TRUE(reopened.TickRegional(1, ledger.records(), due, ages, expected));
+    }
+    EXPECT_EQ(live.at_cell(64, 0), populate ? 3311u : 0u);
+    EXPECT_EQ(live.total_raw(), populate ? 16001u : 16000u);
+    EXPECT_EQ(live.page_count(), populate ? 2u : 1u);
+    EXPECT_EQ(actual.staged_pages, populate ? 2u : 0u);
+    EXPECT_EQ(actual.diffusion_pages, populate ? 2u : 0u);
+    ExpectSameRegionalResult(actual, expected);
+    EXPECT_EQ(live.SerializeRegionalRecord(), reopened.SerializeRegionalRecord());
+    EXPECT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
+    EXPECT_EQ(live.CanonicalBytes(), reopened.CanonicalBytes());
+    if (!populate) {
+        EXPECT_EQ(live.SerializeRegionalRecord(), saved);
+        EXPECT_EQ(actual.ages, ages);
+        EXPECT_TRUE(actual.work.empty());
+    }
+}
+} // namespace
+
 TEST(RegionalEnergy, LegacyEmptyNeighborMatchesReopenedStateAndStagedDepositsOpenTheEdge) {
     for (const bool ledger_path : {false, true}) {
         for (const bool populate : {false, true}) {
             SCOPED_TRACE(::testing::Message() << ledger_path << ':' << populate);
-            ActiveRegionLedger ledger;
-            ledger.pin({2, 0}, true, WorldClock{});
-            ledger.pin({3, 0}, true, WorldClock{});
-            EnergyFieldState live, reopened;
-            ASSERT_TRUE(live.DeserializeRecord("EFS1 1 8\nP 3 0 15:16000\nP 4 0\n", 0));
-            const auto saved = live.SerializeRegionalRecord();
-            ASSERT_EQ(saved, "EFS1 1 0\nP 3 0 15:16000\n");
-            ASSERT_TRUE(reopened.DeserializeRegionalRecord(saved));
-            ASSERT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
-            const EnergyAges ages{{{2, 0}, 3}, {{3, 0}, 5}};
-            std::vector<RegionKey> due;
-            if (populate) {
-                ASSERT_TRUE(live.QueueRegionalDeposit(1, 64, 0, 0, 1));
-                ASSERT_TRUE(reopened.QueueRegionalDeposit(1, 64, 0, 0, 1));
-                due.push_back({3, 0});
-            }
-            EnergyResult actual, expected;
-            if (ledger_path) {
-                ASSERT_TRUE(live.TickRegional(1, ledger, due, ages, actual));
-                ASSERT_TRUE(reopened.TickRegional(1, ledger, due, ages, expected));
-            } else {
-                ASSERT_TRUE(live.TickRegional(1, ledger.records(), due, ages, actual));
-                ASSERT_TRUE(reopened.TickRegional(1, ledger.records(), due, ages, expected));
-            }
-            EXPECT_EQ(live.at_cell(64, 0), populate ? 3311u : 0u);
-            EXPECT_EQ(live.total_raw(), populate ? 16001u : 16000u);
-            EXPECT_EQ(live.page_count(), populate ? 2u : 1u);
-            EXPECT_EQ(actual.staged_pages, populate ? 2u : 0u);
-            EXPECT_EQ(actual.diffusion_pages, populate ? 2u : 0u);
-            EXPECT_EQ(actual.ages, expected.ages);
-            EXPECT_EQ(actual.staged_pages, expected.staged_pages);
-            EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
-            ASSERT_EQ(actual.work.size(), expected.work.size());
-            for (std::size_t i = 0; i < actual.work.size(); ++i) {
-                EXPECT_EQ(actual.work[i].key, expected.work[i].key);
-                EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
-            }
-            EXPECT_EQ(live.SerializeRegionalRecord(), reopened.SerializeRegionalRecord());
-            EXPECT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
-            EXPECT_EQ(live.CanonicalBytes(), reopened.CanonicalBytes());
-            if (!populate) {
-                EXPECT_EQ(live.SerializeRegionalRecord(), saved);
-                EXPECT_EQ(actual.ages, ages);
-                EXPECT_TRUE(actual.work.empty());
-            }
+            CheckLegacyEmptyNeighbor(ledger_path, populate);
         }
     }
 }
