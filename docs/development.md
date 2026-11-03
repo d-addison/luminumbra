@@ -93,7 +93,7 @@ Fast compile also saves verified FetchContent sources under an exact dependency
 key, with a 500 MB uncompressed save cap and one retained generation per branch.
 Those two source generations add at most 1 GB to the 3.5 GB compiler-cache total,
 leaving 5 GB within the unchanged 9.5 GB cleanup budget for other caches and
-protected generations. See [fast hosted validation](ci/local-checks.md#fast-hosted-validation).
+protected generations. See [fast hosted validation](ci/local-checks.md).
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
