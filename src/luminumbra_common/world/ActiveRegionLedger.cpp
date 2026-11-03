@@ -498,13 +498,15 @@ bool ActiveRegionLedger::encodable_with_energy_owners(std::size_t owners) const 
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
     const std::size_t base = kHeaderBytes + m_records.size() * kRecordBytes + 8;
-    const std::size_t extension_payload = (owners == 0 ? 0u : 10u + 16u * owners) +
-                             (m_waterDebts.empty() ? 0u : 10u + 16u * m_waterDebts.size());
+    const std::size_t extension_payload =
+        (owners == 0 ? 0u : 10u + 16u * owners) +
+        (m_waterDebts.empty() ? 0u : 10u + 16u * m_waterDebts.size());
     if (base + 4u + 7u + extension_payload <= kMaxFileBytes)
         return true;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool extension = declare_projection || owners != 0 || !m_waterDebts.empty();
-    return base + (extension ? 4u : 0u) + (declare_projection ? 7u : 0u) + extension_payload <= kMaxFileBytes;
+    return base + (extension ? 4u : 0u) + (declare_projection ? 7u : 0u) + extension_payload <=
+           kMaxFileBytes;
 }
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
