@@ -272,7 +272,11 @@ TEST(WorldDurableResidency, WholeSnapshotCommitReleasesParkedPayloadAndReturnRes
     ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
     const auto before = fx.session->ComputeChunkStateHash();
     const auto parked_bytes = fx.world->parking_status().parked_bytes;
+    const auto generation = fx.world->debug_dirty_generation();
+    fx.world->release_clean_parked_chunks();
+    EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
     ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_EQ(fx.world->debug_dirty_generation(), generation + 1);
     EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
     EXPECT_LT(fx.world->parking_status().parked_bytes, parked_bytes);
     EXPECT_EQ(fx.session->ComputeChunkStateHash(), before);
@@ -318,7 +322,7 @@ TEST(WorldDurableResidency, OnlyAuthoritativeChunksAreParked) {
 }
 
 TEST(WorldDurableResidency, ByteLimitKeepsDirtyChunkResidentAndRequestsSave) {
-    DurableFixture fx(/*durable=*/true);
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
     ASSERT_TRUE(fx.created) << fx.error;
     fx.world->set_parked_bytes_limit(1);
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
@@ -337,6 +341,15 @@ TEST(WorldDurableResidency, ByteLimitKeepsDirtyChunkResidentAndRequestsSave) {
 
     fx.world->clear_persistence_save_request();
     EXPECT_FALSE(fx.world->persistence_save_requested());
+
+    // Deferred evictions must retry even when a successful save changes no suspension state
+    // and has no parked payload to release.
+    const auto generation = fx.world->debug_dirty_generation();
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    EXPECT_FALSE(fx.world->find_streamed_chunk(coords));
+    EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
 }
 
 TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
@@ -952,15 +965,53 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
 }
 
+TEST(WorldDurableResidency, RepeatedSuccessfulSavesLeaveSettledActivationElided) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.world->debug_set_streaming_radius_cap(1);
+    const auto anchor = fx.SpawnAnchor();
+    fx.Settle(anchor, kSettleIterations);
+    ASSERT_TRUE(fx.world->get_streaming_telemetry_stats().quiescent());
+    ASSERT_EQ(fx.world->parking_status().parked_count, 0u);
+    ASSERT_EQ(fx.world->parking_status().blocked_dirty, 0u);
+    ASSERT_FALSE(fx.world->persistence_save_requested());
+    const auto generation = fx.world->debug_dirty_generation();
+    const auto counters = fx.world->activation_index_counters();
+
+    for (int save = 0; save < 3; ++save) {
+        SCOPED_TRACE(save);
+        ASSERT_TRUE(fx.session->SaveWorldState());
+        EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
+        for (int frame = 0; frame < 8; ++frame) {
+            fx.Settle(anchor, 1);
+            EXPECT_EQ(fx.world->get_last_streaming_budget_stats().scheduled_generation, 0u);
+            EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
+        }
+        EXPECT_EQ(fx.world->activation_index_counters().columns_scanned, counters.columns_scanned);
+        EXPECT_EQ(fx.world->activation_index_counters().index_updates, counters.index_updates);
+        EXPECT_EQ(fx.world->activation_index_counters().span_cache_hits, counters.span_cache_hits);
+        EXPECT_EQ(fx.world->activation_index_counters().span_cache_misses,
+                  counters.span_cache_misses);
+    }
+}
+
 TEST(WorldDurableResidency, FailedSessionSaveRearmsDirtyChunkForRetry) {
     DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
     ASSERT_TRUE(fx.created) << fx.error;
+    fx.world->set_parked_bytes_limit(1);
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
 
     const auto edited = fx.EditAtSpawnAndFindEdited();
     ASSERT_TRUE(edited);
     ASSERT_TRUE(edited->is_voxel_data_dirty());
+    const auto coords = edited->get_coords();
+    const auto far_anchor = fx.FarAnchor();
+    fx.Settle(far_anchor, kSettleIterations);
+    ASSERT_EQ(fx.world->find_streamed_chunk(coords), edited);
+    ASSERT_GE(fx.world->parking_status().blocked_dirty, 1u);
+    ASSERT_TRUE(fx.world->persistence_save_requested());
 
+    const auto before_failure = fx.world->debug_dirty_generation();
     Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
         [] { return false; });
     const bool failed_save = fx.session->SaveWorldState();
@@ -969,10 +1020,22 @@ TEST(WorldDurableResidency, FailedSessionSaveRearmsDirtyChunkForRetry) {
     EXPECT_FALSE(failed_save);
     EXPECT_TRUE(edited->is_voxel_data_dirty());
     EXPECT_EQ(fx.session->GetPersistenceStatus().failures, 1u);
+    EXPECT_EQ(fx.world->debug_dirty_generation(), before_failure + 1);
+    fx.Settle(far_anchor, kSettleIterations);
+    EXPECT_EQ(fx.world->find_streamed_chunk(coords), edited);
+    EXPECT_EQ(fx.world->parking_status().parked_count, 0u);
 
     // An explicit retry rewrites the re-armed chunk and acknowledges it.
-    EXPECT_TRUE(fx.session->SaveWorldState());
+    const auto before_retry = fx.world->debug_dirty_generation();
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_EQ(fx.world->debug_dirty_generation(), before_retry + 1);
     EXPECT_FALSE(edited->is_voxel_data_dirty());
+    EXPECT_FALSE(fx.world->persistence_save_requested());
+    fx.Settle(far_anchor, kSettleIterations);
+    EXPECT_FALSE(fx.world->find_streamed_chunk(coords));
+    EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    const auto inventory = fx.world->durable_chunk_inventory();
+    EXPECT_NE(std::find(inventory.begin(), inventory.end(), coords), inventory.end());
 }
 
 TEST(WorldDurableResidency, NonQuiescentChunkIsNotParked) {
