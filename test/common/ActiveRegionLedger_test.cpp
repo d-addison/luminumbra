@@ -1114,6 +1114,58 @@ TEST(ActiveRegionLedgerTest, ScheduleCarriesEnergyAgesThroughRefusalAndSuccess) 
     EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{kFar, 7}}));
 }
 
+TEST(ActiveRegionLedgerTest, FreezeDigestReadsOriginalEnergyAgesBeforeScheduleCommits) {
+    auto ledger = Distant({0, 1, 1});
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    const auto before = ledger;
+    const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+    unsigned digest_calls = 0;
+    const auto digest = [&](RegionKey key) {
+        ++digest_calls;
+        EXPECT_EQ(key, kFar);
+        const auto age = ledger.energy_ages().at(key);
+        EXPECT_EQ(age, 7u);
+        EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+        EXPECT_EQ(ledger.records(), before.records());
+        EXPECT_EQ(ledger.canonical_bytes(), before.canonical_bytes());
+        return age;
+    };
+    RegionSchedule schedule;
+    ASSERT_NO_THROW(schedule = ledger.schedule(WorldClock(3), {}, work, digest));
+    EXPECT_EQ(digest_calls, 1u);
+    ASSERT_EQ(schedule.transitions.size(), 1u);
+    EXPECT_EQ(schedule.transitions.front().key, kFar);
+    EXPECT_EQ(schedule.transitions.front().from, RegionState::Reduced);
+    EXPECT_EQ(schedule.transitions.front().to, RegionState::Frozen);
+    EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
+    EXPECT_EQ(ledger.records().at(kFar).frozen_at, 3u);
+    EXPECT_EQ(ledger.records().at(kFar).frozen_digest, 7u);
+    EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+}
+
+TEST(ActiveRegionLedgerTest, ThrowingFreezeDigestPreservesRecordsEnergyAgesAndCanonicalBytes) {
+    auto ledger = Distant({0, 1, 1});
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    const auto before = ledger;
+    const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+    bool read_age = false;
+    const auto digest = [&](RegionKey key) -> std::uint64_t {
+        EXPECT_EQ(ledger.energy_ages().at(key), 7u);
+        read_age = true;
+        throw std::runtime_error("IO failure");
+    };
+    EXPECT_THROW(ledger.schedule(WorldClock(3), {}, work, digest), std::runtime_error);
+    EXPECT_TRUE(read_age);
+    EXPECT_EQ(ledger.records(), before.records());
+    EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+    EXPECT_EQ(ledger.canonical_bytes(), before.canonical_bytes());
+    EXPECT_EQ(ledger.encode(), before.encode());
+}
+
 TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysPreserveSurvivorOrderAndTrace) {
     auto ledger = HomeVisit();
     const auto keys = Keys(ledger);
