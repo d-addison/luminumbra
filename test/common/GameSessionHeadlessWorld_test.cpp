@@ -7645,7 +7645,8 @@ TEST(GameSessionHeadlessWorldTest, BatchedTerrainProbesMatchIndividualQueriesAnd
         const auto* object = session.GetGroundObjects().find(ids[i]);
         ASSERT_NE(object, nullptr);
         EXPECT_TRUE(object->settled());
-        EXPECT_EQ(object->y_mm, std::llround(static_cast<double>(*batched[i]) * 1000.0));
+        EXPECT_EQ(object->y_mm,
+                  std::llround(static_cast<double>(batched[i].value_or(0.0f)) * 1000.0));
     }
     // No result survives a call, so a terrain edit cannot reuse the previous height.
     for (auto& density : chunk->sdf_data)
