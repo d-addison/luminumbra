@@ -1441,6 +1441,49 @@ TEST(WaterSeedInputs, DrySlopeTentativeFlowLeavesPristineWaterClean) {
     }
 }
 
+TEST(WaterSeedInputs, FluxOnlyChangesPersistWithoutDepthDelta) {
+    for (const int resolution : {16, 2, 8, 4, 16}) {
+        for (const int changed_edge : {-1, 0, 1, 2}) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(changed_edge);
+            SeedFixture fixture;
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.set_state(ChunkState::Idle);
+            chunk.mark_sdf_generated_current_params();
+            chunk.is_water_sleeping.store(true);
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.tick();
+            ASSERT_FALSE(chunk.needs_authority());
+            const auto cells = static_cast<std::size_t>(resolution) * resolution;
+            chunk.water_bed_mm.assign(cells, 4000);
+            chunk.water_depth_mm.assign(cells, 0);
+            chunk.water_edge_flux.assign(2 * cells, 0);
+            if (changed_edge == 0)
+                chunk.water_edge_flux.front() = 57; // Internal momentum on a level dry bed.
+            else if (changed_edge == 1)
+                chunk.water_edge_flux.back() = 57; // Boundary momentum is cleared by the kernel.
+            else if (changed_edge == 2)
+                chunk.water_edge_flux.clear(); // Missing momentum is repaired before the step.
+            chunk.ticks_below_threshold = 0;
+            chunk.is_water_sleeping.store(false);
+            const auto revision = chunk.water_revision();
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 0));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+            EXPECT_EQ(chunk.max_water_delta_last_tick, 0.0f);
+            EXPECT_EQ(chunk.ticks_below_threshold, 1);
+            const bool changed = changed_edge >= 0;
+            EXPECT_EQ(chunk.is_water_state_dirty(), changed);
+            // A flux mutation also makes the subsequent calm-counter change durable.
+            EXPECT_EQ(chunk.water_revision(), revision + (changed ? 2u : 0u));
+            fixture.world().sync_water_authority();
+            EXPECT_EQ(chunk.has_water_authority(), changed);
+            EXPECT_EQ(chunk.is_voxel_data_dirty(), changed);
+        }
+    }
+}
+
 TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) {
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {
         SeedFixture fixture(2);
