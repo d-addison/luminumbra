@@ -51,8 +51,8 @@
     {
       "id": "dw.intro.011",
       "source": "docs/distant-world.md#distant-world-and-distant-simulation-contract",
-      "quote": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1.",
-      "text": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1."
+      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1.",
+      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9 closure, and the committed-generation edited-SDF producer and FW S8 consumer are planned for v0.3.1."
     },
     {
       "id": "dw.intro.012",
@@ -69,8 +69,8 @@
     {
       "id": "dw.scope.002",
       "source": "docs/distant-world.md#scope",
-      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;",
-      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;"
+      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;",
+      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;"
     },
     {
       "id": "dw.scope.003",
@@ -225,8 +225,8 @@
     {
       "id": "dw.tiers.002",
       "source": "docs/distant-world.md#tier-ladder",
-      "quote": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;",
-      "text": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;"
+      "quote": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;",
+      "text": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;"
     },
     {
       "id": "dw.tiers.003",
@@ -957,8 +957,8 @@
     {
       "id": "dw.policy.024",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "distant creatures do not use scent | \u2014 |",
-      "text": "distant creatures do not use scent | \u2014 |"
+      "quote": "distant creatures do not use scent | — |",
+      "text": "distant creatures do not use scent | — |"
     },
     {
       "id": "dw.policy.025",
@@ -969,8 +969,8 @@
     {
       "id": "dw.policy.026",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |",
-      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |"
+      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |",
+      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |"
     },
     {
       "id": "dw.policy.027",
@@ -1101,8 +1101,8 @@
     {
       "id": "dw.persistence.001",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, the `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept decodable with its existing dimensions and validation;",
-      "text": "Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, the `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept decodable with its existing dimensions and validation;"
+      "quote": "Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, FSD2 far payload v3 (kept decodable with its existing dimensions and validation;",
+      "text": "Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, FSD2 far payload v3 (kept decodable with its existing dimensions and validation;"
     },
     {
       "id": "dw.persistence.002",
@@ -1431,8 +1431,8 @@
     {
       "id": "dw.perf.001",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440.",
-      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440."
+      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440.",
+      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440."
     },
     {
       "id": "dw.perf.002",
@@ -2025,14 +2025,14 @@
     {
       "id": "ar.file.006",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Snapshot transaction publication is separate work;",
-      "text": "Snapshot transaction publication is separate work;"
+      "quote": "Indexed saves use one compound transaction across chunk, plant, energy, ledger and metadata writers, including flag-off sessions writing an already indexed destination.",
+      "text": "Indexed saves use one compound transaction across chunk, plant, energy, ledger and metadata writers, including flag-off sessions writing an already indexed destination."
     },
     {
       "id": "ar.file.007",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity.",
-      "text": "this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity."
+      "quote": "Ordinary unindexed flag-off saves retain their existing bytes and partial-progress failure behavior.",
+      "text": "Ordinary unindexed flag-off saves retain their existing bytes and partial-progress failure behavior."
     },
     {
       "id": "ar.file.008",
@@ -2535,8 +2535,8 @@
     {
       "id": "ar.file.091",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, SDF, heightmap, materials, integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state.",
-      "text": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, SDF, heightmap, materials, integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state."
+      "quote": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, authoritative terrain (SDF, heightmap and materials, distinguished from generated terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`), integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state.",
+      "text": "The provider uses a dedicated `region_content_v2` projection in chunk-id order: identity, authoritative terrain (SDF, heightmap and materials, distinguished from generated terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`), integer water depth/bed/flux, water initialization, resolution and solver sleep/threshold state."
     },
     {
       "id": "ar.file.092",
@@ -3513,8 +3513,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
-      "text": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
+      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
+      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -3585,8 +3585,8 @@
     {
       "id": "dw.calendar.030",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "| Rendered moon | Selected rendering calendar month | Calendar day length \u00d7 independent lunar days |",
-      "text": "| Rendered moon | Selected rendering calendar month | Calendar day length \u00d7 independent lunar days |"
+      "quote": "| Rendered moon | Selected rendering calendar month | Calendar day length × independent lunar days |",
+      "text": "| Rendered moon | Selected rendering calendar month | Calendar day length × independent lunar days |"
     },
     {
       "id": "dw.calendar.031",
@@ -3783,14 +3783,14 @@
     {
       "id": "dw.calendar.063",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "Simulation speed hotkeys retain their existing batching and pause\u201316\u00d7 range;",
-      "text": "Simulation speed hotkeys retain their existing batching and pause\u201316\u00d7 range;"
+      "quote": "Simulation speed hotkeys retain their existing batching and pause–16× range;",
+      "text": "Simulation speed hotkeys retain their existing batching and pause–16× range;"
     },
     {
       "id": "dw.calendar.064",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "ideal 16\u00d7 gives a 337.5-second day.",
-      "text": "ideal 16\u00d7 gives a 337.5-second day."
+      "quote": "ideal 16× gives a 337.5-second day.",
+      "text": "ideal 16× gives a 337.5-second day."
     },
     {
       "id": "ar.activation.065",
@@ -4457,6 +4457,132 @@
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
       "quote": "The lunar month follows the selected calendar's recorded day length and lunar-day count.",
       "text": "The lunar month follows the selected calendar's recorded day length and lunar-day count."
+    },
+    {
+      "id": "indexed.persistence.001",
+      "source": "docs/distant-world.md#distant-world-and-distant-simulation-contract",
+      "quote": "Indexed authority durability and rehydration are in preparation with native qualification pending.",
+      "text": "Indexed authority durability and rehydration are in preparation with native qualification pending."
+    },
+    {
+      "id": "indexed.persistence.002",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "quote": "Indexed authority durability and rehydration are in preparation with native qualification pending.",
+      "text": "Indexed authority durability and rehydration are in preparation with native qualification pending."
+    },
+    {
+      "id": "indexed.persistence.003",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Indexed metadata uses `container_version: 3` and `snapshotFormat: 1`;",
+      "text": "Indexed metadata uses `container_version: 3` and `snapshotFormat: 1`;"
+    },
+    {
+      "id": "indexed.persistence.004",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "every indexed save includes a `luminumbra.persistence.world_manifest.v2` manifest, even without chunks or metadata.",
+      "text": "every indexed save includes a `luminumbra.persistence.world_manifest.v2` manifest, even without chunks or metadata."
+    },
+    {
+      "id": "indexed.persistence.005",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Either envelope witness requires the snapshot index;",
+      "text": "Either envelope witness requires the snapshot index;"
+    },
+    {
+      "id": "indexed.persistence.006",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "malformed, unreadable, oversized or future control files refuse admission.",
+      "text": "malformed, unreadable, oversized or future control files refuse admission."
+    },
+    {
+      "id": "indexed.persistence.007",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, load read-only and upgrade on their first indexed save.",
+      "text": "Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, load read-only and upgrade on their first indexed save."
+    },
+    {
+      "id": "indexed.persistence.008",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "LMR1 payload version 2 and the snapshot index schema remain unchanged;",
+      "text": "LMR1 payload version 2 and the snapshot index schema remain unchanged;"
+    },
+    {
+      "id": "indexed.persistence.009",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "older readers refuse the new envelope.",
+      "text": "older readers refuse the new envelope."
+    },
+    {
+      "id": "indexed.persistence.010",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history.",
+      "text": "Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history."
+    },
+    {
+      "id": "indexed.persistence.011",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;",
+      "text": "Journal v4 binds undo, publication and quarantine identities before either POSIX move;"
+    },
+    {
+      "id": "indexed.persistence.012",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the snapshot index publishes last as the durable commit point.",
+      "text": "the snapshot index publishes last as the durable commit point."
+    },
+    {
+      "id": "indexed.persistence.013",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.",
+      "text": "Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending."
+    },
+    {
+      "id": "indexed.persistence.014",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "After that point, cleanup failure preserves the new commit and leaves recovery work.",
+      "text": "After that point, cleanup failure preserves the new commit and leaves recovery work."
+    },
+    {
+      "id": "indexed.persistence.015",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.",
+      "text": "Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds."
+    },
+    {
+      "id": "indexed.persistence.016",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds.",
+      "text": "Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds."
+    },
+    {
+      "id": "indexed.persistence.017",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Rollback and journal retirement refuse foreign occupants and unknown contents;",
+      "text": "Rollback and journal retirement refuse foreign occupants and unknown contents;"
+    },
+    {
+      "id": "indexed.persistence.018",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it.",
+      "text": "Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it."
+    },
+    {
+      "id": "indexed.persistence.019",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation.",
+      "text": "Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation."
+    },
+    {
+      "id": "indexed.persistence.020",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves.",
+      "text": "Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves."
+    },
+    {
+      "id": "indexed.persistence.021",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.",
+      "text": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks."
     }
   ],
   "exclusions": [
@@ -4615,8 +4741,8 @@
     {
       "id": "dw.perf.018",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
-      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
+      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
+      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
       "reason": "Descriptive Current behaviour paragraph contrasts shipped behaviour with the accepted future contract; it is not an acceptance requirement.",
       "category": "current-behaviour"
     },

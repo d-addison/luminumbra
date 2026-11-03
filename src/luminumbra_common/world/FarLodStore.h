@@ -183,6 +183,13 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(FarLodTile& tile,
                                                 const FarLodSdfSnapshot& snapshot,
                                                 std::string* error = nullptr);
 
+// As ReduceChunkSdfIntoFarTile, minus the whole-tile stream validation. Only
+// for a tile that already passed ReduceChunkSdfIntoFarTile and has changed
+// since only through these two functions, which keep a valid tile valid.
+FarLodSdfReduceResult ReduceChunkSdfIntoValidatedFarTile(FarLodTile& tile,
+                                                         const FarLodSdfSnapshot& snapshot,
+                                                         std::string* error = nullptr);
+
 // Region mesh output (consumed by MarchingCubes::GenerateFarLodRegionMesh and
 // the far render path). Vertex positions are region-local in X/Z (relative to
 // the region origin rx*512, rz*512) and absolute in Y, VoxelVertex layout
@@ -223,6 +230,9 @@ public:
     // Record id for a tile inside its region file (the (lod_level, id) pair
     // keys the record; lod_level carries the tier).
     static u64 tile_record_id(FarLodTier tier, i32 rx, i32 rz);
+
+    // Process-wide count of tile stream validations that CRC-checked SDF bricks.
+    static u64 brick_validation_count_for_testing();
 
     // Strict current payload decoder shared with whole-world validation.
     static bool decode_payload(const std::string& payload,

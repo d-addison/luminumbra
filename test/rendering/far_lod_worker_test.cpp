@@ -1130,6 +1130,57 @@ TEST(FarLodWorker, DurableChunkTruthRepairsOldFarWithoutAStreamedSnapshot) {
     }
 }
 
+TEST(FarLodWorker, HomeTileStreamValidationDoesNotGrowWithDurableOverlayCount) {
+    const TerrainGenParams params = FlatParams();
+    for (const int durable_count : {1, 4}) {
+        SCOPED_TRACE(::testing::Message() << "durable_count=" << durable_count);
+        const TempSaveDir save;
+
+        SHIELD_WorldSystem old_world(nullptr, nullptr, params, 1337);
+        auto old_chunk = std::make_shared<Chunk>(IVec3(5, 0, 5));
+        old_world.GenerateChunkData(*old_chunk, 1);
+        ASSERT_TRUE(SetPlanarAuthority(*old_chunk, 7.0f, 231u));
+        ASSERT_TRUE(old_world.adopt_streamed_chunk(old_chunk));
+        const auto old_snapshot = old_world.capture_far_lod_sdf_snapshot(0, 0);
+        ASSERT_TRUE(old_snapshot);
+        const auto old_home =
+            BuildFarLodWorkerTile(old_world, *old_snapshot, FarLodTier::F1, 0, 0, {});
+        ASSERT_TRUE(old_home.ok) << old_home.error;
+        ASSERT_FALSE(old_home.tile.sdf_bricks.empty());
+        std::vector<std::string> errors;
+        ASSERT_TRUE(FarLodStore(save.path).save_tile(old_home.tile, &errors));
+
+        const SHIELD_WorldSystem generation_world(nullptr, nullptr, params, 1337);
+        WorldStreamingState durable_state;
+        for (int index = 0; index < durable_count; ++index) {
+            auto durable_chunk = std::make_shared<Chunk>(IVec3(12 + index, 0, 12));
+            generation_world.GenerateChunkData(*durable_chunk, 1);
+            ASSERT_TRUE(SetPlanarAuthority(*durable_chunk, 11.0f, 229u));
+            durable_state.insert_chunk(durable_chunk);
+        }
+        const Persistence::WorldSaveService save_service;
+        errors.clear();
+        ASSERT_TRUE(save_service.save_world(durable_state, save.path, &errors));
+        ASSERT_TRUE(errors.empty());
+
+        const SHIELD_WorldSystem recovery_world(nullptr, nullptr, params, 1337);
+        const auto recovery_snapshot = recovery_world.capture_far_lod_sdf_snapshot(0, 0);
+        ASSERT_TRUE(recovery_snapshot);
+        ASSERT_TRUE(recovery_snapshot->entries.empty());
+        const u64 validations_before = FarLodStore::brick_validation_count_for_testing();
+        const auto recovered = BuildFarLodWorkerTile(
+            recovery_world, *recovery_snapshot, FarLodTier::F1, 0, 0, save.path);
+        const u64 validations =
+            FarLodStore::brick_validation_count_for_testing() - validations_before;
+        ASSERT_TRUE(recovered.ok) << recovered.error;
+        EXPECT_EQ(recovered.tile.sdf_bricks.size(),
+                  old_home.tile.sdf_bricks.size() + static_cast<std::size_t>(durable_count));
+        // Decoding the persisted home tile validates it once; every durable
+        // chunk then updates it, and only the first update re-validates it.
+        EXPECT_EQ(validations, 2u);
+    }
+}
+
 TEST(TreeImpostorMaterial, FilteredLeafEdgesPreserveColorNormalRoughnessAndOcclusion) {
     if (!glfwInit())
         GTEST_SKIP() << "glfwInit failed";

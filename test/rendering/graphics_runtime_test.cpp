@@ -437,8 +437,8 @@ TEST_F(GraphicsRuntime, NewSelectionsRetainUltraPassValuesPendingVisualApproval)
         GraphicsSettings settings;
         ASSERT_TRUE(SelectGraphicsPreset(settings, preset));
         ResolvedGraphics resolved;
-        std::string error;
-        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error));
+        std::string resolution_error;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, resolution_error));
         ASSERT_TRUE(pipeline.apply_graphics(resolved));
         EXPECT_EQ(pipeline.graphics_runtime_config(), GraphicsRuntimeConfig{});
     }
