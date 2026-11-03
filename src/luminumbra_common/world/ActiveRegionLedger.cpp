@@ -226,8 +226,26 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
                                             std::span<const RegionWork> work,
                                             const DurableDigest& durable_digest,
                                             const OwnershipProbe& owned) {
-    auto next = *this;
-    auto result = next.schedule_in_place(clock, replicated_anchors, work, durable_digest, owned);
+    // Scheduling only reads energy ages, so they move through the working copy instead of
+    // being copied every tick; every failure path hands them back unchanged.
+    EnergyAges ages;
+    ages.swap(m_energyAges);
+    ActiveRegionLedger next = [&] {
+        try {
+            return ActiveRegionLedger(*this);
+        } catch (...) {
+            m_energyAges.swap(ages);
+            throw;
+        }
+    }();
+    next.m_energyAges.swap(ages);
+    RegionSchedule result;
+    try {
+        result = next.schedule_in_place(clock, replicated_anchors, work, durable_digest, owned);
+    } catch (...) {
+        m_energyAges.swap(next.m_energyAges);
+        throw;
+    }
     *this = std::move(next);
     return result;
 }

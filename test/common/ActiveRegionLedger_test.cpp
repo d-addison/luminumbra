@@ -1085,6 +1085,17 @@ TEST(ActiveRegionLedgerTest, EnergyAgeEncodingRefusesBeyondExistingFileCap) {
     EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
 }
 
+TEST(ActiveRegionLedgerTest, ScheduleCarriesEnergyAgesThroughRefusalAndSuccess) {
+    auto ledger = Distant();
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    const auto before = ledger.encode();
+    EXPECT_THROW(Step(ledger, 1, 0), std::invalid_argument);
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{kFar, 7}}));
+    EXPECT_EQ(ledger.encode(), before);
+    Step(ledger, 2, 0);
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{kFar, 7}}));
+}
+
 TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysPreserveSurvivorOrderAndTrace) {
     auto ledger = HomeVisit();
     const auto keys = Keys(ledger);
