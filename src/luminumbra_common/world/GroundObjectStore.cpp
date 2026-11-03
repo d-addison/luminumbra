@@ -189,6 +189,11 @@ bool GroundObjectStore::owns_region(RegionKey key) const {
     return m_byRegion.find(key) != m_byRegion.end();
 }
 
+std::size_t GroundObjectStore::region_size(RegionKey key) const {
+    const auto it = m_byRegion.find(key);
+    return it == m_byRegion.end() ? 0 : it->second.size();
+}
+
 std::vector<GroundObject> GroundObjectStore::in_region(RegionKey key) const {
     std::vector<GroundObject> out;
     const auto it = m_byRegion.find(key);
@@ -217,9 +222,11 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
     if (regionIt == m_byRegion.end()) {
         return result;
     }
-    // Copy the id set: despawns below mutate the live index while we walk it.
-    const std::vector<std::uint64_t> ids(regionIt->second.begin(), regionIt->second.end());
-    for (const std::uint64_t id : ids) {
+    // Retain the region entry until iteration ends, including when its last object despawns.
+    auto& ids = regionIt->second;
+    for (auto idIt = ids.begin(); idIt != ids.end();) {
+        const auto current = idIt++;
+        const std::uint64_t id = *current;
         const auto objectIt = m_objects.find(id);
         if (objectIt == m_objects.end()) {
             continue;
@@ -243,10 +250,13 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
 
         if (live.despawn_after != 0 && live.active_age >= live.despawn_after) {
             result.despawned.push_back(live);
-            Detach(m_byRegion, key, id);
+            ids.erase(current);
             m_reserved_bytes -= ReservedBytes(live);
             m_objects.erase(objectIt);
         }
+    }
+    if (ids.empty()) {
+        m_byRegion.erase(regionIt);
     }
     return result;
 }

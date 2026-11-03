@@ -71,6 +71,8 @@ public:
     }
     // O(log n). True when at least one object lies in the region.
     [[nodiscard]] bool owns_region(RegionKey key) const;
+    // O(log n). Number of objects in the region without copying them.
+    [[nodiscard]] std::size_t region_size(RegionKey key) const;
     // Objects of the region in ascending id order.
     [[nodiscard]] std::vector<GroundObject> in_region(RegionKey key) const;
     // The set of regions that currently hold at least one object, ascending.

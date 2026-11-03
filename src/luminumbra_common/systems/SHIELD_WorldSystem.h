@@ -471,7 +471,7 @@ public:
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
     // Owner-thread downward probe over available terrain truth. Never generates or performs IO;
-    // edited resident SDF supersedes the procedural surface in its vertical band.
+    // full-resolution resident SDF supersedes the procedural surface in its vertical band.
     std::optional<float> ProbeTerrainBelow(const Vec3& requested) const;
 
     // Owner-thread capture for bounded boot input jobs. No streamed chunks,

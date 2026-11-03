@@ -3057,6 +3057,8 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
         Luminumbra::Persistence::SaveTransaction transaction(
             save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(transaction.protect({GroundObjectStore::kRelativePath}, &errors))
+            << JoinErrors(errors);
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), ledger, save_dir.path(), &errors))
             << JoinErrors(errors);
@@ -3077,6 +3079,51 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
     GroundObjectStore absent;
     ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path(), 100, &errors));
     EXPECT_TRUE(absent.empty());
+    // Repeating an empty save still declares the absent member in the snapshot.
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(absent, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+    const auto member =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+            return value.path == GroundObjectStore::kRelativePath;
+        });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_FALSE(member->present);
+}
+
+TEST(WorldSaveService, GroundObjectsJoinedEmptySaveRemovesFileAndRetainsAbsentMember) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_joined_empty");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        SCOPED_TRACE(attempt);
+        {
+            WorldSaveService::SaveFactsScope facts(save_dir.path());
+            Luminumbra::Persistence::SaveTransaction transaction(
+                save_dir.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+            ASSERT_TRUE(transaction.protect({GroundObjectStore::kRelativePath}, &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+        }
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+        Luminumbra::Persistence::SnapshotIndex index;
+        ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+        const auto member =
+            std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+                return value.path == GroundObjectStore::kRelativePath;
+            });
+        ASSERT_NE(member, index.members.end());
+        EXPECT_FALSE(member->present);
+    }
 }
 
 TEST(WorldSaveService, GroundObjectIdAtOrAboveNextIdIsRefused) {

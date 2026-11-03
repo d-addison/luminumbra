@@ -4356,7 +4356,7 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
         AddError(errors, "Ground objects exceed the file capacity.");
         return false;
     }
-    TransactionScope scope(save_dir, {}, errors, true);
+    TransactionScope scope(save_dir, {world::GroundObjectStore::kRelativePath}, errors, true);
     if (!scope.ok() || !validate_save(save_dir, errors))
         return false;
     if (store.empty()) {

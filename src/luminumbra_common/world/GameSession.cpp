@@ -528,7 +528,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
-    if (m_activeRegionsEnabled && m_simulationBatchInProgress)
+    if (m_activeRegionsEnabled && (m_simulationBatchInProgress || m_saveEventDeliveryInProgress))
         return 0;
     class BatchGuard {
     public:
@@ -2193,7 +2193,7 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     for (const RegionKey key : due) {
         if (!m_groundObjects.owns_region(key))
             continue;
-        const auto processed = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
+        const auto processed = static_cast<std::uint64_t>(m_groundObjects.region_size(key));
         const GroundObjectStore::AgeResult result = m_groundObjects.age_region(key, settle);
         m_regionCompletedWork.push_back(RegionWork{key, 0, processed, 0, 0});
         for (const GroundObject& object : result.despawned)
@@ -2535,6 +2535,7 @@ bool PersistSavedPreset(const fs::path& save_dir,
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
                                       Persistence::CreatedWorldArtifacts* artifacts) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
+        (m_activeRegionsEnabled && m_simulationEventBus.pending_count() != 0) ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
          (m_activeRegionsEnabled || !m_renderCalendar)) ||
@@ -2665,6 +2666,28 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         save_dir, report, full_snapshot, m_activeRegionsEnabled || full_snapshot);
 }
 
+bool GameSession::DrainEventsBeforeSave() {
+    if (!m_activeRegionsEnabled || m_simulationEventBus.pending_count() == 0)
+        return true;
+    // Pending notifications are not persisted. Deliver before capturing any save state;
+    // consumers that leave queued work or events must reach a clean boundary before saving.
+    struct DeliveryGuard {
+        bool& active;
+        ~DeliveryGuard() {
+            active = false;
+        }
+    } guard{m_saveEventDeliveryInProgress};
+    m_saveEventDeliveryInProgress = true;
+    try {
+        m_simulationEventBus.drain(m_worldClock.tick(), [this] { return !m_regionFault; });
+    } catch (const std::exception& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    } catch (...) {
+        LatchRegionFault(m_worldClock.tick(), "Unknown simulation consumer fault");
+    }
+    return !m_regionFault && m_regionWork.empty() && m_simulationEventBus.pending_count() == 0;
+}
+
 bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
@@ -2708,6 +2731,9 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                          .count());
         }
     } outcome{*this, save_started, false};
+
+    if (!DrainEventsBeforeSave())
+        return false;
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an

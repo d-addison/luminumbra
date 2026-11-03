@@ -4703,8 +4703,8 @@ std::optional<float> SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested
         if (coords.x != column.x || coords.z != column.z)
             continue;
         column_available = true;
-        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
-            chunk->sdf_data.size() != static_cast<std::size_t>(nx * ny * nz))
+        // Generated lattices include caves and structures absent from the height sample.
+        if (chunk->sdf_data.size() != static_cast<std::size_t>(nx * ny * nz))
             continue;
         const float bottom = static_cast<float>(static_cast<double>(coords.y) * CHUNK_SIZE_Y);
         if (procedural >= bottom && procedural <= bottom + CHUNK_SIZE_Y)

@@ -313,6 +313,34 @@ TEST(GroundObjectStoreTest, AgeRegionSkipsAbsentRegionAndSaturates) {
     EXPECT_EQ(store.find(4)->active_age, std::numeric_limits<std::uint32_t>::max());
 }
 
+TEST(GroundObjectStoreTest, AgeRegionRemovesEntireRegionWithoutSkippingIds) {
+    GroundObjectStore store;
+    for (const std::uint64_t id : {3u, 1u, 2u}) {
+        auto object = MakeObject(id);
+        object.despawn_after = 1;
+        ASSERT_TRUE(store.insert(object));
+    }
+    ASSERT_TRUE(store.insert(MakeObject(4, kRegion, 0)));
+    const RegionKey home{0, 0}, other{1, 0};
+    EXPECT_EQ(store.region_size(home), 3u);
+    EXPECT_EQ(store.region_size(other), 1u);
+    EXPECT_EQ(store.region_size({2, 0}), 0u);
+    const auto result = store.age_region(home, {});
+    EXPECT_EQ(result.aged, 3u);
+    ASSERT_EQ(result.despawned.size(), 3u);
+    for (std::size_t i = 0; i < result.despawned.size(); ++i) {
+        EXPECT_EQ(result.despawned[i].id, i + 1);
+    }
+    EXPECT_EQ(store.region_size(home), 0u);
+    EXPECT_FALSE(store.owns_region(home));
+    EXPECT_EQ(store.region_size(other), 1u);
+    ASSERT_NE(store.find(4), nullptr);
+    EXPECT_EQ(store.find(4)->active_age, 0u);
+    ASSERT_TRUE(store.insert(MakeObject(5)));
+    EXPECT_EQ(store.region_size(home), 1u);
+    EXPECT_EQ(store.age_region(home, {}).aged, 1u);
+}
+
 TEST(GroundObjectStoreTest, AgeRegionRevertsSettleThatMovesObject) {
     GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeObject(7)));
