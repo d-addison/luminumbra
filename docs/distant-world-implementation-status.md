@@ -93,6 +93,15 @@ The whole file remains limited to 4 MiB, with nesting admitted by the shared
 empty queue and zero cursor, preserving older files. Empty delivery state keeps
 the existing object-file bytes; empty objects with delivery state retain the file.
 
+A missing ground-object file has two valid snapshot representations. A file
+that has never been written is omitted from the index; protecting it during an
+empty save does not add a member. Removing a previously indexed file retains
+an explicit absent member with zero byte count and fingerprint, preserving its
+member generation on repeated empty saves. Both forms load as empty objects
+and delivery state, and both refuse an unexpected file. Notification-only
+files remain present even when the object array is empty. These distinctions
+preserve the existing fixtures and hashes for worlds without ground objects.
+
 Saving never delivers simulation notifications. Reload restores ground events
 with their original due ticks, lanes, sequences and payloads, so consumers run at
 the usual end-of-tick delivery point and completed work feeds the following

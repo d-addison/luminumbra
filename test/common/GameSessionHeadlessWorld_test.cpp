@@ -7106,20 +7106,42 @@ TEST(GameSessionHeadlessWorldTest, MetadataOnlySaveAfterSpawnWritesObjectFileAnd
     jobs.startup(1);
     GameSession session;
     CreateGroundWorld(session, root, jobs, "Ground metadata");
+    const auto save = session.GetWorldSaveDir();
     P::SnapshotIndex initial;
-    ASSERT_TRUE(P::read_snapshot_index(session.GetWorldSaveDir(), initial, nullptr));
+    ASSERT_TRUE(P::read_snapshot_index(save, initial, nullptr));
     const auto absent =
         std::find_if(initial.members.begin(), initial.members.end(), [](const auto& member) {
             return member.path == Luminumbra::world::GroundObjectStore::kRelativePath;
         });
-    ASSERT_NE(absent, initial.members.end());
-    EXPECT_FALSE(absent->present);
+    // A never-written member may be omitted; a deleted member is explicitly absent.
+    if (absent != initial.members.end()) {
+        EXPECT_FALSE(absent->present);
+    }
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::ground_objects_path(save)));
+    Luminumbra::world::GroundObjectStore restored;
+    Luminumbra::world::GroundNotifications notifications;
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        restored,
+        save,
+        session.GetActiveRegionLedger().next_persistent_id(),
+        nullptr,
+        {},
+        &notifications));
+    EXPECT_TRUE(restored.empty());
+    EXPECT_TRUE(notifications.events.empty());
+    EXPECT_EQ(notifications.next_sequence, 0u);
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
     ASSERT_TRUE(session.SaveWorld());
-    const auto save = session.GetWorldSaveDir();
-    Luminumbra::world::GroundObjectStore restored;
-    Luminumbra::world::GroundNotifications notifications;
+    P::SnapshotIndex committed;
+    ASSERT_TRUE(P::read_snapshot_index(save, committed, nullptr));
+    const auto present =
+        std::find_if(committed.members.begin(), committed.members.end(), [](const auto& member) {
+            return member.path == Luminumbra::world::GroundObjectStore::kRelativePath;
+        });
+    ASSERT_NE(present, committed.members.end());
+    EXPECT_TRUE(present->present);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     std::string error;
     ASSERT_TRUE(Luminumbra::world::GroundObjectStore::parse(
         ReadClockTestFile(P::WorldSaveService::ground_objects_path(save)),
