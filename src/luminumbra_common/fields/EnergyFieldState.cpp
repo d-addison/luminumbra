@@ -649,6 +649,18 @@ std::int64_t RegionalFloorDiv(std::int64_t value, std::int64_t divisor) noexcept
 bool ValidEnergyOwner(const EnergyFieldState::RegionKey& key) noexcept {
     return key.x >= -32768 && key.x < 32768 && key.z >= -32768 && key.z < 32768;
 }
+bool ValidRegionalRecords(const EnergyFieldState::RegionRecords& records) {
+    using Luminumbra::world::RegionState;
+    if (records.size() > Luminumbra::world::ActiveRegionLedger::kMaxRegions)
+        return false;
+    for (const auto& [key, owner] : records)
+        if (!ValidEnergyOwner(key) || owner.cadence_shift > 16 ||
+            (owner.state != RegionState::Active && owner.state != RegionState::Reduced &&
+             owner.state != RegionState::Frozen) ||
+            owner.cadence_phase >= (std::uint32_t{1} << owner.cadence_shift))
+            return false;
+    return true;
+}
 std::pair<int, int> RegionalCellRange(std::int32_t region) noexcept {
     const auto start = std::int64_t{region} * 512 - 12;
     return {static_cast<int>(-RegionalFloorDiv(-start, 24)),
@@ -1021,7 +1033,7 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     }
     // Exact reencoding rejects alternate whitespace, signed zero, leading zeros,
     // missing newline, duplicate/empty pages and extra/trailing data.
-    if (staged.SerializeRegionalRecord() != record)
+    if (!staged.RegionalRecordFits() || staged.SerializeRegionalRecord() != record)
         return false;
     m_regional_validation.reset();
     m_channels = channels;
@@ -1032,9 +1044,29 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     return true;
 }
 
+std::array<EnergyFieldState::RegionKey, 4>
+EnergyFieldState::RegionalPageOwners(std::int64_t key) noexcept {
+    int px = 0, pz = 0;
+    UnpackCellKey(key, px, pz);
+    const int min_x = px * kEnergyPageCells, min_z = pz * kEnergyPageCells;
+    const int max_x = min_x + kEnergyPageCells - 1, max_z = min_z + kEnergyPageCells - 1;
+    return {OwnerOfCell(min_x, min_z),
+            OwnerOfCell(min_x, max_z),
+            OwnerOfCell(max_x, min_z),
+            OwnerOfCell(max_x, max_z)};
+}
+
 bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const {
-    // Full validation never trusts a previous marker or memoized page facts.
+    // Full validation never trusts record provenance, a previous marker or page facts.
+    m_regional_validation.reset();
+    if (!ValidRegionalRecords(records))
+        return false;
+    return ValidateRegionalPages(records, ages);
+}
+
+bool EnergyFieldState::ValidateRegionalPages(const RegionRecords& records,
+                                             const EnergyAges& ages) const {
     m_regional_validation.reset();
     if (m_channels < 1 || m_channels > 64 ||
         records.size() > Luminumbra::world::ActiveRegionLedger::kMaxRegions)
@@ -1056,8 +1088,13 @@ bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
             ++validation.owner_pages[facts.owners[i]];
         }
         validation.record_bytes += facts.record_bytes;
-        if (!facts.any)
+        if (facts.any) {
+            for (const auto owner : RegionalPageOwners(key))
+                if (ValidEnergyOwner(owner))
+                    ++validation.border_owners[owner];
+        } else {
             validation.empty_pages.push_back(key);
+        }
     }
     m_regional_validation = std::move(validation);
     return true;
@@ -1068,21 +1105,36 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                                     std::span<const RegionKey> due,
                                     const EnergyAges& ages,
                                     RegionalResult& out) {
+    // Untracked maps must be revalidated, including in-place edits at the same size.
+    if (!ValidRegionalRecords(records))
+        return false;
+    return TickRegionalImpl(tick, records, due, ages, out, false);
+}
+
+bool EnergyFieldState::TickRegional(std::uint64_t tick,
+                                    const Luminumbra::world::ActiveRegionLedger& ledger,
+                                    std::span<const RegionKey> due,
+                                    const EnergyAges& ages,
+                                    RegionalResult& out) {
+    return TickRegionalImpl(tick, ledger.records(), due, ages, out, true);
+}
+
+namespace {
+using EnergyRegionKey = EnergyFieldState::RegionKey;
+bool AdvanceDueRegionalAges(const EnergyFieldState::RegionRecords& records,
+                            std::span<const EnergyRegionKey> due,
+                            EnergyFieldState::EnergyAges& ages,
+                            std::set<EnergyRegionKey>& firing,
+                            std::set<EnergyRegionKey>& age_updates) {
     using Luminumbra::world::RegionState;
     using Luminumbra::world::WorldClock;
-    if (tick >= WorldClock::kTickLimit || m_channels < 1 || m_channels > 64 ||
-        m_pending.size() > kMaxRegionalDeposits)
-        return false;
-    RegionalResult result;
-    result.ages = ages;
-    std::set<RegionKey> firing, age_updates;
-    std::optional<RegionKey> previous;
+    std::optional<EnergyRegionKey> previous;
     for (const auto key : due) {
         const auto owner = records.find(key);
         if (!ValidEnergyOwner(key) || owner == records.end() ||
             owner->second.state == RegionState::Frozen || (previous && key <= *previous))
             return false;
-        auto [age, added] = result.ages.try_emplace(key, 0);
+        auto [age, added] = ages.try_emplace(key, 0);
         (void)added;
         if (age->second >= WorldClock::kTickLimit - 1)
             return false;
@@ -1092,25 +1144,80 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
             firing.insert(key);
         previous = key;
     }
+    return true;
+}
+template<class Validation>
+bool CountOwnedRegionalAges(const EnergyFieldState::RegionRecords& records,
+                            const EnergyFieldState::EnergyAges& ages,
+                            const std::optional<Validation>& validation,
+                            std::size_t& owned_ages) {
+    for (const auto& [key, age] : ages) {
+        if (!ValidEnergyOwner(key) || !records.contains(key) ||
+            age >= Luminumbra::world::WorldClock::kTickLimit)
+            return false;
+        if (validation && validation->owner_pages.contains(key))
+            ++owned_ages;
+    }
+    return true;
+}
+} // namespace
+
+std::set<EnergyFieldState::RegionKey>
+EnergyFieldState::RegionalBorderCandidates(std::span<const RegionKey> due,
+                                           const EnergyFieldState& staged) const {
+    std::set<RegionKey> border_candidates;
+    const auto add_owner = [&](RegionKey owner) {
+        border_candidates.insert(owner);
+        for (const auto& [dx, dz] :
+             {std::pair{-1, 0}, std::pair{1, 0}, std::pair{0, -1}, std::pair{0, 1}})
+            border_candidates.insert({owner.x + dx, owner.z + dz});
+    };
+    for (const auto owner : due)
+        add_owner(owner);
+    // Common borders can fire without an interior due tick. Cached page
+    // geometry includes owners whose cells are still zero, so their borders
+    // join the same sealed page set as a full ledger walk.
+    for (const auto& [owner, count] : m_regional_validation->border_owners) {
+        (void)count;
+        add_owner(owner);
+    }
+    for (const auto& [key, page] : staged.m_pages) {
+        (void)page;
+        for (const auto owner : RegionalPageOwners(key))
+            add_owner(owner);
+    }
+    // Legacy empty pages still participate until the successful tick removes them.
+    for (const auto key : m_regional_validation->empty_pages)
+        for (const auto owner : RegionalPageOwners(key))
+            add_owner(owner);
+    return border_candidates;
+}
+
+bool EnergyFieldState::TickRegionalImpl(std::uint64_t tick,
+                                        const RegionRecords& records,
+                                        std::span<const RegionKey> due,
+                                        const EnergyAges& ages,
+                                        RegionalResult& out,
+                                        bool ledger_validated) {
+    using Luminumbra::world::RegionState;
+    using Luminumbra::world::WorldClock;
+    if (tick >= WorldClock::kTickLimit || m_channels < 1 || m_channels > 64 ||
+        m_pending.size() > kMaxRegionalDeposits)
+        return false;
+    RegionalResult result;
+    result.ages = ages;
+    std::set<RegionKey> firing, age_updates;
+    if (!AdvanceDueRegionalAges(records, due, result.ages, firing, age_updates))
+        return false;
     if (records.size() > Luminumbra::world::ActiveRegionLedger::kMaxRegions)
         return false;
     std::size_t owned_ages = 0;
-    for (const auto& [key, age] : result.ages) {
-        if (!ValidEnergyOwner(key) || !records.contains(key) || age >= WorldClock::kTickLimit)
-            return false;
-        if (m_regional_validation && m_regional_validation->owner_pages.contains(key))
-            ++owned_ages;
-    }
-    for (const auto& [key, owner] : records)
-        if (!ValidEnergyOwner(key) || owner.cadence_shift > 16 ||
-            (owner.state != RegionState::Active && owner.state != RegionState::Reduced &&
-             owner.state != RegionState::Frozen) ||
-            owner.cadence_phase >= (std::uint32_t{1} << owner.cadence_shift))
-            return false;
+    if (!CountOwnedRegionalAges(records, result.ages, m_regional_validation, owned_ages))
+        return false;
     if (m_regional_validation) {
         if (owned_ages != m_regional_validation->owner_pages.size())
             return false;
-    } else if (!ValidateRegionalOwners(records, result.ages)) {
+    } else if (!ValidateRegionalPages(records, result.ages)) {
         return false;
     }
 
@@ -1208,10 +1315,14 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                  ++px)
                 include(px, pz);
     }
-    for (const auto& [owner, record] : records) {
+    std::set<RegionKey> border_candidates;
+    if (ledger_validated)
+        border_candidates = RegionalBorderCandidates(due, staged);
+    const auto include_borders = [&](RegionKey owner,
+                                     const Luminumbra::world::ActiveRegionRecord& record) {
         if (record.state == RegionState::Frozen ||
             (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) != 0)
-            continue;
+            return;
         const auto [min_x, end_x] = RegionalCellRange(owner.x);
         const auto [min_z, end_z] = RegionalCellRange(owner.z);
         for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
@@ -1236,6 +1347,16 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                 }
             }
         }
+    };
+    if (ledger_validated) {
+        for (const auto owner : border_candidates) {
+            const auto found = records.find(owner);
+            if (found != records.end())
+                include_borders(owner, found->second);
+        }
+    } else {
+        for (const auto& [owner, record] : records)
+            include_borders(owner, record);
     }
     result.staged_pages = staged.m_pages.size();
     result.diffusion_pages = diffusion_pages.size();
@@ -1358,7 +1479,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
             }
         }
     }
-    if (!staged.ValidateRegionalOwners(records, result.ages) || !RegionalRecordFits(&staged))
+    if (!staged.ValidateRegionalPages(records, result.ages) || !RegionalRecordFits(&staged))
         return false;
     std::map<RegionKey, std::uint64_t> counts;
     for (const auto owner : age_updates)
@@ -1375,6 +1496,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     while (!staged.m_pages.empty()) {
         auto node = staged.m_pages.extract(staged.m_pages.begin());
         auto& owner_pages = m_regional_validation->owner_pages;
+        auto& border_owners = m_regional_validation->border_owners;
         if (const auto original = m_pages.find(node.key()); original != m_pages.end()) {
             const auto& facts = original->second.regional_facts(node.key(), m_channels);
             m_regional_validation->record_bytes -= facts.record_bytes;
@@ -1383,11 +1505,21 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                 if (--count->second == 0)
                     owner_pages.erase(count);
             }
+            if (facts.any)
+                for (const auto owner : RegionalPageOwners(node.key())) {
+                    const auto count = border_owners.find(owner);
+                    if (count != border_owners.end() && --count->second == 0)
+                        border_owners.erase(count);
+                }
         }
         const auto& facts = node.mapped().regional_facts(node.key(), m_channels);
         m_regional_validation->record_bytes += facts.record_bytes;
         for (std::size_t i = 0; i < facts.owner_count; ++i)
             ++owner_pages[facts.owners[i]];
+        if (facts.any)
+            for (const auto owner : RegionalPageOwners(node.key()))
+                if (ValidEnergyOwner(owner))
+                    ++border_owners[owner];
         if (node.mapped().all_zero())
             m_pages.erase(node.key());
         else if (const auto original = m_pages.find(node.key()); original != m_pages.end())

@@ -68,6 +68,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -173,6 +174,13 @@ public:
                       std::span<const RegionKey> due,
                       const EnergyAges& ages,
                       RegionalResult& out);
+    // Ledger mutation and decode enforce valid record metadata. A raw map has no
+    // revision or mutation boundary, so the overload above uses full record scans.
+    bool TickRegional(std::uint64_t tick,
+                      const Luminumbra::world::ActiveRegionLedger& ledger,
+                      std::span<const RegionKey> due,
+                      const EnergyAges& ages,
+                      RegionalResult& out);
     [[nodiscard]] static RegionKey OwnerOfCell(int cx, int cz) noexcept;
     [[nodiscard]] bool OwnsRegion(const RegionKey& key) const;
     // Stored values only; ages are projected by ARL4. No legacy page epochs.
@@ -261,6 +269,9 @@ private:
     // Legacy writers, queues and restore clear this; regional ticks maintain it.
     struct RegionalValidation {
         std::map<RegionKey, std::size_t> owner_pages;
+        // Corner counts index every owner intersecting a nonempty physical page,
+        // including zero-valued cells that may participate in a common border.
+        std::map<RegionKey, std::size_t> border_owners;
         std::vector<std::int64_t> empty_pages;
         std::uint64_t record_bytes = 0;
     };
@@ -268,6 +279,9 @@ private:
     [[nodiscard]] static std::int64_t PackPageKey(int px, int pz) noexcept;
     [[nodiscard]] static std::int64_t PackCellKey(int cx, int cz) noexcept;
     static void UnpackCellKey(std::int64_t key, int& cx, int& cz) noexcept;
+    [[nodiscard]] static std::array<RegionKey, 4> RegionalPageOwners(std::int64_t key) noexcept;
+    [[nodiscard]] std::set<RegionKey>
+    RegionalBorderCandidates(std::span<const RegionKey> due, const EnergyFieldState& staged) const;
 
     [[nodiscard]] bool InWindow(int cx, int cz) const noexcept;
 
@@ -284,6 +298,14 @@ private:
     void NormalizeAllPages();
 
     [[nodiscard]] bool RegionalRecordFits(const EnergyFieldState* replacements = nullptr) const;
+    [[nodiscard]] bool ValidateRegionalPages(const RegionRecords& records,
+                                             const EnergyAges& ages) const;
+    bool TickRegionalImpl(std::uint64_t tick,
+                          const RegionRecords& records,
+                          std::span<const RegionKey> due,
+                          const EnergyAges& ages,
+                          RegionalResult& out,
+                          bool ledger_validated);
 
     int m_channels = 1;
     // Window origin in world cell coords, page-aligned. Valid once anchored.

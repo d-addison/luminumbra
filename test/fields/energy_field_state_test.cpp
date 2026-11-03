@@ -1231,13 +1231,12 @@ TEST(RegionalEnergy, ScalarEdgeGateSealsExchangeAndEmptyGateKeepsLegacyResults) 
     EXPECT_EQ(legacy.at(1, 0), 7.5);
 }
 
-TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingInput) {
+namespace {
+std::string RegionalRecordAtByteLimit(EnergyRecords& records, EnergyAges& ages) {
     constexpr std::size_t channel_count = 64;
     constexpr std::size_t values_per_page = 256 * channel_count;
     constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
     std::string record = "EFS1 64 0\n";
-    EnergyRecords records;
-    EnergyAges ages;
     bool complete = false;
     for (int px = 0; !complete; ++px) {
         std::string row = "P " + std::to_string(px) + " 0";
@@ -1256,7 +1255,7 @@ TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingI
                     row.insert(*offset, extra, '1');
                     padding -= extra;
                 }
-                ASSERT_EQ(padding, 0u);
+                EXPECT_EQ(padding, 0u);
                 complete = true;
                 break;
             }
@@ -1270,6 +1269,15 @@ TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingI
             ages[owner] = 0;
         }
     }
+    return record;
+}
+} // namespace
+
+TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingInput) {
+    constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
+    EnergyRecords records;
+    EnergyAges ages;
+    const auto record = RegionalRecordAtByteLimit(records, ages);
     ASSERT_EQ(record.size(), byte_limit);
     EnergyFieldState field;
     ASSERT_TRUE(field.DeserializeRegionalRecord(record));
@@ -1300,6 +1308,37 @@ TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingI
     EXPECT_EQ(output.clipped_raw, 1u);
     EXPECT_EQ(output.ages, ages);
     EXPECT_EQ(field.SerializeRegionalRecord(), record);
+}
+
+TEST(RegionalEnergy, MissingFinalNewlineAtByteLimitRefusesWithoutThrowingOrChangingState) {
+    EnergyRecords records;
+    EnergyAges ages;
+    auto record = RegionalRecordAtByteLimit(records, ages);
+    const auto value = record.find(":9");
+    ASSERT_NE(value, std::string::npos);
+    // The canonical encoding needs one additional byte; the unterminated final
+    // line still parses successfully and keeps the input exactly at the limit.
+    record.insert(value + 2, 1, '1');
+    record.pop_back();
+    ASSERT_EQ(record.size(), EnergyFieldState::kMaxRegionalRecordBytes);
+    ASSERT_NE(record.back(), '\n');
+
+    EnergyFieldState field(2);
+    const std::string saved = "EFS1 2 0\nP 0 0 0:100\n";
+    ASSERT_TRUE(field.DeserializeRegionalRecord(saved));
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 1));
+    const EnergyRecords owners{{{0, 0}, ActiveRegionRecord{}}};
+    ASSERT_TRUE(field.ValidateRegionalOwners(owners, {{{0, 0}, 0}}));
+    bool accepted = true;
+    EXPECT_NO_THROW(accepted = field.DeserializeRegionalRecord(record));
+    EXPECT_FALSE(accepted);
+    EXPECT_EQ(field.channels(), 2);
+    EXPECT_EQ(field.SerializeRegionalRecord(), saved);
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+    const std::array due{RegionKey{0, 0}};
+    const auto result = RegionalStep(field, 1, owners, due, {});
+    EXPECT_EQ(field.at_cell(0, 0), 101u);
+    EXPECT_EQ(result.clipped_raw, 0u);
 }
 
 TEST(RegionalEnergy, RegionalWriterRefusesIncompatibleLegacyPagesWithoutChangingBytes) {
@@ -1365,6 +1404,111 @@ TEST(RegionalEnergy, AffectedValidationMatchesFullWalkWithThousandsOfDormantPage
         EXPECT_EQ(field.CanonicalRegionalBytes(), reference.CanonicalRegionalBytes());
         EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
         ages = actual.ages;
+    }
+}
+
+TEST(RegionalEnergy, LedgerLookupsMatchForcedFullScansWithThousandsOfRecordsAndFewDueOwners) {
+    ActiveRegionLedger ledger({0, 1, 2});
+    for (int x = -32; x < 32; ++x)
+        for (int z = -32; z < 32; ++z)
+            ledger.pin({x, z}, true, WorldClock{});
+    ASSERT_GE(ledger.records().size(), 4096u);
+    EnergyFieldState field;
+    // Include both axes, negative coordinates, shared and separate physical pages,
+    // legacy empty pages, and distant owners whose metadata the scheduler changes.
+    ASSERT_TRUE(field.DeserializeRecord(
+        "EFS1 1 8\nP -4 -4\nP -1 -1 255:16000\nP 0 0 0:100 136:17000\n"
+        "P 0 -1 240:12000\nP 1 0 4:16000 5:500\nP 3 0 15:9000\nP 4 0 255:1\n"
+        "P 7 7\nP 41 41 255:6000\n",
+        0));
+    EnergyAges ages{{{-1, -1}, 3},
+                    {{0, -1}, 5},
+                    {{0, 0}, 7},
+                    {{1, 0}, 5},
+                    {{2, 0}, 3},
+                    {{3, 0}, 7},
+                    {{31, 31}, 5}};
+    ASSERT_TRUE(field.ValidateRegionalOwners(ledger.records(), ages));
+    auto reference = field;
+    const std::array due{RegionKey{0, 0}, RegionKey{3, 0}};
+    const std::array<Luminumbra::world::RegionWork, 1> work{{{{0, 0}, 1, 0, 0, 0}}};
+    bool border_without_due = false;
+    for (std::uint64_t tick = 1; tick <= 17; ++tick) {
+        SCOPED_TRACE(tick);
+        // Exercise valid state/cadence mutations between ticks without replacing
+        // the energy validation marker. Only two owners enter the interior due set.
+        ledger.schedule(WorldClock(tick), {}, work, [](RegionKey) { return 42u; });
+        const auto selected =
+            tick % 3 == 0 ? std::span<const RegionKey>{} : std::span<const RegionKey>{due};
+        if (tick % 4 == 0) {
+            ASSERT_TRUE(field.QueueRegionalDeposit(1, 65, 0, 0, 700));
+            ASSERT_TRUE(reference.QueueRegionalDeposit(1, 65, 0, 0, 700));
+        }
+        EnergyFieldStateTestAccess::Invalidate(reference);
+        EnergyResult actual, expected;
+        ASSERT_TRUE(field.TickRegional(tick, ledger, selected, ages, actual));
+        // A raw map has no trusted mutation boundary and forces both record
+        // validation and the original full-ledger border discovery.
+        ASSERT_TRUE(reference.TickRegional(tick, ledger.records(), selected, ages, expected));
+        EXPECT_EQ(actual.ages, expected.ages);
+        EXPECT_EQ(actual.clipped_raw, expected.clipped_raw);
+        EXPECT_EQ(actual.staged_pages, expected.staged_pages);
+        EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
+        ASSERT_EQ(actual.work.size(), expected.work.size());
+        for (std::size_t i = 0; i < actual.work.size(); ++i) {
+            EXPECT_EQ(actual.work[i].key, expected.work[i].key);
+            EXPECT_EQ(actual.work[i].region_ticks, expected.work[i].region_ticks);
+            EXPECT_EQ(actual.work[i].entity_updates, expected.work[i].entity_updates);
+            EXPECT_EQ(actual.work[i].water_cells, expected.work[i].water_cells);
+            EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
+        }
+        EXPECT_EQ(field.SerializeRegionalRecord(), reference.SerializeRegionalRecord());
+        EXPECT_EQ(field.CanonicalRegionalBytes(), reference.CanonicalRegionalBytes());
+        EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
+        EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        border_without_due =
+            border_without_due || (selected.empty() && actual.diffusion_pages != 0);
+        ages = actual.ages;
+    }
+    EXPECT_TRUE(border_without_due);
+}
+
+TEST(RegionalEnergy, FullValidationRejectsTamperedRecordMetadataDespiteCachedValidation) {
+    ActiveRegionLedger ledger;
+    ledger.pin({0, 0}, true, WorldClock{});
+    const RegionKey dormant{100, 100};
+    ledger.pin(dormant, true, WorldClock{});
+    EnergyFieldState initial;
+    ASSERT_TRUE(initial.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:100\n"));
+    const EnergyAges ages{{{0, 0}, 0}};
+    ASSERT_TRUE(initial.ValidateRegionalOwners(ledger.records(), ages));
+    const auto saved = initial.SerializeRegionalRecord();
+    for (int mutation = 0; mutation < 3; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto field = initial;
+        auto tampered = ledger;
+        // Deliberately bypass the ledger's const-only record interface and leave
+        // the energy marker intact. Full admission must still check every record.
+        auto& record = const_cast<EnergyRecords&>(tampered.records()).at(dormant);
+        if (mutation == 0) {
+            record.state = static_cast<RegionState>(255);
+        } else if (mutation == 1) {
+            record.cadence_shift = 17;
+        } else {
+            record.cadence_phase = 1;
+        }
+        EnergyResult result;
+        ASSERT_TRUE(field.TickRegional(1, tampered, {}, ages, result));
+        EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        EXPECT_EQ(field.SerializeRegionalRecord(), saved);
+        EXPECT_FALSE(field.ValidateRegionalOwners(tampered.records(), result.ages));
+        EXPECT_FALSE(EnergyFieldStateTestAccess::Validated(field));
+        EXPECT_FALSE(field.ValidateRegionalOwners(tampered.records(), result.ages));
+        result.clipped_raw = 91;
+        EXPECT_FALSE(field.TickRegional(2, tampered.records(), {}, ages, result));
+        EXPECT_EQ(result.clipped_raw, 91u);
+        EXPECT_EQ(field.SerializeRegionalRecord(), saved);
+        EXPECT_TRUE(field.ValidateRegionalOwners(ledger.records(), ages));
     }
 }
 
@@ -1498,7 +1642,7 @@ TEST(RegionalEnergy, CachedOwnersTrackRemovalAndStillRequireCurrentRecordsAndAge
     EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
     const auto before = field.SerializeRegionalRecord();
     EXPECT_FALSE(field.TickRegional(3, records, {}, {}, result));
-    EXPECT_FALSE(field.TickRegional(3, {}, {}, {}, result));
+    EXPECT_FALSE(field.TickRegional(3, EnergyRecords{}, {}, {}, result));
     EXPECT_EQ(field.SerializeRegionalRecord(), before);
     const std::array frozen_due{dormant};
     EXPECT_FALSE(field.TickRegional(3, records, frozen_due, ages, result));
