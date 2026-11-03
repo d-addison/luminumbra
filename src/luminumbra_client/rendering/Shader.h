@@ -7,6 +7,7 @@
 #include <unordered_map> // Added for the cache
 #include <vector>
 
+#include "AttributedGl.h"
 #include "ShaderReflection.h" // reflect resource layout at load time
 
 namespace Luminumbra::Rendering {
@@ -93,9 +94,9 @@ private:
     // source files, compiles+links, and returns a NEW program name (0 on any
     // failure; m_diagnostic holds the reason). Does NOT touch m_id -- the caller
     // decides whether to adopt it, which is what makes rollback safe.
-    GLuint buildProgram(const char* vertexPath, const char* fragmentPath);
+    AttributedGl::Program buildProgram(const char* vertexPath, const char* fragmentPath);
 
-    GLuint m_id = 0;
+    AttributedGl::Program m_id{};
     bool m_valid = false;
     std::string m_debug_name;
     std::string m_diagnostic;

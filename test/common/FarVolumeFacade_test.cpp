@@ -159,7 +159,8 @@ TEST(FarVolumeFacade, SameAuthorityCompilesAllTiersAndNegativeCoordinates) {
             ADD_FAILURE() << "mesh bounds missing";
             return;
         }
-        EXPECT_EQ(result.mesh.origin_meters.y + result.mesh.bounds->min[1], -.25);
+        EXPECT_EQ(static_cast<double>(result.mesh.origin_meters.y) + result.mesh.bounds->min[1],
+                  -.25);
         EXPECT_GT(result.work.height_samples, 129u * 129u) << "actual normal halo must be sampled";
         EXPECT_LE(result.work.height_samples, 131u * 131u);
         EXPECT_EQ(result.work.density_samples,
@@ -475,6 +476,46 @@ TEST(FarVolumeFacade,
     }
 }
 
+// Lane A #176, 9b04e1a6:test/common/FarVolume_test.cpp:436.
+TEST(FarVolumeFacade, BoxKernelHasAnalyticalTransferAndExposesResidualPhaseAlias) {
+    constexpr double pi = 3.14159265358979323846;
+    for (const std::uint32_t spacing : {16u, 32u, 64u})
+        for (const double cycles : {0.0, 0.25, 0.5, 1.0, 2.0})
+            for (int phase = 0; phase < 8; ++phase) {
+                const double phi = 2.0 * pi * static_cast<double>(phase) / 8.0;
+                const auto value = BoxFilterFarVolumeCarve(
+                    glm::vec3(0.0f), spacing, [cycles, phi, spacing](const glm::vec3& p) {
+                        return static_cast<float>(
+                            2.0 + std::cos(2.0 * pi * cycles * static_cast<double>(p.x) /
+                                               static_cast<double>(spacing) +
+                                           phi));
+                    });
+                // Independent transfer of the two midpoint taps along X.
+                // The four identical Y/Z pairs do not change this cosine factor.
+                const double expected = 2.0 + std::cos(phi) * std::cos(pi * cycles * 0.5);
+                EXPECT_NEAR(value, expected, 3.0e-7)
+                    << "spacing=" << spacing << " cycles=" << cycles << " phase=" << phase;
+            }
+    // The spacing-frequency mode is cancelled, but twice that frequency aliases
+    // at full amplitude. The finite quadrature is not an ideal low-pass filter.
+    EXPECT_NEAR(BoxFilterFarVolumeCarve(glm::vec3(0.0f),
+                                        16,
+                                        [](const glm::vec3& p) {
+                                            return static_cast<float>(
+                                                2.0 + std::cos(2.0 * pi * p.x / 16.0));
+                                        }),
+                2.0f,
+                1.0e-6f);
+    EXPECT_NEAR(BoxFilterFarVolumeCarve(glm::vec3(0.0f),
+                                        16,
+                                        [](const glm::vec3& p) {
+                                            return static_cast<float>(
+                                                2.0 + std::cos(4.0 * pi * p.x / 16.0));
+                                        }),
+                1.0f,
+                1.0e-6f);
+}
+
 TEST(FarVolumeFacade, OriginalFiniteBoxFilterRetainsTapOrderAndRefusals) {
     for (const std::uint32_t spacing : {16u, 32u, 64u}) {
         std::vector<glm::vec3> taps;
@@ -485,7 +526,7 @@ TEST(FarVolumeFacade, OriginalFiniteBoxFilterRetainsTapOrderAndRefusals) {
             });
         EXPECT_EQ(value, 4.5f);
         ASSERT_EQ(taps.size(), 8u);
-        const float half_tap = spacing * .25f;
+        const float half_tap = static_cast<float>(spacing) * .25f;
         EXPECT_EQ(taps.front(), (glm::vec3{-256 - half_tap, 8 - half_tap, 512 - half_tap}));
         EXPECT_EQ(taps.back(), (glm::vec3{-256 + half_tap, 8 + half_tap, 512 + half_tap}));
     }

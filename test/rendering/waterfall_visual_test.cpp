@@ -17,6 +17,7 @@
 // the determinism half (the gate's load-bearing  assertion) still runs +
 // writes the artifact, so the validator always has its determinism evidence.
 
+#include "../support/WorldgenTestData.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -633,6 +634,11 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
         Luminumbra::world::GameSession session;
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
+        // This crest-edit fixture needs the replenished standing-water rest level;
+        // finite catchment depletion is covered by the hydrology tests.
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWaterHighResEnabled(false);
         EXPECT_TRUE(session.CreateWorld("WfLive", "777", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
         world->debug_set_streaming_radius_cap(kStreamRadiusCap);
@@ -699,13 +705,9 @@ TEST(WaterfallLiveWater, DammingUpstreamExtinguishesSiteDeterministically) {
     const fs::path tmp = fs::temp_directory_path() / "luminumbra_waterfall_live_test";
     fs::remove_all(tmp);
     fs::create_directories(tmp / "worlds" / "atlas" / "presets");
-    fs::create_directories(tmp / "data" / "common");
     fs::copy_file(SourceRoot() / "worlds" / "atlas" / "presets" / "default.json",
                   tmp / "worlds" / "atlas" / "presets" / "default.json");
-    std::error_code ec;
-    fs::copy_file(SourceRoot() / "data" / "common" / "biomes.json",
-                  tmp / "data" / "common" / "biomes.json",
-                  ec);
+    Luminumbra::TestSupport::CopyWorldgenTestData(SourceRoot(), tmp);
     const std::string root =
         tmp.string() + std::string(1, static_cast<char>(fs::path::preferred_separator));
     const LiveWaterRun a = RunLiveWaterScenario(root);

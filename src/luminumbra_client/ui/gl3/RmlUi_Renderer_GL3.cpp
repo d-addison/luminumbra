@@ -1,3 +1,4 @@
+#include "rendering/AttributedGl.h"
 /*
  * This source file is part of RmlUi, the HTML/CSS Interface Middleware
  *
@@ -26,14 +27,20 @@
  *
  */
 
+#include "app/FrameAttribution.h"
+#include "core/Profiler.h"
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include "RmlUi_Renderer_GL3.h"
+#include "UiFilterCache.h"
 #include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/DecorationTypes.h>
 #include <RmlUi/Core/FileInterface.h>
 #include <RmlUi/Core/Geometry.h>
 #include <RmlUi/Core/Log.h>
+#include <RmlUi/Core/Math.h>
 #include <RmlUi/Core/MeshUtilities.h>
 #include <RmlUi/Core/Platform.h>
 #include <RmlUi/Core/SystemInterface.h>
@@ -474,7 +481,7 @@ private:
     Rml::Array<T, (size_t)Enum::Count> ids = {};
 };
 
-using Programs = EnumArray<GLuint, ProgramId>;
+using Programs = EnumArray<Luminumbra::Rendering::AttributedGl::Program, ProgramId>;
 using VertShaders = EnumArray<GLuint, VertShaderId>;
 using FragShaders = EnumArray<GLuint, FragShaderId>;
 
@@ -558,7 +565,10 @@ static bool CreateShader(GLuint& out_shader_id, GLenum shader_type, const char* 
 
     GLuint id = glCreateShader(shader_type);
     glShaderSource(id, 1, (const GLchar**)&code_string, NULL);
-    glCompileShader(id);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(id);
+    }
 
     GLint status = 0;
     glGetShaderiv(id, GL_COMPILE_STATUS, &status);
@@ -581,12 +591,12 @@ static bool CreateShader(GLuint& out_shader_id, GLenum shader_type, const char* 
     return true;
 }
 
-static bool CreateProgram(GLuint& out_program,
+static bool CreateProgram(Luminumbra::Rendering::AttributedGl::Program& out_program,
                           Uniforms& inout_uniform_map,
                           ProgramId program_id,
                           GLuint vertex_shader,
                           GLuint fragment_shader) {
-    GLuint id = glCreateProgram();
+    auto id = Luminumbra::Rendering::AttributedGl::CreateProgram(glCreateProgram);
     RMLUI_ASSERT(id);
 
     for (GLuint i = 0; i < (GLuint)VertexAttribute::Count; i++)
@@ -597,7 +607,11 @@ static bool CreateProgram(GLuint& out_program,
     glAttachShader(id, vertex_shader);
     glAttachShader(id, fragment_shader);
 
-    glLinkProgram(id);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+
+        glLinkProgram(id);
+    }
 
     glDetachShader(id, vertex_shader);
     glDetachShader(id, fragment_shader);
@@ -613,7 +627,7 @@ static bool CreateProgram(GLuint& out_program,
         Rml::Log::Message(
             Rml::Log::LT_ERROR, "OpenGL program linking failure: %s", info_log_string);
         delete[] info_log_string;
-        glDeleteProgram(id);
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, id);
         return false;
     }
 
@@ -799,6 +813,8 @@ static void BindTexture(const FramebufferData& fb) {
 }
 
 static bool CreateShaders(ProgramData& data) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::ShaderLoad);
     RMLUI_ASSERT(std::all_of(data.vert_shaders.begin(), data.vert_shaders.end(), [](auto&& value) {
         return value == 0;
     }));
@@ -831,17 +847,18 @@ static bool CreateShaders(ProgramData& data) {
             return ReportError("program", def.name_str);
     }
 
-    glUseProgram(data.programs[ProgramId::BlendMask]);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram,
+                                                    data.programs[ProgramId::BlendMask]);
     glUniform1i(data.uniforms.Get(ProgramId::BlendMask, UniformId::TexMask), 1);
 
-    glUseProgram(0);
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
 
     return true;
 }
 
 static void DestroyShaders(const ProgramData& data) {
-    for (GLuint id : data.programs)
-        glDeleteProgram(id);
+    for (const auto& id : data.programs)
+        Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, id);
 
     for (GLuint id : data.vert_shaders)
         glDeleteShader(id);
@@ -864,6 +881,9 @@ RenderInterface_GL3::RenderInterface_GL3() {
 }
 
 RenderInterface_GL3::~RenderInterface_GL3() {
+    for (const auto& entry : filter_quad_cache.entries())
+        if (entry.valid && entry.value)
+            RenderInterface_GL3::ReleaseGeometry(entry.value);
     if (fullscreen_quad_geometry) {
         RenderInterface_GL3::ReleaseGeometry(fullscreen_quad_geometry);
         fullscreen_quad_geometry = {};
@@ -1166,7 +1186,8 @@ void RenderInterface_GL3::RenderGeometry(Rml::CompiledGeometryHandle handle,
     }
 
     glBindVertexArray(geometry->vao);
-    glDrawElements(GL_TRIANGLES, geometry->draw_count, GL_UNSIGNED_INT, (const GLvoid*)0);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawElements, GL_TRIANGLES, geometry->draw_count, GL_UNSIGNED_INT, (const GLvoid*)0);
 
     glBindVertexArray(0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -1303,6 +1324,8 @@ struct TGAHeader {
 
 Rml::TextureHandle RenderInterface_GL3::LoadTexture(Rml::Vector2i& texture_dimensions,
                                                     const Rml::String& source) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::TextureLoad);
     Rml::FileInterface* file_interface = Rml::GetFileInterface();
     Rml::FileHandle file_handle = file_interface->Open(source);
     if (!file_handle) {
@@ -1378,6 +1401,8 @@ Rml::TextureHandle RenderInterface_GL3::LoadTexture(Rml::Vector2i& texture_dimen
 
 Rml::TextureHandle RenderInterface_GL3::GenerateTexture(Rml::Span<const Rml::byte> source_data,
                                                         Rml::Vector2i source_dimensions) {
+    const Luminumbra::Client::Attribution::PhaseScope texture_phase(
+        Luminumbra::Client::Attribution::Phase::TextureLoad);
     RMLUI_ASSERT(source_data.data() &&
                  source_data.size() == size_t(source_dimensions.x * source_dimensions.y * 4));
 
@@ -1394,6 +1419,18 @@ void RenderInterface_GL3::DrawFullscreenQuad() {
 }
 
 void RenderInterface_GL3::DrawFullscreenQuad(Rml::Vector2f uv_offset, Rml::Vector2f uv_scaling) {
+    if (uv_offset == Rml::Vector2f() && uv_scaling == Rml::Vector2f(1.f)) {
+        DrawFullscreenQuad();
+        return;
+    }
+    const Luminumbra::Client::FilterQuadKey key{.offset_x = uv_offset.x,
+                                                .offset_y = uv_offset.y,
+                                                .scale_x = uv_scaling.x,
+                                                .scale_y = uv_scaling.y};
+    if (const auto* cached = filter_quad_cache.find(key)) {
+        RenderGeometry(*cached, {}, RenderInterface_GL3::TexturePostprocess);
+        return;
+    }
     Rml::Mesh mesh;
     Rml::MeshUtilities::GenerateQuad(mesh, Rml::Vector2f(-1), Rml::Vector2f(2), {});
     if (uv_offset != Rml::Vector2f() || uv_scaling != Rml::Vector2f(1.f)) {
@@ -1402,7 +1439,9 @@ void RenderInterface_GL3::DrawFullscreenQuad(Rml::Vector2f uv_offset, Rml::Vecto
     }
     const Rml::CompiledGeometryHandle geometry = CompileGeometry(mesh.vertices, mesh.indices);
     RenderGeometry(geometry, {}, RenderInterface_GL3::TexturePostprocess);
-    ReleaseGeometry(geometry);
+    const auto replaced = filter_quad_cache.store(key, geometry);
+    if (replaced)
+        ReleaseGeometry(replaced);
 }
 
 static Rml::Colourf ConvertToColorf(Rml::ColourbPremultiplied c0) {
@@ -1439,7 +1478,18 @@ static void SetTexCoordLimits(GLint tex_coord_min_location,
 
 static void SetBlurWeights(GLint weights_location, float sigma) {
     constexpr int num_weights = BLUR_NUM_WEIGHTS;
-    float weights[num_weights];
+    // Only sigma determines the normalized kernel. Eight exact entries avoid
+    // repeated exponentials for the shipped blur/shadow radii, with no GL state
+    // assumptions and no change to the shader's uniform upload.
+    using Weights = std::array<float, num_weights>;
+    thread_local Luminumbra::Client::UiFilterCache<Luminumbra::Client::BlurKernelKey, Weights>
+        kernels;
+    const Luminumbra::Client::BlurKernelKey key{.sigma = sigma};
+    if (const auto* cached = kernels.find(key)) {
+        glUniform1fv(weights_location, num_weights, cached->data());
+        return;
+    }
+    Weights weights{};
     float normalization = 0.0f;
     for (int i = 0; i < num_weights; i++) {
         if (Rml::Math::Absolute(sigma) < 0.1f)
@@ -1453,7 +1503,8 @@ static void SetBlurWeights(GLint weights_location, float sigma) {
     for (int i = 0; i < num_weights; i++)
         weights[i] /= normalization;
 
-    glUniform1fv(weights_location, (GLsizei)num_weights, &weights[0]);
+    kernels.store(key, weights);
+    glUniform1fv(weights_location, num_weights, weights.data());
 }
 
 void RenderInterface_GL3::RenderBlur(float sigma,
@@ -1836,7 +1887,11 @@ void RenderInterface_GL3::RenderShader(Rml::CompiledShaderHandle shader_handle,
 
             SubmitTransformUniform(translation);
             glBindVertexArray(geometry.vao);
-            glDrawElements(GL_TRIANGLES, geometry.draw_count, GL_UNSIGNED_INT, (const GLvoid*)0);
+            Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                        GL_TRIANGLES,
+                                                        geometry.draw_count,
+                                                        GL_UNSIGNED_INT,
+                                                        (const GLvoid*)0);
             glBindVertexArray(0);
         } break;
         case CompiledShaderType::Creation: {
@@ -1850,7 +1905,11 @@ void RenderInterface_GL3::RenderShader(Rml::CompiledShaderHandle shader_handle,
 
             SubmitTransformUniform(translation);
             glBindVertexArray(geometry.vao);
-            glDrawElements(GL_TRIANGLES, geometry.draw_count, GL_UNSIGNED_INT, (const GLvoid*)0);
+            Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                        GL_TRIANGLES,
+                                                        geometry.draw_count,
+                                                        GL_UNSIGNED_INT,
+                                                        (const GLvoid*)0);
             glBindVertexArray(0);
         } break;
         case CompiledShaderType::Invalid: {
@@ -1885,6 +1944,8 @@ void RenderInterface_GL3::BlitLayerToPostprocessPrimary(Rml::LayerHandle layer_h
 }
 
 void RenderInterface_GL3::RenderFilters(Rml::Span<const Rml::CompiledFilterHandle> filter_handles) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::UiFilters);
     for (const Rml::CompiledFilterHandle filter_handle : filter_handles) {
         const CompiledFilter& filter = *reinterpret_cast<const CompiledFilter*>(filter_handle);
         const FilterType type = filter.type;
@@ -2126,8 +2187,10 @@ Rml::CompiledFilterHandle RenderInterface_GL3::SaveLayerAsMaskImage() {
 void RenderInterface_GL3::UseProgram(ProgramId program_id) {
     RMLUI_ASSERT(program_data);
     if (active_program != program_id) {
-        if (program_id != ProgramId::None)
-            glUseProgram(program_data->programs[program_id]);
+        if (program_id != ProgramId::None) {
+            Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram,
+                                                            program_data->programs[program_id]);
+        }
         active_program = program_id;
     }
 }
@@ -2253,7 +2316,13 @@ void RenderInterface_GL3::ResetProgram() {
     UseProgram(ProgramId::None);
 }
 
-bool RmlGL3::Initialize(Rml::String* out_message) {
+bool RmlGL3::Initialize(
+#if defined RMLUI_PLATFORM_EMSCRIPTEN || !defined RMLUI_GL3_CUSTOM_LOADER
+    Rml::String* out_message
+#else
+    Rml::String*
+#endif
+) {
 #if defined RMLUI_PLATFORM_EMSCRIPTEN
     if (out_message)
         *out_message = "Started Emscripten WebGL renderer.";

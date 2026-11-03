@@ -1,12 +1,24 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "core/Log.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -27,6 +39,16 @@ bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag) {
         if (argv[i] == flag) {
             return true;
         }
+    }
+    return false;
+}
+
+bool HasCommandLineOption(int argc, char* argv[], const std::string& flag) {
+    const std::string assignment_prefix = flag + "=";
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument = argv[i];
+        if (argument == flag || argument.starts_with(assignment_prefix))
+            return true;
     }
     return false;
 }
@@ -114,7 +136,8 @@ CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture
 
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
-static bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
+namespace {
+bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
     const auto x_pos = value.find_first_of("xX");
     if (x_pos == std::string::npos || x_pos == 0 || x_pos + 1 >= value.size()) {
         return false;
@@ -132,10 +155,91 @@ static bool ParseResolution(const std::string& value, int& out_width, int& out_h
     }
 }
 
+void ParseSurfaceRadiusOptions(int argc,
+                               char* argv[],
+                               int& surface_radius,
+                               int& collision_radius,
+                               int& benchmark_stream_radius) {
+    // Validate both spellings and every occurrence before any scenario can
+    // create a world. Missing/invalid values must not fall back to a default.
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument(argv[i]);
+        for (const auto flag : {std::string_view("--horizon-radius"),
+                                std::string_view("--collision-radius"),
+                                std::string_view("--render-benchmark-stream-radius")}) {
+            std::string_view value;
+            if (argument == flag) {
+                if (i + 1 < argc)
+                    value = argv[++i];
+            } else if (argument.starts_with(flag) && argument.size() > flag.size() &&
+                       argument[flag.size()] == '=') {
+                value = argument.substr(flag.size() + 1);
+            } else {
+                continue;
+            }
+            int& radius = flag == "--horizon-radius"     ? surface_radius
+                          : flag == "--collision-radius" ? collision_radius
+                                                         : benchmark_stream_radius;
+            if (!World::TryParseSurfaceRadius(value, radius))
+                throw std::invalid_argument(std::string(flag) + " requires 0..12 chunks");
+        }
+    }
+    if (HasCommandLineOption(argc, argv, "--render-benchmark-stream-radius") &&
+        GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2") != "v4")
+        throw std::invalid_argument("--render-benchmark-stream-radius requires schema v4");
+}
+} // namespace
+
+RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
+    // Admission precedes --save-root directory creation.
+    int surface_radius = 0;
+    int collision_radius = 0;
+    int benchmark_stream_radius = 0;
+    ParseSurfaceRadiusOptions(
+        argc, argv, surface_radius, collision_radius, benchmark_stream_radius);
+    RuntimePathOptions options;
+    for (const char* flag : {"--runtime-root", "--save-root"}) {
+        std::filesystem::path& path =
+            std::string(flag) == "--runtime-root" ? options.runtime_root : options.save_root;
+        bool seen = false;
+        const std::string prefix = std::string(flag) + "=";
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            if (argument != flag && argument.rfind(prefix, 0) != 0)
+                continue;
+            if (seen)
+                throw std::invalid_argument(std::string(flag) + " may only be supplied once");
+            seen = true;
+            std::string value;
+            if (argument == flag) {
+                if (i + 1 < argc)
+                    value = argv[++i];
+            } else {
+                value = argument.substr(prefix.size());
+            }
+            path = std::filesystem::path(value);
+            if (path.empty() || !Filesystem::IsAbsolutePath(path))
+                throw std::invalid_argument(std::string(flag) + " requires an absolute directory");
+        }
+    }
+    if (!options.save_root.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(options.save_root, error);
+        if (error || !std::filesystem::is_directory(options.save_root, error) || error)
+            throw std::invalid_argument("--save-root cannot be created: " +
+                                        options.save_root.string());
+    }
+    return options;
+}
+
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
     RuntimeScenarioConfig config;
+    ParseSurfaceRadiusOptions(
+        argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
     config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    config.systems_config_path = GetCommandLineOption(argc, argv, "--systems-config", "");
+    config.preset_json_path = GetCommandLineOption(argc, argv, "--preset-json", "");
     //  the visual-sweep capture matrix can be selected with the
     // LUMINUMBRA_VISUAL_SWEEP=1 env flag (in addition to --scenario), so existing
     // auto/server launch wrappers can opt in without a CLI change. An explicit
@@ -149,7 +253,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     config.auto_create_world = HasCommandLineFlag(argc, argv, "--auto-create-world");
     config.auto_enter_world = HasCommandLineFlag(argc, argv, "--auto-enter-world");
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
-    config.enable_audio = HasCommandLineFlag(argc, argv, "--enable-audio");
+    config.enable_audio = true; // --enable-audio remains accepted for compatibility.
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
 
@@ -189,10 +293,6 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
         config.avatars = 2; // animal + human
     config.readiness_timeout_seconds = GetCommandLineIntOption(
         argc, argv, "--readiness-timeout", config.readiness_timeout_seconds);
-    config.horizon_radius =
-        GetCommandLineIntOption(argc, argv, "--horizon-radius", config.horizon_radius);
-    config.collision_radius =
-        GetCommandLineIntOption(argc, argv, "--collision-radius", config.collision_radius);
     config.coverage_radius =
         GetCommandLineIntOption(argc, argv, "--coverage-radius", config.coverage_radius);
     config.min_renderable_chunks = static_cast<size_t>(GetCommandLineUInt64Option(
@@ -215,7 +315,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     config.skinned_normal_texture =
         GetCommandLineOption(argc, argv, "--skinned-normal-texture", "");
     if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty()) {
-        std::ifstream archetype_in(root_dir / config.creature_archetype);
+        Luminumbra::Filesystem::ContentInput archetype_in(root_dir / config.creature_archetype);
         if (archetype_in.is_open()) {
             try {
                 nlohmann::json archetype;

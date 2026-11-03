@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 namespace Luminumbra::Server {
@@ -39,6 +40,21 @@ public:
                        scheduled,
                        update_ms_ - timing.water + activation_wait_ms);
         budget_.Record(SimBudgetStage::ServerWater, tick, water_work, timing.water);
+    }
+
+    void RecordWorkItems(std::uint64_t tick,
+                         const Systems::SHIELD_WorldSystem::StreamingBudgetFrameStats& streaming,
+                         Systems::PhysicsSystem::WorkItems physics,
+                         std::uint64_t water_cells,
+                         std::uint64_t snapshot_copies) {
+        using luminumbra::simulation::SimWork;
+        budget_.RecordWork(SimWork::WaterCells, tick, water_cells);
+        budget_.RecordWork(SimWork::StreamingGeneration, tick, streaming.scheduled_generation);
+        budget_.RecordWork(SimWork::StreamingMeshing, tick, streaming.scheduled_meshing);
+        budget_.RecordWork(SimWork::PhysicsBodies, tick, physics.bodies);
+        budget_.RecordWork(SimWork::PhysicsCharacters, tick, physics.characters);
+        budget_.RecordWork(SimWork::SnapshotCopies, tick, snapshot_copies);
+        budget_.RecordWork(SimWork::ActivationQueries, tick, streaming.target_surface_columns);
     }
 
 private:

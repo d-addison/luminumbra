@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 
 // PHEROMONE TRAIL GROUND DECAL — render-only deferred decal.
 // Reconstructs world position from the deferred G-buffer (gPosition = VIEW-SPACE,
@@ -14,6 +15,7 @@
 
 layout(location = 0) out vec4 FragColor;
 
+uniform sampler2D gDepth;
 uniform sampler2D gPosition;      // unit 0: VIEW-SPACE position (RGB16F)
 uniform sampler2D u_scentField;   // unit 1: RG16F (R=food, G=home)
 
@@ -29,7 +31,8 @@ const vec3 FOOD_COLOR = vec3(0.95, 0.62, 0.18);
 const vec3 HOME_COLOR = vec3(0.25, 0.55, 0.85);
 
 void main() {
-    vec3 viewPos = texture(gPosition, TexCoords).xyz;
+    vec3 viewPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)) { FragColor = vec4(0.0); return; }
     // Empty/sky G-buffer pixels are (0,0,0) in view space; reject them.
     if (dot(viewPos, viewPos) < 1e-8) { FragColor = vec4(0.0); return; }
 

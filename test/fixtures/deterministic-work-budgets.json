@@ -1,0 +1,52 @@
+{
+  "schema": "luminumbra.deterministic_work_budgets.v1",
+  "limits": {
+    "idle": {
+      "uploaded_bytes": 0,
+      "hashed_bytes": 0,
+      "uploads": 0,
+      "surface_misses": 0,
+      "surface_samples": 0,
+      "deferred_columns": 0
+    },
+    "foliage": {
+      "surface_misses": 4,
+      "surface_samples": 32768,
+      "uploaded_bytes": 2700000,
+      "uploads": 4,
+      "copied_bytes": 5400000,
+      "hashed_bytes": 0,
+      "deferred_columns": 5,
+      "backlog_growth": 5,
+      "drain_steps": 3
+    },
+    "terrain_upload": {
+      "uploaded_bytes": 4194304,
+      "uploads": 8,
+      "backlog": 17,
+      "backlog_growth": 17,
+      "drain_steps": 3
+    },
+    "water_upload": {
+      "uploaded_bytes": 1048576,
+      "uploads": 4,
+      "backlog": 17,
+      "backlog_growth": 17,
+      "drain_steps": 5
+    },
+    "simulation": {
+      "water_cells": 64,
+      "streaming_generation": 64,
+      "streaming_meshing": 64,
+      "physics_bodies": 1,
+      "physics_characters": 2,
+      "active_region_records": 18,
+      "active_region_due": 18,
+      "snapshot_copies": 128,
+      "activation_queries": 5,
+      "backlog": 128,
+      "backlog_growth": 64,
+      "drain_steps": 64
+    }
+  }
+}

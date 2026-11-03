@@ -29,6 +29,8 @@ void UpdateCaveFlourishes(ClientAppContext& app,
 // TEARDOWN CONTRACT: the scan jobs hold a raw SHIELD_WorldSystem* — every
 // world transition (CreateWorld / session reset) MUST drain the in-flight
 // batch first, exactly as before the extraction.
+// Finish readers but retain scan results for the still-live world.
+void WaitForBackgroundWorldScan(Luminumbra::JobSystem& jobs);
 void DrainBackgroundWorldScan(Luminumbra::JobSystem& jobs);
 
 } // namespace Luminumbra::Client::App

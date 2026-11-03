@@ -11,49 +11,6 @@ namespace fs = std::filesystem;
 // transport uses the same interface. Run: one process --net-host --port
 // P, another --net-join --host H --port P.
 // ---------------------------------------------------------------------------
-void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
-    slot.transport = std::make_unique<Luminumbra::Net::TcpTransport>();
-    Luminumbra::Net::TcpTransport* transport = slot.transport.get();
-    const std::uint16_t port = slot.port;
-    slot.accepting = true;
-    slot.accept_result = std::async(std::launch::async, [transport, port]() {
-        return transport->Listen(port, /*timeout_ms=*/250);
-    });
-}
-
-bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
-    if (slot.accepted) {
-        return false;
-    }
-    if (!slot.accepting) {
-        StartRuntimeTcpAccept(slot);
-    }
-    if (!slot.accept_result.valid() ||
-        slot.accept_result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-        return false;
-    }
-
-    const bool accepted = slot.accept_result.get();
-    slot.accepting = false;
-    if (accepted) {
-        slot.accepted = true;
-        slot.connected = true;
-        return true;
-    }
-
-    slot.transport.reset();
-    return false;
-}
-
-void CloseRuntimeTcpSlot(RuntimeTcpClientSlot& slot) {
-    if (slot.accepting && slot.accept_result.valid()) {
-        slot.accept_result.wait();
-    }
-    if (slot.transport) {
-        slot.transport->Close();
-    }
-}
-
 int RunNetHostServerMode(const ServerCliOptions& options) {
     const std::uint32_t expected_clients = ExpectedNetworkClients(options);
     std::uint16_t last_accept_port = 0;
@@ -89,6 +46,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     }
 
     Luminumbra::Net::ReplicationServer server;
+    auto expected_hello = RuntimeHelloFrom(options);
     std::vector<RuntimeTcpClientSlot> slots;
     slots.reserve(expected_clients);
     for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {
@@ -115,8 +73,10 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     std::uint32_t left_count = 0;
     auto next_tick_time = std::chrono::steady_clock::now();
     while (executed < options.ticks) {
+        expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+        expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         for (RuntimeTcpClientSlot& slot : slots) {
-            if (PollRuntimeTcpAccept(slot)) {
+            if (PollRuntimeTcpAccept(slot, expected_hello)) {
                 slot.joined_tick = executed;
                 server.AddClient(slot.client_id, slot.transport.get());
                 accepted_count += 1;

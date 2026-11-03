@@ -5,9 +5,11 @@ import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import struct
+
+from fixture_paths import read_bytes, resolve_reference
 
 
 class Refusal(ValueError):
@@ -37,17 +39,27 @@ def fnv(data):
 
 
 def local(root, name, limit):
-    require(type(name) is str and re.fullmatch(r'[A-Za-z0-9_./-]+', name) is not None,
+    require(type(name) is str, "unsafe artifact name")
+    relative = PurePosixPath(name)
+    require(bool(relative.parts) and not relative.is_absolute() and '..' not in relative.parts
+            and ':' not in name and '\\' not in name, "escaped artifact")
+    require(re.fullmatch(r'[A-Za-z0-9_./-]+', name) is not None,
             "unsafe artifact name")
-    path = root / name
-    require(not Path(name).is_absolute() and '..' not in Path(name).parts, "escaped artifact")
+    root = root.resolve()
+    try:
+        path = resolve_reference(root, name)
+    except ValueError as exc:
+        raise Refusal("escaped artifact") from exc
     check = path
     while check != root:
         require(not check.is_symlink() and not (getattr(check.lstat(), "st_file_attributes", 0) & 0x400),
                 "linked artifact")
         check = check.parent
     require(path.is_file() and 0 < path.stat().st_size <= limit, "missing/oversized artifact")
-    return path.read_bytes()
+    try:
+        return read_bytes(root, path, limit=limit)
+    except ValueError as exc:
+        raise Refusal(str(exc)) from exc
 
 
 def expected_view_projection(camera):

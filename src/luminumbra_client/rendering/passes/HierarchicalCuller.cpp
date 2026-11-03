@@ -54,11 +54,11 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node,
 
     for (const auto& chunk : chunks) {
         glm::ivec3 coords = chunk.coords;
-        glm::vec3 chunk_center(coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
-                               coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
-                               coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
+        glm::vec3 chunk_center(static_cast<float>(coords.x * CHUNK_SIZE_X) + CHUNK_SIZE_X * 0.5f,
+                               static_cast<float>(coords.y * CHUNK_SIZE_Y) + CHUNK_SIZE_Y * 0.5f,
+                               static_cast<float>(coords.z * CHUNK_SIZE_Z) + CHUNK_SIZE_Z * 0.5f);
 
-        int child_index = 0;
+        std::size_t child_index = 0;
         if (chunk_center.x >= center.x)
             child_index += 1;
         if (chunk_center.z >= center.z)
@@ -69,7 +69,7 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node,
 
     // Create children for non-empty quadrants
     node->is_leaf = false;
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         if (!child_chunks[i].empty()) {
             // Center-based partitioning can assign a chunk that straddles the split.
             // Its child must enclose the complete chunk, including the portion across

@@ -27,11 +27,14 @@ if(LUMINUMBRA_ENABLE_TRACY)
     set(TRACY_ENABLE     ON  CACHE BOOL "" FORCE)
     set(TRACY_ON_DEMAND  ON  CACHE BOOL "" FORCE)
 
+    # Tracy v0.13.1, pinned to its immutable upstream commit.
+    set(LUMINUMBRA_TRACY_TAG "v0.13.1")
+    set(LUMINUMBRA_TRACY_REVISION "05cceee0df3b8d7c6fa87e9638af311dbabc63cb")
+
     FetchContent_Declare(
         tracy
         GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-        GIT_TAG        v0.13.1
-        GIT_SHALLOW    TRUE
+        GIT_TAG        "${LUMINUMBRA_TRACY_REVISION}"
     )
     FetchContent_MakeAvailable(tracy)
 
@@ -40,7 +43,7 @@ if(LUMINUMBRA_ENABLE_TRACY)
     target_link_libraries(luminumbra_profiler INTERFACE TracyClient)
     target_compile_definitions(luminumbra_profiler INTERFACE LUMINUMBRA_ENABLE_TRACY)
 
-    message(STATUS "Tracy Profiler vendored via FetchContent (v0.13.1, on-demand) -- zones ACTIVE")
+    message(STATUS "Tracy Profiler vendored via FetchContent (${LUMINUMBRA_TRACY_TAG}, on-demand) -- zones ACTIVE")
 else()
     message(STATUS "Tracy Profiler disabled (LUMINUMBRA_ENABLE_TRACY=OFF) -- Profiler.h zones are no-ops")
 endif()

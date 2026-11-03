@@ -109,14 +109,17 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
     // order tends to follow launch order -- further de-correlating declared id from accept rank.
     std::atomic<bool> done{false};
     std::vector<std::unique_ptr<std::atomic<bool>>> hello_sent;
-    hello_sent.reserve(kNumClients);
+    hello_sent.reserve(static_cast<std::size_t>(kNumClients));
     for (int i = 0; i < kNumClients; ++i)
         hello_sent.push_back(std::make_unique<std::atomic<bool>>(false));
     std::vector<std::thread> threads;
-    threads.reserve(kNumClients);
+    threads.reserve(static_cast<std::size_t>(kNumClients));
     for (int i = 0; i < kNumClients; ++i) {
-        threads.emplace_back(
-            RunDeclaringClient, port, declared_order[i], hello_sent[i].get(), &done);
+        threads.emplace_back(RunDeclaringClient,
+                             port,
+                             declared_order[static_cast<std::size_t>(i)],
+                             hello_sent[static_cast<std::size_t>(i)].get(),
+                             &done);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
 
@@ -184,7 +187,7 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
 
     // Every client actually connected and sent its Hello + marker.
     for (int i = 0; i < kNumClients; ++i) {
-        EXPECT_TRUE(hello_sent[i]->load(std::memory_order_relaxed))
+        EXPECT_TRUE(hello_sent[static_cast<std::size_t>(i)]->load(std::memory_order_relaxed))
             << "client " << i << " never sent its Hello";
     }
 

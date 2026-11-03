@@ -1,7 +1,7 @@
 # Doxygen configuration for the Luminumbra C++20 engine.
 
 PROJECT_NAME           = Luminumbra
-PROJECT_NUMBER         = 0.1.0
+PROJECT_NUMBER         = 0.3.0
 PROJECT_BRIEF          = "A C++20 voxel and entity-component-system engine"
 
 OUTPUT_DIRECTORY       = build/docs

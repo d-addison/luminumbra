@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -74,6 +78,7 @@ SyntheticSaveSpec Spec(const std::string& world_id, std::uint32_t chunks) {
     SyntheticSaveSpec spec;
     spec.world_id = world_id;
     spec.chunk_count = chunks;
+    spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
     return spec;
 }
 
@@ -96,9 +101,9 @@ TEST_F(SyntheticSaveFixture, CoordinateSpiralMatchesDocumentedPrefix) {
     for (int j = 0; j < 13; ++j) {
         for (int half = 0; half < 2; ++half) {
             const auto& c = coords[static_cast<std::size_t>(2 * j + half)];
-            EXPECT_EQ(c.x, columns[j].first) << "column " << j;
+            EXPECT_EQ(c.x, columns[static_cast<std::size_t>(j)].first) << "column " << j;
             EXPECT_EQ(c.y, half) << "column " << j;
-            EXPECT_EQ(c.z, columns[j].second) << "column " << j;
+            EXPECT_EQ(c.z, columns[static_cast<std::size_t>(j)].second) << "column " << j;
         }
     }
 }
@@ -120,8 +125,15 @@ TEST_F(SyntheticSaveFixture, WritesCatalogValidWorld) {
     ASSERT_TRUE(report.ok) << report.error;
     EXPECT_EQ(report.chunks_written, 24u);
     EXPECT_GT(report.region_files, 0u);
+    const auto metadata = nlohmann::json::parse(Read(report.save_dir / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), Persistence::kSavedPresetFormat);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              Persistence::StableChecksum(
+                  nlohmann::json::parse(Read(report.save_dir / "preset.json")).dump()));
+    EXPECT_EQ(Read(report.save_dir / "preset.json"), Read(spec.preset_source));
 
-    const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
+    const auto inspected =
+        Persistence::InspectSavedWorld(root, fs::path(LUMINUMBRA_SOURCE_ROOT), spec.world_id);
     EXPECT_EQ(inspected.error, "");
     EXPECT_TRUE(WorldSaveService::validate_save(report.save_dir));
     EXPECT_TRUE(fs::exists(WorldSaveService::world_manifest_path(report.save_dir)));
@@ -199,6 +211,16 @@ TEST_F(SyntheticSaveFixture, RefusesBadSpecAndExistingSave) {
     EXPECT_FALSE(second.ok);
     EXPECT_FALSE(second.error.empty());
     EXPECT_EQ(DiskBytes(first.save_dir), before);
+}
+
+TEST_F(SyntheticSaveFixture, RefusesMissingPresetSourceBeforeCreatingDirectories) {
+    const auto root = NewRoot("missing_source");
+    auto spec = Spec("missing_source", 1);
+    spec.preset_source.clear();
+    const auto report = WriteSyntheticSave(spec, root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.error.find("preset_source is required"), std::string::npos);
+    EXPECT_FALSE(fs::exists(root));
 }
 
 TEST_F(SyntheticSaveFixture, RefusesPreExistingLeafWithoutChangingItsContents) {
@@ -282,3 +304,23 @@ TEST_F(SyntheticSaveFixture, FailedWriteRemovesPartialSaveAndAllowsRetry) {
 }
 
 } // namespace
+
+TEST_F(SyntheticSaveFixture, PresetAdmissionPrecedesEveryDestinationWrite) {
+    const auto root = NewRoot("preset_admission");
+    fs::create_directories(root);
+    const auto source = root / "preset.json";
+    auto spec = Spec("refused", 1);
+    spec.preset_source = source;
+    const auto depth = Persistence::SavedInputLimits::kJsonNestingDepth;
+    for (const auto& bytes : {std::string("{"),
+                              std::string(depth + 1, '[') + "0" + std::string(depth + 1, ']'),
+                              std::string(Persistence::SavedInputLimits::kPresetBytes + 1, ' ')}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(source, bytes));
+        const auto before = DiskBytes(root);
+        const auto report = WriteSyntheticSave(spec, root);
+        EXPECT_FALSE(report.ok);
+        EXPECT_FALSE(report.error.empty());
+        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_FALSE(fs::exists(root / "worlds"));
+    }
+}

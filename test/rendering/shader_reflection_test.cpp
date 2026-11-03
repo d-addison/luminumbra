@@ -394,6 +394,40 @@ TEST_P(PassLayoutValidation, RealShaderMatchesRegisteredLayoutNonVacuously) {
     glDeleteProgram(prog);
 }
 
+TEST_P(PassLayoutValidation, FarWorldDepthUniformsAndFloatDepthRemainActive) {
+    const std::map<std::string, std::string> depth_samplers{{"lighting", "u_sceneDepth"},
+                                                            {"ssao", "gDepth"},
+                                                            {"ssao_gtao", "gDepth"},
+                                                            {"ssao_bilateral_upsample", "gDepth"},
+                                                            {"scent_decal", "gDepth"},
+                                                            {"debug_view", "gDepth"},
+                                                            {"aerial_perspective", "gDepth"}};
+    const auto found = depth_samplers.find(GetParam());
+    if (found == depth_samplers.end())
+        return;
+    const auto* entry = FindPassShaderLayout(GetParam());
+    ASSERT_NE(entry, nullptr);
+    const std::string root = LUMINUMBRA_SOURCE_ROOT;
+    std::string vertex, fragment, error;
+    ASSERT_TRUE(ReadShaderSource(root + "/" + entry->vert, vertex, error)) << error;
+    ASSERT_TRUE(ReadShaderSource(root + "/" + entry->frag, fragment, error)) << error;
+    const auto program = LinkProgram(vertex.c_str(), fragment.c_str(), error);
+    ASSERT_NE(program, 0u) << error;
+    const auto layout = ReflectProgramLayout(program);
+    const auto* depth = layout.find_sampler(found->second);
+    ASSERT_NE(depth, nullptr);
+    EXPECT_EQ(depth->type, static_cast<GLenum>(GL_SAMPLER_2D));
+    const char* inverse =
+        GetParam() == "aerial_perspective" ? "u_inverseProjection" : "u_gbufferInverseProjection";
+    EXPECT_GE(glGetUniformLocation(program, inverse), 0);
+    const auto mode_location = glGetUniformLocation(program, "u_farWorldLadder");
+    ASSERT_GE(mode_location, 0);
+    GLint mode = -1;
+    glGetUniformiv(program, mode_location, &mode);
+    EXPECT_EQ(mode, 0) << "Existing callers must default to the Legacy path";
+    glDeleteProgram(program);
+}
+
 INSTANTIATE_TEST_SUITE_P(RegisteredPasses,
                          PassLayoutValidation,
                          ::testing::ValuesIn(RegisteredLayoutNames()),
@@ -471,3 +505,35 @@ TEST(ReflectionCoverage, EverySamplerBindingPassRegistersAndValidatesALayout) {
 }
 
 } // namespace
+
+TEST(FarWorldWaterReflection, ProductionLadderKeepsIvec4ReadinessBufferAndMaterialOutputs) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const std::string root = LUMINUMBRA_SOURCE_ROOT;
+    std::string vertex, fragment, error;
+    ASSERT_TRUE(ReadShaderSource(root + "/res/shaders/g_buffer.vert", vertex, error)) << error;
+    ASSERT_TRUE(ReadShaderSource(root + "/res/shaders/g_buffer.frag", fragment, error)) << error;
+    const auto version_end = fragment.find('\n');
+    ASSERT_NE(version_end, std::string::npos);
+    fragment.insert(version_end + 1, "#define LUMINUMBRA_FAR_WORLD_LADDER 1\n");
+    const auto program = LinkProgram(vertex.c_str(), fragment.c_str(), error);
+    ASSERT_NE(program, 0u) << error;
+    const auto block =
+        glGetProgramResourceIndex(program, GL_SHADER_STORAGE_BLOCK, "FarWorldLiveOwnership");
+    ASSERT_NE(block, GL_INVALID_INDEX);
+    const GLenum binding_property = GL_BUFFER_BINDING;
+    GLint binding = -1;
+    glGetProgramResourceiv(
+        program, GL_SHADER_STORAGE_BLOCK, block, 1, &binding_property, 1, nullptr, &binding);
+    EXPECT_EQ(binding, 7);
+    const auto member = glGetProgramResourceIndex(program, GL_BUFFER_VARIABLE, "u_farLiveCells[0]");
+    ASSERT_NE(member, GL_INVALID_INDEX);
+    const GLenum properties[]{GL_TYPE, GL_ARRAY_STRIDE};
+    GLint values[2]{};
+    glGetProgramResourceiv(program, GL_BUFFER_VARIABLE, member, 2, properties, 2, nullptr, values);
+    EXPECT_EQ(values[0], static_cast<GLint>(GL_INT_VEC4));
+    EXPECT_EQ(values[1], 16);
+    EXPECT_EQ(glGetFragDataLocation(program, "gNormalMaterial"), 1);
+    EXPECT_EQ(glGetFragDataLocation(program, "gMetallicAO"), 3);
+    glDeleteProgram(program);
+}

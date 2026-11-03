@@ -110,10 +110,12 @@ FlatMaxMip FlattenMaxMip(const HeightMaxMip& mip) {
     EXPECT_LE(mip.levels, kMaxMipLevels);
     std::int32_t off = 0;
     for (int L = 0; L < mip.levels; ++L) {
-        f.offset[L] = off;
-        f.dim[L] = mip.dims[L];
-        f.data.insert(f.data.end(), mip.max_h[L].begin(), mip.max_h[L].end());
-        off += static_cast<std::int32_t>(mip.max_h[L].size());
+        f.offset[static_cast<std::size_t>(L)] = off;
+        f.dim[static_cast<std::size_t>(L)] = mip.dims[static_cast<std::size_t>(L)];
+        f.data.insert(f.data.end(),
+                      mip.max_h[static_cast<std::size_t>(L)].begin(),
+                      mip.max_h[static_cast<std::size_t>(L)].end());
+        off += static_cast<std::int32_t>(mip.max_h[static_cast<std::size_t>(L)].size());
     }
     return f;
 }
@@ -134,12 +136,14 @@ FlatSdfChain FlattenSdfChain(const SdfMipChain& c) {
     EXPECT_LE(f.levels, kMaxMipLevels);
     std::int32_t off = 0;
     for (int L = 0; L < f.levels; ++L) {
-        f.offset[L] = off;
-        f.nx[L] = c.nx[L];
-        f.ny[L] = c.ny[L];
-        f.nz[L] = c.nz[L];
-        f.data.insert(f.data.end(), c.levels[L].begin(), c.levels[L].end());
-        off += static_cast<std::int32_t>(c.levels[L].size());
+        f.offset[static_cast<std::size_t>(L)] = off;
+        f.nx[static_cast<std::size_t>(L)] = c.nx[static_cast<std::size_t>(L)];
+        f.ny[static_cast<std::size_t>(L)] = c.ny[static_cast<std::size_t>(L)];
+        f.nz[static_cast<std::size_t>(L)] = c.nz[static_cast<std::size_t>(L)];
+        f.data.insert(f.data.end(),
+                      c.levels[static_cast<std::size_t>(L)].begin(),
+                      c.levels[static_cast<std::size_t>(L)].end());
+        off += static_cast<std::int32_t>(c.levels[static_cast<std::size_t>(L)].size());
     }
     return f;
 }
@@ -361,11 +365,11 @@ TracerRun TimeTracer(GLuint program, GLuint out_buffer, int ray_count) {
     run.hit_mask.resize(static_cast<std::size_t>(ray_count));
     long long steps_total = 0;
     for (int i = 0; i < ray_count; ++i) {
-        const bool hit = (out[i] & 0x80000000u) != 0u;
-        run.hit_mask[i] = hit ? 1u : 0u;
+        const bool hit = (out[static_cast<std::size_t>(i)] & 0x80000000u) != 0u;
+        run.hit_mask[static_cast<std::size_t>(i)] = hit ? 1u : 0u;
         if (hit)
             ++run.hits;
-        steps_total += static_cast<long long>(out[i] & 0x7fffffffu);
+        steps_total += static_cast<long long>(out[static_cast<std::size_t>(i)] & 0x7fffffffu);
     }
     run.mean_steps_per_ray = static_cast<double>(steps_total) / ray_count;
     return run;
@@ -447,9 +451,12 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         // Upload ray dirs as vec4 (std430 aligns vec3 to 16 bytes -> use vec4).
         std::vector<float> dir4(static_cast<std::size_t>(ray_count) * 4, 0.0f);
         for (int i = 0; i < ray_count; ++i) {
-            dir4[i * 4 + 0] = static_cast<float>(dirs[i].x);
-            dir4[i * 4 + 1] = static_cast<float>(dirs[i].y);
-            dir4[i * 4 + 2] = static_cast<float>(dirs[i].z);
+            dir4[static_cast<std::size_t>(i * 4 + 0)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].x);
+            dir4[static_cast<std::size_t>(i * 4 + 1)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].y);
+            dir4[static_cast<std::size_t>(i * 4 + 2)] =
+                static_cast<float>(dirs[static_cast<std::size_t>(i)].z);
         }
         const GLuint dirs_buf =
             MakeStorageBuffer(static_cast<GLsizeiptr>(dir4.size() * sizeof(float)), dir4.data());
@@ -535,9 +542,11 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         long long sdf_false_hit = 0;  // SDF says hit, ground truth says miss
         long long sdf_false_miss = 0; // SDF says miss, ground truth says hit
         for (int i = 0; i < ray_count; ++i) {
-            if (sdf_run.hit_mask[i] && !hf_run.hit_mask[i])
+            if (sdf_run.hit_mask[static_cast<std::size_t>(i)] &&
+                !hf_run.hit_mask[static_cast<std::size_t>(i)])
                 ++sdf_false_hit;
-            if (!sdf_run.hit_mask[i] && hf_run.hit_mask[i])
+            if (!sdf_run.hit_mask[static_cast<std::size_t>(i)] &&
+                hf_run.hit_mask[static_cast<std::size_t>(i)])
                 ++sdf_false_miss;
         }
         const double sdf_agreement =

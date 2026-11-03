@@ -165,12 +165,15 @@ MarchResult MarchHeightfield(const HeightField& hf,
         double cell_max = py + 1.0;
         for (int L = mip.levels - 1; L >= 0; --L) {
             const double lvl_cell = base_cell * static_cast<double>(1 << L);
-            const int dim = mip.dims[L];
+            const int dim = mip.dims[static_cast<std::size_t>(L)];
             int cx = static_cast<int>(std::floor((px - hf.ox) / lvl_cell));
             int cz = static_cast<int>(std::floor((pz - hf.oz) / lvl_cell));
             cx = std::clamp(cx, 0, dim - 1);
             cz = std::clamp(cz, 0, dim - 1);
-            const float mx = mip.max_h[L][static_cast<std::size_t>(cz) * dim + cx];
+            const float mx =
+                mip.max_h[static_cast<std::size_t>(L)]
+                         [static_cast<std::size_t>(cz) * static_cast<std::size_t>(dim) +
+                          static_cast<std::size_t>(cx)];
             if (py > mx) { // safely above this whole cell
                 level = L;
                 cell_max = mx;
@@ -222,12 +225,15 @@ float SampleMip(const SdfMipChain& c, int L, double wx, double wy, double wz) {
     int x = static_cast<int>(std::floor((wx - c.ox) / s));
     int y = static_cast<int>(std::floor((wy - c.oy) / s));
     int z = static_cast<int>(std::floor((wz - c.oz) / s));
-    x = std::clamp(x, 0, c.nx[L] - 1);
-    y = std::clamp(y, 0, c.ny[L] - 1);
-    z = std::clamp(z, 0, c.nz[L] - 1);
-    return c
-        .levels[L][static_cast<std::size_t>(x) +
-                   c.nx[L] * (static_cast<std::size_t>(y) + c.ny[L] * static_cast<std::size_t>(z))];
+    x = std::clamp(x, 0, c.nx[static_cast<std::size_t>(L)] - 1);
+    y = std::clamp(y, 0, c.ny[static_cast<std::size_t>(L)] - 1);
+    z = std::clamp(z, 0, c.nz[static_cast<std::size_t>(L)] - 1);
+    return c.levels[static_cast<std::size_t>(L)]
+                   [static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(c.nx[static_cast<std::size_t>(L)]) *
+                        (static_cast<std::size_t>(y) +
+                         static_cast<std::size_t>(c.ny[static_cast<std::size_t>(L)]) *
+                             static_cast<std::size_t>(z))];
 }
 
 // Sphere trace a mip SDF (coarse-mip-first: pick a mip level by distance so far
@@ -388,7 +394,7 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
                 if (m.hit)
                     ++hits;
             }
-            a_ms[run] = t.elapsed_ms();
+            a_ms[static_cast<std::size_t>(run)] = t.elapsed_ms();
             a_steps_total = steps;
             a_hits = hits;
         }
@@ -409,7 +415,7 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
                 if (s.base_overshot)
                     ++base;
             }
-            bc_ms[run] = t.elapsed_ms();
+            bc_ms[static_cast<std::size_t>(run)] = t.elapsed_ms();
             bc_steps_total = steps;
             bc_hits = hits;
             bc_mip_miss = mip;
@@ -432,7 +438,7 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
                 if (s.base_overshot)
                     ++base;
             }
-            bn_ms[run] = t.elapsed_ms();
+            bn_ms[static_cast<std::size_t>(run)] = t.elapsed_ms();
             bn_steps_total = steps;
             bn_hits = hits;
             bn_mip_miss = mip;

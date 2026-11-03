@@ -1,4 +1,6 @@
 #include "SkyboxPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
@@ -197,6 +199,7 @@ void SkyboxPass::reset_shader() {
 void SkyboxPass::execute(const RenderContext& ctx,
                          const Camera& camera,
                          bool draw_weather_overlay) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute");
     glDepthFunc(GL_GEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
@@ -319,7 +322,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
         m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
     }
     glBindVertexArray(m_skybox_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 36);
     (*ctx.skybox_draw_counter)++;
     glBindVertexArray(0);
     if (sky_lut_ready) {
@@ -340,6 +343,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
 }
 
 void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_weather_overlay");
     if (ctx.weather_type == WeatherType::None || ctx.weather_intensity <= 0.0f) {
         return;
     }
@@ -354,6 +358,7 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera&
 void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
                                          const Camera& camera,
                                          const glm::mat4& projection) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_weather_overlay");
     if (!m_weather_shader || !m_weather_shader->IsValid()) {
         return;
     }
@@ -392,7 +397,9 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_time", ctx.time_seconds);
     m_weather_shader->setVec3("u_cameraPos", camera.Position);
     m_weather_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_weather_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    m_weather_shader->setMat4("u_inverseProjection",
+                              ctx.far_world_ladder ? ctx.gbuffer_inverse_projection
+                                                   : glm::inverse(projection));
     // Weather fog scattering follows the lighting-pass convention (the
     // light-travel direction), unlike the skybox disc uniforms above.
     m_weather_shader->setVec3("u_sunDirection", ctx.sun.direction);
@@ -461,7 +468,7 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_windStrength", wind_strength);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
     glEnable(GL_DEPTH_TEST);

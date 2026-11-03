@@ -13,6 +13,49 @@ FarWorldLiveUpload Current(FarWorldLiveCell cell) {
 }
 } // namespace
 
+TEST(FarWorldOwnership, TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndependent) {
+    auto upload = Current({-1, 0, -1, 0});
+    upload.water_snapshot_version = upload.water_uploaded_version = 17;
+    upload.water_uploaded_indices = 6;
+    upload.water_valid_allocation = upload.water_pass_eligible = true;
+    for (int refusal = 0; refusal < 5; ++refusal) {
+        auto candidate = upload;
+        if (refusal == 0)
+            --candidate.water_uploaded_version;
+        if (refusal == 1)
+            candidate.water_valid_allocation = false;
+        if (refusal == 2)
+            candidate.water_uploaded_indices = 0;
+        if (refusal == 3)
+            candidate.water_pass_eligible = false;
+        FarWorldOwnership mask;
+        mask.Begin(1);
+        ASSERT_TRUE(mask.Add(candidate));
+        ASSERT_TRUE(mask.Finish());
+        EXPECT_TRUE(mask.Owns({-8, 0, -8}));
+        EXPECT_EQ(mask.OwnsWater({-8, 0, -8}), refusal == 4);
+    }
+    FarWorldOwnership mask;
+    mask.Begin(2);
+    auto water_only = upload;
+    --water_only.uploaded_version;
+    ASSERT_TRUE(mask.Add(water_only));
+    ASSERT_TRUE(mask.Finish());
+    EXPECT_FALSE(mask.Owns({-8, 0, -8}));
+    EXPECT_TRUE(mask.OwnsWater({-8, 0, -8}));
+    mask.Begin(3);
+    ASSERT_TRUE(mask.Add(Current(upload.cell)));
+    ASSERT_TRUE(mask.Add(water_only));
+    ASSERT_TRUE(mask.Finish());
+    ASSERT_EQ(mask.cells().size(), 1u);
+    EXPECT_EQ(mask.cells()[0].reserved, kFarWorldTerrainReady | kFarWorldWaterReady);
+    mask.Begin(4, 1);
+    ASSERT_TRUE(mask.Add(upload));
+    EXPECT_FALSE(mask.Add(Current({0, 0, 0, 0})));
+    EXPECT_FALSE(mask.Finish());
+    EXPECT_FALSE(mask.OwnsWater({-8, 0, -8}));
+}
+
 TEST(FarWorldOwnership, CurrentStaleMissingFailedEvictedAndEmptyUploads) {
     auto current = Current({0, 0, 0, 0});
     EXPECT_TRUE(IsFarWorldLiveUploadCurrent(current));
@@ -110,8 +153,8 @@ TEST(FarWorldOwnership, SortedUniqueCellsMatchBoundedGpuLayout) {
         ASSERT_TRUE(mask.Add(Current(cell)));
     ASSERT_TRUE(mask.Finish());
     ASSERT_EQ(mask.cells().size(), 2u);
-    EXPECT_EQ(mask.cells()[0], (FarWorldLiveCell{-1, 3, -2, 0}));
-    EXPECT_EQ(mask.cells()[1], (FarWorldLiveCell{1, -1, 0, 0}));
+    EXPECT_EQ(mask.cells()[0], (FarWorldLiveCell{-1, 3, -2, kFarWorldTerrainReady}));
+    EXPECT_EQ(mask.cells()[1], (FarWorldLiveCell{1, -1, 0, kFarWorldTerrainReady}));
     EXPECT_EQ(kFarWorldOwnershipGpuBytes, 131072u);
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SimWorkCounters.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -108,6 +110,8 @@ public:
     void Clear() {
         for (auto& stage : samples_)
             stage.clear();
+        for (auto& counter : work_items_)
+            counter.clear();
     }
     [[nodiscard]] const Samples& SamplesByStage() const {
         return samples_;
@@ -118,8 +122,18 @@ public:
             samples_[static_cast<std::size_t>(stage)].push_back({tick, work, duration_ms});
     }
 
+    void RecordWork(SimWork counter, std::uint64_t tick, std::uint64_t work) {
+        if (enabled_)
+            work_items_[static_cast<std::size_t>(counter)].push_back({tick, work});
+    }
+    [[nodiscard]] const auto& WorkItems() const {
+        return work_items_;
+    }
+
     // Deliberately excludes all wall-clock values, including in replay validation.
     [[nodiscard]] bool WorkMatches(const SimBudgetTelemetry& other) const {
+        if (work_items_ != other.work_items_)
+            return false;
         for (std::size_t stage = 0; stage < samples_.size(); ++stage) {
             const auto& left = samples_[stage];
             const auto& right = other.samples_[stage];
@@ -205,6 +219,8 @@ public:
 private:
     bool enabled_ = false;
     Samples samples_;
+    // Finite captures only, with the same lifetime/reset policy as stage traces.
+    std::array<std::vector<SimWorkSample>, kSimWorkNames.size()> work_items_;
 };
 
 } // namespace luminumbra::simulation

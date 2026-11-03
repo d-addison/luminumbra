@@ -175,10 +175,10 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
             MakeStorageBuffer(static_cast<GLsizeiptr>(hf.h.size() * sizeof(float)), hf.h.data());
 
         // Allocate one RW buffer per CPU level (same dims).
-        std::vector<GLuint> level_buf(cpu.levels, 0u);
+        std::vector<GLuint> level_buf(static_cast<std::size_t>(cpu.levels), 0u);
         for (int L = 0; L < cpu.levels; ++L) {
-            level_buf[L] =
-                MakeRWBuffer(static_cast<GLsizeiptr>(cpu.max_h[L].size() * sizeof(float)));
+            level_buf[static_cast<std::size_t>(L)] = MakeRWBuffer(static_cast<GLsizeiptr>(
+                cpu.max_h[static_cast<std::size_t>(L)].size() * sizeof(float)));
         }
 
         // Level 0 from base.
@@ -193,11 +193,16 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
         // Coarser levels.
         glUseProgram(progR);
         for (int L = 1; L < cpu.levels; ++L) {
-            glUniform1i(glGetUniformLocation(progR, "u_fine"), cpu.dims[L - 1]);
-            glUniform1i(glGetUniformLocation(progR, "u_coarse"), cpu.dims[L]);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, level_buf[L - 1]);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, level_buf[L]);
-            glDispatchCompute(Groups(cpu.dims[L]), Groups(cpu.dims[L]), 1);
+            glUniform1i(glGetUniformLocation(progR, "u_fine"),
+                        cpu.dims[static_cast<std::size_t>(L - 1)]);
+            glUniform1i(glGetUniformLocation(progR, "u_coarse"),
+                        cpu.dims[static_cast<std::size_t>(L)]);
+            glBindBufferBase(
+                GL_SHADER_STORAGE_BUFFER, 0, level_buf[static_cast<std::size_t>(L - 1)]);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, level_buf[static_cast<std::size_t>(L)]);
+            glDispatchCompute(Groups(cpu.dims[static_cast<std::size_t>(L)]),
+                              Groups(cpu.dims[static_cast<std::size_t>(L)]),
+                              1);
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
         }
         glFinish();
@@ -207,8 +212,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
         long long total_cells = 0, mismatches = 0;
         double max_abs_diff = 0.0;
         for (int L = 0; L < cpu.levels; ++L) {
-            std::vector<float> gpu(cpu.max_h[L].size(), 0.0f);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, level_buf[L]);
+            std::vector<float> gpu(cpu.max_h[static_cast<std::size_t>(L)].size(), 0.0f);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, level_buf[static_cast<std::size_t>(L)]);
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
                                0,
                                static_cast<GLsizeiptr>(gpu.size() * sizeof(float)),
@@ -217,7 +222,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
             for (std::size_t i = 0; i < gpu.size(); ++i) {
                 ++total_cells;
                 const double diff =
-                    std::abs(static_cast<double>(gpu[i]) - static_cast<double>(cpu.max_h[L][i]));
+                    std::abs(static_cast<double>(gpu[i]) -
+                             static_cast<double>(cpu.max_h[static_cast<std::size_t>(L)][i]));
                 if (diff != 0.0) {
                     ++mismatches;
                     max_abs_diff = std::max(max_abs_diff, diff);

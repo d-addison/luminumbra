@@ -2,13 +2,16 @@
 #include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
+#include "luminumbra_common/core/SimulationClock.h"
 #include "luminumbra_common/world/WorldClock.h"
 #include <optional>
 
 #include "../../include/luminumbra/core/Types.h"
 #include "FarWorldRenderer.h"
+#include "FarWorldReplay.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
+#include "GraphicsRuntimeConfig.h"
 #include "Mesh.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
@@ -18,6 +21,7 @@
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
 #include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
+#include "UploadBudget.h"
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
 #include "luminumbra_common/components/LightingComponents.h"
@@ -105,6 +109,14 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+
+    void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
+                                   const ChunkGeometryPool& pool) const noexcept {
+        upload.snapshot_version = mesh_version;
+        upload.uploaded_version = mesh_version;
+        upload.uploaded_indices = element_count;
+        upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
+    }
 };
 
 struct WaterRenderData {
@@ -116,6 +128,36 @@ struct WaterRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    // Only a validated Ladder upload certifies this exact mesh version.
+    std::optional<u32> ladder_upload_version;
+
+    bool LadderUploadValid() const noexcept {
+        return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
+    }
+
+    // Retained water is the presented version until replacement adoption. Both
+    // the draw list and far-water mask must consume this same certificate.
+    bool PresentedLadderWaterEligible(bool enabled) const noexcept {
+        return LadderWaterPassEligible(
+            mesh_version, mesh_version, element_count, LadderUploadValid(), enabled);
+    }
+    void SetPresentedLadderWaterUpload(FarWorldLiveUpload& upload, bool enabled) const noexcept {
+        SetLadderWaterUpload(upload, mesh_version, enabled);
+    }
+
+    void SetLadderWaterUpload(FarWorldLiveUpload& upload,
+                              u32 snapshot_version,
+                              bool pass_enabled) const noexcept {
+        upload.water_snapshot_version = snapshot_version;
+        upload.water_uploaded_version = mesh_version;
+        upload.water_uploaded_indices = element_count;
+        upload.water_valid_allocation = LadderUploadValid();
+        upload.water_pass_eligible = LadderWaterPassEligible(snapshot_version,
+                                                             mesh_version,
+                                                             element_count,
+                                                             upload.water_valid_allocation,
+                                                             pass_enabled);
+    }
 };
 
 // FrameBufferObject moved to FrameBufferObject.h (included above). Definition unchanged.
@@ -137,6 +179,8 @@ struct WaterRenderData {
 class RenderPipeline {
 public:
     struct MeshUploadFrameStats {
+        UploadWorkStats terrain_budget{};
+        UploadWorkStats water_budget{};
         size_t snapshot_count = 0;
         size_t terrain_upload_candidates = 0;
         size_t terrain_uploads = 0;
@@ -215,7 +259,9 @@ public:
         // when foliage is disabled (the pass is a no-op), keeping existing
         // visual gates byte-stable.
         size_t foliage_draws = 0;
-        size_t foliage_instances_drawn = 0;
+        size_t foliage_instances_drawn = 0; // Only a CPU-known count, never capacity.
+        size_t foliage_instance_capacity = 0;
+        bool foliage_instance_count_known = true;
         size_t final_blits = 0;
         // Per-pass GPU timings sampled from a GL_TIMESTAMP query ring
         // (frame N publishes the timings recorded at frame ). Values stay
@@ -343,7 +389,8 @@ public:
                       Systems::SHIELD_WorldSystem& world_system,
                       const Camera& camera,
                       float deltaTime,
-                      bool wireframe = false);
+                      bool wireframe = false,
+                      UploadPresentation presentation = UploadPresentation::Streaming);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -401,6 +448,11 @@ public:
         m_benchmark_gpu_queries = queries;
     }
     void set_render_scale(float scale);
+    // Render-thread startup/live application. Session overrides are resolved by
+    // the host before entry. Unchanged values do not allocate or reset history.
+    bool apply_graphics(const luminumbra::core::ResolvedGraphics& resolved);
+    // Narrow const diagnostic of the values the passes actually receive.
+    GraphicsRuntimeConfig graphics_runtime_config() const;
 
     //   (ADDITIVE offscreen render-target redirect for the
     // create-world live preview diorama). When an offscreen target is set, the
@@ -424,7 +476,7 @@ public:
     // diorama is covered by its live chunks; skipping far-LOD means no such jobs are ever
     // dispatched for the transient preview world. Restored after the preview's frame.
     void set_far_lod_enabled(bool enabled) {
-        m_far_lod_enabled = enabled;
+        m_legacy_far_enabled = enabled;
     }
 
     // Worldgen-preview far-field: pin far-LOD streaming + the inner fragment
@@ -461,12 +513,23 @@ public:
     void set_authored_static_draws(std::shared_ptr<const StaticDrawSnapshot> draws) {
         m_authored_draws = std::move(draws);
     }
-    void set_taau_enabled(bool e) {
-        m_taau_enabled = e;
-    } // render.taau (client wires from SystemConfig)
-    //  route sky-view LUT (init + refresh) through GPU compute. render.sky_lut_gpu, default OFF.
+    // Const diagnostic of the camera that produced the prepared frame. The live
+    // camera may already have moved when CLI capture runs after rendering.
+    const FarReplayCamera* capture_camera() const {
+        return m_frame_prepared.valid ? &m_frame_prepared.replay_camera : nullptr;
+    }
+    void set_taau_enabled(bool e);
+    bool taau_enabled() const {
+        return m_taau_enabled;
+    }
+    bool taau_history_valid() const; // render.taau (client wires from SystemConfig)
+    //  route sky-view LUT (init + refresh) through GPU compute. render.sky_lut_gpu, enabled by
+    //  SystemConfig.
     void set_sky_lut_gpu_enabled(bool e) {
         m_sky_lut.set_gpu_skyview_enabled(e);
+    }
+    bool sky_lut_gpu_enabled() const {
+        return m_sky_lut.gpu_skyview_enabled();
     }
     const glm::vec2& taau_jitter_ndc() const {
         return m_taau_jitter_ndc;
@@ -480,6 +543,11 @@ public:
     void clear_all_chunk_data(); // Force clear all cached chunk render data
     const MeshUploadFrameStats& get_last_mesh_upload_stats() const {
         return m_last_mesh_upload_stats;
+    }
+    // Presentation readiness only. Never use to gate simulation or collision.
+    bool render_uploads_settled() const {
+        return m_last_mesh_upload_stats.terrain_uploads_deferred == 0 &&
+               m_last_mesh_upload_stats.water_uploads_deferred == 0;
     }
     const RenderPassFrameStats& get_last_render_pass_stats() const {
         return m_last_render_pass_stats;
@@ -575,8 +643,8 @@ public:
     // never had (cross-run FLIP floors at ~0.057 noise; --smoke never renders). The
     //  execution migration compares old-vs-new dispatch paths through this same
     // entry point. Writes frame_parity_{a,b}.ppm + frame_parity.json under out_dir.
-    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence — Codex
-    // ), or a nonzero score.
+    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence),
+    // or a nonzero score.
     bool capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir);
     // / closure gate: render the same prepared frame at native scale twice
     // (the scale-1 seam must be bit-exact), then at 0.67 internal scale and compare the
@@ -602,14 +670,20 @@ public:
         m_timeOfDayHold = hold;
     }
     // drive the day clock from the AUTHORITATIVE sim tick —
-    // tod = TimeOfDayFromTick(tick, day_length) (TimeOfDayModel.h). Called per frame
+    // tod = SolarTimeFromNoonElapsed(elapsed, calendar). Called per frame
     // from live play; suppresses that frame's wall-clock advance so TOD is a pure
     // function of the tick (same tick -> same sun, independent of frame pacing).
     // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins
     // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
-    // never call this keep the legacy wall-clock advance byte-identically.
+    // never call this keep the legacy wall-clock advance at the shared day length.
     void set_time_of_day_tick(std::uint64_t sim_tick);
     void set_world_clock(const world::WorldClock& clock);
+    // Presentation calendar for clock-disabled saves; keeps the legacy noon origin.
+    void set_render_calendar(world::WorldCalendar calendar);
+    // Read-only diagnostic of the adopted calendar's celestial period.
+    [[nodiscard]] std::uint64_t get_lunar_period_ticks() const {
+        return m_renderClock.lunar_period_ticks();
+    }
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
         m_dayLengthOverride = true;
@@ -619,7 +693,7 @@ public:
     // the sun-path trig) -- never wall-clock, never a free-running float
     // accumulator (regression review). It is: the client pushes the
     // replicated sim tick here each frame; the season modulates the sun ARC
-    // (declination / day length) and a biome material/foliage PALETTE tint ON TOP
+    // (declination / peak elevation) and a biome material/foliage PALETTE tint ON TOP
     // of the existing time-of-day, and adds NOTHING to world_hash. One-way :
     // nothing here writes back into the sim.
     void set_season_tick(std::uint64_t tick);
@@ -786,29 +860,61 @@ public:
     }
 
     // --- Far-LOD region rendering ---
-    // Far tile builds run on the attached JobSystem's Normal lane; without an
-    // attached job system the far-LOD path stays inert.
+    // Far tile and foliage ground builds use the attached JobSystem's Normal
+    // lane. Without it, far-LOD stays inert and foliage prepares synchronously.
     void attach_farlod_job_system(JobSystem* job_system);
-    // Drains in-flight far tile builds (they sample the world system). MUST
-    // run before the currently bound world is destroyed/recreated.
+    // Save fence: finish accepted cache writes without changing render/world state.
+    void wait_for_accepted_far_tile_writes();
+    // Finish live-world readers without discarding results before a fallible open.
+    void wait_for_world_readers();
+    // Retire the old binding and visuals at a committed world replacement.
+    // Before a fallible open, wait_for_world_readers keeps the old world resumable.
     void prepare_world_swap();
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
-    FarWorldRenderer& far_world_renderer() {
-        return *m_far_world;
-    }
+    // Startup/world-entry policy; runtime changes first reset history via
+    // set_far_world_mode. Returns the resolved request for caller diagnostics.
+    FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }
+    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
+        return m_far_world->Diagnostic();
+    }
+    FarWorldReportingState far_world_reporting_state() const {
+        const auto& diagnostic = m_far_world->Diagnostic();
+        const bool terrain_submission =
+            m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Terrain);
+        if (diagnostic.captured) {
+            auto state = FarWorldReportState(diagnostic, terrain_submission);
+            state.coverage_settled =
+                state.coverage_settled && diagnostic.frame == m_far_world_frame;
+            return state;
+        }
+        return {.selection = m_far_world->Selection(FarWorldPurpose::World),
+                .submission_refusal = terrain_submission
+                                          ? FarWorldSubmissionRefusal::None
+                                          : FarWorldSubmissionRefusal::IsolationSuppressed,
+                .coverage_settled = false};
+    }
+    void set_far_world_submission(bool submit) {
+        m_far_world_submission = submit;
+    }
+    // Same prepared frame; no frame increment, scheduler, live publication or epilogue.
+    // TAAU reads frozen ON history into scratch; all entry state is restored.
+    bool render_far_world_off_pair(const Camera& camera);
     FarWorldSelection far_world_selection() const {
         return m_frame_far_selection;
     }
-    FarLodSystem* farlod() {
-        return m_farlod.get();
+    // Value diagnostics are the selected-renderer interface. Legacy runtime
+    // access is restricted to the effective default/preview compatibility path.
+    FarLodSystem* legacy_far_compatibility() {
+        return LegacyFarWorldCompatibility(m_frame_far_selection, m_farlod.get());
     }
-    const FarLodSystem* farlod() const {
-        return m_farlod.get();
+    const FarLodSystem* legacy_far_compatibility() const {
+        return LegacyFarWorldCompatibility(m_frame_far_selection,
+                                           static_cast<const FarLodSystem*>(m_farlod.get()));
     }
 
     // --- Particle framework. ---
@@ -889,11 +995,26 @@ public:
     // emitter at each plunge foot (capped to bound particle cost).
     // dressing on a world-deterministic site set — never hashed (one-way).
     void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
+    // CPU-only: exclusive pass/site-cache access, with the world retained until
+    // the job drains. Other adoption operations below require the GL thread.
+    WaterfallPass::PreparedGeometry
+    build_waterfall_geometry(const Systems::SHIELD_WorldSystem& world) {
+        return m_waterfall_pass->build_geometry(world);
+    }
+    void begin_waterfall_adoption(WaterfallPass::PreparedGeometry geometry) {
+        m_waterfall_pass->begin_adoption(std::move(geometry));
+    }
+    bool adopt_waterfalls() {
+        return m_waterfall_pass->adopt_next(m_particle_pass.get(), m_root_path);
+    }
+    // Entry cancellation runs after its CPU job and world readers are drained.
+    void cancel_waterfall_adoption();
 
 private:
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
     friend struct RenderClockTestPeer;
+    friend struct WaterUploadTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
@@ -918,6 +1039,7 @@ private:
         size_t terrain_index_count = 0;
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
+        bool water_metadata_valid = true;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -936,6 +1058,20 @@ private:
             return !vertices.empty() && !indices.empty();
         }
     };
+
+    struct MeshUploadCandidate {
+        ChunkMeshSnapshot chunk{};
+        bool is_new = false;
+        bool is_stale = false;
+        float distance_sq = 0;
+        std::size_t bytes = 0;
+    };
+    UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_water_upload_queue;
+    template<bool Water>
+    void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
+                                   const Camera& camera,
+                                   double preparation_ms = 0);
 
     // build the SSAO pass contract from pipeline state.
     // Shared by the render_frame call site and capture_ssao_parity so the gated
@@ -987,6 +1123,7 @@ private:
         float far_plane = World::kLegacyFarPlaneMeters;
         glm::mat4 projection{1.0f};
         glm::mat4 view{1.0f};
+        FarReplayCamera replay_camera;
         glm::vec4 frustum_planes[6]{};
         std::vector<ChunkMeshSnapshot> renderable_chunk_snapshots;
         bool valid = false;
@@ -995,8 +1132,10 @@ private:
                        Systems::SHIELD_WorldSystem& world_system,
                        const Camera& camera,
                        float deltaTime,
-                       bool wireframe);
+                       bool wireframe,
+                       UploadPresentation presentation);
     void dispatch_stages(const Camera& camera);
+    FarReplayCamera replay_camera(const Camera& camera) const;
 
     using StageExecutorFn = void (RenderPipeline::*)(const Camera&);
     // node name -> extracted stage body, authored order.
@@ -1042,7 +1181,8 @@ private:
 
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
-                                    const Camera& camera);
+                                    const Camera& camera,
+                                    double preparation_ms);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
@@ -1112,14 +1252,18 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;     // Start at sunrise
-    bool m_timeOfDayHold = false; // freeze auto-advance for photo-mode TOD scrub
-    float m_dayDurationSeconds = 60.0f;
+    float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
+    double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
+    bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
+    double m_dayDurationSeconds = world::WorldCalendar{}.dayLengthTicks /
+                                  luminumbra::core::SimulationClock::kCanonicalTickRateHz;
+    world::WorldClock m_renderClock;
+    std::uint64_t m_celestialTick = 0;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
     std::optional<world::WorldClock> m_worldClock;
     bool m_dayLengthOverride = false;
-    std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
+    std::uint64_t m_dayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
     bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;
@@ -1127,10 +1271,12 @@ private:
 
     //  render-scale seam. The scene is rendered at m_internal_* (= output x
     // m_render_scale) into the scaled G-buffer/lighting/SSAO intermediates, then upscaled
-    // to output (m_screen_*) for post/UI/backbuffer; the shadow atlas, TAAU history and
-    // the backbuffer stay at output resolution. user.render_scale configures the
-    // scale; at 1.0 m_internal_* == m_screen_* (lround(N*1.0f) == N).
+    // to output (m_screen_*) for post/UI/backbuffer. TAAU history stays at output
+    // resolution; shadow atlases use their independently resolved size. Resolved
+    // graphics configures the scale; at 1.0 m_internal_* == m_screen_*.
+    bool resize_graphics_targets(float scale, u32 shadow_resolution);
     float m_render_scale = 1.0f;
+    luminumbra::core::UiBlurQuality m_ui_blur = luminumbra::core::UiBlurQuality::Full;
     u32 m_internal_width = 0;
     u32 m_internal_height = 0;
     //  (Group K): one glfwGetTime snapshot per frame (set at render_frame
@@ -1149,7 +1295,7 @@ private:
     // m_offscreen_target_w/h instead of framebuffer 0. Default inactive == the
     // legacy default-0 blit (byte-identical).
     bool m_offscreen_target_active = false;
-    bool m_far_lod_enabled = true; // worldgen preview disables far-LOD (transient-world UAF)
+    bool m_legacy_far_enabled = true; // retained preview scheduling/submission hook
     u32 m_offscreen_target_fbo = 0;
     u32 m_offscreen_target_w = 0;
     u32 m_offscreen_target_h = 0;
@@ -1210,8 +1356,6 @@ private:
     // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
     // (byte-identical until deliberately re-calibrated). This is a fixed pipeline value.
     glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
-    static constexpr std::uint64_t kTicksPerLunarCycle =
-        54000ull;                        // 30 min @ 30 Hz (a lunar "month")
     float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
     float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
     glm::vec3 m_seasonPaletteTint{1.0f}; // warm(summer)/cool(winter) palette tint
@@ -1251,10 +1395,17 @@ private:
     // render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
+    // Inventory includes compatibility stores retained across selection changes,
+    // using values published by the Legacy branch rather than Ladder reading its counters.
+    std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;
+    bool m_far_world_submission = true, m_far_world_advanced = false, m_far_world_paired = false;
+    std::uint64_t m_far_world_epoch = 1;
+    glm::mat4 m_far_world_pair_prev_view_proj{1.0f};
+    float m_far_world_pair_prev_time = 0;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
@@ -1264,7 +1415,7 @@ private:
     std::unique_ptr<ParticlePass> m_particle_pass;          //
     std::unique_ptr<FoliagePass> m_foliage_pass;            //
     std::unique_ptr<PlantProcgenPass> m_plant_procgen_pass; //  (flag-gated)
-    std::unique_ptr<GroundDecalPass> m_ground_decal_pass;   //   pheromone trail (default-OFF)
+    std::unique_ptr<GroundDecalPass> m_ground_decal_pass; //   pheromone trail (enabled by default)
     std::unique_ptr<DebugViewPass>
         m_debug_view_pass; // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<FinalBlitPass> m_final_blit_pass; // -T01: first pass on the RenderContext seam
@@ -1288,14 +1439,21 @@ private:
     // The aerial pass is the analytic aerial-perspective fullscreen term wiring
     // the previously dormant volumetric_lighting.frag. Render-only (documented design).
     SkyAtmosphereLut m_sky_lut;
-    //  TAAU resolve (render.taau, default OFF). Motion-reprojected temporal AA over the lit HDR
+    //  TAAU resolve (render.taau, enabled by default). Motion-reprojected temporal AA over the lit
+    //  HDR
     // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
     // runs and the lighting color blits through unchanged (byte-identical default render).
-    bool m_taau_enabled = false;
+    bool m_taau_enabled = true;
     std::shared_ptr<const StaticDrawSnapshot> m_authored_draws;
     std::unique_ptr<RenderView> m_authored_view;
     glm::vec2 m_taau_jitter_ndc =
-        glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+        glm::vec2(0.0f); // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+    TaauHistoryState m_far_world_pair_taau;
+    TaauHistoryState m_far_world_pair_taau_after;
+    bool m_far_world_pair_taau_enabled = false;
+    unsigned m_far_world_pair_jitter_frame = 0;
+    glm::vec2 m_far_world_pair_jitter{0.0f};
+    std::size_t m_far_world_pair_mdi_cursor = 0;
     unsigned m_taau_frame = 0u; // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
@@ -1397,7 +1555,7 @@ private:
 
     // Froxel quality remains pipeline orchestration state; the pass owns both
     // compute programs and volumes and reads this value through RenderContext.
-    int m_volumetric_quality = 0;
+    int m_volumetric_quality = kDefaultVolumetricQuality;
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array. Same layer order as the
@@ -1424,9 +1582,9 @@ private:
     // the glow grade (defaults == the lighting_pass.frag initializers).
     glm::vec3 m_aetherGlowColor{0.30f, 0.55f, 0.95f};
     float m_aetherGlowIntensity = 2.0f;
-    float m_aetherMaterialModulation = 0.0f; // 0 = pixel-identical
-    bool m_aetherPolarityActive = false;     // dual-tap live?
-    bool m_aetherFieldTextureIsDual = false; // current alloc format
+    float m_aetherMaterialModulation = kDefaultAetherMaterialModulation; // 0 = pixel-identical
+    bool m_aetherPolarityActive = false;                                 // dual-tap live?
+    bool m_aetherFieldTextureIsDual = false;                             // current alloc format
     // render-only snow ground cover (0 = byte-identical default).
     float m_snowCover = 0.0f;
     size_t m_terrain_texture_fallback_layers = 0;
@@ -1664,9 +1822,9 @@ private:
         glm::vec3 max;
 
         AABB() = default;
-        AABB(const glm::vec3& min, const glm::vec3& max)
-            : min(min)
-            , max(max) {}
+        AABB(const glm::vec3& minimum, const glm::vec3& maximum)
+            : min(minimum)
+            , max(maximum) {}
     };
 
     struct ChunkCullEntry {
@@ -1682,8 +1840,8 @@ private:
         bool is_leaf = true;
 
         CullingNode() = default;
-        CullingNode(const AABB& bounds)
-            : bounds(bounds) {}
+        CullingNode(const AABB& node_bounds)
+            : bounds(node_bounds) {}
     };
 
     class HierarchicalCuller {
@@ -1720,7 +1878,7 @@ private:
     void draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                          std::size_t& out_draws,
                          std::size_t& out_indices);
-    //  (Codex-signed-off terrain-submit seam): a callback wrapping the
+    // Terrain-submit seam: a callback wrapping the
     // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
     // so neither needs friend access for terrain submission. Returns counts; the
     // caller folds them into pass stats.

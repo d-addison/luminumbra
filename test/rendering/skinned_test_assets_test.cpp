@@ -1,10 +1,11 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include "luminumbra_client/core/scenarios/SkinnedMeshTestAssets.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -22,11 +23,7 @@ namespace anim = luminumbra::animation;
 class SmokeAssetDirectory {
 public:
     SmokeAssetDirectory()
-        : path(std::filesystem::temp_directory_path() /
-               ("luminumbra_skinned_smoke_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
-        std::filesystem::create_directory(path);
-    }
+        : path(Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_skinned_smoke_")) {}
     ~SmokeAssetDirectory() {
         std::error_code error;
         std::filesystem::remove_all(path, error);

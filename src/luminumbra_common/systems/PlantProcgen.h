@@ -255,8 +255,8 @@ inline ProcMesh TessellatePlant(const PlantStructure& s, int radial = 6, float l
         }
         for (int k = 0; k < radial; ++k) {
             const int k1 = (k + 1) % radial;
-            const std::uint32_t a0 = base + 2u * k, a1 = base + 2u * k + 1u;
-            const std::uint32_t b0 = base + 2u * k1, b1 = base + 2u * k1 + 1u;
+            const std::uint32_t a0 = base + 2u * static_cast<std::uint32_t>(k), a1 = a0 + 1u;
+            const std::uint32_t b0 = base + 2u * static_cast<std::uint32_t>(k1), b1 = b0 + 1u;
             m.indices.insert(m.indices.end(), {a0, a1, b1, a0, b1, b0}); // two tris per side
         }
     }

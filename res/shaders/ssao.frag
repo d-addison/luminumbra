@@ -1,8 +1,10 @@
 #version 450 core
+#include "far_world_position.glsl"
 out float FragColor; // Output is a single float (occlusion value)
 
 in vec2 TexCoords;
 
+uniform sampler2D gDepth;
 uniform sampler2D gPosition;          // View-space positions
 uniform sampler2D gNormalMaterial;    // Octahedral view-space normal + material ID
 uniform sampler2D u_noiseTexture;
@@ -31,7 +33,8 @@ vec3 decode_octahedral(vec2 encoded) {
 void main()
 {
     // Get fragment data from G-buffer (fragPos and normal are in VIEW SPACE)
-    vec3 fragPos = texture(gPosition, TexCoords).rgb;
+    vec3 fragPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, gDepth, TexCoords, fragPos)) { FragColor = 1.0; return; }
     vec3 normal = decode_octahedral(texture(gNormalMaterial, TexCoords).xy);
     
     // Get random vector to rotate the sampling kernel (using dynamic screen size)
@@ -57,7 +60,9 @@ void main()
         offset.xyz = offset.xyz * 0.5 + 0.5; // Transform to [0,1] range
         
         // Get depth of geometry at the sample's screen location from the view-space position buffer
-        float sampleViewZ = texture(gPosition, offset.xy).z;
+        vec3 samplePosition = vec3(0.0);
+        if (!farWorldPosition(gPosition, gDepth, offset.xy, samplePosition)) continue;
+        float sampleViewZ = samplePosition.z;
         
         // Compare depths in VIEW SPACE. This is the correct way to check for occlusion.
         float rangeCheck = smoothstep(0.0, 1.0, RADIUS / abs(fragPos.z - sampleViewZ));

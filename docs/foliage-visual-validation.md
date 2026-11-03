@@ -44,6 +44,56 @@ eligible set uses the existing CPU fallback. Admission happens before surface
 sampling; outer terrain columns and zero-density columns do not consume these
 slots. Normal cached frames do not repeat this work.
 
+## Evidence collection and rebuild storage
+
+For issue #388, `FoliagePass::set_evidence_enabled(true)` explicitly enables the
+full byte-wise input hash. The default is off. The foliage visual qualification
+scenario enables it independently of CPU readback and frame attribution. Ordinary
+play, other scenarios and `--render-benchmark` runs leave it off. Enabling frame
+recording alone does not enable evidence hashing.
+
+The hash recipe is unchanged: FNV-1a over uploaded chunk records, exact surface
+samples, packed palette floats, then camera X/Z, density scale, fade end and total
+archetype weight, in that order. Qualification appends the two wind floats as
+before. Enabling evidence after an ordinary build hashes its retained inputs on
+the next rebuild invocation without resampling, uploading or dispatching again.
+Qualification refuses `input_evidence_not_collected` when the current input
+identity was not collected. CPU fallback and empty builds have no uploaded hash.
+
+The existing `hash_ms` and `hashed_bytes` counters remain exactly zero with
+evidence off. With evidence on they count the same input bytes as before; the
+retained identity is reused on unchanged frames. `palette_scratch_ms` covers
+palette refresh and scratch preparation. `scratch_bytes` counts actual new GPU
+scratch allocation, so it is zero when the retained capacity fits.
+
+Sorted chunks, admitted-column pointers, packed chunk records and aggregate
+surface samples retain CPU capacity between rebuilds. Their logical lengths are
+reset before filling. Palette floats and total weight refresh only after loading
+archetypes. GPU group counts and offsets retain their largest allocation, bounded
+by 512 × 128 unsigned integers per buffer. Count and prefix dispatches overwrite
+every active entry before emit consumes it; unused tail entries are never read.
+
+The exact OpenGL call changes, for Ultra and every other foliage preset, are:
+
+- The scatter program's ten uniform locations (`u_chunk_count`,
+  `u_archetype_count`, `u_total_weight`, `u_max_candidates`, `u_max_instances`,
+  `u_density_scale`, `u_camera_xz`, `u_fade_end_m`, `u_wind_xz`, `u_emit`) and the
+  prefix program's two locations (`u_group_count`, `u_max_instances`) are queried
+  once after successful linking. Recreation refreshes all twelve locations.
+  This removes fourteen `glGetUniformLocation` calls per nonempty ordinary GPU
+  rebuild and five per frozen dispatch. Uniform setters retain their order,
+  locations and values.
+- The two null-data `glBufferData(GL_SHADER_STORAGE_BUFFER, group_bytes, nullptr,
+  GL_DYNAMIC_DRAW)` calls for group counts/offsets occur only on capacity growth.
+  Growth uses the same byte count, buffer targets and usage arguments as before;
+  all surrounding buffer binds retain their order.
+
+For nonempty successful GPU rebuilds, all remaining GL calls, ordering and
+arguments are unchanged, including full chunk,
+surface and palette uploads, count-command resets, count/prefix/emit dispatches,
+barriers, readback policy and draws. Placement, candidate order, surface queries,
+instance layout, fade, wind and density controls are unchanged.
+
 An earlier native control run at source `983e6abc338637a226d623ef20ffafc10f07e920`
 refused without a calm screenshot. The implementation counted the complete
 renderable column list before culling: the initial 25×25 surface already
@@ -138,3 +188,9 @@ A skipped GL test cannot qualify the renderer; both real stills need inspection.
 The GPU capacity tests also exercise the complete initial surface footprint,
 zero-density admission, the accepted 512-column boundary and 513-column CPU
 fallback. They preserve the production fade, density and timing thresholds.
+
+`FoliageRebuildTest` cases in `pass_context_test` cover evidence on/off instance
+bytes on GPU and CPU fallback, the legacy hash recipe over actual uploaded bytes,
+late opt-in without rebuilding, zero hash attribution when off, scratch growth,
+shrink and empty transitions, palette reloads and compute-program recreation.
+They require a real hidden GL context and have no skip path.

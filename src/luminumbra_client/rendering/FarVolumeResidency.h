@@ -13,6 +13,8 @@ struct FarVolumeWantedRequest {
     // Explicit producer estimate of additional snapshot + compile + conversion
     // peak bytes. Admission remains authoritative; no native estimate/default.
     std::uint64_t build_headroom_bytes = 0;
+    std::shared_ptr<const FarWorldWaterObservation> water = {};
+    std::optional<FarWorldWaterBound> water_bound = std::nullopt;
 };
 struct FarVolumeResidencyLimits {
     std::array<std::size_t, World::kFarTierCount> entry_slots{};
@@ -38,6 +40,16 @@ struct FarVolumeResidentObservation {
     World::FarTileStatus coverage;
     std::uint64_t cpu_bytes = 0, gpu_bytes = 0;
     std::uint64_t ready_upload_bytes = 0;
+    World::FarBuildIdentity built_identity;
+    World::FarVolumeRequest built_request;
+    bool water_complete = false, water_known_dry = false;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
+};
+// Owner-thread work for the last admission attempt, including refusals. Counts
+// index key comparisons and descriptor visits, not authority sampling.
+// This diagnostic never affects admission, ordering, or resource ownership.
+struct FarVolumeAdmissionWork {
+    std::size_t key_comparisons = 0, descriptor_visits = 0;
 };
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;
@@ -57,6 +69,8 @@ struct FarVolumeTierObservation {
     // source/converted results and GPU, unlike the retained pair subtotals.
     // Worker activity can skew CPU/GPU sampling; diagnostics never admit bytes.
     World::FarVolumeTierMemoryStats memory;
+    std::size_t water_known_dry_tiles = 0, water_wet_tiles = 0;
+    std::uint64_t retained_water_indices = 0, submitted_water_indices = 0;
 };
 struct FarVolumeDrawRecord {
     World::FarBuildIdentity identity;
@@ -66,6 +80,7 @@ struct FarVolumeDrawRecord {
     double horizontal_outer_clip_meters = 0;
     double view_ray_bias_meters = 0;
     FarWorldArrival arrival;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
 };
 using FarVolumeDrawVisitor = void (*)(void*, const FarVolumeDrawRecord&);
 using FarVolumeAuthorityProducer = std::function<std::optional<World::FarVolumeAuthority>(
@@ -117,6 +132,7 @@ public:
     std::size_t VisitDraws(FarVolumeDrawVisitor visitor, void* context);
     // Cancels/drains every queue BEFORE dropping any authority/CPU/GPU pair.
     void CancelAndDrain();
+    FarVolumeAdmissionWork AdmissionWork() const;
 
 private:
     struct Entry {
@@ -127,6 +143,8 @@ private:
         double distance = 0;
     };
     struct Tier {
+        static std::size_t IndexSize(std::size_t, const FarVolumeQueueLimits&);
+        void RebuildIndex(FarVolumeAdmissionWork&);
         Tier(JobSystem&,
              World::FarVolumeMemoryPool&,
              std::size_t,
@@ -135,14 +153,18 @@ private:
         World::FarVolumeMemoryLease control;
         World::FarVolumeChargedResource resource;
         std::pmr::vector<Entry> entries;
+        // First entry_slots indices are sorted live descriptors; the second half
+        // holds at most entry_slots incoming positions during admission.
+        std::pmr::vector<std::size_t> key_index;
+        std::size_t index_count = 0;
         std::pmr::vector<std::size_t> order;
         FarVolumeBuildQueue queue;
         std::size_t completion_slots;
     };
     class Guard;
     void CheckOwner() const;
-    Entry* Find(const World::FarTileKey&);
-    const Entry* Find(const World::FarTileKey&) const;
+    Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr);
+    const Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr) const;
     bool Headroom(std::size_t tier,
                   std::uint64_t bytes,
                   const World::FarTileKey& preserve,
@@ -151,6 +173,7 @@ private:
     World::FarVolumeTierMemory& memory_;
     const std::thread::id owner_ = std::this_thread::get_id();
     bool active_ = false;
+    FarVolumeAdmissionWork admission_work_;
     std::array<std::optional<Tier>, World::kFarTierCount> tiers_;
 };
 } // namespace Luminumbra::Rendering

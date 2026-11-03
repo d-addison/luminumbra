@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../RenderContext.h"
+#include "core/Profiler.h"
 
 #include <glad/glad.h>
 
@@ -21,6 +22,7 @@ public:
     // final-blit; the only change is that source/dest come from the RenderContext
     // + registry handle instead of pipeline privates.
     void execute(const RenderContext& ctx) const {
+        LUMIN_PROFILE_ZONE_N("GL FinalBlitPass.execute");
         glBindFramebuffer(GL_READ_FRAMEBUFFER, ctx.lit_scene.id);
 
         const GLuint draw_fbo = ctx.dest_fbo().id;

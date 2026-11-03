@@ -1,4 +1,6 @@
 #include "WaterPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
@@ -153,7 +155,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
     m_caustics_shader->setVec2("u_resolution", glm::vec2(kCausticsResolution, kCausticsResolution));
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
     glEnable(GL_DEPTH_TEST);
@@ -163,6 +165,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
 
 WaterDrawStats
 WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL WaterPass.execute");
     WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
     generate_caustics(ctx);
@@ -178,10 +181,13 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
 
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)ctx.screen_width / (float)ctx.screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
+    glm::mat4 projection =
+        ctx.far_world_ladder
+            ? ctx.gbuffer_projection
+            : ReversedZPerspective(glm::radians(camera.Zoom),
+                                   (float)ctx.screen_width / (float)ctx.screen_height,
+                                   camera.GetNearPlane(),
+                                   camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices
@@ -239,7 +245,8 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     for (const auto& item : input.draw_items) {
         m_water_shader->setMat4("u_model", item.model);
         glBindVertexArray(item.vao_id);
-        glDrawElements(GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements, GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
         stats.water_draws++;
         stats.water_indices += item.element_count;
     }

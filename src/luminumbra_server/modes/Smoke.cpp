@@ -16,11 +16,6 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
     config.world_id.clear(); // determinism runs always boot fresh worlds
     config.world_name = std::string("Headless Smoke ") + run_label;
-    if (config.autosave_interval_ticks == 0) {
-        // Exercise the autosave path on the gate by default (incremental
-        // contract: a never-edited world records passes, writes nothing).
-        config.autosave_interval_ticks = 30;
-    }
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
@@ -31,6 +26,14 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     // the gate can assert non-vacuity (start != end => the ecology actually
     // birthed/culled creatures over the horizon, not a frozen roster).
     result.creature_count_start = runner.CreatureCount();
+    auto* session = runner.Session();
+    result.effective_simulation = session->EffectiveSimulationGates();
+    result.effective_simulation["aether_state"] =
+        session->AetherStateEnabled() && session->GetEnergyFieldState() != nullptr;
+    result.effective_simulation["water_high_res"] =
+        session->GetWorldSystem()->debug_water_sim_resolution() == 16;
+    result.effective_simulation["finite_hydrology"] = session->FiniteHydrologyEnabled();
+    result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
     //  avatar physics telemetry — confirm the server-authoritative avatar

@@ -20,6 +20,11 @@ bool IsFarWorldLiveUploadCurrent(const FarWorldLiveUpload& upload) noexcept {
     return upload.valid_allocation && upload.uploaded_indices != 0 &&
            upload.snapshot_version == upload.uploaded_version;
 }
+bool IsFarWorldLiveWaterUploadCurrent(const FarWorldLiveUpload& upload) noexcept {
+    return upload.water_valid_allocation && upload.water_uploaded_indices != 0 &&
+           upload.water_snapshot_version == upload.water_uploaded_version &&
+           upload.water_pass_eligible;
+}
 bool FarWorldChunkCell(const std::array<double, 3>& position, FarWorldLiveCell& cell) noexcept {
     if (!Finite(position))
         return false;
@@ -104,22 +109,30 @@ bool FarWorldOwnership::Add(const FarWorldLiveUpload& upload) noexcept {
         return false;
     }
     ++candidates_;
-    if (!IsFarWorldLiveUploadCurrent(upload))
+    const auto bits = (IsFarWorldLiveUploadCurrent(upload) ? kFarWorldTerrainReady : 0) |
+                      (IsFarWorldLiveWaterUploadCurrent(upload) ? kFarWorldWaterReady : 0);
+    if (bits == 0)
         return true;
     if (count_ == limit_ || upload.cell.reserved != 0) {
         failed_ = true;
         return false;
     }
-    cells_[count_++] = upload.cell;
+    cells_[count_] = upload.cell;
+    cells_[count_++].reserved = bits;
     return true;
 }
 bool FarWorldOwnership::Finish() noexcept {
     if (failed_)
         return false;
     std::sort(cells_.begin(), cells_.begin() + static_cast<std::ptrdiff_t>(count_), Less);
-    const auto end =
-        std::unique(cells_.begin(), cells_.begin() + static_cast<std::ptrdiff_t>(count_));
-    count_ = static_cast<std::size_t>(end - cells_.begin());
+    std::size_t merged = 0;
+    for (std::size_t i = 0; i < count_; ++i) {
+        if (merged && !Less(cells_[merged - 1], cells_[i]))
+            cells_[merged - 1].reserved |= cells_[i].reserved;
+        else
+            cells_[merged++] = cells_[i];
+    }
+    count_ = merged;
     complete_ = true;
     return true;
 }
@@ -128,14 +141,27 @@ std::span<const FarWorldLiveCell> FarWorldOwnership::cells() const noexcept {
 }
 bool FarWorldOwnership::Owns(const std::array<double, 3>& position) const noexcept {
     FarWorldLiveCell cell;
-    return complete_ && FarWorldChunkCell(position, cell) &&
-           std::binary_search(cells().begin(), cells().end(), cell, Less);
+    if (!complete_ || !FarWorldChunkCell(position, cell))
+        return false;
+    const auto found = std::lower_bound(cells().begin(), cells().end(), cell, Less);
+    return found != cells().end() && !Less(cell, *found) &&
+           (found->reserved & kFarWorldTerrainReady);
+}
+bool FarWorldOwnership::OwnsWater(const std::array<double, 3>& position) const noexcept {
+    FarWorldLiveCell cell;
+    if (!complete_ || !FarWorldChunkCell(position, cell))
+        return false;
+    const auto found = std::lower_bound(cells().begin(), cells().end(), cell, Less);
+    return found != cells().end() && !Less(cell, *found) && (found->reserved & kFarWorldWaterReady);
 }
 bool FarWorldOwnership::Owns(const FarWorldCellOrigin& origin,
                              const std::array<float, 3>& local) const noexcept {
     FarWorldLiveCell cell;
-    return complete_ && FarWorldChunkCell(origin, local, cell) &&
-           std::binary_search(cells().begin(), cells().end(), cell, Less);
+    if (!complete_ || !FarWorldChunkCell(origin, local, cell))
+        return false;
+    const auto found = std::lower_bound(cells().begin(), cells().end(), cell, Less);
+    return found != cells().end() && !Less(cell, *found) &&
+           (found->reserved & kFarWorldTerrainReady);
 }
 bool FarWorldArrivalReplaces(const FarWorldArrival& arrival,
                              float tile_edge,

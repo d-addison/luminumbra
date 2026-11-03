@@ -2,9 +2,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../support/UniqueTempPath.h"
+
 #include <array>
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -44,25 +44,8 @@ public:
 
 private:
     static std::filesystem::path CreateUniqueRoot() {
-        static std::atomic<std::uint64_t> sequence = 0;
-        const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        const std::filesystem::path temp_root = std::filesystem::temp_directory_path();
-
-        for (int attempt = 0; attempt < 128; ++attempt) {
-            const std::filesystem::path candidate =
-                temp_root / ("luminumbra-synthetic-audio-bank-" + std::to_string(timestamp) + "-" +
-                             std::to_string(sequence.fetch_add(1)));
-            std::error_code error;
-            if (std::filesystem::create_directory(candidate, error)) {
-                return candidate;
-            }
-            if (error) {
-                throw std::runtime_error("cannot create synthetic audio fixture: " +
-                                         error.message());
-            }
-        }
-
-        throw std::runtime_error("cannot allocate a unique synthetic audio fixture directory");
+        return Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra-synthetic-audio-bank-");
     }
 
     static void ValidateRelativePath(const std::filesystem::path& path) {

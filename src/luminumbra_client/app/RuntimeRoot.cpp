@@ -1,6 +1,7 @@
 #include "app/RuntimeRoot.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 
+#include <stdexcept>
 #include <system_error>
 #include <vector>
 
@@ -37,7 +38,29 @@ void AddAncestorCandidates(std::vector<std::filesystem::path>& candidates,
 
 } // namespace
 
-std::filesystem::path ResolveRuntimeRoot(const char* argv0) {
+std::filesystem::path ResolveRuntimeRoot(const char* argv0,
+                                         const std::filesystem::path& explicit_root) {
+    if (!explicit_root.empty()) {
+        std::error_code error;
+        bool has_files = true;
+        for (const char* sentinel : {"res/shaders/g_buffer.vert",
+                                     "data/audio/music.bank.json",
+                                     "worlds/atlas/presets/default.json"}) {
+            if (!std::filesystem::is_regular_file(explicit_root / sentinel, error) || error) {
+                has_files = false;
+                break;
+            }
+        }
+        if (!Filesystem::IsAbsolutePath(explicit_root) ||
+            !std::filesystem::is_directory(explicit_root, error) || error || !has_files) {
+            throw std::invalid_argument(
+                "--runtime-root must be an existing absolute directory containing "
+                "res/shaders/g_buffer.vert, data/audio/music.bank.json and "
+                "worlds/atlas/presets/default.json: " +
+                explicit_root.string());
+        }
+        return explicit_root;
+    }
     std::vector<std::filesystem::path> candidates;
 
     std::error_code ec;

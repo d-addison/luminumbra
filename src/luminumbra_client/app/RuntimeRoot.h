@@ -11,7 +11,9 @@
 
 namespace Luminumbra::Client::App {
 
-std::filesystem::path ResolveRuntimeRoot(const char* argv0);
+// An explicit root bypasses discovery and throws on invalid or incomplete layouts.
+std::filesystem::path ResolveRuntimeRoot(const char* argv0,
+                                         const std::filesystem::path& explicit_root = {});
 std::string RuntimeRootString(const std::filesystem::path& root_dir);
 
 } // namespace Luminumbra::Client::App

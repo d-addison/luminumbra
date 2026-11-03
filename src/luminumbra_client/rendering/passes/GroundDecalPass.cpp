@@ -1,4 +1,6 @@
 #include "GroundDecalPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../Camera.h"
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -80,6 +82,7 @@ void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
 }
 
 void GroundDecalPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL GroundDecalPass.execute");
     if (!m_active || !m_shader || !m_shader->IsValid() || m_vao == 0 || m_scent_tex == 0)
         return;
 
@@ -89,6 +92,8 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
         ctx.camera ? glm::inverse(ctx.camera->GetViewMatrix()) : glm::mat4(1.0f);
 
     m_shader->use();
+    m_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_shader->setMat4("u_inverseView", inverse_view);
     m_shader->setVec2("u_scentWorldOrigin", glm::vec2(m_origin_x, m_origin_z));
     m_shader->setFloat("u_scentInvWorldSpan", m_inv_world_span);
@@ -101,8 +106,12 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D, m_scent_tex);
     m_shader->setInt("u_scentField", 1);
 
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+    m_shader->setInt("gDepth", 2);
+
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }
 

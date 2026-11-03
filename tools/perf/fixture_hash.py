@@ -30,6 +30,11 @@ These are loaded by client render/preview paths, never by the server workloads.
 Simulation species and other foliage data remain part of the hash. Both sides
 of a comparison must use the same scope.
 
+Authored biome table references use the portable containment resolver. Their
+transitive dependencies outside the included tree extend the receipt with a
+versioned, name-sorted JSON list of canonical digests (null for missing files).
+Trees whose dependencies are already included retain their original digest.
+
 Usage:  fixture_hash.py <data-root> [--scope all|headless-server]
 Prints the hex digest on stdout.
 """
@@ -39,9 +44,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from fixture_paths import contain_path, path_exists, read_bytes, resolve_reference
 
 # JSON object keys beginning with this prefix are documentation for humans, not
 # input to the engine. `data/common/systems.json` uses the convention heavily
@@ -68,9 +77,15 @@ def strip_comment_keys(value: Any) -> Any:
     return value
 
 
-def canonical_file_digest(path: Path) -> str:
-    """Digest one fixture file, canonicalising JSON and hashing anything else raw."""
-    raw = path.read_bytes()
+def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
+                          dependencies: dict[str, Path] | None = None,
+                          containment_root: Path | None = None,
+                          max_reference_depth: int | None = None) -> str:
+    """Digest one file, optionally carrying the enclosing traversal's depth cap.
+
+    Standalone callers have no traversal budget and keep their existing support.
+    """
+    raw = read_bytes(containment_root if containment_root is not None else path.parent, path)
     if path.suffix.lower() == ".json":
         try:
             # utf-8-sig: several fixtures carry a byte-order mark.
@@ -78,6 +93,17 @@ def canonical_file_digest(path: Path) -> str:
         except (UnicodeDecodeError, json.JSONDecodeError):
             # Malformed JSON still has to register as a change.
             return hashlib.sha256(raw).hexdigest()
+        if reference_root is not None and isinstance(parsed, dict):
+            generation = parsed.get("generation_params")
+            biomes = generation.get("biomes") if isinstance(generation, dict) else None
+            table = biomes.get("table") if isinstance(biomes, dict) else None
+            # An empty table disables biomes. Malformed documents still hash;
+            # only authored external path strings need containment validation.
+            if isinstance(table, str) and table:
+                dependency = resolve_reference(reference_root, table, max_depth=max_reference_depth)
+                if dependencies is not None:
+                    name = dependency.relative_to(reference_root.resolve()).as_posix()
+                    dependencies[name] = dependency
         canonical = json.dumps(
             strip_comment_keys(parsed), sort_keys=True, separators=(",", ":")
         )
@@ -85,28 +111,173 @@ def canonical_file_digest(path: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def fixture_hash(root: Path, *, scope: str = "all") -> str:
-    """Digest a fixture tree. Path-ordered, so the result is reproducible."""
+def fixture_entry_status(root: Path, path: Path):
+    """Inspect a contained entry, allowing only missing native placement defaults."""
+    contained = contain_path(root, path)
+    parts = path.relative_to(root).parts
+    # Callers hash either data/common or data. Only the direct per-type
+    # placement file is optional; pieces and other tree entries remain required.
+    if parts and Path(parts[0]) == Path("common"):
+        parts = parts[1:]
+    optional = (len(parts) == 3 and Path(parts[0]) == Path("structures")
+                and Path(parts[2]) == Path("placement.json"))
+    try:
+        status = contained.stat()
+    except FileNotFoundError:
+        if not optional:
+            raise
+        return contained, None
+    if optional and not stat.S_ISREG(status.st_mode):
+        raise ValueError(f"fixture reference is not a regular file: {path}")
+    return contained, status
+
+
+# Count logical entries, including the root, directories, missing optional files,
+# excluded files and dependency edges. The shipped data tree has 207 entries at
+# depth four (common: 46; presets: nine). These conservative caps leave room for
+# ordinary additions without allowing a small directory-link graph to expand
+# indefinitely. Depth also bounds path-prefix checks and active scanner storage.
+MAX_FIXTURE_ENTRIES = 4096
+MAX_FIXTURE_DEPTH = 64
+
+
+class FixtureBudget:
+    """One hash/traversal's expanded work, charged before retaining an entry."""
+
+    def __init__(self):
+        self.remaining = MAX_FIXTURE_ENTRIES
+
+    def take(self, depth: int):
+        if self.remaining <= 0:
+            raise ValueError("fixture traversal entry budget exceeded")
+        if depth > MAX_FIXTURE_DEPTH:
+            raise ValueError("fixture traversal depth budget exceeded")
+        self.remaining -= 1
+
+
+def fixture_entries(root: Path, *, budget: FixtureBudget | None = None):
+    """Stream contained entries with O(depth) scanners and active ancestry.
+
+    No directory listing or pending ancestry copies are accumulated. At most
+    MAX_FIXTURE_DEPTH + 1 scanners are open, and every encountered name is charged
+    before status queries, optional omission, descent or yielding to a collector.
+    Logical aliases remain separate entries; only active-ancestry cycles refuse.
+    """
+    budget = budget if budget is not None else FixtureBudget()
+    budget.take(0)
+    target = root.resolve()
+    ancestors = {target}
+    stack = [(os.scandir(root), target)]
+    try:
+        while stack:
+            scanner, target = stack[-1]
+            entry = next(scanner, None)
+            if entry is None:
+                scanner.close()
+                stack.pop()
+                ancestors.remove(target)
+                continue
+            budget.take(len(stack))
+            path = Path(entry.path)
+            contained, status = fixture_entry_status(root, path)
+            if status is None:
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                target = contained.resolve()
+                if target in ancestors:
+                    raise ValueError(f"cyclic fixture directory reference: {path}")
+                yield path, contained, status
+                scanner = os.scandir(path)
+                stack.append((scanner, target))
+                ancestors.add(target)
+            elif stat.S_ISREG(status.st_mode):
+                yield path, contained, status
+            else:
+                raise ValueError(f"fixture reference is not a regular file: {path}")
+    finally:
+        for scanner, _ in stack:
+            scanner.close()
+
+
+def fixture_files(root: Path, *, budget: FixtureBudget | None = None) -> Iterator[tuple[Path, Path]]:
+    """Check and bound all expanded work before collecting regular files."""
+    for path, contained, status in fixture_entries(root, budget=budget):
+        if stat.S_ISREG(status.st_mode):
+            yield path, contained
+
+
+def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None = None,
+                 dependencies: dict[str, Path] | None = None) -> str:
+    """Digest a tree plus referenced dependencies not already included in it.
+
+    Optional dependencies receives the transitive, normalized root-relative
+    dependency paths, including missing files, for fixture copying consumers.
+    """
     if scope not in SCOPES:
         raise ValueError(f"unknown fixture scope: {scope}")
     digest = hashlib.sha256()
+    reference_root = reference_root if reference_root is not None else root
+    budget = FixtureBudget()
+    referenced: dict[str, Path] = {}
+    hashed: set[Path] = set()
     if scope != "all":
         # Separate scoped identities from the existing full-tree hash format.
         digest.update(f"fixture-scope:{scope}\0".encode("ascii"))
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+    # Native Windows Path ordering folds case; the receipt order must not.
+    for path, contained in sorted(fixture_files(root, budget=budget),
+                                  key=lambda item: item[0].relative_to(root).parts):
         relative = path.relative_to(root).as_posix()
         if scope == "headless-server" and relative in SERVER_RENDER_ONLY_FILES:
             continue
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(canonical_file_digest(path).encode("ascii"))
+        file_digest = canonical_file_digest(contained, reference_root=reference_root,
+                                            dependencies=referenced, containment_root=root.resolve(),
+                                            max_reference_depth=MAX_FIXTURE_DEPTH)
+        hashed.add(contained)
+        digest.update(file_digest.encode("ascii"))
         digest.update(b"\n")
+    # Preserve the tree receipt byte-for-byte when every dependency is already
+    # included. The extension uses JSON framing to bind names, contents and
+    # missing-file state without delimiter ambiguity, including unusual names.
+    extra: dict[str, str | None] = {}
+    pending = []
+    for item in referenced.items():
+        budget.take(len(item[1].relative_to(reference_root.resolve()).parts))
+        pending.append(item)
+    visited: set[str] = set()
+    while pending:
+        name, path = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        if path not in hashed:
+            if path_exists(path):
+                discovered: dict[str, Path] = {}
+                extra[name] = canonical_file_digest(path, reference_root=reference_root,
+                                                     dependencies=discovered,
+                                                     containment_root=reference_root.resolve(),
+                                                     max_reference_depth=MAX_FIXTURE_DEPTH)
+                for item in discovered.items():
+                    budget.take(len(item[1].relative_to(reference_root.resolve()).parts))
+                    referenced[item[0]] = item[1]
+                    pending.append(item)
+            else:
+                extra[name] = None
+    if dependencies is not None:
+        dependencies.update(referenced)
+    if extra:
+        digest.update(b"\0fixture-dependencies:v1\0")
+        digest.update(json.dumps(sorted(extra.items()), ensure_ascii=True,
+                                 separators=(",", ":")).encode("ascii"))
     return digest.hexdigest()
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_root", type=Path)
+    parser.add_argument("--reference-root", type=Path,
+                        help="data root for preset references (defaults to the hashed root)")
     parser.add_argument(
         "--scope", choices=SCOPES, default="all",
         help="headless-server expects data/common and omits only client grass/rain/snow rendering data",
@@ -116,7 +287,12 @@ def main(argv: list[str]) -> int:
     if not root.is_dir():
         print(f"fixture root is not a directory: {root}", file=sys.stderr)
         return 2
-    print(fixture_hash(root, scope=args.scope))
+    try:
+        result = fixture_hash(root, scope=args.scope, reference_root=args.reference_root)
+    except (OSError, ValueError) as exc:
+        print(f"fixture refused: {exc}", file=sys.stderr)
+        return 2
+    print(result)
     return 0
 
 

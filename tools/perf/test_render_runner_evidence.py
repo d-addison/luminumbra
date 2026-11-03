@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Device-free run_client controls, including a real child that outlives capture."""
+"""Device-free run_client controls with real and injected process timeouts."""
 import argparse
-import base64
 from contextlib import redirect_stderr
 import hashlib
 import importlib.util
@@ -9,14 +8,19 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import test_render_contract as contract_fixtures
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
@@ -26,28 +30,155 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 CHILD = r'''
-import base64, pathlib, sys, time
-artifact, payload, code, wait, loaders = sys.argv[1:]
+import pathlib, sys, time
+artifact, payload, code, loaders, ready, startup_delay = sys.argv[1:]
+time.sleep(float(startup_delay))
 if loaders == '1':
     print('Static-model textures registered (3 models).', flush=True)
     for part in ('trunk', 'branches', 'leaves'):
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
-    pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
-if wait == '1':
-    time.sleep(30)
+    pathlib.Path(artifact).write_bytes(pathlib.Path(payload).read_bytes())
+if ready != '-':
+    print('A' * 20000, flush=True)
+    print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
+    print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
+    print('unrelated trailing line', flush=True)
+    pathlib.Path(ready).touch()
+    while True:
+        time.sleep(1)
 sys.exit(int(code))
 '''
 
 
+TIMEOUT_LOG = (b'A' * 20000 + b'\n'
+               b'EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...\n'
+               b'EnsureSurfaceReadyNear/surface-build batch 3\n'
+               b'unrelated trailing line\n')
+
+
 SLOW_CHILD = r'''
-import sys, time
+import pathlib, sys, time
 print('A' * 20000, flush=True)
 print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
 print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
 print('unrelated trailing line', flush=True)
-time.sleep(30)
+pathlib.Path(sys.argv[1]).touch()
+while True:
+    time.sleep(1)
 '''
+
+
+class RenderRunnerRefusalInputsTests(unittest.TestCase):
+    def check_texture_inputs(self, method):
+        # Validate the actual integration case's argv and script before substituting
+        # the native content loader's refusal. An option error must fail this check.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / 'data/models/trees/tree_textures.json'
+            manifest.parent.mkdir(parents=True)
+            texture = root / 'data/texture.ltex'
+            texture.write_bytes(b'texture bytes')
+            manifest.write_text(json.dumps({'models': [{'albedo': 'data/texture.ltex'}]}),
+                                encoding='utf-8')
+            case = runner.RenderRunnerTests(method)
+            case.root = root
+            def content_refusal(name, extra, *, expected_exit, schema):
+                self.assertEqual((name, expected_exit, schema), ('refused', 2, 'v4'))
+                self.assertEqual(extra[0], '--traversal')
+                self.assertEqual(len(extra), 2, 'content refusal must not have a duration override')
+                script = runner.contract.traversal_manifest(Path(extra[1]).read_text(encoding='utf-8'))
+                self.assertEqual(script['kind'], 'save_load')
+                self.assertEqual(script['expected_ticks'], 4)
+                self.assertEqual([action['tick'] for action in script['actions']], [1, 2])
+                document = json.loads(manifest.read_bytes())
+                reference = document['models'][0]['albedo']
+                self.assertEqual((root / reference).resolve(), (root / 'external.ltex').resolve())
+                self.assertEqual((root / 'external.ltex').read_bytes(), texture.read_bytes())
+                return 'Benchmark content reference escapes inventoried trees'
+            with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                    source=Path(__file__).resolve().parents[2]), create=True), \
+                    mock.patch.object(case, 'run_client', side_effect=content_refusal) as process:
+                getattr(case, method)()
+                process.assert_called_once()
+
+    def test_absolute_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_absolute_texture_refusal')
+
+    def test_parent_relative_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_parent_relative_texture_refusal')
+
+
+class RenderRunnerLogPathsTests(unittest.TestCase):
+    def check_case(self, method, data, script=None):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory)
+            # Two instances of the same entry share an artifact directory.
+            # Each reader must use its own writer's runtime token.
+            for runtime_name in ('first-runtime', 'second-runtime'):
+                runtime = artifacts / runtime_name
+                runtime.mkdir()
+                case = runner.RenderRunnerTests(method)
+                case.root = runtime
+                case.environment = os.environ.copy()
+                case.script = script
+                calls = []
+                def process(command, *, log, artifact, expected_exit, **kwargs):
+                    name = artifact.stem
+                    calls.append(name)
+                    self.assertEqual(log, artifacts / f'{method}-{runtime_name}-{name}.log')
+                    if expected_exit:
+                        output = ('Traversal owns the measured duration; '
+                                  'omit --render-benchmark-frames')
+                    else:
+                        artifact.write_text(json.dumps(data), encoding='utf-8')
+                        output = ('Static-model textures registered (3 models).\n' +
+                                  '\n'.join(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)"
+                                            for part in ('trunk', 'branches', 'leaves')) +
+                                  '\nFar world: requested=ladder effective=legacy '
+                                  'refusal=ImmutableAuthorityUnavailable\n'
+                                  'suppressed=true submission_refusal=IsolationSuppressed')
+                    log.write_text(output, encoding='utf-8')
+                    return subprocess.CompletedProcess(command, expected_exit), []
+                with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                        client=Path(sys.executable), artifacts=artifacts), create=True), \
+                        mock.patch.object(runner, '_run_process', side_effect=process):
+                    getattr(case, method)()
+                self.assertEqual(calls, ['first', 'second', 'traversal-frames-separate',
+                                         'traversal-frames-assigned']
+                                 if script else ['isolated'])
+
+    def test_traversal_readers_use_unique_writer_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'short.traversal'
+            text = (contract_fixtures.FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8')
+            text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+            text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+            script.write_bytes(text.encode('utf-8'))
+            manifest = runner.contract.traversal_manifest(text)
+            data = contract_fixtures.artifact()
+            data['workload'].update({key: value for key, value in manifest.items() if key != 'path'})
+            data['workload'].update(kind='traversal', actual_ticks=4,
+                                    measured_duration_seconds=0.01, script=text,
+                                    script_path=str(script), camera_samples=[
+                                        runner.contract.camera_sample(manifest, tick)
+                                        for tick in (1, 2, 3, 4)])
+            data['world_content_identity'] = data['workload']['content_identity']
+            data['far_world'] = contract_fixtures.far_capture()['far_world']
+            for row in data['far_world']['frames']:
+                row.update(effective_mode='legacy', refusal='ImmutableAuthorityUnavailable')
+            contract_fixtures.update_far_summary(data)
+            self.check_case('test_traversal_twice', data, script)
+
+    def test_isolation_reader_uses_unique_writer_path(self):
+        data = contract_fixtures.artifact()
+        data['far_world'] = contract_fixtures.far_capture()['far_world']
+        override = {'cli:--isolation-layers': 'foliage'}
+        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+        for row in data['far_world']['frames']:
+            row.update(suppressed=True, submission_refusal='IsolationSuppressed')
+        contract_fixtures.update_far_summary(data)
+        self.check_case('test_isolation_submission_reporting', data)
 
 
 class RenderRunnerEvidenceTests(unittest.TestCase):
@@ -60,7 +191,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.runtime.mkdir()
         self.artifacts.mkdir()
         self.child = self.root / 'child.py'
-        self.child.write_text(CHILD)
+        self.child.write_text(CHILD, encoding="utf-8")
         self.case = runner.RenderRunnerTests('test_traversal_twice')
         self.case.root = self.runtime
         self.case.environment = os.environ.copy()
@@ -71,8 +202,14 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.payload = b'{\n  "schema": "diagnostic_fixture", "frames": 4\n}\n'
         self.code = 0
         self.wait = False
+        self.real_timeout = True
+        self.children = []
+        self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        mock.patch.object(runner.crash_capture, 'run', side_effect=ordinary_run).start()
         self.original_run = subprocess.run
         self.calls = []
         mock.patch.object(runner.subprocess, 'run', side_effect=self.run_child).start()
@@ -82,20 +219,84 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 180)
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
-        payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
-        child_command = [sys.executable, str(self.child), artifact, payload,
-                         str(self.code), str(int(self.wait)), str(int(self.loaders))]
-        # Only the tiny fixture child gets a shorter timeout. Production argv,
-        # cwd, environment and the 180-second limit above are observed unchanged.
-        try:
-            return self.original_run(child_command, **dict(kwargs, timeout=0.75 if self.wait else 5))
-        except subprocess.TimeoutExpired as error:
+        payload = '-'
+        if self.payload is not None:
+            # Capture JSON can exceed both Windows' command-line limit and the
+            # POSIX per-argument bound. Close the fixture file before spawning.
+            fixture = self.root / 'child-payload.json'
+            fixture.write_bytes(self.payload)
+            payload = str(fixture)
+        if self.wait and not self.real_timeout:
+            if self.payload is not None:
+                Path(artifact).write_bytes(self.payload)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            error = subprocess.TimeoutExpired(command, kwargs['timeout'])
             self.process_exception = error
             self.process_exception_attributes = (error.cmd, error.timeout)
-            raise
+            raise error
+        ready = self.root / 'ready'
+        waiting = self.wait and self.real_timeout
+        child_command = [sys.executable, '-I', '-B', str(self.child), artifact, payload,
+                         str(self.code), str(int(self.loaders)),
+                         str(ready) if waiting else '-', str(self.startup_delay)]
+        if waiting:
+            ready.unlink(missing_ok=True)
+            popen = subprocess.Popen
+
+            def start(*args, **options):
+                child = popen(*args, **options)
+                self.children.append(child)
+                wait = child.wait
+
+                def wait_for_timeout(timeout=None):
+                    if timeout is not None:
+                        # Only a deadlock detector: wait for the real child to
+                        # finish writing before requesting an immediate timeout.
+                        deadline = time.monotonic() + 60
+                        while not ready.exists():
+                            self.assertIsNone(child.poll(), 'child exited before capture')
+                            self.assertLess(time.monotonic(), deadline,
+                                            'child never became ready')
+                            time.sleep(0.01)
+                        self.assertIsNone(child.poll(), 'child must still be running')
+                        return wait(timeout=0)
+                    return wait()
+
+                child.wait = wait_for_timeout
+                child.kill = mock.Mock(wraps=child.kill)
+                return child
+
+            with mock.patch.object(subprocess, 'Popen', side_effect=start):
+                try:
+                    return self.original_run(child_command, **kwargs)
+                except subprocess.TimeoutExpired as error:
+                    self.process_exception = error
+                    self.process_exception_attributes = (error.cmd, error.timeout)
+                    raise
+        return self.original_run(child_command, **dict(kwargs, timeout=5))
+
+    def run_ready_child(self, command, ready, **kwargs):
+        ready.unlink(missing_ok=True)
+        kwargs.pop('timeout')
+        kwargs.pop('check')
+        with subprocess.Popen(command, **kwargs) as process:
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    self.assertIsNone(process.poll(), 'fixture exited before becoming ready')
+                    self.assertLess(time.monotonic(), deadline, 'fixture did not become ready')
+                    time.sleep(0.01)
+                code = process.wait(timeout=0.05)
+                return subprocess.CompletedProcess(command, code)
+            finally:
+                # Reap the child before reading evidence or deleting its runtime.
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
 
     def paths(self, name='capture'):
-        stem = 'test_traversal_twice-' + name
+        stem = 'test_traversal_twice-' + self.case.root.name + '-' + name
         return self.artifacts / (stem + '.json'), self.artifacts / (stem + '.process.json')
 
     def receipt(self, name='capture'):
@@ -108,8 +309,194 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIs(caught.exception, self.process_exception)
         self.assertEqual((caught.exception.cmd, caught.exception.timeout),
                          self.process_exception_attributes)
+        if self.real_timeout:
+            self.children[-1].kill.assert_called_once_with()
+            self.assertIsNotNone(self.children[-1].returncode, 'timed out child was not reaped')
+
+    def test_atomic_publication_replaces_existing_files_without_rename(self):
+        paths = self.paths()
+        for path in paths:
+            path.write_bytes(b'previous evidence')
+        with mock.patch.object(runner.os, 'rename', side_effect=FileExistsError(
+                'destination already exists')), \
+                mock.patch.object(runner.os, 'replace', wraps=os.replace) as replace:
+            for path in paths:
+                runner._atomic_write(path, b'current evidence')
+                self.assertEqual(path.read_bytes(), b'current evidence')
+        self.assertEqual(replace.call_count, 2)
+        self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_successful_v4_workload_runs_through_report_validation(self):
+        source = Path(__file__).resolve().parents[2]
+        runner.OPTIONS.source = source
+        data = self.delayed_reload_capture()
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_save_load_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertNotIn('--no-audio', command)
+        self.assert_bounded_save_load_command(command)
+        capture, _ = self.paths('save-load')
+        self.assertEqual(json.loads(capture.read_bytes()), data)
+        receipt = self.receipt('save-load')
+        self.assertEqual(receipt['outcome'], 'returned')
+        self.assertEqual(receipt['return_code'], 0)
+        self.assertEqual(receipt['capture_status'], 'retained')
+        self.assertEqual(receipt['capture_sha256'], hashlib.sha256(self.payload).hexdigest())
+
+    def test_successful_v4_without_audio_runs_through_report_validation(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        content = data['settings']['content_files']
+        for path in list(content):
+            if path.startswith('assets/audio/'):
+                del content[path]
+        content['assets/audio'] = None
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_no_audio_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertIn('--no-audio', command)
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assert_bounded_save_load_command(command)
+        self.assertFalse((self.runtime / 'assets/audio').exists())
+        self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
+        self.assertEqual(self.receipt('save-load')['return_code'], 0)
+
+    def delayed_reload_capture(self):
+        script = self.case.save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        reload = data['workload']['reload']
+        request = reload['request_frame']
+        settled = request + 3
+        for row in data['workload']['observations']:
+            if request <= row['frame'] < settled:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        reload['first_settled_frame'] = settled
+        samples = data['frame_samples']
+        warmup = data['warmup_frames']
+        reload['elapsed_ms'] = sum(row['frame_wall_ms'] for row in
+                                   samples[request - warmup:settled - warmup])
+        overrides = {'cli:--horizon-radius': '4', 'cli:--collision-radius': '4',
+                     'cli:--render-benchmark-stream-radius': '4'}
+        data['debug_overrides'] = {'active': overrides, 'declared': dict(overrides)}
+        data['settings']['render_overrides'] = dict(overrides)
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        # No streaming churn from camera movement while the reload is settling.
+        poses = [runner.contract.camera_sample(manifest, tick)['position'] for tick in
+                 range(manifest['actions'][-1]['tick'], settled - warmup + 2)]
+        self.assertTrue(all(pose == poses[0] for pose in poses))
+        self.assertTrue(any(runner.contract.camera_sample(manifest, tick)['position'] != poses[0]
+                            for tick in range(settled - warmup + 2, manifest['expected_ticks'] + 1)))
+        return data
+
+    def assert_bounded_save_load_command(self, command):
+        overrides = {'cli:' + flag: '4' for flag in (
+            '--horizon-radius', '--collision-radius', '--render-benchmark-stream-radius')}
+        for key, value in overrides.items():
+            self.assertIn(key[4:], command)
+            self.assertEqual(command[command.index(key[4:]) + 1], value)
+        declaration = Path(command[command.index('--declare-render-overrides') + 1])
+        self.assertEqual(json.loads(declaration.read_text(encoding='utf-8')), overrides)
+        script = Path(command[command.index('--traversal') + 1])
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        self.assertEqual((manifest['duration_seconds'], manifest['tick_rate'],
+                          manifest['expected_ticks']), (0.4, 30, 12))
+        self.assertEqual([(row['tick'], row['name']) for row in manifest['actions']],
+                         [(1, 'save'), (2, 'reload')])
+        self.assertNotIn('--render-benchmark-frames', command)
+
+    def test_small_capture_still_rejects_changed_identity_and_unresumed_camera(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        data['settings']['render_overrides']['cli:--render-benchmark-stream-radius'] = '2'
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaises(ValueError):
+            self.case.test_v4_save_load_success()
+        data = self.delayed_reload_capture()
+        # Even a quiescent reload at the last frame cannot claim resumed motion.
+        last = data['workload']['observations'][-1]['frame']
+        data['workload']['reload'].update(first_settled_frame=last)
+        for row in data['workload']['observations']:
+            if data['workload']['reload']['request_frame'] <= row['frame'] < last:
+                row.update(settled=False, stream_meshing_batches=1)
+        warmup = data['warmup_frames']
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload']['elapsed_ms'] = sum(
+            row['frame_wall_ms'] for row in data['frame_samples'][request - warmup:last - warmup])
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not resume its camera path'):
+            self.case.test_v4_save_load_success()
+
+    def test_v4_success_case_rejects_reload_that_never_settles(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        for row in data['workload']['observations']:
+            if row['frame'] >= request:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not settle after reload'):
+            self.case.test_v4_save_load_success()
+        self.assertEqual(self.receipt('save-load')['capture_status'], 'retained')
+
+    def test_unsettled_reload_reports_each_active_gate(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        keys = ('stream_queue_depth', 'stream_generation_batches', 'stream_meshing_batches',
+                'stream_pending_lod_chunks', 'terrain_upload_candidates', 'water_upload_candidates',
+                'stream_promotion_pending', 'foliage_pending', 'region_scheduler_fault')
+        for row in rows:
+            if row['frame'] >= request:
+                row['settled'] = False
+                for key in keys:
+                    row[key] = True if type(row[key]) is bool else 1
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaises(ValueError) as caught:
+            self.case.test_v4_save_load_success()
+        for key in keys:
+            self.assertIn(f'{key}={count}', str(caught.exception))
+        self.assertIn('world_not_ready=0', str(caught.exception))
+        self.assertIn('outside_gameplay=0', str(caught.exception))
+
+    def test_unsettled_reload_reports_unready_world(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        rows = data['workload']['observations']
+        for row in rows:
+            if row['frame'] >= request:
+                row.update(settled=False, world_ready=False)
+        self.payload = json.dumps(data).encode('utf-8')
+        count = sum(row['frame'] >= request for row in rows)
+        with self.assertRaisesRegex(ValueError, f'world_not_ready={count}'):
+            self.case.test_v4_save_load_success()
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = True
+        self.assert_retained_timeout_capture()
+        self.assertEqual(len(self.children), 1)
+        self.children[0].kill.assert_called_once_with()
+        self.assertIsNotNone(self.children[0].returncode, 'timed out child was not reaped')
+        self.assertEqual(self.receipt()['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(self.receipt()['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+
+    def test_injected_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = False
+        self.assert_retained_timeout_capture()
+
+    def assert_retained_timeout_capture(self):
         self.assert_timeout()
         shutil.rmtree(self.runtime)
         capture, receipt_path = self.paths()
@@ -124,8 +511,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt['timeout_seconds'], 180)
         self.assertEqual(receipt['command'], self.calls[0][0])
         self.assertEqual(receipt['cwd'], str(self.runtime))
-        self.assertEqual(receipt['binary_path'], str(self.client))
+        self.assertEqual(receipt['binary_path'], str(self.client.resolve(strict=True)))
         self.assertEqual(receipt['binary_sha256'], hashlib.sha256(self.client.read_bytes()).hexdigest())
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
         self.assertGreater(receipt['elapsed_seconds'], 0)
         self.assertEqual(receipt['capture_status'], 'retained')
         self.assertEqual(receipt['capture_path'], str(capture))
@@ -133,19 +521,25 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertNotIn('environment', receipt)
         self.assertEqual(receipt['evidence_errors'], [])
 
+    def test_timeout_waits_for_capture_even_after_slow_interpreter_startup(self):
+        self.startup_delay = 1
+        self.assert_timeout()
+        self.assertEqual(self.paths()[0].read_bytes(), self.payload)
+        self.assertEqual(self.receipt()['capture_status'], 'retained')
+
     def test_timeout_missing_and_partial_captures_cannot_reuse_old_outputs(self):
         for payload, status in ((None, 'missing'), (b'{"incomplete":', 'invalid_json')):
             with self.subTest(status=status):
                 self.payload = payload
                 for path in (*self.paths(), self.runtime / 'capture.json'):
-                    path.write_text('{"stale":true}')
+                    path.write_text('{"stale":true}', encoding="utf-8")
                 unrelated = self.artifacts / 'other-case.json'
-                unrelated.write_text('untouched')
+                unrelated.write_text('untouched', encoding="utf-8")
                 self.assert_timeout()
                 self.assertFalse(self.paths()[0].exists())
                 self.assertEqual(self.receipt()['capture_status'], status)
                 self.assertIsNone(self.receipt()['capture_sha256'])
-                self.assertEqual(unrelated.read_text(), 'untouched')
+                self.assertEqual(unrelated.read_text(encoding="utf-8"), 'untouched')
 
     def test_success_retains_bytes_and_existing_return_value(self):
         self.assertEqual(self.case.run_client('capture'), json.loads(self.payload))
@@ -286,35 +680,148 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
     def test_process_elapsed_excludes_evidence_finalization(self):
         # Use a private clock object so subprocess's real deadline clock stays real.
         clock = mock.Mock()
-        clock.monotonic.side_effect = [10.0, 12.5]
+        clock.perf_counter.side_effect = [10.0, 12.5]
         with mock.patch.object(runner, 'time', clock):
             self.case.run_client('capture')
         self.assertEqual(self.receipt()['elapsed_seconds'], 2.5)
-        self.assertEqual(clock.monotonic.call_count, 2)
+        self.assertEqual(clock.perf_counter.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
 
+    def test_executable_change_invalidates_receipt_on_return_and_timeout(self):
+        executable = self.root / Path(sys.executable).name
+        runner.OPTIONS.client = executable
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                shutil.copy2(sys.executable, executable)
+                error = subprocess.TimeoutExpired([str(executable)], 180)
+
+                def launch(command, **kwargs):
+                    metadata = executable.stat()
+                    os.utime(executable, ns=(metadata.st_atime_ns,
+                                            metadata.st_mtime_ns + 2000000000))
+                    Path(command[command.index('--render-benchmark') + 1]).write_bytes(self.payload)
+                    if timed_out:
+                        raise error
+                    return subprocess.CompletedProcess(command, 0)
+
+                with mock.patch.object(runner.subprocess, 'run', side_effect=launch), \
+                        redirect_stderr(io.StringIO()), \
+                        self.assertRaises(subprocess.TimeoutExpired if timed_out else OSError) as caught:
+                    self.case.run_client('capture')
+                if timed_out:
+                    self.assertIs(caught.exception, error)
+                receipt = self.receipt()
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertTrue(receipt['evidence_errors'])
+                self.assertEqual(self.paths()[0].read_bytes(), self.payload)
+
+    def test_timeout_log_read_is_bounded_and_old_phase_is_not_retained(self):
+        payload = b'EnsureSurfaceReadyNear: outside retained window\n' + b'x' * 20000
+        reads = []
+        class BoundedReader(io.BytesIO):
+            def read(self, size=-1):
+                reads.append(size)
+                self_outer.assertGreaterEqual(size, 0)
+                self_outer.assertLessEqual(size, runner.TIMEOUT_LOG_TAIL_BYTES)
+                return super().read(size)
+        self_outer = self
+        log = mock.Mock()
+        log.open.return_value = BoundedReader(payload)
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertEqual(reads, [runner.TIMEOUT_LOG_TAIL_BYTES])
+        self.assertEqual(receipt['log_tail'], 'x' * runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIsNone(receipt['last_observed_phase'])
+
+    def test_timeout_partial_first_line_cannot_supply_phase(self):
+        fragment = b'EnsureSurfaceReadyNear: partial first line\n'
+        payload = b'x' * 10000 + fragment + b'q' * (runner.TIMEOUT_LOG_TAIL_BYTES - len(fragment))
+        log = self.root / 'partial-timeout.log'
+        log.write_bytes(payload)
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertTrue(receipt['log_tail'].startswith(fragment.decode('ascii')))
+        self.assertIsNone(receipt['last_observed_phase'])
+
+    def test_timeout_unfinished_final_phase_preserves_last_complete_phase(self):
+        log = self.root / 'unfinished-timeout.log'
+        log.write_bytes(b'EnsureSurfaceReadyNear: completed phase\n'
+                        b'EnsureSurfaceReadyNear: unfinished phase')
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertTrue(receipt['log_tail'].endswith('unfinished phase'))
+        self.assertEqual(receipt['last_observed_phase'], 'EnsureSurfaceReadyNear: completed phase')
+
+    def test_timeout_tail_invalid_utf8_and_read_failure_are_best_effort(self):
+        log = self.root / 'invalid-timeout.log'
+        log.write_bytes(b'\xff\nEnsureSurfaceReadyNear: final complete phase\n')
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertIn('\ufffd', receipt['log_tail'])
+        self.assertEqual(receipt['last_observed_phase'], 'EnsureSurfaceReadyNear: final complete phase')
+        with mock.patch.object(Path, 'open', side_effect=OSError('fixture read refused')), \
+                redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertEqual(receipt['log_tail'], '')
+        self.assertIsNone(receipt['last_observed_phase'])
+        self.assertIn('timeout log read: fixture read refused', receipt['evidence_errors'])
+
     def test_timeout_reports_log_tail_and_last_observed_phase(self):
-        slow = self.root / 'slow_child.py'
-        slow.write_text(SLOW_CHILD)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assert_timeout()
+        self.assert_timeout_diagnostics(self.receipt(), stderr.getvalue())
+
+    def test_injected_timeout_reports_log_tail_and_last_observed_phase(self):
         log = self.root / 'timeout.log'
         artifact = self.root / 'timeout-capture.json'
         retained = self.root / 'timeout-retained.json'
         receipt_path = self.root / 'timeout-process.json'
-        original_run = self.original_run
+        error = subprocess.TimeoutExpired([sys.executable], 180)
 
+        def timeout(command, **kwargs):
+            self.assertEqual(kwargs['timeout'], 180)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            raise error
+
+        stderr = io.StringIO()
+        with mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
+                redirect_stderr(stderr):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                runner._run_process([sys.executable], cwd=self.root,
+                                    environment=os.environ.copy(), log=log,
+                                    artifact=artifact, retained=retained,
+                                    receipt_path=receipt_path)
+        self.assertIs(caught.exception, error)
+        receipt = json.loads(receipt_path.read_text())
+        self.assert_timeout_diagnostics(receipt, stderr.getvalue())
+
+    def test_ready_child_timeout_reports_log_tail_and_last_observed_phase(self):
+        slow = self.root / 'slow_child.py'
+        slow.write_text(SLOW_CHILD, encoding="utf-8")
+        log = self.root / 'timeout.log'
+        artifact = self.root / 'timeout-capture.json'
+        retained = self.root / 'timeout-retained.json'
+        receipt_path = self.root / 'timeout-process.json'
         def short_run(command, **kwargs):
-            kwargs['timeout'] = 2
-            return original_run(command, **kwargs)
+            return self.run_ready_child(command, self.root / 'slow.ready', **kwargs)
 
         stderr = io.StringIO()
         with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
                 redirect_stderr(stderr):
             with self.assertRaises(subprocess.TimeoutExpired):
-                runner._run_process([sys.executable, str(slow)], cwd=self.root,
+                runner._run_process([sys.executable, '-I', '-B', str(slow),
+                                     str(self.root / 'slow.ready')], cwd=self.root,
                                     environment=os.environ.copy(), log=log,
                                     artifact=artifact, retained=retained,
                                     receipt_path=receipt_path)
-        receipt = json.loads(receipt_path.read_text())
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt['outcome'], 'timed_out')
         self.assertEqual(receipt['last_observed_phase'],
                          'EnsureSurfaceReadyNear/surface-build batch 3')
@@ -324,6 +831,257 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('render runner: timed out after', message)
         self.assertIn('unrelated trailing line', message)
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
+
+    def assert_timeout_diagnostics(self, receipt, message):
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
+        self.assertIn('unrelated trailing line', receipt['log_tail'])
+        self.assertIn('render runner: timed out after', message)
+        self.assertIn('unrelated trailing line', message)
+        self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
+
+
+class RenderRunnerResidencyTests(unittest.TestCase):
+    def test_capture_cap_is_validated_early_and_applied_to_creation_and_reload(self):
+        root = Path(__file__).resolve().parents[2]
+        def cpp(path):
+            source = (root / path).read_text(encoding='utf-8')
+            tokens = r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/'
+            source = re.sub(tokens, lambda m: '' if m[0].startswith('/') else m[0],
+                            source, flags=re.DOTALL)
+            return ''.join(source.split())
+        parser_source = cpp('src/luminumbra_client/core/RuntimeScenarioConfig.cpp')
+        admission = parser_source[parser_source.index('voidParseSurfaceRadiusOptions('):
+                                  parser_source.index('RuntimePathOptionsParseRuntimePathOptions(')]
+        self.assertIn('std::string_view("--render-benchmark-stream-radius")', admission)
+        self.assertIn(':benchmark_stream_radius;', admission)
+        self.assertIn('if(!World::TryParseSurfaceRadius(value,radius))throw', admission)
+        self.assertIn('HasCommandLineOption(argc,argv,"--render-benchmark-stream-radius")&&'
+                      'GetCommandLineOption(argc,argv,"--render-benchmark-schema","v2")!="v4")'
+                      'throwstd::invalid_argument(', admission)
+        paths = parser_source[parser_source.index('RuntimePathOptionsParseRuntimePathOptions('):
+                              parser_source.index('ParseRuntimeScenarioConfig(')]
+        self.assertLess(paths.index('argc,argv,surface_radius,collision_radius,benchmark_stream_radius'),
+                        paths.index('std::filesystem::create_directories('))
+        self.assertIn('argc,argv,config.horizon_radius,config.collision_radius,'
+                      'config.benchmark_stream_radius', parser_source)
+        main = cpp('src/luminumbra_client/main_client.cpp')
+        entry = main[main.index('autofinish_world_entry='):main.index('autostart_world_creation=')]
+        cap = 'world_system->debug_set_streaming_radius_cap(scenario_config.benchmark_stream_radius);'
+        self.assertIn('if(benchmark_v4)' + cap, entry)
+        self.assertLess(entry.index(cap), entry.index('EnsureSurfaceReadyNear('))
+        creation = main[main.index('autostart_world_creation='):main.index('autostart_world_load=')]
+        load = main[main.index('autostart_world_load='):main.index('if(g_uiManager){', main.index('autostart_world_load='))]
+        for path in (creation, load):
+            self.assertIn('finish_world_entry();', path)
+        # The shared gate must still visit an activation interval and every
+        # pending queue/upload; it never advances a script tick while draining.
+        drain = main[main.index('constautosettle_workload_reload='):main.index('if(reload_settling_pending)')]
+        for gate in ('reload_residency_observed(', 'streaming.quiescent()',
+                     'uploads.terrain_upload_candidates==0', 'uploads.water_upload_candidates==0',
+                     '!foliage->build_pending()', 'benchmark_queries->checkpoint_passes()'):
+            self.assertIn(gate, drain)
+        self.assertNotIn('++traversal', drain)
+        self.assertNotIn('traversal_target_tick=', drain)
+        # Remain an observable declared override, bound by the existing identity
+        # serializer, rather than joining the workload-option exemption list.
+        report = cpp('src/luminumbra_client/app/RenderBenchmarkReport.h')
+        self.assertNotIn('"--render-benchmark-stream-radius"', report)
+
+
+class RenderRunnerRegistrationTests(unittest.TestCase):
+    def test_real_client_registrations_share_native_graphics_admission(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / 'test/CMakeLists.txt').read_text(encoding='utf-8')
+        # Evaluate only the actual registration lists/loop, never the native
+        # target definitions or engine project. Discovery records properties on
+        # sentinel tests instead of launching GoogleTest executables.
+        start = source.index('set(LUMINUMBRA_GTEST_TARGETS\n')
+        end = source.index('\nendforeach()', source.index('foreach(_lum_gtest_target'))
+        native = source[start:end + len('\nendforeach()')]
+        integrations = source[source.index('add_test(NAME RenderBenchmarkAssets'):]
+        manual = source[source.index('add_test(NAME ShieldRtTracerProfileGpu'):
+                        source.index('#  per-flag fixtures')]
+        cpu = source[source.index('add_test(NAME ShieldRtSpike'):
+                     source.index('# Simulation telemetry captures')]
+        gpu_cases = {
+            'ShieldRtTracerProfileGpu': 'shieldrt_tracer_profile_gpu',
+            'ShieldRtFarFieldParityGpu': 'shieldrt_far_field_parity_gpu',
+            'ShieldRtFarFieldGbufferGpu': 'shieldrt_far_field_gbuffer_gpu',
+            'ShieldRtFarFieldMaxMipGpu': 'shieldrt_far_field_maxmip_gpu',
+        }
+        cases = {
+            'RenderTraversalIntegrated': 'test_traversal_twice',
+            'RenderWorkloadSaveLoadIntegrated': 'test_v4_save_load_success',
+            'RenderWorkloadNoAudioIntegrated': 'test_v4_no_audio_success',
+            'RenderBenchmarkStreamRadiusRefusal': 'test_stream_radius_refusal',
+            'RenderEscapingAudioRefusal': 'test_escaping_audio_refusal',
+            'RenderAbsoluteTextureRefusal': 'test_absolute_texture_refusal',
+            'RenderParentRelativeTextureRefusal': 'test_parent_relative_texture_refusal',
+            'RenderSceneConfigSeparateRefusal': 'test_scene_config_separate_refusal',
+            'RenderSceneConfigAssignmentRefusal': 'test_scene_config_assignment_refusal',
+            'RenderExistingWorldOptionFormsRefusal': 'test_existing_world_option_forms_refusal',
+            'RenderTraversalDurationOptionFormsRefusal': 'test_traversal_duration_option_forms_refusal',
+            'RenderCaptureOptionMissingValuesRefusal': 'test_capture_option_missing_values_refusal',
+            'RenderTraversalOwnerOptionFormsRefusal': 'test_traversal_owner_option_forms_refusal',
+            'RenderBenchmarkImplicitCreationFailure': 'test_implicit_creation_failure',
+            'RenderBenchmarkMeasuredFrameBounds': 'test_v2_measured_frame_bounds',
+            'RenderBenchmarkIsolationSubmission': 'test_isolation_submission_reporting',
+            'RenderBenchmarkOverrideCollection': 'test_gl_debug_override_collection',
+            'RenderTraversalEmbeddedPresetRefusal': 'test_embedded_preset_refusal',
+        }
+        with tempfile.TemporaryDirectory(prefix='render registration ') as temporary:
+            fixture = Path(temporary)
+            for optional in ('OFF', 'ON'):
+                with self.subTest(optional_graphics=optional):
+                    project = fixture / optional
+                    project.mkdir()
+                    build = project / 'build with spaces'
+                    # Five inert imported targets; metadata inspection never executes them.
+                    targets = (*gpu_cases.values(), 'shieldrt_spike_bench')
+                    executables = {}
+                    imported = []
+                    for target in targets:
+                        executable = project / (target + ' sentinel.exe')
+                        executable.write_text('metadata only\n', encoding='utf-8')
+                        executable.chmod(0o700)
+                        executables[target] = executable.as_posix()
+                        imported.append(
+                            f'add_executable({target} IMPORTED)\n'
+                            f'set_target_properties({target} PROPERTIES '
+                            f'IMPORTED_LOCATION [=[{executable.as_posix()}]=])')
+                    imported_targets = '\n'.join(imported)
+                    cmake = f"""cmake_minimum_required(VERSION 3.20)
+project(RenderRegistration LANGUAGES NONE)
+enable_testing()
+set(CMAKE_SOURCE_DIR [=[{root.as_posix()}]=])
+set(Python3_EXECUTABLE [=[{Path(sys.executable).as_posix()}]=])
+add_executable(luminumbra_client_app IMPORTED)
+set_target_properties(luminumbra_client_app PROPERTIES
+    IMPORTED_LOCATION [=[{Path(sys.executable).as_posix()}]=])
+function(gtest_discover_tests target)
+    cmake_parse_arguments(discovery "NO_PRETTY_VALUES" "DISCOVERY_TIMEOUT;TEST_LIST" "PROPERTIES" ${{ARGN}})
+    if(NOT discovery_DISCOVERY_TIMEOUT EQUAL 120 OR discovery_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unexpected discovery arguments")
+    endif()
+    add_test(NAME native.${{target}} COMMAND "${{CMAKE_COMMAND}}" -E false)
+    if(discovery_TEST_LIST)
+        set(${{discovery_TEST_LIST}} native.${{target}} PARENT_SCOPE)
+    endif()
+    if(discovery_PROPERTIES)
+        set_tests_properties(native.${{target}} PROPERTIES ${{discovery_PROPERTIES}})
+    endif()
+endfunction()
+set(LUMINUMBRA_ENABLE_DILIGENT {optional})
+set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE {optional})
+{native}
+file(WRITE "${{CMAKE_BINARY_DIR}}/gl-targets.txt" "${{LUMINUMBRA_GL_GTEST_TARGETS}}")
+{imported_targets}
+{manual}
+{cpu}
+{integrations}
+"""
+                    (project / 'CMakeLists.txt').write_text(cmake, encoding='utf-8')
+                    subprocess.run(['cmake', '-S', str(project), '-B', str(build),
+                                    '-G', 'Ninja'], check=True, capture_output=True, text=True)
+                    result = subprocess.run(
+                        ['ctest', '--test-dir', str(build), '--show-only=json-v1'],
+                        check=True, capture_output=True, text=True)
+                    tests = {test['name']: test for test in json.loads(result.stdout)['tests']}
+                    properties = {
+                        name: {item['name']: item['value'] for item in test['properties']}
+                        for name, test in tests.items()
+                    }
+                    self.assertEqual({name for name in tests if not name.startswith('native.')},
+                                     set(cases) | set(gpu_cases) | {
+                                          'RenderBenchmarkAssets', 'ShieldRtSpike'})
+                    gl_targets = (build / 'gl-targets.txt').read_text(encoding='utf-8').split(';')
+                    self.assertGreaterEqual(len(gl_targets), 17)
+                    self.assertIn('render_smoke_test', gl_targets)
+                    optional_targets = {
+                        'rhi_device_bringup_test', 'rhi_pilot_flip_test',
+                        'pilot_shader_reflection_test',
+                    }
+                    required_gl_targets = {
+                        'render_smoke_test', 'render_capture_test',
+                        'async_readback_ring_test', 'dual_backend_flip_test',
+                        'registry_ownership_test', 'environment_brdf_test',
+                        'pass_context_test', 'reversed_z_depth_test',
+                        'shader_reflection_test', 'waterfall_visual_test',
+                        'particle_determinism_test', 'far_lod_worker_test',
+                        'ui_smoke_test', 'ui_page_load_test', 'worldgen_preview_test',
+                        'runtime_world_visual_validation_test',
+                    }
+                    # Membership includes optional targets even when discovery omits them.
+                    expected_gl = required_gl_targets | optional_targets
+                    self.assertCountEqual(gl_targets, expected_gl)
+                    expected_registered_gl = {'OFF': required_gl_targets, 'ON': expected_gl}[optional]
+                    self.assertEqual({name[7:] for name in tests
+                                      if name.startswith('native.') and name[7:] in expected_gl},
+                                     expected_registered_gl)
+                    self.assertEqual({name[7:] for name, props in properties.items()
+                                      if name.startswith('native.') and
+                                      props.get('RESOURCE_LOCK') == ['luminumbra_gl_context']},
+                                     expected_registered_gl)
+                    active_gl = set(gl_targets)
+                    if optional == 'OFF':
+                        active_gl -= optional_targets
+                    for target in sorted(active_gl):
+                        name = 'native.' + target
+                        self.assertIn(name, tests)
+                        self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                         ['luminumbra_gl_context'], name)
+                    self.assertNotIn('RESOURCE_LOCK', properties['native.common_tests'])
+                    for target in ('rhi_device_bringup_test', 'rhi_pilot_flip_test',
+                                   'pilot_shader_reflection_test'):
+                        self.assertEqual('native.' + target in tests, optional == 'ON')
+                    for name, method in cases.items():
+                        with self.subTest(test=name):
+                            command = tests[name]['command']
+                            self.assertEqual(Path(command[0]).resolve(), Path(sys.executable).resolve())
+                            self.assertEqual(Path(command[1]), root / 'tools/perf/test_render_runner.py')
+                            self.assertEqual(command[2], '--client')
+                            self.assertEqual(Path(command[3]).resolve(), Path(sys.executable).resolve())
+                            self.assertEqual(command[4:], [
+                                '--source', root.as_posix(),
+                                '--assets', (build / 'test-artifacts/render-synthetic-content').as_posix(),
+                                '--artifacts', (build / 'test-artifacts/render-runner').as_posix(),
+                                'RenderRunnerTests.' + method])
+                            self.assertEqual(properties[name]['TIMEOUT'], 600)
+                            self.assertEqual(properties[name]['FIXTURES_REQUIRED'],
+                                             ['render_benchmark_assets'])
+                            self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                             properties['native.render_smoke_test']['RESOURCE_LOCK'])
+                            for forbidden in ('DISABLED', 'SKIP_RETURN_CODE', 'SKIP_REGULAR_EXPRESSION',
+                                              'LABELS', 'RUN_SERIAL'):
+                                self.assertNotIn(forbidden, properties[name])
+                    for name, target in gpu_cases.items():
+                        with self.subTest(manual_gpu=name):
+                            self.assertEqual(tests[name]['command'], [executables[target]])
+                            self.assertEqual(properties[name]['TIMEOUT'], 600)
+                            self.assertEqual(properties[name]['LABELS'], ['gpu', 'manual', 'perf'])
+                            self.assertEqual(properties[name].get('RESOURCE_LOCK'),
+                                             properties['native.render_smoke_test']['RESOURCE_LOCK'])
+                            for forbidden in ('DISABLED', 'SKIP_RETURN_CODE', 'SKIP_REGULAR_EXPRESSION',
+                                              'FIXTURES_REQUIRED', 'RUN_SERIAL'):
+                                self.assertNotIn(forbidden, properties[name])
+                    self.assertEqual(tests['ShieldRtSpike']['command'],
+                                     [executables['shieldrt_spike_bench']])
+                    self.assertEqual(properties['ShieldRtSpike']['TIMEOUT'], 600)
+                    self.assertEqual(properties['ShieldRtSpike']['LABELS'], ['manual', 'perf', 'spike'])
+                    self.assertNotIn('RESOURCE_LOCK', properties['ShieldRtSpike'])
+                    assets = tests['RenderBenchmarkAssets']['command']
+                    self.assertEqual(Path(assets[0]).resolve(), Path(sys.executable).resolve())
+                    self.assertEqual(Path(assets[1]), root / 'tools/perf/synthetic_render_content.py')
+                    self.assertEqual(assets[2:], [
+                        '--root', (build / 'test-artifacts/render-synthetic-content').as_posix()])
+                    self.assertEqual(properties['RenderBenchmarkAssets']['FIXTURES_SETUP'],
+                                     ['render_benchmark_assets'])
+                    self.assertEqual(properties['RenderBenchmarkAssets']['TIMEOUT'], 30)
+                    cache = (build / 'CMakeCache.txt').read_text(encoding='utf-8')
+                    self.assertNotRegex(cache, r'(?m)^CMAKE_(?:C|CXX)_COMPILER:')
 
 
 if __name__ == '__main__':

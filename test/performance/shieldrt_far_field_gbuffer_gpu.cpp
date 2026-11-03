@@ -113,10 +113,12 @@ FlatMaxMip FlattenMaxMip(const HeightMaxMip& mip) {
     EXPECT_LE(mip.levels, kMaxMipLevels);
     std::int32_t off = 0;
     for (int L = 0; L < mip.levels; ++L) {
-        f.offset[L] = off;
-        f.dim[L] = mip.dims[L];
-        f.data.insert(f.data.end(), mip.max_h[L].begin(), mip.max_h[L].end());
-        off += static_cast<std::int32_t>(mip.max_h[L].size());
+        f.offset[static_cast<std::size_t>(L)] = off;
+        f.dim[static_cast<std::size_t>(L)] = mip.dims[static_cast<std::size_t>(L)];
+        f.data.insert(f.data.end(),
+                      mip.max_h[static_cast<std::size_t>(L)].begin(),
+                      mip.max_h[static_cast<std::size_t>(L)].end());
+        off += static_cast<std::int32_t>(mip.max_h[static_cast<std::size_t>(L)].size());
     }
     return f;
 }
@@ -375,11 +377,15 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glGenTextures(4, tex.data());
     for (int i = 0; i < 4; ++i) {
-        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glBindTexture(GL_TEXTURE_2D, tex[static_cast<std::size_t>(i)]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kViewW, kViewH, 0, GL_RGBA, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i),
+                               GL_TEXTURE_2D,
+                               tex[static_cast<std::size_t>(i)],
+                               0);
     }
     glGenRenderbuffers(1, &depth_rb);
     glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);

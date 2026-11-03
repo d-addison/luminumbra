@@ -52,6 +52,10 @@ TEST(FarVolumeRenderMesh, PreservesRelativeSharedGeometryNormalsAndMaterial) {
     ASSERT_TRUE(
         AdaptFarVolumeRenderMesh(source, 4096, {&pool, &retained, nullptr}, output, &error));
     EXPECT_EQ(error, FarVolumeRenderError::None);
+    EXPECT_EQ(output.terrain_content, source.content);
+    EXPECT_EQ(output.terrain_indices, source.indices.size());
+    EXPECT_EQ(output.water_indices, 0u);
+    EXPECT_FALSE(output.water_complete);
     EXPECT_EQ(output.request, source.request);
     EXPECT_EQ(output.origin_meters, source.origin_meters);
     EXPECT_EQ(output.sampled_max_meters, source.sampled_max_meters);
@@ -120,6 +124,10 @@ TEST(FarVolumeRenderMesh, EmptyAirAndSolidRetainSpanAndReleasePriorGeometry) {
         source.indices.clear();
         ASSERT_TRUE(AdaptFarVolumeRenderMesh(source, 0, {&pool, &retained, nullptr}, output));
         EXPECT_EQ(output.content, content);
+        EXPECT_EQ(output.terrain_content, source.content);
+        EXPECT_EQ(output.terrain_indices, source.indices.size());
+        EXPECT_EQ(output.water_indices, 0u);
+        EXPECT_FALSE(output.water_complete);
         EXPECT_EQ(output.request, source.request);
         EXPECT_EQ(output.origin_meters, source.origin_meters);
         EXPECT_EQ(output.sampled_max_meters, source.sampled_max_meters);

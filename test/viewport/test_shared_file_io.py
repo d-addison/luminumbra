@@ -12,7 +12,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import types
 import unittest
 from unittest import mock
@@ -71,6 +70,67 @@ class SharedFileIOTests(unittest.TestCase):
         self.target = self.root / 'current.json'
         self.old, self.new = {'revision': 1}, {'revision': 2}
         contracts.atomic_json(self.target, self.old)
+
+    def test_path_validation_survives_lease_and_ancestor_disappearance(self):
+        original = Path.stat
+        for ancestor in (False, True):
+            with self.subTest(ancestor=ancestor):
+                transient = self.root / ('transient-directory' if ancestor else 'frame-0.lease')
+                if ancestor:
+                    transient.mkdir()
+                    target = transient / 'absent'
+                else:
+                    transient.touch()
+                    target = transient
+                observed = []
+                def disappear(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    if path == transient:
+                        observed.append(path)
+                        (path.rmdir if ancestor else path.unlink)()
+                    return info
+                with mock.patch.object(Path, 'stat', disappear):
+                    self.assertEqual(file_io.safe_path(target), target)
+                self.assertEqual(observed, [transient])
+                self.assertFalse(transient.exists())
+
+    def test_missing_path_is_allowed_but_unreadable_and_reparse_metadata_are_refused(self):
+        path = self.root / 'absent'
+        self.assertEqual(file_io.safe_path(path), path)
+        for error in (PermissionError('unreadable'), OSError('metadata unavailable')):
+            with self.subTest(error=error), mock.patch.object(Path, 'lstat', side_effect=error):
+                with self.assertRaises(type(error)):
+                    file_io.safe_path(path)
+        with mock.patch.object(Path, 'lstat', return_value=types.SimpleNamespace(
+                st_mode=stat.S_IFREG, st_file_attributes=0x400)):
+            with self.assertRaisesRegex(ValueError, 'Reparse path'):
+                file_io.safe_path(path)
+
+    def test_publication_destination_disappearance_matches_retained_directory_semantics(self):
+        temporary = self.root / 'complete'
+        original = Path.stat
+        for error in (None, PermissionError('unreadable'), OSError('metadata unavailable')):
+            with self.subTest(error=error):
+                temporary.write_bytes(b'complete')
+                self.target.write_bytes(b'previous')
+                observed = []
+                def disappear(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    if path == self.target:
+                        observed.append(path)
+                        if len(observed) == 2:  # After safe_path, at destination validation.
+                            if error is not None: raise error
+                            path.unlink()
+                    return info
+                with mock.patch.object(Path, 'stat', disappear):
+                    if error is None:
+                        file_io.replace_file(temporary, self.target)
+                    else:
+                        with self.assertRaises(type(error)):
+                            file_io.replace_file(temporary, self.target)
+                self.assertEqual(len(observed), 2)
+                self.assertEqual(self.target.read_bytes(), b'complete' if error is None else b'previous')
+                self.assertEqual(temporary.exists(), error is not None)
 
     def test_actual_held_service_reader_keeps_old_bytes_and_new_reader_gets_replacement(self):
         before = self.target.read_bytes()
@@ -274,10 +334,10 @@ class SharedFileIOTests(unittest.TestCase):
     def test_fifo_reader_is_rejected_without_blocking(self):
         fifo = self.root / 'fifo'
         os.mkfifo(fifo)
-        started = time.monotonic()
-        with self.assertRaisesRegex(ValueError, 'regular file'):
-            file_io.open_regular_reader(fifo)
-        self.assertLess(time.monotonic() - started, .5)
+        with mock.patch.object(file_io.os, 'open', side_effect=AssertionError('FIFO must not be opened')) as opened:
+            with self.assertRaisesRegex(ValueError, 'regular file'):
+                file_io.open_regular_reader(fifo)
+        opened.assert_not_called()
 
     def test_linked_reader_and_publication_are_rejected(self):
         link = self.root / 'link'
@@ -324,21 +384,21 @@ class SharedFileIOTests(unittest.TestCase):
         # existing fixture; the test compiler writes a deterministic mesh.
         fixture_module = load(AUTHORING / 'service/tests/test_service.py', 'shared_service_fixture')
         fixture = fixture_module.Project()
-        fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
         builder = fixture.open()
         job = fixture.success(builder)
         self.assertEqual(job['service_hashes']['file_io.py'], hashlib.sha256(
             (AUTHORING / 'service/luminumbra_author/file_io.py').read_bytes()).hexdigest())
 
     def test_changed_packaged_helper_invalidates_actual_client_session(self):
-        from test_client import ClientTests, state, wait_for
+        from test_client import ClientTests, state
         fixture = ClientTests()
+        self.addCleanup(fixture.doCleanups)
         fixture.setUp()
-        self.addCleanup(fixture.tearDown)
         client = fixture.client()
         client.submit(state())
-        wait_for(client.poll)
+        fixture.wait(client.poll)
         with (fixture.broker_root / 'file_io.py').open('ab') as stream:
             stream.write(b'\n# changed pinned helper\n')
         self.assertTrue(client.close(wait=True, timeout=5))
@@ -362,8 +422,8 @@ class SharedFileIOTests(unittest.TestCase):
         generation = importlib.import_module(package.__name__ + '.viewport_generation')
         fixtures = load(AUTHORING / 'extension_tests/test_viewport_generation.py', 'shared_generation_fixture')
         fixture = fixtures.GenerationMetadata()
-        fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
         fixture.publish('b' * 32, 8)
         path = fixture.root / 'current.json'
         desired = json.loads(path.read_bytes())
@@ -371,13 +431,12 @@ class SharedFileIOTests(unittest.TestCase):
         previous = path.read_bytes()
         code = ('import json,sys;sys.path.insert(0,sys.argv[1]);'
                 'from luminumbra_author.contracts import atomic_json;'
-                'atomic_json(sys.argv[2],json.loads(sys.argv[3]))')
+                'atomic_json(sys.argv[2],json.loads(sys.argv[3]));print("published",flush=True)')
         with generation.open_record_reader(path) as held:
-            started = time.monotonic()
             result = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(archive), str(path), json.dumps(desired)],
                                     cwd=self.root, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(result.stdout, 'published\n')
             self.assertEqual(held.read(), previous)
             actual = generation._read_metadata(fixture.project, fixture.asset, '', {})
             self.assertEqual((actual['generation_id'], actual['revision']), ('b' * 32, 8))

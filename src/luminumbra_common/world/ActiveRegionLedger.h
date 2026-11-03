@@ -97,10 +97,11 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
-    // type 2 digest projection (7 bytes), type 6 completed work (10 + 16 bytes per owned key).
-    // Types 3/4 are reserved for water/energy; all unsupported types refuse.
+    // type 2 digest projection (7 bytes), type 4 energy ages and type 6 completed work
+    // (each 10 + 16 bytes per owner). The original file cap is
+    // unchanged; encode refuses when the records and extensions together exceed it.
     static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 6 + 4 + 16 * kMaxRegions + 8;
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
@@ -110,6 +111,7 @@ public:
     using OwnershipProbe = std::function<bool(RegionKey)>;
     // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
     static constexpr std::uint64_t kIdleEvictionTicks = 108000;
+
     // Persistent ids are allocated from 1 and never reach 2^63.
     static constexpr std::uint64_t kPersistentIdLimit = 1ull << 63;
 
@@ -141,7 +143,22 @@ public:
         return m_nextPersistentId;
     }
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
+    // Throws std::length_error without mutation when the allocator TLV exceeds the file cap.
     bool allocate_persistent_id(std::uint64_t& id);
+    using EnergyAges = std::map<RegionKey, std::uint64_t>;
+    [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
+        return m_energyAges;
+    }
+    // Missing register returns false without changing age.
+    bool energy_age(const RegionKey& key, std::uint64_t& age) const noexcept;
+    // Ages are durable even at zero energy. Both setters refuse unknown owners,
+    // ages >= WorldClock::kTickLimit and owner counts the file cap cannot encode,
+    // without changing any register.
+    bool set_energy_age(const RegionKey& key, std::uint64_t age);
+    bool set_energy_ages(const EnergyAges& ages);
+    void reset_energy_ages() noexcept {
+        m_energyAges.clear();
+    }
     // Finite, and -2^24 <= x,z < 2^24 (exactly -2^24 is valid). y must be finite.
     [[nodiscard]] static bool valid_anchor(const Vec3& position) noexcept;
     // Non-throwing form: returns false and leaves the anchor untouched when invalid.
@@ -151,6 +168,8 @@ public:
     void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
     void mark_edited(RegionKey key, const WorldClock& clock);
+    // Wakes an existing Frozen record whose authority changed; never creates or alters others.
+    void wake_frozen(RegionKey key) noexcept;
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
@@ -177,12 +196,14 @@ public:
     // Inputs are complete for this host tick. Duplicate work entries are summed
     // before any decision; unknown regions and repeated/backward ticks refuse.
     // nullopt uses the local single-player anchor; an explicit empty span visits nothing.
+    // due lists only records that survive this tick's retention, in scheduler order.
     RegionSchedule schedule(const WorldClock& clock,
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {},
                             const OwnershipProbe& owned = {});
     [[nodiscard]] std::string canonical_bytes() const;
+    // Throws std::length_error if the envelope would exceed kMaxFileBytes.
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
     static bool decode(std::string_view bytes, ActiveRegionLedger& out, std::string& error);
@@ -193,14 +214,21 @@ private:
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
                                      const OwnershipProbe& owned);
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor.
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor
+    // or energy age, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
+    // Whether the combined envelope fits kMaxFileBytes with the proposed owner counts.
+    // Omitted completed owners and the allocator flag retain their current registers.
+    bool encodable_with_energy_owners(std::size_t owners,
+                                      std::optional<std::size_t> completed_owners = std::nullopt,
+                                      bool allocator_advanced = false) const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
+    EnergyAges m_energyAges;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.

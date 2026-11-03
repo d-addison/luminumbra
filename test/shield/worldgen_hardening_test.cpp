@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // =====================================================================================
 // worldgen_hardening_test.cpp
 //
@@ -106,10 +107,10 @@ protected:
         params_rivers.river_max_carve = 60.0f;
     }
 
-    TerrainGenParams params_flat;
-    TerrainGenParams params_terrain;
-    TerrainGenParams params_caved;
-    TerrainGenParams params_rivers;
+    TerrainGenParams params_flat = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_terrain = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_caved = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_rivers = Luminumbra::Test::SyntheticTerrainParams();
 
     static constexpr int kSeed = 1337;
 };

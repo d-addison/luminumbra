@@ -236,7 +236,7 @@ def main() -> int:
     try:
         if args.manifest.stat().st_size > 1024 * 1024:
             raise ValueError("Asset manifest exceeds 1 MiB")
-        manifest = json.loads(args.manifest.read_text())
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         if manifest["schema"] != "luminumbra.game.asset-packs.v1":
             raise ValueError("Unsupported asset manifest schema")
         pack = manifest["packs"][args.pack]

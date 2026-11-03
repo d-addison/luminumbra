@@ -1,7 +1,6 @@
 #pragma once
 
-//  terrain-submit seam (Codex-signed-off:
-// shadow submitter sign-off).
+// Shared terrain-submit seam.
 //
 // GBuffer and Shadow share live-terrain submission. Today each does, via the
 // RenderPipeline `friend`:
@@ -36,7 +35,7 @@ struct TerrainSubmitStats {
 
 // Submit the visible live-terrain chunks for one set of six frustum planes.
 // Returns the cull/draw/index counts; the caller folds them into its own pass
-// stats. The array-reference parameter MATCHES the Codex-authoritative signature
+// stats. The array-reference parameter matches the shared terrain-submit signature
 // and the current CullHierarchical(const glm::vec4[6]) shape exactly.
 using SubmitTerrainChunksFn =
     std::function<TerrainSubmitStats(const glm::vec4 (&frustum_planes)[6])>;

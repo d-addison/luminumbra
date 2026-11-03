@@ -17,6 +17,10 @@ def dispatch(service, operation, params):
         capabilities.setdefault("features", {}).update({"meshgen_script_pins": True,
                                                         "meshgen_configuration": True,
                                                         "meshgen_backend_broker": True,
+                                                        "meshgen_candidate_storage": False,
+                                                        "meshgen_provenance_v2": False,
+                                                        "meshgen_worker_simulation": False,
+                                                        "meshgen_native_finisher": False,
                                                         "meshgen_real_backends": False})
         return capabilities if operation == "capabilities" else {
             "schemas": capabilities["schemas"], "profiles": capabilities["profiles"],

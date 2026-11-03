@@ -3,6 +3,7 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "rendering/Camera.h"
+#include <imgui.h>
 
 namespace Luminumbra::Client {
 
@@ -37,54 +38,49 @@ void PlayerController::ApplyKeyBindings(const luminumbra::core::SystemConfig& cf
     }
 }
 
-void PlayerController::RenderDebugUI() {
-    // Set the initial position and size of the overlay.
-    // ImGuiCond_FirstUseEver ensures this only applies the very first time.
-    const float DISTANCE = 10.0f;
-    ImVec2 window_pos = ImVec2(DISTANCE, DISTANCE);
-    ImGui::SetNextWindowPos(window_pos, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.65f); // Make the window semi-transparent
+void PlayerController::DrawDebugContents() {
+    // Display Movement Mode
+    const char* modeStr = (m_mode == MovementMode::Walking) ? "Walking" : "Noclip";
+    ImGui::Text("Mode: %s", modeStr);
 
-    // Define window flags for a simple, non-interactive overlay
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+    ImGui::Separator();
 
-    if (ImGui::Begin("Player State", nullptr, window_flags)) {
-        // Display Movement Mode
-        const char* modeStr = (m_mode == MovementMode::Walking) ? "Walking" : "Noclip";
-        ImGui::Text("Mode: %s (V to toggle)", modeStr);
+    // Display Position Info
+    ImGui::Text("Controller Pos: %.2f, %.2f, %.2f", m_position.x, m_position.y, m_position.z);
+    ImGui::Text("Camera Pos:     %.2f, %.2f, %.2f",
+                m_camera->Position.x,
+                m_camera->Position.y,
+                m_camera->Position.z);
 
-        ImGui::Separator();
+    ImGui::Separator();
 
-        // Display Position Info
-        ImGui::Text("Controller Pos: %.2f, %.2f, %.2f", m_position.x, m_position.y, m_position.z);
-        ImGui::Text("Camera Pos:     %.2f, %.2f, %.2f",
-                    m_camera->Position.x,
-                    m_camera->Position.y,
-                    m_camera->Position.z);
+    // Display Action States
+    bool is_sprinting = glfwGetKey(m_window, key(InputAction::Sprint)) == GLFW_PRESS;
+    ImGui::Text("Sprinting: %s", is_sprinting && !m_isCrouching ? "Yes" : "No");
 
-        ImGui::Separator();
-
-        // Display Action States
-        bool is_sprinting = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-        ImGui::Text("Sprinting: %s", is_sprinting && !m_isCrouching ? "Yes" : "No");
-
-        // Display mode-specific info
-        if (m_mode == MovementMode::Walking) {
-            ImGui::Text("Crouching: %s", m_isCrouching ? "Yes" : "No");
-            // For this to work, you may need to add a simple `is_player_on_ground`
-            // function to your PhysicsSystem.
-            if (m_physicsSystem) {
-                ImGui::Text("On Ground: %s", m_physicsSystem->is_player_grounded() ? "Yes" : "No");
-            }
-        } else { // Noclip
-            float current_speed = m_noclipBaseSpeed * m_noclipSpeedMultiplier;
-            ImGui::Text("Noclip Speed: %.2fx (Scroll Wheel)", m_noclipSpeedMultiplier);
+    // Display mode-specific info
+    if (m_mode == MovementMode::Walking) {
+        ImGui::Text("Crouching: %s", m_isCrouching ? "Yes" : "No");
+        // For this to work, you may need to add a simple `is_player_on_ground`
+        // function to your PhysicsSystem.
+        if (m_physicsSystem) {
+            ImGui::Text("On Ground: %s", m_physicsSystem->is_player_grounded() ? "Yes" : "No");
         }
+    } else { // Noclip
+        ImGui::Text("Noclip Speed: %.2fx (Scroll Wheel)", m_noclipSpeedMultiplier);
     }
-    ImGui::End();
+}
+
+void PlayerController::SetLiveInputGate(std::function<bool(int)> gate) {
+    m_liveInputGate = std::move(gate);
+}
+void PlayerController::ClearQueuedLiveInput() {
+    m_wantsToJump = false;
+    m_wantsToCrouch = false;
+    m_shutterRequested = false;
+    m_codexToggleRequested = false;
+    m_apertureNudge = m_focusNudge = m_shutterSpeedNudge = m_isoNudge = m_todNudge = 0.0f;
+    m_weatherCycle = 0;
 }
 
 void PlayerController::Update(float deltaTime) {
@@ -95,6 +91,11 @@ void PlayerController::Update(float deltaTime) {
 
 PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     PlayerReplayInputFrame input{};
+    const auto held = [&](InputAction action) {
+        const int code = key(action);
+        return (!m_liveInputGate || m_liveInputGate(code)) &&
+               glfwGetKey(m_window, code) == GLFW_PRESS;
+    };
 
     glm::vec3 wishDir(0.0f);
     glm::vec3 forward(m_camera->Front.x, 0.0f, m_camera->Front.z);
@@ -104,20 +105,20 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
 
     glm::vec3 right = m_camera->Right;
 
-    if (glfwGetKey(m_window, key(InputAction::MoveForward)) == GLFW_PRESS)
+    if (held(InputAction::MoveForward))
         wishDir += forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveBack)) == GLFW_PRESS)
+    if (held(InputAction::MoveBack))
         wishDir -= forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveLeft)) == GLFW_PRESS)
+    if (held(InputAction::MoveLeft))
         wishDir -= right;
-    if (glfwGetKey(m_window, key(InputAction::MoveRight)) == GLFW_PRESS)
+    if (held(InputAction::MoveRight))
         wishDir += right;
 
     if (m_mode == MovementMode::Noclip) {
-        if (glfwGetKey(m_window, key(InputAction::NoclipUp)) == GLFW_PRESS) {
+        if (held(InputAction::NoclipUp)) {
             wishDir += m_camera->WorldUp;
         }
-        if (glfwGetKey(m_window, key(InputAction::NoclipDown)) == GLFW_PRESS) {
+        if (held(InputAction::NoclipDown)) {
             wishDir -= m_camera->WorldUp;
         }
     }
@@ -125,7 +126,7 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     input.wishDirection = wishDir;
     input.jumpPressed = m_wantsToJump;
     input.crouchPressed = m_wantsToCrouch;
-    input.sprintHeld = glfwGetKey(m_window, key(InputAction::Sprint)) == GLFW_PRESS;
+    input.sprintHeld = held(InputAction::Sprint);
     return input;
 }
 

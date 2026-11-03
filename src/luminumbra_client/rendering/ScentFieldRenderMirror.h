@@ -24,7 +24,7 @@ struct ScentFieldRenderMirror {
 
     void resize(int n) {
         cells = n;
-        rg.assign(static_cast<std::size_t>(n) * n * 2, 0.0f);
+        rg.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n) * 2, 0.0f);
     }
 };
 

@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace Luminumbra::Rendering {
 
-// A render-owned vertical query over the same triangles uploaded to the terrain
+// An immutable vertical query over the same triangles uploaded to the terrain
 // pool. Bins bound the candidate search; no worldgen/SDF approximation is used.
 class FoliageGroundMesh {
 public:
@@ -24,6 +26,14 @@ public:
                       const std::vector<VoxelVertex>& vertices,
                       const std::vector<u32>& indices)
         : m_origin(origin) {
+        // Each triangle occupies at most 64 bins. Check index and allocation
+        // ranges before constructing any query storage.
+        const auto triangle_count = indices.size() / 3;
+        constexpr auto max_bytes_per_triangle = sizeof(Triangle) + kBins * kBins * sizeof(u32);
+        if (triangle_count > std::numeric_limits<u32>::max() ||
+            triangle_count > m_triangles.max_size() || triangle_count > m_bins.front().max_size() ||
+            triangle_count > std::numeric_limits<std::size_t>::max() / max_bytes_per_triangle)
+            throw std::length_error("foliage triangle bins exceed storage range");
         for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
             if (indices[i] >= vertices.size() || indices[i + 1] >= vertices.size() ||
                 indices[i + 2] >= vertices.size())
@@ -49,7 +59,7 @@ public:
             const int z1 = bin(std::max({a.position.z, b.position.z, c.position.z}));
             for (int z = z0; z <= z1; ++z)
                 for (int x = x0; x <= x1; ++x)
-                    m_bins[z * kBins + x].push_back(slot);
+                    m_bins[static_cast<std::size_t>(z * kBins + x)].push_back(slot);
         }
     }
 
@@ -59,7 +69,7 @@ public:
         Hit hit;
         if (x < 0 || z < 0 || x > CHUNK_SIZE_X || z > CHUNK_SIZE_Z)
             return hit;
-        for (u32 slot : m_bins[bin(z) * kBins + bin(x)]) {
+        for (u32 slot : m_bins[static_cast<std::size_t>(bin(z) * kBins + bin(x))]) {
             const auto& t = m_triangles[slot];
             const float dx = x - t.a.x;
             const float dz = z - t.a.z;

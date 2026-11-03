@@ -126,6 +126,55 @@ TEST(FarVolumeMesher, AllFiveTiersMeshAnalyticWallsAndCeilingsAtNegativeOrigins)
     }
 }
 
+// Lane A #176, 9b04e1a6:test/common/FarVolume_test.cpp:406.
+TEST(FarVolumeMesher, AnalyticalArchProducesWallsAndUndersideWithoutHeightfieldBackground) {
+    // Vertical torus centered at (256,0,256), major radius 64 m, tube radius
+    // 24 m, united with solid ground. Use canonical raw samples and one mesher.
+    const auto field = [](const FarVolumePosition& p) -> FarVolumeSample {
+        const double x = static_cast<double>(p.x) - 256.0;
+        const double y = static_cast<double>(p.y);
+        const double z = static_cast<double>(p.z) - 256.0;
+        const double ring = std::hypot(x, y) - 64.0;
+        const double torus = std::hypot(ring, z) - 24.0;
+        return {static_cast<float>(std::min(y, torus)), 1};
+    };
+    const auto tile = build({{3, 0, 0}, {-256, 128}, identity}, field);
+    ASSERT_FALSE(tile.bricks.empty());
+    const auto result = mesh(tile, field);
+    ASSERT_FALSE(result.indices.empty());
+    check_geometry(result);
+    std::size_t underside = 0, walls = 0, upper = 0;
+    for (std::size_t i = 0; i < result.indices.size(); i += 3) {
+        const auto a = world_position(result, result.vertices[result.indices[i]]);
+        const auto b = world_position(result, result.vertices[result.indices[i + 1]]);
+        const auto c = world_position(result, result.vertices[result.indices[i + 2]]);
+        if (std::min({a[1], b[1], c[1]}) <= 0.0)
+            continue;
+        auto normal = face(a, b, c);
+        const double length = std::hypot(normal[0], normal[1], normal[2]);
+        ASSERT_GT(length, 0.0);
+        for (auto& component : normal)
+            component /= length;
+        // Independent continuous torus gradient at the triangle centroid.
+        // Above ground, only the torus defines the union's surface direction.
+        const double x = (a[0] + b[0] + c[0]) / 3.0 - 256.0;
+        const double y = (a[1] + b[1] + c[1]) / 3.0;
+        const double z = (a[2] + b[2] + c[2]) / 3.0 - 256.0;
+        const double radius = std::hypot(x, y);
+        ASSERT_GT(radius, 0.0);
+        const FarVolumeVector gradient{
+            (radius - 64.0) * x / radius, (radius - 64.0) * y / radius, z};
+        EXPECT_GT(normal[0] * gradient[0] + normal[1] * gradient[1] + normal[2] * gradient[2], 0.0)
+            << "triangle=" << i / 3;
+        underside += normal[1] < -0.25 ? std::size_t{1} : std::size_t{0};
+        walls += std::abs(normal[1]) < 0.5 ? std::size_t{1} : std::size_t{0};
+        upper += normal[1] > 0.25 ? std::size_t{1} : std::size_t{0};
+    }
+    EXPECT_GT(underside, 0u);
+    EXPECT_GT(walls, 0u);
+    EXPECT_GT(upper, 0u);
+}
+
 TEST(FarVolumeMesher, CurvedSharedBordersHaveIdenticalPositionsMaterialsAndNormalsForAllTiers) {
     using Border = std::map<FarVolumeVector, FarVolumeVector>;
     for (std::size_t tier = 1; tier <= 5; ++tier) {

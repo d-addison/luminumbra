@@ -1,11 +1,24 @@
 #include "ShadowPass.h"
+#include "../FarWorldReplay.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
 #include "core/Log.h"
 #include "rendering/Shader.h"
 
-#include <glm/gtc/matrix_transform.hpp>
+#include "luminumbra/core/Types.h"
+
+#include "../RenderContext.h"
+#include "../RenderInputs.h"
+#include "../TerrainSubmit.h"
+#include <array>
+#include <filesystem>
+#include <glm/ext/matrix_float4x4.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <memory>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 
@@ -26,7 +39,7 @@ void ShadowPass::init_shader(const std::filesystem::path& root_path) {
         GL_PROGRAM, m_tint_shader ? m_tint_shader->Id() : 0u, "shader.shadow_tint");
 }
 
-void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
+bool ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     // allocate the layered depth array + no-color FBO THROUGH
     // the registry. The desc reproduces the exact GL parameters of the retired
     // glTexImage3D/glTexParameter calls (DEPTH_COMPONENT32F, CASCADE_COUNT layers,
@@ -52,6 +65,8 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     depth_desc.debug_label = "shadow.depth_cascades";
     m_shadow_map.depth_texture_array =
         registry.create_texture("shadow_depth_cascades", depth_desc).id;
+    if (!m_shadow_map.depth_texture_array)
+        return false;
 
     FboDesc fbo_desc;
     fbo_desc.attachments = {{GL_DEPTH_ATTACHMENT, "shadow_depth_cascades"}};
@@ -60,6 +75,8 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     m_shadow_map.fbo_id = registry.create_fbo("shadow_fbo", fbo_desc).id;
     if (m_shadow_map.fbo_id == 0) {
         LUMINUMBRA_CORE_ERROR("Shadow Map FBO not complete!");
+        destroy_shadow_map(registry);
+        return false;
     }
     PassGl::set_default_shadow_cascade_splits(m_shadow_map);
 
@@ -87,6 +104,10 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     tint_desc.expected_layout = "color_attachment";
     tint_desc.debug_label = "shadow.tint_cascades";
     m_tint_texture_array = registry.create_texture("shadow_tint_cascades", tint_desc).id;
+    if (!m_tint_texture_array) {
+        destroy_shadow_map(registry);
+        return false;
+    }
 
     // The tint FBO: color = a tint layer, depth = the SAME cascade's opaque depth
     // layer (attached per cascade in the draw loop) so panes behind opaque
@@ -98,7 +119,49 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     m_tint_fbo = registry.create_fbo("shadow_tint_fbo", tint_fbo_desc).id;
     if (m_tint_fbo == 0) {
         LUMINUMBRA_CORE_ERROR("Shadow tint FBO not complete!");
+        destroy_shadow_map(registry);
+        return false;
     }
+    clear_tint();
+    return true;
+}
+
+bool ShadowPass::set_resolution(RenderResourceRegistry& registry, u32 resolution) {
+    if (resolution != 1024 && resolution != 1536 && resolution != 2048)
+        return false;
+    if (m_shadow_map.resolution == resolution)
+        return true;
+    if (m_shadow_map.fbo_id != 0) {
+        const std::array extents{
+            RenderResourceRegistry::TargetExtent{"shadow_depth_cascades", resolution, resolution},
+            RenderResourceRegistry::TargetExtent{"shadow_tint_cascades", resolution, resolution}};
+        const auto* depth = registry.owned_texture_desc("shadow_depth_cascades");
+        const auto* tint = registry.owned_texture_desc("shadow_tint_cascades");
+        // The pipeline can include both atlases in a larger scene transaction.
+        // In that case only refresh the cached handles and initialize the tint.
+        const bool already_replaced = depth && tint && depth->width == resolution &&
+                                      depth->height == resolution && tint->width == resolution &&
+                                      tint->height == resolution;
+        if (!already_replaced && !registry.replace_targets(extents))
+            return false;
+        m_shadow_map.depth_texture_array = registry.texture("shadow_depth_cascades").id;
+        m_shadow_map.fbo_id = registry.fbo("shadow_fbo").id;
+        m_tint_texture_array = registry.texture("shadow_tint_cascades").id;
+        m_tint_fbo = registry.fbo("shadow_tint_fbo").id;
+        clear_tint();
+    }
+    m_shadow_map.resolution = resolution;
+    return true;
+}
+
+void ShadowPass::clear_tint() {
+    // A live resize can follow UI rendering. Clear every texel even if that
+    // caller left a scissor rectangle or a partial color write mask active.
+    const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean color_mask[4]{};
+    glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     // One-time identity clear (all layers white).
     if (m_tint_fbo != 0 && m_tint_texture_array != 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_tint_fbo);
@@ -114,6 +177,9 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
+    if (scissor)
+        glEnable(GL_SCISSOR_TEST);
     m_tint_dirty = false;
 }
 
@@ -139,6 +205,7 @@ void ShadowPass::reset_shader() {
 
 std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
 ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL ShadowPass.execute");
     (void)
         ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
     std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> cascade_stats{};
@@ -165,8 +232,12 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
 
     m_shadow_map.light_space_matrices = light_space_matrices;
-    glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(m_shadow_map.resolution),
+               static_cast<GLsizei>(m_shadow_map.resolution));
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_shadow_map.fbo_id);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
@@ -185,15 +256,17 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
         // Reset each selected layer. Clearing before the loop only resets the
         // previous frame's final attachment and leaves stale depth in the others.
         glClear(GL_DEPTH_BUFFER_BIT);
-        m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
+        m_shadow_shader->setMat4("u_lightSpaceMatrix",
+                                 light_space_matrices[static_cast<std::size_t>(i)]);
 
         glm::vec4 cascade_planes[6];
-        PassGl::ExtractFrustumPlanes(
-            light_space_matrices[i], cascade_planes, PassGl::ClipDepth::NegativeOneToOne);
-        // ONE submit per cascade via the Codex-signed-off callback
+        PassGl::ExtractFrustumPlanes(light_space_matrices[static_cast<std::size_t>(i)],
+                                     cascade_planes,
+                                     PassGl::ClipDepth::NegativeOneToOne);
+        // ONE submit per cascade via the shared callback
         // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
         // per-cascade counts; the call site folds them into stats with =/+=.
-        cascade_stats[i] = input.submit_terrain(cascade_planes);
+        cascade_stats[static_cast<std::size_t>(i)] = input.submit_terrain(cascade_planes);
     }
     glCullFace(GL_BACK);
 
@@ -209,6 +282,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
                             m_tint_fbo != 0;
     if ((have_glass || m_tint_dirty) && m_tint_fbo != 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_tint_fbo);
+        PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_tint_fbo);
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         glDepthMask(GL_FALSE);
         glEnable(GL_DEPTH_TEST);
@@ -230,13 +304,14 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
             glEnable(GL_BLEND);
             if (!have_glass)
                 continue;
-            m_tint_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
+            m_tint_shader->setMat4("u_lightSpaceMatrix",
+                                   light_space_matrices[static_cast<std::size_t>(i)]);
             glBindVertexArray(input.glass_vao);
             for (const GlassPaneItem& pane : *input.glass_items) {
                 m_tint_shader->setMat4("u_model", pane.model);
                 m_tint_shader->setVec3("u_tint", pane.tint);
                 m_tint_shader->setFloat("u_thickness", pane.thickness);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
+                Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
             }
             glBindVertexArray(0);
         }

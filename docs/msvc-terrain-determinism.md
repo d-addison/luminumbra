@@ -1,6 +1,6 @@
 # MSVC terrain-height contraction investigation
 
-At `a360460`, local MSVC 19.50.35727.0 failed the existing five synthetic
+Local MSVC 19.50.35727.0 failed the existing five synthetic
 height-grid pins and the shipped archipelago pin. CI MSVC 19.51.36256.0 passed
 them. Repeated sampling and scalar/grid agreement within each build passed;
 changing expectations would have hidden the compiler-dependent behavior.
@@ -22,7 +22,7 @@ and square-root repair, which corrected cave occupancy.
 | Same object with only `/fp:precise` appended | Some FBm samples changed; the island mismatch remained; rejected as a fix |
 | Explicit CI-order Simplex 2D operations, original flags | Every sample bit in all five portable grids matched CI |
 
-Independent Astra/xhigh review recovered the Simplex 2D methods through PE RTTI,
+The Simplex 2D methods were recovered through PE RTTI,
 vtables and linker maps. MSVC 19.51 contracts skew/unskew multiply-add operations;
 19.50 keeps those operations separate. An exact binary32 evaluation reproduces
 all 4,096 local island samples and all 4,096 CI samples. Unskew contraction alone
@@ -58,8 +58,7 @@ tests with zero skips. All six diagnostic grids, including the shipped
 archipelago, match the existing CI sample bits. Height, topology and serialization
 expectations were not edited.
 
-The causal receipts retain executable, library, compiler, command and input
-identities; original and rejected experiments remain preserved in the private
-release campaign. [Issue #115](https://github.com/d-addison/luminumbra/issues/115)
+Qualification receipts must retain executable, library, compiler, command and
+input identities. [issue #115](https://github.com/d-addison/luminumbra/issues/115)
 tracks the final committed CI/native/package acceptance. This bounded source
 verification is not release approval or a universal cross-compiler bitwise claim.

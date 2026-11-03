@@ -15,7 +15,10 @@
 #include "ReplicationProtocol.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace Luminumbra::Net {
@@ -66,15 +69,33 @@ namespace Luminumbra::Net {
 // Reconstruct the full snapshot from (baseline + delta): keep baseline entities, drop the
 // delta's removed ids, then overwrite/insert the delta's entities. Header fields come from
 // `delta`. Pure + deterministic (id-ordered output).
-[[nodiscard]] inline SnapshotMsg ApplySnapshotDelta(const SnapshotMsg& baseline,
-                                                    const SnapshotMsg& delta) {
+// Bound reconstructed state as well as individual delta frames. The map holds
+// at most one frame's entities; reject new ids before allocating beyond that cap.
+[[nodiscard]] inline std::optional<SnapshotMsg> TryApplySnapshotDelta(const SnapshotMsg& baseline,
+                                                                      const SnapshotMsg& delta,
+                                                                      std::size_t max_frame_bytes) {
+    const auto base_bytes = SnapshotEncodedSize(baseline.entities.size(), 0);
+    const auto overhead = SnapshotEncodedSize(0, delta.removed_ids.size());
+    if (!base_bytes || *base_bytes > max_frame_bytes || !overhead || *overhead > max_frame_bytes)
+        return std::nullopt;
+    const auto entity_limit = (max_frame_bytes - *overhead) / 23u;
     std::map<std::uint32_t, ReplEntityState> set;
     for (const ReplEntityState& e : baseline.entities)
         set[e.entity_id] = e;
     for (std::uint32_t id : delta.removed_ids)
         set.erase(id);
-    for (const ReplEntityState& e : delta.entities)
-        set[e.entity_id] = e;
+    for (const ReplEntityState& e : delta.entities) {
+        const auto existing = set.find(e.entity_id);
+        if (existing != set.end()) {
+            existing->second = e;
+        } else {
+            if (set.size() >= entity_limit)
+                return std::nullopt;
+            set.emplace(e.entity_id, e);
+        }
+    }
+    if (set.size() > entity_limit)
+        return std::nullopt;
 
     SnapshotMsg full;
     full.server_tick = delta.server_tick;
@@ -90,6 +111,14 @@ namespace Luminumbra::Net {
     for (const auto& [id, e] : set)
         full.entities.push_back(e); // map -> ascending id
     return full;
+}
+
+// In-memory callers retain the original pure reconstruction contract. Network
+// admission uses TryApplySnapshotDelta with the transport's complete-frame cap.
+[[nodiscard]] inline SnapshotMsg ApplySnapshotDelta(const SnapshotMsg& baseline,
+                                                    const SnapshotMsg& delta) {
+    return TryApplySnapshotDelta(baseline, delta, (std::numeric_limits<std::size_t>::max)())
+        .value_or(SnapshotMsg{});
 }
 
 } // namespace Luminumbra::Net

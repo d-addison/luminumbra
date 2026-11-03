@@ -4,8 +4,10 @@
 // position/angle quantization round-trips within tolerance.
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <vector>
 
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 
 namespace {
@@ -31,6 +33,52 @@ TEST(ReplicationProtocol, UsercmdRoundTrip) {
     EXPECT_EQ(in, out);
 }
 
+TEST(ReplicationProtocol, UsercmdHasExactly19PayloadBytes) {
+    UsercmdMsg command;
+    command.tick = 0x315054534cULL; // LSTP1 must remain a legal command tick.
+    command.player_id = 7;
+    command.move_x = -1;
+    command.move_z = 2;
+    command.yaw_mrad = 3;
+    command.action_bits = 4;
+    const auto frame = EncodeUsercmd(command);
+    const std::vector<std::uint8_t> expected{1, 19, 0, 0, 0, 'L', 'S', 'T', 'P', '1', 0, 0,
+                                             0, 7,  0, 0, 0, 255, 255, 2,   0,   3,   0, 4};
+    EXPECT_EQ(frame, expected);
+    EXPECT_EQ(frame.size(), 5 + kUsercmdPayloadBytes);
+    UsercmdMsg decoded;
+    ASSERT_TRUE(DecodeUsercmd(frame, decoded));
+    EXPECT_EQ(decoded, command);
+    for (std::size_t size = 0; size < frame.size(); ++size) {
+        auto truncated = frame;
+        truncated.resize(size);
+        EXPECT_FALSE(DecodeUsercmd(truncated, decoded)) << size;
+    }
+    for (const bool update_length : {false, true}) {
+        auto extended = frame;
+        extended.push_back(0);
+        if (update_length)
+            ++extended[1];
+        EXPECT_FALSE(DecodeUsercmd(extended, decoded));
+    }
+}
+
+TEST(ReplicationProtocol, HelloIsNeverAUsercmdAndLegacyHelloDecoderRemainsPermissive) {
+    HelloMsg hello;
+    hello.system_config_identity = "config";
+    hello.preset_content_hash = "content";
+    auto frame = EncodeHello(hello);
+    UsercmdMsg command;
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+    frame.push_back(0);
+    HelloMsg decoded;
+    EXPECT_TRUE(DecodeHello(frame, decoded)); // Strictness is scoped to admission.
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+    ++frame[1];
+    EXPECT_TRUE(DecodeHello(frame, decoded));
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+}
+
 TEST(ReplicationProtocol, AckRoundTrip) {
     AckMsg in;
     in.snapshot_seq = 999;
@@ -40,6 +88,15 @@ TEST(ReplicationProtocol, AckRoundTrip) {
     ASSERT_TRUE(DecodeAck(frame, out));
     EXPECT_EQ(in.snapshot_seq, out.snapshot_seq);
     EXPECT_EQ(in.usercmd_tick, out.usercmd_tick);
+}
+
+TEST(ReplicationProtocol, AckHasExactly12LittleEndianPayloadBytes) {
+    AckMsg message;
+    message.snapshot_seq = 0x12345678;
+    message.usercmd_tick = 0x0123456789abcdefULL;
+    const std::vector<std::uint8_t> expected{
+        3, 12, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01};
+    EXPECT_EQ(EncodeAck(message), expected);
 }
 
 TEST(ReplicationProtocol, SnapshotMultiEntityRoundTrip) {
@@ -120,6 +177,88 @@ TEST(ReplicationProtocol, EmptySnapshotRoundTrips) {
     EXPECT_TRUE(out.entities.empty());
 }
 
+TEST(ReplicationProtocol, BorrowedSnapshotEntitiesPreserveHeaderAndRemovals) {
+    SnapshotMsg header;
+    header.server_tick = 77;
+    header.snapshot_seq = 5;
+    header.delta_from_seq = 3;
+    header.acked_usercmd_tick = 70;
+    header.entities.push_back(ReplEntityState{}); // the supplied set must take precedence
+    header.removed_ids = {10, 20};
+    ReplEntityState entity;
+    entity.entity_id = 42;
+    entity.px_mm = -1234;
+    entity.type_id = 7;
+    entity.anim_phase = 200;
+    const std::vector<ReplEntityState> entities{entity};
+
+    const auto frame = EncodeSnapshot(header, entities);
+    EXPECT_EQ(frame.size(), 37u + 23u + 8u);
+    SnapshotMsg decoded;
+    ASSERT_TRUE(DecodeSnapshot(frame, decoded));
+    EXPECT_EQ(decoded.server_tick, header.server_tick);
+    EXPECT_EQ(decoded.snapshot_seq, header.snapshot_seq);
+    EXPECT_EQ(decoded.delta_from_seq, header.delta_from_seq);
+    EXPECT_EQ(decoded.acked_usercmd_tick, header.acked_usercmd_tick);
+    EXPECT_EQ(decoded.entities, entities);
+    EXPECT_EQ(decoded.removed_ids, header.removed_ids);
+    EXPECT_EQ(header.entities.front().entity_id, 0u);
+    EXPECT_EQ(entities.front(), entity);
+}
+
+TEST(ReplicationProtocol, OversizedSnapshotRefusesBeforeReadingOrAllocating) {
+    SnapshotMsg header;
+    const auto max = std::numeric_limits<std::size_t>::max();
+    for (const auto count : {kMaxFramePayloadBytes / 23u + 1u, max / 23u, max}) {
+        SCOPED_TRACE(count);
+        std::size_t reads = 0;
+        const auto frame = EncodeSnapshot(header, count, [&](std::size_t) {
+            ++reads;
+            return ReplEntityState{};
+        });
+        // The same encoder handles vectors and generated sets. A logically huge
+        // source needs no large fixture; refusal must precede both reads and reserve.
+        EXPECT_EQ(reads, 0u);
+        EXPECT_TRUE(frame.empty());
+        EXPECT_EQ(frame.capacity(), 0u);
+        const auto size = SnapshotEncodedSize(count, 0);
+        EXPECT_TRUE(!size || *size > kMaxFramePayloadBytes);
+    }
+}
+
+TEST(ReplicationProtocol, SnapshotSizeChecksExactLimitAndOverflowWithoutAllocation) {
+    // One entity makes the remaining wire budget divisible by the removal width.
+    const auto removals = (kMaxFramePayloadBytes - 37u - 23u) / 4u;
+    ASSERT_EQ(SnapshotEncodedSize(1, removals), kMaxFramePayloadBytes);
+    EXPECT_EQ(SnapshotEncodedSize(1, removals + 1), kMaxFramePayloadBytes + 4u);
+    EXPECT_EQ(SnapshotEncodedSize(0, 0), 37u);
+    const auto max = std::numeric_limits<std::size_t>::max();
+    EXPECT_FALSE(SnapshotEncodedSize(max, 0));
+    EXPECT_FALSE(SnapshotEncodedSize(0, max));
+    EXPECT_FALSE(SnapshotEncodedSize(max / 23u, 0));
+    EXPECT_FALSE(SnapshotEncodedSize(0, max / 4u));
+    EXPECT_FALSE(SnapshotEncodedSize((max - 37u) / 23u, 6));
+}
+
+TEST(ReplicationProtocol, GeneratedSnapshotPreservesEncodedBytes) {
+    SnapshotMsg snapshot;
+    snapshot.server_tick = 123;
+    snapshot.snapshot_seq = 7;
+    snapshot.delta_from_seq = 4;
+    snapshot.acked_usercmd_tick = 120;
+    snapshot.entities = {{1, -100, 200, 300, -10, 1, 7, 2, 128},
+                         {2, 400, -500, 600, 20, 2, 8, 3, 255}};
+    snapshot.removed_ids = {10, 20};
+    std::size_t reads = 0;
+    const auto generated = EncodeSnapshot(snapshot, snapshot.entities.size(), [&](std::size_t i) {
+        EXPECT_EQ(i, reads++);
+        return snapshot.entities[i];
+    });
+    EXPECT_EQ(reads, snapshot.entities.size());
+    EXPECT_EQ(generated, EncodeSnapshot(snapshot));
+    EXPECT_EQ(generated.size(), SnapshotEncodedSize(2, 2));
+}
+
 TEST(ReplicationProtocol, TruncatedFrameRejected) {
     SnapshotMsg in;
     in.server_tick = 7;
@@ -130,6 +269,27 @@ TEST(ReplicationProtocol, TruncatedFrameRejected) {
     frame.resize(frame.size() - 4);
     SnapshotMsg out;
     EXPECT_FALSE(DecodeSnapshot(frame, out));
+}
+
+TEST(ReplicationProtocol, HugeSnapshotCountsAreRejectedBeforeAllocation) {
+    // Empty snapshot: 5-byte envelope, 24-byte fixed fields, then two u32 counts.
+    for (const std::size_t count_offset : {29u, 33u}) {
+        SCOPED_TRACE(count_offset);
+        auto frame = EncodeSnapshot({});
+        ASSERT_EQ(frame.size(), 37u);
+        const auto count = std::numeric_limits<std::uint32_t>::max();
+        for (int i = 0; i < 4; ++i)
+            frame[count_offset + i] = static_cast<std::uint8_t>(count >> (8 * i));
+
+        SnapshotMsg out;
+        const auto entity_capacity = out.entities.capacity();
+        const auto removed_capacity = out.removed_ids.capacity();
+        EXPECT_FALSE(DecodeSnapshot(frame, out));
+        EXPECT_TRUE(out.entities.empty());
+        EXPECT_TRUE(out.removed_ids.empty());
+        EXPECT_EQ(out.entities.capacity(), entity_capacity);
+        EXPECT_EQ(out.removed_ids.capacity(), removed_capacity);
+    }
 }
 
 TEST(ReplicationProtocol, WrongTypeRejected) {

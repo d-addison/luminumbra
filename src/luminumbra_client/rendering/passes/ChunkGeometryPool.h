@@ -4,6 +4,7 @@
 #include "../Mesh.h"
 #include "luminumbra_common/world/Chunk.h"
 #include <cstddef>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,10 @@ namespace Luminumbra::Rendering {
 class ChunkGeometryPool {
 public:
     static constexpr u32 kInvalid = 0xFFFFFFFFu;
+    // Bound storage, handles and sync objects even if the GPU never completes.
+    static constexpr std::size_t kMaxStorageBytes = 512u * 1024u * 1024u;
+    static constexpr std::size_t kMaxBlocks = 16;
+    static constexpr std::size_t kMaxAllocations = 65536;
 
     // One per-chunk allocation record. block_index selects the GL block; the
     // vertex/index slices are expressed in ELEMENTS (vertices / indices), so the
@@ -55,6 +60,15 @@ public:
         u32 index_capacity = 0;    // indices
         u32 vertex_high_water = 0; // bump allocator frontier
         u32 index_high_water = 0;
+        // Includes live, pending and quarantined allocations. Only zero permits
+        // resetting frontiers or replacing this block's GL storage.
+        std::size_t allocation_count = 0;
+        bool submitted = false; // a draw may still consume this block
+        // Pressure reuse covers the latest consumer of the entire block. A
+        // missing/failed completion quarantines reuse, never resident bytes.
+        GLsync reuse_completion = nullptr;
+        bool reuse_requested = false;
+        bool reuse_quarantined = false;
         // Free slices returned by freed chunks, reused best-fit before bumping.
         std::vector<std::pair<u32, u32>> free_vertex_slices; // {offset, size}
         std::vector<std::pair<u32, u32>> free_index_slices;
@@ -71,9 +85,10 @@ public:
                  const u32* indices,
                  u32 index_count,
                  const char* label_seed);
-    // Overwrites an existing allocation in place when the new geometry fits the
-    // reserved slots; otherwise frees and reallocates. Returns the (possibly
-    // new) handle.
+    // Stage in a different slice first. At capacity, reuse the resident only
+    // after observing completion of its final consumers, without waiting. Both
+    // buffers must fit their slots (or adjacent unused tails). Every refusal
+    // leaves drawable bytes, counts and the handle unchanged.
     u32 update(u32 handle,
                const VoxelVertex* vertices,
                u32 vertex_count,
@@ -81,7 +96,26 @@ public:
                u32 index_count,
                const char* label_seed);
     void free(u32 handle);
+    // Call immediately after every draw consuming this block, including replay
+    // and shadow draws. Retirement fences cover all earlier commands in context.
+    void mark_submitted(u32 block_index);
+    // Visit at most one upload lane's count limit, with zero-time polls. Rotate
+    // incomplete entries so failed/missing fences cannot pin healthy storage.
+    // Their slices remain quarantined until completion or final destruction.
+    void reclaim();
+    // Const diagnostics for storage/retirement pressure.
+    std::size_t retired_count() const {
+        return m_retired.size();
+    }
+    // All allocated GL backing storage, including pending/quarantined bytes.
+    std::size_t storage_bytes() const {
+        return m_storage_bytes;
+    }
 
+    bool valid_allocation(u32 handle, u32 indices) const {
+        return handle < m_allocations.size() && m_allocations[handle].live &&
+               m_allocations[handle].index_count == indices && indices != 0;
+    }
     const Allocation& allocation(u32 handle) const {
         return m_allocations[handle];
     }
@@ -99,13 +133,31 @@ public:
     // (feeds the runtime VRAM estimate, matching the old per-chunk accounting).
     void resident_capacity(std::size_t& vertices, std::size_t& indices) const;
 
-    // Releases all GL objects + mappings. Safe to call with no current chunks.
+    // Retire a world's live slices without resetting storage/retirement caps.
+    void clear();
+    // Final teardown only: delete GL objects; queued consumers retain backing
+    // storage under GL object lifetime rules. No later world reuses these bytes.
     void destroy();
     bool empty() const {
         return m_blocks.empty();
     }
 
 private:
+    u32 allocate_with_reclaim(const VoxelVertex* vertices,
+                              u32 vertex_count,
+                              const u32* indices,
+                              u32 index_count,
+                              const char* label_seed,
+                              std::size_t visits,
+                              bool& capacity_refused);
+    u32 reuse_completed(u32 handle,
+                        const VoxelVertex* vertices,
+                        u32 vertex_count,
+                        const u32* indices,
+                        u32 index_count);
+    bool complete_for_reuse(Block& block);
+    void fence_reuse(Block& block);
+    void reclaim(std::size_t limit);
     u32 acquire_handle();
     void release_handle(u32 handle);
     bool reserve_in_block(Block& block,
@@ -115,8 +167,17 @@ private:
                           u32& vertex_slot,
                           u32& index_offset,
                           u32& index_slot);
-    u32 add_block(u32 min_vertices, u32 min_indices, const char* label_seed);
+    u32
+    add_block(u32 min_vertices, u32 min_indices, const char* label_seed, bool& capacity_refused);
+    void release_block(Block& block);
 
+    struct Retired {
+        u32 handle = kInvalid;
+        GLsync completion = nullptr;
+    };
+    void recycle(u32 handle);
+    std::deque<Retired> m_retired; // <= kMaxAllocations; bounded round-robin visits
+    std::size_t m_storage_bytes = 0;
     std::vector<Block> m_blocks;
     std::vector<Allocation> m_allocations;
     std::vector<u32> m_free_handles;

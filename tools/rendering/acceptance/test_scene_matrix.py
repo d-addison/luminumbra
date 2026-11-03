@@ -269,7 +269,8 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(len(commands), 3 * 7)
         benchmark = [c for c in commands if "--render-benchmark" in c]
         self.assertEqual(len(benchmark), 7)
-        validators = [c for c in commands if c.startswith("python3 tools/perf/validate_render_capture.py")]
+        validators = [c for c in commands
+                      if shlex.split(c)[:2] == [Path(sys.executable).as_posix(), sm.VALIDATOR]]
         self.assertEqual(len(validators), 7)
         for line in validators:
             self.assertIn("--require-settled", line)
@@ -297,6 +298,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertFalse((self.out / "commands.txt").exists())
 
     def test_build_dir_is_substituted(self):
+        build_dir = self.out.parent / "lum build"
         code, _ = _run(
             [
                 "--matrix",
@@ -305,12 +307,18 @@ class GeneratorTests(unittest.TestCase):
                 str(self.out),
                 "--allow-unresolved",
                 "--build-dir",
-                "/opt/lum build",
+                str(build_dir),
             ]
         )
         self.assertEqual(code, 0)
         text = (self.out / "commands.txt").read_text(encoding="utf-8")
-        self.assertIn("'/opt/lum build/bin/luminumbra_client_app'", text)
+        commands = [shlex.split(line) for line in text.splitlines()
+                    if line and not line.startswith("#")]
+        clients = [argv for argv in commands if "--scene-config" in argv]
+        self.assertEqual(len(clients), 14)
+        for argv in clients:
+            self.assertEqual(argv[0], (build_dir / "bin" / sm.CLIENT_BINARY).as_posix())
+            self.assertTrue(Path(argv[argv.index("--scene-config") + 1]).is_absolute())
 
 
 class EngineContractTests(unittest.TestCase):
@@ -340,7 +348,7 @@ class EngineContractTests(unittest.TestCase):
         for argv in self._command_lines():
             if argv[0].endswith(sm.CLIENT_BINARY):
                 allowed = client
-            elif argv[0] == "python3":
+            elif argv[0] == Path(sys.executable).as_posix():
                 allowed = validator
             else:
                 self.fail(f"unexpected command {argv[0]}")

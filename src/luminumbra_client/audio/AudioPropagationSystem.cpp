@@ -1,5 +1,6 @@
 #include "AudioPropagationSystem.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -19,7 +20,12 @@ AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSyste
 }
 
 AudioPropagationSystem::~AudioPropagationSystem() {
-    m_shutdown = true;
+    {
+        // Publishing shutdown under the task mutex keeps a worker that has just evaluated its wait
+        // predicate from missing the notification and blocking destruction in join().
+        std::lock_guard<std::mutex> lock(m_task_mutex);
+        m_shutdown = true;
+    }
     m_task_cv.notify_all();
 
     for (auto& thread : m_worker_threads) {
@@ -40,7 +46,8 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
     // Check cache first
     if (ShouldUseCachedResult(source, listener)) {
         uint64_t hash = m_cache.HashPositions(source, listener);
-        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
         auto it = m_cache.entries.find(hash);
         if (it != m_cache.entries.end()) {
             UpdatePerformanceMetrics(0.1f, true); // Cache hit
@@ -92,7 +99,8 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
     // Cache the result
     uint64_t hash = m_cache.HashPositions(source, listener);
     {
-        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
         PropagationCache::CacheEntry& entry = m_cache.entries[hash];
         entry.result = result;
         entry.timestamp = std::chrono::steady_clock::now();
@@ -114,7 +122,7 @@ void AudioPropagationSystem::CalculatePropagationAsync(
     std::function<void(AudioPropagationResult)> callback,
     float max_distance) {
     {
-        std::lock_guard<std::mutex> lock(m_task_mutex);
+        LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
         m_pending_tasks.push_back({source, listener, max_distance, std::move(callback)});
     }
     m_task_cv.notify_one();
@@ -319,13 +327,14 @@ AudioPropagationSystem::AnalyzeEnvironment(const glm::vec3& position, float anal
         }
     }
 
-    analysis.is_enclosed = (enclosed_rays > sample_directions.size() * 0.5f);
+    analysis.is_enclosed =
+        (static_cast<float>(enclosed_rays) > static_cast<float>(sample_directions.size()) * 0.5f);
 
     if (analysis.is_enclosed) {
-        float avg_wall_distance = total_distance / sample_directions.size();
+        float avg_wall_distance = total_distance / static_cast<float>(sample_directions.size());
         analysis.room_volume = avg_wall_distance * avg_wall_distance * avg_wall_distance * 2.0f;
         analysis.surface_area = avg_wall_distance * avg_wall_distance * 6.0f;
-        analysis.avg_absorption = total_absorption / std::max(1, enclosed_rays);
+        analysis.avg_absorption = total_absorption / static_cast<float>(std::max(1, enclosed_rays));
         analysis.rt60_estimate =
             CalculateRT60(analysis.room_volume, analysis.surface_area, analysis.avg_absorption);
     } else {
@@ -373,7 +382,8 @@ uint64_t AudioPropagationSystem::PropagationCache::HashPositions(const glm::vec3
 bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
                                                    const glm::vec3& listener) {
     uint64_t hash = m_cache.HashPositions(source, listener);
-    std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+    LUMIN_PROFILE_LOCK(
+        std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
 
     auto it = m_cache.entries.find(hash);
     if (it == m_cache.entries.end())
@@ -387,6 +397,7 @@ bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
 }
 
 void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms, bool cache_hit) {
+    std::lock_guard<std::mutex> lock(m_metrics_mutex);
     if (cache_hit) {
         m_metrics.cache_hits++;
     } else {
@@ -402,13 +413,17 @@ void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms,
 }
 
 void AudioPropagationSystem::WorkerThreadFunction() {
+    LUMIN_PROFILE_THREAD("Audio propagation worker");
     while (!m_shutdown) {
         AsyncTask task;
 
         // Wait for task
         {
-            std::unique_lock<std::mutex> lock(m_task_mutex);
-            m_task_cv.wait(lock, [this] { return !m_pending_tasks.empty() || m_shutdown; });
+            LUMIN_PROFILE_LOCK(
+                std::unique_lock<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
+            LUMIN_PROFILE_WAIT("Audio condition wait", m_task_cv.wait(lock, [this] {
+                return !m_pending_tasks.empty() || m_shutdown;
+            }));
 
             if (m_shutdown)
                 break;
@@ -416,12 +431,17 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             if (!m_pending_tasks.empty()) {
                 task = std::move(m_pending_tasks.back());
                 m_pending_tasks.pop_back();
-                m_metrics.active_calculations++;
             } else {
                 continue;
             }
         }
 
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations++;
+        }
+
+        LUMIN_PROFILE_ZONE_N("Audio worker job");
         // Process task
         AudioPropagationResult result =
             CalculatePropagation(task.source, task.listener, task.max_distance);
@@ -431,7 +451,10 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             task.callback(result);
         }
 
-        m_metrics.active_calculations--;
+        {
+            std::lock_guard<std::mutex> lock(m_metrics_mutex);
+            m_metrics.active_calculations--;
+        }
     }
 }
 
@@ -449,8 +472,6 @@ float LinearToDb(float linear) {
 
 float CalculateAirAbsorption(float distance, float frequency_hz, float humidity) {
     // ISO 9613-1 standard for atmospheric absorption
-    float temp_celsius = 20.0f;    // Assume 20°C
-    float pressure_kpa = 101.325f; // Standard atmospheric pressure
 
     // Simplified air absorption coefficient
     float absorption_coefficient = 0.0f;

@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // ADVERSARIAL determinism-hardening gate for the layered worldgen snapshot
 // pipeline + structure/feature placement.
 //
@@ -54,7 +55,7 @@ constexpr int kSeed = 424242;
 // The archipelago preset from the sibling/world-gen fixtures: real terrain that
 // crosses the iso-surface inside chunk (0,0,0) so meshes are non-trivial.
 TerrainGenParams ArchipelagoParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -78,7 +79,7 @@ TerrainGenParams CaveParams() {
 // A guaranteed-flat solid surface at a fixed height: predictable for normals /
 // winding / degenerate-input reasoning.
 TerrainGenParams FlatParams(float height_offset) {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 0.0f;
     params.octaves = 4;

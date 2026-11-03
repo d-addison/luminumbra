@@ -70,7 +70,7 @@ def validate_ctest(root):
     if any(count != 1 for count in names.values()):
         raise ValueError("Duplicate prefab CTest cases")
     for case in cases:
-        if (case.get("status") != "run" or case.get("result") == "suppressed"
+        if (case.get("status") != "run" or case.get("result") not in (None, "completed")
                 or any(case.find(tag) is not None for tag in ("failure", "error", "skipped"))):
             raise ValueError("Unevaluated or failing prefab CTest case: " + case.get("name"))
     return sorted(names)
@@ -133,7 +133,7 @@ def main():
                     "--service", str(service), "--toolchain", str(toolchain),
                     "--consumer", str(consumer), "--output", str(output / "acceptance")], check=True)
     acceptance_path = output / "acceptance/receipt.json"
-    acceptance = json.loads(acceptance_path.read_text())
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
     receipt.update(passed=True, installed_checks=validate_acceptance(acceptance),
                    acceptance_receipt_sha256=sha(acceptance_path))
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")

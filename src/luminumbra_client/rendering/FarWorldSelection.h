@@ -31,7 +31,9 @@ enum class FarWorldRefusal {
     SpanHistoryExhausted,
     ShaderProgramUnavailable,
     InvalidCavePolicy,
-    CavePolicyMismatch
+    CavePolicyMismatch,
+    WaterUnavailable,
+    WaterSpanRefused
 };
 
 constexpr FarWorldMode RequestedFarWorldMode(bool enabled) noexcept {
@@ -46,6 +48,24 @@ struct FarWorldSelection {
     FarWorldRefusal refusal = FarWorldRefusal::None;
     bool advance = true, submit = true;
 };
+// Retained default/preview compatibility. Requested Ladder may still select
+// Legacy after refusal; effective Ladder never receives a Legacy runtime owner.
+template<class LegacyOwner>
+constexpr LegacyOwner* LegacyFarWorldCompatibility(const FarWorldSelection& selection,
+                                                   LegacyOwner* owner) noexcept {
+    return selection.effective == FarWorldMode::Legacy ? owner : nullptr;
+}
+
+// The preview's historical enable hook belongs only to compatibility. Selected
+// Ladder suppression uses the submission override, preserving its frame/policy.
+constexpr FarWorldSelection ApplyLegacyFarWorldEnable(FarWorldSelection selection,
+                                                      bool enabled) noexcept {
+    if (selection.effective == FarWorldMode::Legacy && !enabled) {
+        selection.advance = false;
+        selection.submit = false;
+    }
+    return selection;
+}
 FarWorldSelection SelectFarWorld(FarWorldMode requested,
                                  FarWorldPurpose purpose,
                                  FarWorldRefusal prerequisite,
@@ -83,6 +103,7 @@ struct FarWorldDrawCommand {
 using FarWorldPrepareDraw = std::function<bool(const FarWorldDrawCommand&)>;
 struct FarWorldSubmitStats {
     std::size_t draws = 0, indices = 0, refused = 0;
+    std::uint64_t water_indices = 0;
 };
 using FarWorldSubmitFn = std::function<FarWorldSubmitStats(const FarWorldPrepareDraw&)>;
 using FarWorldLegacySubmitFn = std::function<FarWorldSubmitStats()>;

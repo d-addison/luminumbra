@@ -318,7 +318,7 @@
                                 </div>
                                 <div class="settings-row-inline param-row">
                                     <label>island mask</label>
-                                    <span class="toggle worldgen-param" data-path="terrain.island_mask_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                    <span class="toggle worldgen-param on" data-path="terrain.island_mask_enabled" data-type="bool"><span class="toggle-knob"></span></span>
                                 </div>
                             </div>
                             </div>

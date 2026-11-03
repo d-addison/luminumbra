@@ -54,8 +54,10 @@ struct FrameScanReport {
     std::uint64_t water_pixels = 0;
     double water_coverage = 0.0;
     double water_mean_luminance = 0.0;
-    std::uint64_t foliage_instances = 0; // live foliage scatter instances this frame
-    double mean_frame_luminance = 0.0;   // whole back buffer
+    std::uint64_t foliage_instances = 0; // CPU-known generated count
+    std::uint64_t foliage_instance_capacity = 0;
+    bool foliage_instance_count_known = true;
+    double mean_frame_luminance = 0.0; // whole back buffer
     bool ok = false;
 };
 

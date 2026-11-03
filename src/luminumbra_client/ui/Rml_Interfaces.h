@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Log.h" // Your spdlog wrapper
+#include "rendering/AttributedGl.h"
 #include <RmlUi/Core.h>
 #include <glad/glad.h>
 #include <string>
@@ -62,7 +63,7 @@ private:
         int num_indices = 0;
     };
 
-    GLuint m_program = 0;
+    Luminumbra::Rendering::AttributedGl::Program m_program{};
     GLint m_translation_loc = -1, m_projection_loc = -1;
     int m_width = 0, m_height = 0;
     // 1x1 opaque-white texture bound for untextured (solid-colour) geometry, so the

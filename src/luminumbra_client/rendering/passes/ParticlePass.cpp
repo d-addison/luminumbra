@@ -1,4 +1,8 @@
 #include "ParticlePass.h"
+#include "../FarWorldReplay.h"
+#include "core/Profiler.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
@@ -87,6 +91,21 @@ float ParticlePass::Curve::sample(float t) const {
 
 ParticlePass::ParticlePass() = default;
 ParticlePass::~ParticlePass() = default;
+
+std::vector<ParticlePass::LiveParticleState> ParticlePass::live_particle_states() const {
+    std::vector<LiveParticleState> states;
+    states.reserve(m_live_count);
+    for (const auto& particle : m_particles) {
+        if (particle.alive) {
+            states.push_back({.pos = particle.pos,
+                              .vel = particle.vel,
+                              .age = particle.age,
+                              .lifetime = particle.lifetime,
+                              .emitter_index = particle.emitter_index});
+        }
+    }
+    return states;
+}
 
 void ParticlePass::init_shader(const std::filesystem::path& root_path) {
     // Re-home of magical_particles. Billboard expansion now happens in the
@@ -196,7 +215,7 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path,
                              json_path.string());
         return kInvalidEmitter;
     }
-    std::ifstream in(json_path);
+    Filesystem::ContentInput in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("ParticlePass: emitter file not found '{}'.", json_path.string());
         return kInvalidEmitter;
@@ -271,6 +290,7 @@ void ParticlePass::clear_emitters() {
     m_active_emitters.clear();
     m_descriptors.clear();
     m_next_emitter_id = 0;
+    m_ambient_emitter_index = kMaxEmitters;
     m_precip_emitters.fill(kInvalidEmitter);
     m_precip_load_attempted.fill(false);
     m_splash_emitter_index = kNoSplashEmitter;
@@ -280,6 +300,39 @@ void ParticlePass::clear_emitters() {
         p.alive = false;
     m_ring_head = 0;
     m_live_count = 0;
+}
+
+void ParticlePass::clear_waterfall_spray() {
+    // add_emitter caps the vector at kMaxEmitters; this fixed remap needs no
+    // allocation and keeps removal linear in emitters plus the particle ring.
+    std::array<uint32_t, kMaxEmitters> remap{};
+    uint32_t retained = 0;
+    for (std::size_t index = 0; index < m_active_emitters.size(); ++index) {
+        remap[index] = m_active_emitters[index].waterfall_spray ? kInvalidEmitter : retained++;
+    }
+    if (retained == m_active_emitters.size())
+        return;
+    m_live_count = 0;
+    for (auto& particle : m_particles) {
+        if (!particle.alive)
+            continue;
+        const auto replacement = remap[particle.emitter_index];
+        if (replacement == kInvalidEmitter) {
+            particle.alive = false;
+        } else {
+            particle.emitter_index = replacement;
+            ++m_live_count;
+        }
+    }
+    if (m_splash_emitter_index != kNoSplashEmitter)
+        m_splash_emitter_index = remap[m_splash_emitter_index];
+    if (m_ambient_emitter_index != kMaxEmitters)
+        m_ambient_emitter_index = remap[m_ambient_emitter_index];
+    std::erase_if(m_active_emitters,
+                  [](const ActiveEmitter& emitter) { return emitter.waterfall_spray; });
+    m_descriptors.clear();
+    // The prepared instance records can still contain the removed spray.
+    m_frame_instance_count = 0;
 }
 
 void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin) {
@@ -295,6 +348,18 @@ void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base
             emitter.world_origin = base_origin + emitter.data.origin;
             return;
         }
+    }
+}
+
+void ParticlePass::update_ambient_motes(const std::filesystem::path& root_path,
+                                        const glm::vec3& camera_position) {
+    if (m_ambient_emitter_index == kMaxEmitters) {
+        if (add_emitter(root_path / "data/common/particles/ambient_motes.json", camera_position) !=
+            kInvalidEmitter)
+            m_ambient_emitter_index = m_active_emitters.size() - 1;
+    } else {
+        auto& emitter = m_active_emitters[m_ambient_emitter_index];
+        emitter.world_origin = camera_position + emitter.data.origin;
     }
 }
 
@@ -353,6 +418,7 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
         return kInvalidEmitter;
     }
     ActiveEmitter& spray = m_active_emitters.back();
+    spray.waterfall_spray = true;
     // Spawn box spans the channel width horizontally and a shallow band at the
     // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
     const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);
@@ -629,6 +695,7 @@ void ParticlePass::update(float dt) {
 }
 
 std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL ParticlePass.execute");
     // No-op (zero draw work) when nothing to render: keeps existing visual gates
     // byte-stable.
     if (!m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 || m_vao == 0) {
@@ -729,8 +796,13 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     // Point the VAO's binding 0 at this frame's ring slot, then instanced-draw
     // 4 verts (a quad) per particle.
     glBindVertexArray(m_vao);
+    PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_frame_instance_count));
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
+                                                GL_TRIANGLE_STRIP,
+                                                0,
+                                                4,
+                                                static_cast<GLsizei>(m_frame_instance_count));
     glBindVertexArray(0);
 
     glActiveTexture(GL_TEXTURE0);

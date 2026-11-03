@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
@@ -535,6 +536,7 @@ nlohmann::json RunProbe(const Options& options) {
         {"seed", kSeed},
         {"preset", preset_path.filename().string()},
         {"spawn", {{"x", spawn.x}, {"y", spawn.y}, {"z", spawn.z}}},
+        {"terrain_height", terrain_height},
         {"requested_chunks", options.chunks},
         {"selected_chunks", selected.size()},
         {"initial_chunk_list_size", candidates.size()},

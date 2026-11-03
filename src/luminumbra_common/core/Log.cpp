@@ -1,5 +1,6 @@
 #include "Log.h"
 #include "BoundedConsoleSink.h"
+#include "LogDispatcherSink.h"
 #include <chrono>
 #include <filesystem>
 #include <mutex>
@@ -51,6 +52,8 @@ std::shared_ptr<spdlog::logger> create_default_logger() {
         sinks.push_back(file);
     } catch (...) {}
 
+    sinks.push_back(Log::GetDispatcherSink());
+
     auto logger = std::make_shared<spdlog::logger>("LUMINUMBRA", sinks.begin(), sinks.end());
     logger->set_level(spdlog::level::trace);
     // Crash-safety: flush warn/error immediately, and flush everything at least once a
@@ -81,4 +84,9 @@ std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
         }
     }
     return s_CoreLogger;
+}
+
+std::shared_ptr<LogDispatcherSink> Log::GetDispatcherSink() {
+    static auto dispatcher = std::make_shared<LogDispatcherSink>();
+    return dispatcher;
 }

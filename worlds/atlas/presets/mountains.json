@@ -1,9 +1,10 @@
 {
   "name": "Mountainous",
   "description": "Dramatic shaped mountain ranges rising from walkable valleys and plateaus",
-  "schema_rev": 6,
+  "schema_rev": 8,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.008,
       "base_amplitude": 70.0,
       "octaves": 6,
@@ -21,7 +22,7 @@
         "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.25], [0.0, 0.18], [0.4, 0.13], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.35, 0.08], [0.72, 0.5], [1.0, 1.0]]
       },
-      "island_mask_enabled": false,
+      "island_mask_enabled": true,
       "hydro": {
         "enabled": true,
         "iterations": 9,
@@ -38,7 +39,7 @@
       "table": "common/biomes.json",
       "temperature_frequency": 0.003,
       "humidity_frequency": 0.004,
-      "relief_enabled": false
+      "relief_enabled": true
     },
     "features": {
       "caves_enabled": true,
@@ -49,9 +50,10 @@
       "river_pv_min": -1.0,
       "river_pv_max": -0.82,
       "river_max_carve": 10.0,
-      "lakes_enabled": false,
-      "cliffs_enabled": false,
-      "structures_enabled": true
+      "lakes_enabled": true,
+      "cliffs_enabled": true,
+      "structures_enabled": true,
+      "surface_breaks_enabled": true
     }
   }
 }

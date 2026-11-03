@@ -28,10 +28,12 @@
 //
 // DESYNC ORACLE: peers exchange world_hash + authoritative sub-hashes at the 30-tick
 // checkpoint cadence (the same cadence the LREC1 replay uses). On a mismatch the
-// session HALTS and emits an LREC1 stream (via ReplayStream) of the local session up
-// to the divergence -- the dump's checkpoints carry the LOCAL hashes, and the divergent
+// session HALTS and finalizes the automatic bounded disk recording (via ReplayStream).
+// Long recordings carry an explicit elided-prefix digest and diagnostic suffix.
+// The dump's checkpoints carry the LOCAL hashes, and the divergent
 // tick + section (terrain/water/entities) is recorded. This is the desync-repro
-// artifact, identical in shape to the --replay path, so the existing tooling re-runs it.
+// artifact. Complete dumps can be re-run by --replay; rolled suffixes are explicitly
+// diagnostic and cannot reconstruct the world from the seed alone.
 //
 // CLEAN DISCONNECT (regression review): a peer Bye or a socket close ENDS the session
 // cleanly -- no hang, no crash, no infinite wait. The surviving side records the
@@ -42,14 +44,23 @@
 // blobs, and hash checkpoints. It knows NOTHING about voxels, biomes, cameras, or any
 // game concept. The opaque input blob is exactly the InputRecord payload of LREC1.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "../HashCheckpoint.h"
+
+namespace Luminumbra::Replay {
+class QueuedReplayRecorder;
+}
 
 namespace Luminumbra::Net {
 
@@ -58,7 +69,7 @@ namespace Luminumbra::Net {
 // wire, NO float bit-twiddling -- hashes travel as their hex strings). ------------
 
 inline constexpr char kLockstepMagic[5] = {'L', 'S', 'T', 'P', '1'};
-inline constexpr std::uint16_t kLockstepProtocolVersion = 1;
+inline constexpr std::uint16_t kLockstepProtocolVersion = 4;
 
 // Message type tags (u8 on the wire).
 enum class MessageType : std::uint8_t {
@@ -69,14 +80,38 @@ enum class MessageType : std::uint8_t {
 };
 
 // Handshake. Both peers send a Hello first; mismatched protocol/version/seed/preset/
-// tick-rate is REJECTED LOUDLY (a mis-paired session would silently desync otherwise).
+// tick-rate/config identity is REJECTED LOUDLY before simulation begins.
 struct HelloMsg {
     std::uint16_t protocol_version = kLockstepProtocolVersion;
     std::uint64_t seed = 0;
     std::string preset;
     std::uint16_t tick_rate_hz = 30;
     std::uint32_t client_id = 0; // the sender's id (0 = host, 1 = first remote)
+    std::string system_config_identity;
+    // Canonical resolved preset plus sorted data_root-relative dependency paths
+    // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
+    std::string preset_content_hash;
+    // Lockstep pacing/admission settings. Replication uses the defaults.
+    std::uint32_t horizon_start = 3;
+    std::uint32_t horizon_min = 3;
+    std::uint32_t horizon_max = 10;
+    std::uint64_t hash_cadence_ticks = 30;
+    std::uint64_t max_frame_bytes = std::uint64_t{64} * 1024 * 1024;
+    std::uint64_t retained_byte_limit = 0;
+    std::uint64_t retained_message_limit = 0;
 };
+
+// Shared admission check for lockstep and TCP remote replication.
+// Client ids are validated separately by each host's slot policy.
+[[nodiscard]] inline bool HelloMatches(const HelloMsg& local, const HelloMsg& peer) {
+    return local.protocol_version == kLockstepProtocolVersion &&
+           peer.protocol_version == local.protocol_version && peer.seed == local.seed &&
+           peer.preset == local.preset && peer.tick_rate_hz == local.tick_rate_hz &&
+           !local.system_config_identity.empty() && !peer.system_config_identity.empty() &&
+           peer.system_config_identity == local.system_config_identity &&
+           !local.preset_content_hash.empty() && !peer.preset_content_hash.empty() &&
+           peer.preset_content_hash == local.preset_content_hash;
+}
 
 // One client's input for one tick. The blob is OPAQUE (the game's per-tick input set's
 // wire form; empty is valid and compact -- the headless server has none today).
@@ -89,13 +124,9 @@ struct InputMsg {
 // The desync oracle exchange: a peer's authoritative hashes at a checkpoint tick. Mesh
 // is excluded (derived render artifact); authoritative = terrain/water/entities, with
 // the combined world_hash for the top-level compare.
-struct HashMsg {
-    std::uint64_t tick = 0;
-    std::string world_hash;
-    std::string terrain;
-    std::string water;
-    std::string entities;
-};
+// Replay and wire checkpoints have the same value contract. Sharing the immutable
+// value lets the recorder retain it without copying potentially large strings.
+using HashMsg = HashCheckpoint;
 
 // Clean disconnect marker carrying the tick the sender stopped at.
 struct ByeMsg {
@@ -135,21 +166,97 @@ enum class FrameDelivery {
     Reliable
 };
 
+// Wire-protocol maximum for a single frame payload, enforced on send and receive.
+inline constexpr std::size_t kMaxFramePayloadBytes = 64u * 1024u * 1024u;
+
+// Remote receive queues admit only below this payload budget, so each direction holds
+// less than 256 KiB + one maximum frame. Cap entries too, including empty frames.
+inline constexpr std::size_t kReceiveQueueByteBudget = 256u * 1024u;
+inline constexpr std::size_t kReceiveQueueFrameLimit = 1024;
+static_assert(kMaxFramePayloadBytes <=
+              (std::numeric_limits<std::size_t>::max)() - kReceiveQueueByteBudget);
+
+[[nodiscard]] inline bool HasReceiveQueueCapacity(std::size_t queued_bytes,
+                                                  std::size_t queued_frames) {
+    return queued_bytes < kReceiveQueueByteBudget && queued_frames < kReceiveQueueFrameLimit;
+}
+
+// Protocol receive work shared through adapters. Backend read-ahead keeps its
+// separate existing bounds. Count empty polls and stop after 256 KiB plus one
+// frame bounded by kMaxFramePayloadBytes, with at most 1024 polls in all.
+struct FrameReceiveBudget {
+    std::size_t polls_left = kReceiveQueueFrameLimit;
+    std::size_t payload_bytes = 0;
+
+    [[nodiscard]] bool CanPoll() const {
+        return polls_left != 0 && payload_bytes < kReceiveQueueByteBudget;
+    }
+};
+
+enum class FrameReceiveResult {
+    Frame,
+    Empty,
+    Yield
+};
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. Returns false if the peer is gone.
+    // Sends one complete message frame. Refusal classes:
+    // - Oversized for this transport: terminal, rejected before writing any bytes.
+    // - Permanent backend failure or disconnection: terminal; closes after draining.
+    // - Temporary capacity: transient, accepts no bytes; retry the same bytes.
+    // After false, check min(kMaxFramePayloadBytes, MaxFramePayloadBytes()), drain
+    // received frames, then check IsPeerConnected(): an in-limit frame with a still
+    // connected peer can be retried unchanged. In-process transports never refuse
+    // for capacity. Buffered received frames precede closure reporting.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
     virtual bool SendFrame(const std::vector<std::uint8_t>& frame,
                            FrameDelivery delivery = FrameDelivery::Reliable) = 0;
 
+    [[nodiscard]] virtual std::size_t MaxFramePayloadBytes() const {
+        return kMaxFramePayloadBytes;
+    }
+
+    // Receive/reconstruction capacity. Backends use the same cap in both
+    // directions by default; adapters with directional limits must forward both.
+    [[nodiscard]] virtual std::size_t MaxReceiveFramePayloadBytes() const {
+        return MaxFramePayloadBytes();
+    }
+
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
     // IsPeerConnected==false (NOT via a thrown error / hang).
     virtual bool TryReceiveFrame(std::vector<std::uint8_t>& out) = 0;
+
+    // Always-reliable transports retain compatibility with the original receive seam.
+    virtual bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                             FrameDelivery& delivery) {
+        delivery = FrameDelivery::Reliable;
+        return TryReceiveFrame(out);
+    }
+
+    // Adapters that consume control frames override this method and pass the
+    // same budget to their source. Yield preserves queued data and is not EOF.
+    virtual FrameReceiveResult TryReceiveFrameWithDeliveryBounded(std::vector<std::uint8_t>& out,
+                                                                  FrameDelivery& delivery,
+                                                                  FrameReceiveBudget& budget) {
+        if (!budget.CanPoll())
+            return FrameReceiveResult::Yield;
+        --budget.polls_left;
+        if (!TryReceiveFrameWithDelivery(out, delivery))
+            return FrameReceiveResult::Empty;
+        // Cap the final frame charge to avoid overflow from a broken transport.
+        budget.payload_bytes += (std::min)(out.size(), kReceiveQueueByteBudget);
+        return FrameReceiveResult::Frame;
+    }
+
+    virtual void CloseWithReason(const std::string&) {
+        Close();
+    }
 
     // True while the peer end is still attached. A clean disconnect flips this false.
     [[nodiscard]] virtual bool IsPeerConnected() const = 0;
@@ -181,6 +288,8 @@ public:
 class LoopbackTransport final : public ILockstepTransport {
 public:
     struct Channel {
+        // Both ends are in-process, so no untrusted peer can enqueue frames here.
+        // Remote receive bounds do not apply to this queue.
         std::deque<std::vector<std::uint8_t>> queue; // complete framed messages
         bool open = true;
     };
@@ -282,6 +391,19 @@ public:
     // `sock` is invalid. `sock` is a native SOCKET cast to intptr_t (-1 = none).
     static std::unique_ptr<TcpTransport> FromAcceptedSocket(std::intptr_t sock);
 
+    // Diagnostics only: read-only buffer accounting, with no polling or I/O.
+    // receive_bytes includes the consumed prefix until compaction or full drain.
+    struct BufferDiagnostics {
+        std::size_t receive_bytes;
+        std::size_t receive_capacity;
+        std::size_t consumed_receive_bytes;
+        std::size_t pending_send_bytes;
+    };
+    [[nodiscard]] BufferDiagnostics GetBufferDiagnostics() const {
+        return {
+            m_recv_buffer.size(), m_recv_buffer.capacity(), m_recv_offset, m_send_q.PendingBytes()};
+    }
+
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
@@ -289,13 +411,16 @@ public:
     void Close() override;
 
 private:
-    bool PumpRecv(); // pulls available bytes into m_recv_buffer; sets m_peer_closed on EOF
-    int FlushSendNonBlocking(); // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
+    std::size_t ReceiveBytesNeeded(); // validates the prefix; closes on an oversized frame
+    void CompactReceiveBuffer();      // discard consumed bytes only before another socket read
+    bool PumpRecv();                  // bounded read-ahead; stops at a complete frame or EOF/error
+    int FlushSendNonBlocking();       // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
 
     std::intptr_t m_socket = -1; // SOCKET (winsock) / fd; -1 = none
     std::intptr_t m_listen_socket = -1;
     bool m_peer_closed = false;
-    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
+    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames and bounded read-ahead
+    std::size_t m_recv_offset = 0;           // first unread byte; consuming a frame moves no bytes
     OutboundByteQueue m_send_q;              // bounded outbound queue; no busy-spin
 };
 
@@ -350,6 +475,8 @@ struct LockstepConfig {
     std::uint16_t tick_rate_hz = 30;
     std::uint32_t local_client_id = 0; // 0 = host, 1 = the one remote (v1 scope: <= 2)
     std::uint32_t peer_client_id = 1;
+    std::string system_config_identity;
+    std::string preset_content_hash;
 
     // Adaptive input horizon (in TICKS -- never wall-clock). Input for tick T is applied
     // at T+horizon. Starts at kStart; GROWS by 1 (up to kMax) when a peer input for the
@@ -366,15 +493,29 @@ struct LockstepConfig {
     // Desync-oracle hash exchange cadence (ticks). Reuses the LREC1 30-tick checkpoint
     // cadence so the dump's checkpoints line up with the recorded replay's.
     std::uint64_t hash_cadence_ticks = 30;
+
+    // Maximum encoded Input/Hash frame size to negotiate with the transport and
+    // remote. Smaller values allow a smaller derived retention budget.
+    std::size_t max_frame_payload_bytes = kMaxFramePayloadBytes;
+
+    // Zero derives the budget from the negotiated frame size, both input horizons,
+    // and checkpoint window. Nonzero budgets must fit ALL permitted messages or
+    // Handshake fails. One remote means per-peer and aggregate bounds are identical.
+    std::size_t peer_retained_byte_limit = 0;
+    std::size_t peer_retained_message_limit = 0;
 };
+
+// Construct the same negotiated Hello for sessions and single-process drivers.
+HelloMsg MakeLockstepHello(const LockstepConfig& config,
+                           std::size_t transport_frame_limit = kMaxFramePayloadBytes);
 
 // Outcome of a tick-advance attempt.
 enum class TickOutcome {
     Advanced,         // a tick ran (all peer inputs present); world advanced by one tick
-    WaitingForPeer,   // peer input for the wanted tick not yet present -- caller pumps again
+    WaitingForPeer,   // input, receive work or closure is pending -- caller pumps again
     Desync,           // a hash mismatch was detected -- session HALTED, dump emitted
     PeerDisconnected, // a clean Bye/close -- session ENDED cleanly (not a desync)
-    Finished,         // the configured tick budget was reached
+    Finished,         // tick budget reached, pending sends accepted and receive drain empty
 };
 
 // The result the host/driver acts on each pump.
@@ -383,7 +524,7 @@ struct TickResult {
     std::uint64_t tick = 0; // the tick this result concerns
     std::vector<std::uint8_t>
         local_inputs; // inputs to APPLY for this tick (local + peer merged opaque set)
-    bool ran_hash_exchange = false; // a HashMsg was sent/compared at this tick
+    bool ran_hash_exchange = false; // a HashMsg was sent/queued at this tick
 };
 
 // Snapshot of session status (telemetry only -- none of this feeds the hash).
@@ -399,10 +540,42 @@ struct LockstepStatus {
     std::string dump_path;                 // LREC1 dump path on desync
     std::uint64_t late_input_events = 0;   // how many times the peer input arrived late
     std::uint32_t max_horizon_reached = 3; // peak horizon over the session
+    std::string handshake_error;
+    std::uint64_t rejected_peer_messages = 0; // invalid, stale or conflicting
+    std::string replay_error;                 // diagnostics only; never changes tick/hash outcomes
 };
 
+// Const diagnostics for all retained session history (no polling or I/O).
+struct LockstepAdmissionStatus {
+    std::size_t input_ticks = 0;
+    std::size_t peer_inputs = 0;
+    std::size_t peer_hashes = 0;
+    std::size_t retained_bytes = 0;
+    std::uint64_t confirmed_hash_tick = 0;
+    std::size_t frame_limit = 0;
+    std::size_t message_limit = 0;
+    std::size_t byte_limit = 0;
+    std::size_t applied_inputs = 0;
+    std::size_t applied_input_bytes = 0;
+    std::size_t local_hashes = 0;
+    std::uint64_t checkpoint_window = 0;
+    std::size_t replay_bytes = 0;
+    std::size_t replay_byte_limit = 0;
+    std::size_t replay_segments = 0;
+};
+
+// Allocation-free capacity query for one additional encoded peer frame.
+// Session admission uses the same check before decoding Input or Hash.
+[[nodiscard]] inline bool HasPeerRetentionCapacity(const LockstepAdmissionStatus& usage,
+                                                   std::size_t bytes) {
+    return usage.peer_inputs < usage.message_limit &&
+           usage.peer_hashes < usage.message_limit - usage.peer_inputs &&
+           usage.retained_bytes <= usage.byte_limit &&
+           bytes <= usage.byte_limit - usage.retained_bytes;
+}
+
 // The host side provides per-tick local inputs and applies the agreed input set. These
-// are the only two callbacks into game/sim code; the session itself is engine-generic.
+// simulation callbacks and optional replay sink keep the session engine-generic.
 // (The headless server passes empty inputs and an apply that just steps the world.)
 struct LockstepHooks {
     // Returns the LOCAL client's opaque input blob for `tick` (empty allowed). Called
@@ -420,6 +593,15 @@ struct LockstepHooks {
     void (*capture_hashes)(std::uint64_t tick, HashMsg& out, void* user) = nullptr;
 
     void* user = nullptr;
+
+    // Optional additional replay sink, called once per executed tick. The hash
+    // pointer is nonnull at checkpoints. Append synchronously to a caller-owned,
+    // bounded streaming sink; do not accumulate records in memory. Never changes
+    // simulation state. Automatic bounded desync recording needs no hook installation.
+    void (*record_replay_tick)(std::uint64_t tick,
+                               const std::vector<std::uint8_t>& merged,
+                               const HashMsg* hash,
+                               void* user) = nullptr;
 };
 
 // --- LockstepSession ---------------------------------------------------------------
@@ -437,24 +619,40 @@ struct LockstepHooks {
 class LockstepSession {
 public:
     LockstepSession(LockstepConfig config, ILockstepTransport* transport, LockstepHooks hooks);
+    ~LockstepSession();
 
-    // Exchanges Hello with the peer and validates protocol/version/seed/preset/tick-rate.
+    // Exchanges Hello and validates protocol/version/seed/preset/tick-rate/config identity.
     // Returns false on a mismatch (rejected loudly) or a peer that never said Hello.
     // For LoopbackTransport both ends must have sent their Hello before either completes;
     // the host typically Handshakes both sides in the gate's single-process driver.
     bool Handshake();
 
-    // Advances the session by AT MOST one tick. Drains pending peer messages first, then:
-    //  - if a clean Bye/close was seen -> PeerDisconnected (clean end);
-    //  - if a peer hash mismatched the local one at a cadence tick -> Desync (HALT + dump);
+    // Advances the session by AT MOST one tick. Receives at most
+    // kReceiveQueueFrameLimit frames/polls and less than kReceiveQueueByteBudget
+    // plus one maximum frame's payload per call, shared by all nested drains.
+    // Pending messages stay in the transport for later calls. Then:
+    //  - if an available peer hash mismatched an executed cadence tick -> Desync (HALT + dump);
+    //  - otherwise, after draining through Bye's executed tick, or when a closed
+    //    transport has no buffered input for the wanted tick -> PeerDisconnected;
     //  - if the peer's input for the wanted tick is present -> Advanced (world stepped,
     //    hashes exchanged at the cadence);
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
-    // `budget_ticks` is the total tick count to run; returns Finished once reached.
+    // Input/hash transient refusals retain the encoded bytes in a bounded FIFO;
+    // each pump retries them before newer sends. Terminal refusals or a full FIFO
+    // disconnect. Bye follows a final FIFO flush; a still-pending FIFO closes instead.
+    // `budget_ticks` is the total tick count to run; returns Finished once reached
+    // and all pending outbound frames have been accepted, after an empty receive poll.
     TickResult PumpTick(std::uint64_t budget_ticks);
 
-    // Sends a clean Bye at the current tick and closes the local transport end. Idempotent.
+    // Flushes pending sends, sends Bye only if flushed, then drains before closing.
+    // Shares PumpTick's receive bounds. If saturated, keep the session/transport
+    // alive and call Disconnect or PumpTick again until Status is terminal.
+    // No further simulation runs after a local close request. Idempotent.
     void Disconnect();
+
+    // Blocking recording barrier for explicit persistence/lifecycle boundaries.
+    // PumpTick never waits for recording. Returns false for an incomplete replay.
+    bool FlushReplayRecorder();
 
     [[nodiscard]] LockstepStatus Status() const {
         return m_status;
@@ -465,24 +663,67 @@ public:
     [[nodiscard]] std::uint32_t Horizon() const {
         return m_horizon;
     }
+    [[nodiscard]] LockstepAdmissionStatus AdmissionStatus() const;
+
+    // Const allocation diagnostic for a retained checkpoint; includes the four
+    // strings' inline capacities. Lookup is logarithmic and never runs per frame.
+    [[nodiscard]] std::optional<std::size_t> PeerHashStringCapacity(std::uint64_t tick) const;
 
     // Where a desync dump is written. Defaults to a temp path; set before PumpTick to
     // direct the gate's dump to a known artifact location.
-    void SetDumpPath(const std::string& path) {
-        m_dump_path = path;
-    }
+    void SetDumpPath(const std::string& path);
 
 private:
-    // Drains all currently-available peer messages into the input/hash buffers, flips
-    // disconnect/desync flags. Hash compare happens here (against the local hash captured
-    // at the same cadence tick). Returns false if a fatal (desync/disconnect) state was set.
+    // Public Handshake/PumpTick/Disconnect own one receive budget; nested send
+    // refusals and closure never replenish it. Charge even empty/malformed frames
+    // and failed polls. Byte overshoot is at most one transport-bounded frame.
+    struct ReceiveWork {
+        std::size_t polls_left = kReceiveQueueFrameLimit;
+        std::size_t payload_bytes = 0;
+    };
+    ReceiveWork m_receive_work;
+    bool m_receive_drain_pending = false;
+    bool m_disconnect_pending = false;
+
+    // Drains within the caller's remaining budget. A quota yield is not EOF:
+    // closure and storage release wait for an actual empty poll (or desync).
+    // Returns false only for a fatal state, not for saturation.
     bool DrainPeerMessages();
 
+    struct PeerCheckpoint {
+        HashMsg hash;
+        bool compared = false;
+    };
+    // Compares once, then releases strings while keeping the confirmation marker.
+    bool ComparePeerHash(PeerCheckpoint& checkpoint);
+
+    // Bounds use subtraction to avoid overflowing near the last representable tick.
+    [[nodiscard]] bool IsWithinPeerLookahead(std::uint64_t tick) const;
+    [[nodiscard]] bool IsRetainedPeerCheckpoint(std::uint64_t tick) const;
+    [[nodiscard]] bool CanRetainPeerFrame(std::size_t bytes) const;
+    bool ConfigureRetention(const HelloMsg& mine, const HelloMsg& peer);
+    void PruneDiagnosticHistory();
+    void PruneConfirmedPeerHashes();
+    void PruneConsumedInputs();
+    void ReleaseRetainedMessages();
+
     // Schedules + sends the local input for `tick` (collect hook), buffering it locally.
-    void ScheduleLocalInput(std::uint64_t tick);
+    bool ScheduleLocalInput(std::uint64_t tick);
+
+    // True means accepted by the transport or retained for ordered retry.
+    bool SendOrQueueFrame(std::vector<std::uint8_t> frame);
+    // Stops at the first transient refusal; false means a terminal disconnect.
+    bool FlushPendingOutbound();
+
+    // Compares available peer hashes before closing and recording a sticky disconnect.
+    void TransportDisconnected(std::optional<std::uint64_t> stop_tick = std::nullopt);
 
     // Emits the LREC1 desync dump of the local session up to `divergence_tick`.
     void EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section);
+    bool OpenReplayRecorder();
+    void RecordReplayTick(std::uint64_t tick,
+                          std::shared_ptr<const std::vector<std::uint8_t>> merged,
+                          std::shared_ptr<const HashMsg> hash);
 
     LockstepConfig m_config;
     ILockstepTransport* m_transport = nullptr;
@@ -490,24 +731,56 @@ private:
 
     std::uint32_t m_horizon = 3;
     std::uint64_t m_agreed_tick = 0;                   // last tick run (0 = none yet)
-    std::uint64_t m_local_input_scheduled_through = 0; // highest tick we've sent local input for
+    std::uint64_t m_local_input_scheduled_through = 0; // highest tick with sent/queued local input
     std::uint32_t m_consecutive_slack_ticks = 0;
+
+    // At most 1024 frames and 64 MiB of encoded bytes, including framing overhead.
+    static constexpr std::size_t kPendingOutboundFrameLimit = 1024;
+    static constexpr std::size_t kPendingOutboundByteLimit = kMaxFramePayloadBytes;
+    std::deque<std::vector<std::uint8_t>> m_pending_outbound;
+    std::size_t m_pending_outbound_bytes = 0;
 
     // Buffered inputs keyed by tick: each tick holds the local + peer opaque blobs by
     // client id (ordered map => deterministic merge order). std::map (ORDERED) is used
     // deliberately so the merged-input concatenation order is stable -- an unordered_map
     // would be a hash-order desync hazard (the Factorio lesson).
+    // At most horizon_max local entries plus the shared peer entry
+    // budget; each tick admits only the configured local and remote client ids.
     std::map<std::uint64_t, std::map<std::uint32_t, std::vector<std::uint8_t>>> m_inputs;
+    std::size_t m_peer_input_count = 0;
+    std::size_t m_retained_peer_bytes = 0;
+    std::uint64_t m_confirmed_peer_hash_tick = 0;
 
-    // Local + peer hashes captured at cadence ticks, for the oracle compare and the dump.
-    std::map<std::uint64_t, HashMsg> m_local_hashes;
-    std::map<std::uint64_t, HashMsg> m_peer_hashes;
+    // Execution pauses at the checkpoint window until the oldest hash confirms.
+    // Admission additionally reserves both horizons of remote lead. All limits
+    // are checked for overflow before any scheduling/allocation at handshake.
+    std::uint64_t m_checkpoint_window = 0;
+    std::size_t m_peer_message_limit = 0;
+    std::size_t m_peer_byte_limit = 0;
+    std::size_t m_frame_limit = kMaxFramePayloadBytes;
 
-    // Recorded input stream for the desync dump (every applied tick's merged input).
-    std::vector<InputMsg> m_applied_inputs;
+    // Only unconfirmed checkpoints plus the bounded diagnostic suffix are kept.
+    std::map<std::uint64_t, std::shared_ptr<const HashMsg>> m_local_hashes;
+    // At most the checkpoint window plus both horizons of checkpoint lead,
+    // also subject to the shared peer message-count and encoded-byte budgets.
+    std::map<std::uint64_t, PeerCheckpoint> m_peer_hashes;
+
+    // Diagnostic suffix: at most kReceiveQueueFrameLimit ticks and
+    // kMaxFramePayloadBytes payload bytes, independent of session duration.
+    // Before pruning, one merged tick adds at most two maximum frame payloads.
+    // Automatic replay recording streams to bounded disk segments instead.
+    static_assert(kMaxFramePayloadBytes <= (std::numeric_limits<std::size_t>::max)() / 3);
+    std::deque<InputMsg> m_applied_inputs;
+    std::size_t m_applied_input_bytes = 0;
+    std::unique_ptr<Replay::QueuedReplayRecorder> m_replay;
+    bool m_replay_open = false;
+    bool m_replay_failed = false;
 
     LockstepStatus m_status;
     std::string m_dump_path;
+    std::optional<std::uint64_t> m_received_bye_tick;
+    std::optional<std::uint64_t> m_transport_close_admission_tick;
+    std::uint64_t m_bye_admission_tick = 0;
     bool m_handshaken = false;
     bool m_disconnected = false; // local end issued/observed a disconnect
 };

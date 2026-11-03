@@ -32,6 +32,8 @@
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/CrashReport.h"
+#include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/GnsTransport.h" // body #ifdef LUMINUMBRA_ENABLE_GNS
 #include "luminumbra_common/net/LockstepSession.h"
@@ -42,12 +44,14 @@
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <cmath>
 #include <entt/entt.hpp>
 
@@ -143,6 +147,16 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--lockstep-dump") == 0) {
             if (const char* v = next_value(i))
                 options.lockstep_dump_path = v;
+        } else if (std::strcmp(arg, "--systems-config") == 0) {
+            if (const char* v = next_value(i)) {
+                options.systems_config_path = v;
+                options.parse_error = options.parse_error || options.systems_config_path.empty();
+            }
+        } else if (std::strcmp(arg, "--preset-json") == 0) {
+            if (const char* v = next_value(i)) {
+                options.preset_json_path = v;
+                options.parse_error = options.parse_error || options.preset_json_path.empty();
+            }
         } else if (std::strcmp(arg, "--root") == 0) {
             if (const char* v = next_value(i))
                 options.root = v;
@@ -160,10 +174,14 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
                 options.ticks = std::strtoull(v, nullptr, 10);
         } else if (std::strcmp(arg, "--radius") == 0) {
             if (const char* v = next_value(i))
-                options.surface_radius = std::atoi(v);
+                options.parse_error =
+                    !Luminumbra::World::TryParseSurfaceRadius(v, options.surface_radius) ||
+                    options.parse_error;
         } else if (std::strcmp(arg, "--collision-radius") == 0) {
             if (const char* v = next_value(i))
-                options.collision_radius = std::atoi(v);
+                options.parse_error =
+                    !Luminumbra::World::TryParseSurfaceRadius(v, options.collision_radius) ||
+                    options.parse_error;
         } else if (std::strcmp(arg, "--test-streaming-radius-cap") == 0) {
             if (const char* v = next_value(i))
                 options.test_streaming_radius_cap = std::atoi(v);
@@ -254,6 +272,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i))
                 options.artifact_path = v;
+        } else if (std::strcmp(arg, "--crash-dir") == 0) {
+            if (const char* v = next_value(i))
+                options.crash_dir = v;
         } else {
             LUMINUMBRA_CORE_ERROR("Unknown argument '{}'", arg);
             options.parse_error = true;
@@ -318,15 +339,28 @@ int main(int argc, char* argv[]) {
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "
             "[--lockstep-dump <path>]] "
-            "[--root <path>] [--preset <name>] "
+            "[--root <path>] [--preset <name>] [--systems-config <path>] [--preset-json <path>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
             "[--collision-radius <chunks>] [--autosave-ticks <n>] [--parked-bytes-limit <bytes>] "
             "[--clients <n>] "
-            "[--player-id <id>] [--server-mode] [--artifact <path>]");
+            "[--player-id <id>] [--server-mode] [--crash-dir <path>] [--artifact <path>]");
         return 2;
     }
     if (const int profile_status = LoadSimBudgetProfileOption(options); profile_status != 0) {
         return profile_status;
+    }
+
+    {
+        const auto crash_dir_environment =
+            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_CRASH_DIR");
+        const fs::path crash_dir = ResolveServerCrashDirectory(
+            options.crash_dir, crash_dir_environment ? crash_dir_environment->c_str() : nullptr);
+        if (luminumbra::crash::InstallCrashCapture(crash_dir, "luminumbra_server_app")) {
+            LUMINUMBRA_CORE_INFO("Crash report path: {}",
+                                 luminumbra::crash::CrashReportPath().string());
+        } else {
+            LUMINUMBRA_CORE_ERROR("Could not install crash capture in '{}'", crash_dir.string());
+        }
     }
 
     if (options.root.empty()) {
@@ -335,6 +369,30 @@ int main(int argc, char* argv[]) {
         options.root = RootString(fs::path(options.root));
     }
     LUMINUMBRA_CORE_INFO("Server runtime root: {}", options.root);
+
+    // Resolve explicit overrides once, before dispatch, so every run and peer uses the
+    // same snapshot. Relative override paths are relative to the working directory.
+    std::string override_error;
+    if (!options.systems_config_path.empty()) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                options.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        options.systems_config_override = std::move(config);
+    }
+    if (!options.preset_json_path.empty()) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(options.preset_json_path,
+                                                          fs::path(options.root) / "data",
+                                                          json_text,
+                                                          override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        options.preset_json_override = std::move(json_text);
+    }
 
     if (!options.mutate_replay_fixture.empty()) {
         return RunMutateReplayFixture(options);

@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "AsyncReadbackRing.h"
+#include "AttributedGl.h"
 
 namespace Luminumbra::Rendering {
 
@@ -89,6 +90,9 @@ public:
     // compile/link failure explicitly falls back to the CPU march.
     void set_gpu_skyview_enabled(bool e) {
         m_use_gpu_skyview = e;
+    }
+    bool gpu_skyview_enabled() const {
+        return m_use_gpu_skyview;
     }
 
     // Pre-compile the GPU compute programs before the timed initialize so the
@@ -164,9 +168,9 @@ private:
     //  GPU-compute sky-view path (default OFF). Lazily-compiled compute program +
     // an SSBO (3 floats/texel) that doubles as the PBO upload source and the ambient readback.
     bool m_use_gpu_skyview = false;
-    GLuint m_skyview_compute_prog = 0;
-    GLuint m_transmittance_compute_prog = 0; // Initializes LUTs once on the GPU.
-    GLuint m_multiscatter_compute_prog = 0;
+    AttributedGl::Program m_skyview_compute_prog{};
+    AttributedGl::Program m_transmittance_compute_prog{}; // Initializes LUTs once on the GPU.
+    AttributedGl::Program m_multiscatter_compute_prog{};
     GLuint m_skyview_ssbo = 0;
     // the ambient readback rides the asynchronous-readback ring — no
     // blocking GL readback primitives remain on this path.

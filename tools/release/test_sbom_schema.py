@@ -4,6 +4,10 @@
 import copy
 import unittest
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from generate_sbom import document_namespace
 from test_sbom import fixture_document
 from validate_sbom import validate_schema, validate_semantics

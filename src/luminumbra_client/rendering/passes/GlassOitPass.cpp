@@ -1,4 +1,7 @@
 #include "GlassOitPass.h"
+#include "../FarWorldReplay.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -11,6 +14,7 @@ GlassOitPass::GlassOitPass() = default;
 GlassOitPass::~GlassOitPass() = default;
 
 void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GlassOitPass.execute_accum");
     // WBOIT accumulation — each visible pane writes its
     // depth-weighted premultiplied color into accum (blend ONE/ONE) and its
     // coverage into reveal (ZERO/ONE_MINUS_SRC_ALPHA -> the (1-a) product),
@@ -20,6 +24,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         return;
     }
     if (!m_accum_shader) {
+        if (ctx.frozen_replay)
+            return;
         // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
         m_accum_shader = std::make_unique<Shader>(
             (input.root_path / "res/shaders/glass_oit.vert").string().c_str(),
@@ -82,6 +88,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_fbo);
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
     glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // OIT composites into internal scene
@@ -114,7 +121,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         m_accum_shader->setMat4("u_model", pane.model);
         m_accum_shader->setVec3("u_tint", pane.tint);
         m_accum_shader->setFloat("u_thickness", pane.thickness);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
     }
     glBindVertexArray(0);
 
@@ -127,6 +134,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
 }
 
 void GlassOitPass::execute_resolve(const RenderContext& ctx, const GlassOitPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GlassOitPass.execute_resolve");
     // the WBOIT resolve — the weighted-average glass
     // color composited over the lit scene with coverage = 1 - reveal. Runs
     // BEFORE the weather snapshot so god-rays/weather observe resolved glass.
@@ -147,7 +155,7 @@ void GlassOitPass::execute_resolve(const RenderContext& ctx, const GlassOitPassI
     glBindTexture(GL_TEXTURE_2D, m_reveal_tex);
     m_resolve_shader->setInt("u_reveal", 1);
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);

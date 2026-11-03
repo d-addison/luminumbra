@@ -154,11 +154,18 @@ public:
         int cache_misses = 0;
     };
 
-    const PerformanceMetrics& GetMetrics() const {
+    // Owned, coherent snapshot. Active work includes callback execution.
+    PerformanceMetrics GetMetrics() const {
+        std::lock_guard<std::mutex> lock(m_metrics_mutex);
         return m_metrics;
     }
+    // Clear accumulated statistics; in-flight work remains active and its later
+    // metric updates belong to the new interval.
     void ResetMetrics() {
+        std::lock_guard<std::mutex> lock(m_metrics_mutex);
+        const int active_calculations = m_metrics.active_calculations;
         m_metrics = {};
+        m_metrics.active_calculations = active_calculations;
     }
 
 private:
@@ -211,7 +218,9 @@ private:
     Luminumbra::Systems::PhysicsSystem* m_physicsSystem;
     PropagationSettings m_settings;
     PropagationCache m_cache;
-    mutable PerformanceMetrics m_metrics;
+    // Never held across audio work, callbacks, or acquisition of another lock.
+    mutable std::mutex m_metrics_mutex;
+    PerformanceMetrics m_metrics;
 
     // Async computation
     std::vector<std::thread> m_worker_threads;

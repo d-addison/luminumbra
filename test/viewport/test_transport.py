@@ -22,6 +22,22 @@ sys.path.insert(0, str(MODULE))
 import protocol as p
 from broker import Broker
 
+
+class Clock:
+    """Freeze product time until an observed request/publication is expired."""
+    def __init__(self):
+        self.value = 0.
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            return self.value
+
+    def advance(self, value):
+        with self.lock:
+            self.value += value
+
+
 KEY = bytes(range(32))
 SESSION = 'a' * 32
 MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
@@ -46,6 +62,98 @@ def signed_raw(raw, payload=b''):
 
 
 class Transport(unittest.TestCase):
+    def test_completion_waits_use_injected_clock_and_join_only_after_completion(self):
+        for outcome in ('complete', 'deadline', 'write-error'):
+            with self.subTest(outcome=outcome):
+                broker = Broker.__new__(Broker)
+                samples = iter((0., .05, .11))
+                broker.clock = lambda: next(samples)
+                broker.writer_error = ['broken pipe'] if outcome == 'write-error' else []
+                broker.writer = mock.Mock()
+                broker.writer.is_alive.side_effect = [True, outcome == 'deadline', False]
+                with mock.patch('broker.time', SimpleNamespace(sleep=lambda _: None)):
+                    if outcome == 'complete':
+                        broker._finish_write(.1)
+                        broker.writer.join.assert_called_once_with(timeout=0)
+                    else:
+                        with self.assertRaisesRegex(p.Refusal, 'Incomplete state write'):
+                            broker._finish_write(.1)
+                        if outcome == 'deadline':
+                            broker.writer.join.assert_not_called()
+
+    def test_setup_error_survives_cleanup_failures_and_every_resource_is_finalized(self):
+        for phase in ('terminate', 'wait', 'join', 'alive', 'stdin', 'stdout', 'stderr', 'handle'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                executable = str(Path(sys.executable).resolve())
+                broker = Broker(directory, KEY, SESSION, [executable],
+                                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), directory)
+                primary = RuntimeError('reader setup failed')
+                child = mock.Mock(pid=123, returncode=None)
+                child.stdin, child.stdout, child.stderr = (mock.Mock() for _ in range(3))
+                calls = []
+                def reap(timeout):
+                    calls.append('wait')
+                    if phase == 'wait' and len(calls) == 1: raise OSError('wait failed')
+                    child.returncode = -1
+                    return -1
+                child.wait.side_effect = reap
+                if phase == 'terminate': child.terminate.side_effect = OSError('terminate failed')
+                if phase in ('stdin', 'stdout', 'stderr'):
+                    getattr(child, phase).close.side_effect = OSError('stream close failed')
+                if phase == 'handle': child._handle.Close.side_effect = OSError('handle close failed')
+                reader, stderr = mock.Mock(ident=1), mock.Mock(ident=None)
+                reader.is_alive.return_value = phase == 'alive'
+                stderr.start.side_effect = primary
+                if phase == 'join': reader.join.side_effect = OSError('join failed')
+                import broker as module
+                with mock.patch.object(module, 'os', SimpleNamespace(**{**vars(os), 'name': 'nt'})), \
+                        mock.patch.object(module.subprocess, 'Popen', return_value=child), \
+                        mock.patch.object(module.threading, 'Thread', side_effect=[reader, stderr]):
+                    with self.assertRaises(RuntimeError) as caught:
+                        broker.run()
+                self.assertIs(caught.exception, primary)
+                self.assertIsNotNone(child.returncode)
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close.assert_called_once_with()
+                reader.join.assert_called_once_with(timeout=2)
+                child._handle.Close.assert_called_once_with()
+                receipt = json.loads((Path(directory) / 'broker-result.json').read_bytes())
+                self.assertTrue(receipt['child_reaped'])
+                self.assertEqual(receipt['status'], 'failed')
+                self.assertEqual(receipt['failure']['error'], str(primary))
+                self.assertTrue((Path(directory) / 'host-stderr.log').exists())
+
+    def test_cleanup_error_refuses_cooperative_success_after_all_finalizers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = str(Path(sys.executable).resolve())
+            broker = Broker(directory, KEY, SESSION, [executable],
+                            hashlib.sha256(Path(executable).read_bytes()).hexdigest(), directory)
+            child = mock.Mock(pid=123, returncode=None)
+            reader, stderr = mock.Mock(ident=1), mock.Mock(ident=2)
+            reader.is_alive.return_value = stderr.is_alive.return_value = False
+            child.poll.side_effect = lambda: child.returncode
+            child.wait.return_value = 0
+            failure = OSError('stderr close failed')
+            child.stderr.close.side_effect = failure
+            def send(header): child.returncode = 0
+            broker._send, broker._finish_write = send, lambda _: None
+            broker.reader_eof = True
+            p.atomic_write(Path(directory) / 'stop.bin', p.encode(
+                {'kind': 'stop', 'session': SESSION, 'sequence': 1}, b'', KEY))
+            with mock.patch('broker.subprocess.Popen', return_value=child), \
+                    mock.patch('broker.threading.Thread', side_effect=[reader, stderr]):
+                with self.assertRaises(OSError) as caught:
+                    broker.run()
+            self.assertIs(caught.exception, failure)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                self.assertTrue(stream.close.called)
+            reader.join.assert_called_with(timeout=2)
+            stderr.join.assert_called_once_with(timeout=2)
+            receipt = json.loads((Path(directory) / 'broker-result.json').read_bytes())
+            self.assertEqual(receipt['status'], 'failed')
+            self.assertEqual(receipt['failure']['error'], str(failure))
+            self.assertTrue(receipt['child_reaped'])
+
     def test_readiness_marker_refuses_stale_identity_duplicate_and_nonregular_files(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'ready.json'
@@ -279,12 +387,23 @@ class Transport(unittest.TestCase):
                     'sys.stdout.buffer.flush()',
                 ])
                 command = [executable, '-B', '-c', script, str(MODULE)]
+            clock = Clock()
             broker = Broker(root, KEY, SESSION,
                 command,
-                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=.5)
+                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=.5, clock=clock)
             p.atomic_write(Path(root)/'desired.bin', p.encode(state(), b'', KEY))
             errors = []
             sent = threading.Event()
+            waiting_stop = threading.Event()
+            original_wait = broker._wait
+            def wait(completed, timeout, message):
+                def observed():
+                    done = completed()
+                    if message == 'Host shutdown deadline' and not done:
+                        waiting_stop.set()
+                    return done
+                return original_wait(observed, timeout, message)
+            broker._wait = wait
             original_send = broker._send
             def send(header):
                 original_send(header)
@@ -294,27 +413,51 @@ class Transport(unittest.TestCase):
             def run():
                 try: broker.run()
                 except Exception as error: errors.append(error)
-            thread = threading.Thread(target=run); thread.start()
-            if update:
-                # Update an actual in-flight request, not a frame-slot allocation
-                # during fixture interpreter startup.
-                self.assertTrue(sent.wait(2), 'Initial fixture state was not dispatched')
-                newer = state(2); newer['state']['locals'][0]['matrix'][12] = 3
-                newer['state']['scene_revision'] = 2
-                p.atomic_write(Path(root)/'desired.bin', p.encode(newer, b'', KEY))
-            end = time.monotonic()+3
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
             observed = None
-            while time.monotonic() < end and thread.is_alive():
-                for index in (0, 1):
-                    value = broker.slots.read(index)
-                    if value is not None: observed = value
-                if observed:
-                    p.atomic_write(Path(root)/'stop.bin', p.encode(
-                        {'kind':'stop','session':SESSION,'sequence':99}, b'', KEY))
-                    break
-                time.sleep(.01)
-            thread.join(timeout=4)
-            self.assertFalse(thread.is_alive())
+            try:
+                self.wait_for(lambda: sent.is_set() or errors)
+                # Invalid-frame fixtures may already have been refused before
+                # this observer runs. Dispatch is the required handshake.
+                self.assertTrue(sent.is_set(), errors)
+                if update:
+                    self.wait_for(lambda: (Path(root) / 'request-received').exists())
+                    newer = state(2); newer['state']['locals'][0]['matrix'][12] = 3
+                    newer['state']['scene_revision'] = 2
+                    p.atomic_write(Path(root)/'desired.bin', p.encode(newer, b'', KEY))
+                    self.wait_for(lambda: broker.gate.last['sequence'] == 2 or errors)
+                    (Path(root) / 'release-1').touch()
+                    (Path(root) / 'release-2').touch()
+                if mode == 'hang':
+                    self.wait_for(lambda: (Path(root) / 'request-received').exists())
+                    clock.advance(.51)
+                else:
+                    def read():
+                        nonlocal observed
+                        for index in (0, 1):
+                            value = broker.slots.read(index)
+                            if value is not None:
+                                observed = value
+                        return observed is not None or bool(errors)
+                    self.wait_for(read)
+                    if observed is not None:
+                        p.atomic_write(Path(root)/'stop.bin', p.encode(
+                            {'kind':'stop','session':SESSION,'sequence':99}, b'', KEY))
+                    if mode == 'stop-hang':
+                        self.wait_for(lambda: (Path(root) / 'stop-received').exists() and waiting_stop.is_set())
+                        clock.advance(.51)
+                thread.join(timeout=4)
+                self.assertFalse(thread.is_alive())
+            finally:
+                # Assertions must not strand a non-cooperating fixture or a
+                # broker worker with frozen product time.
+                if thread.is_alive():
+                    clock.advance(120)
+                    if broker.child is not None and broker.child.poll() is None:
+                        broker.child.kill()
+                    thread.join(timeout=4)
+                self.assertFalse(thread.is_alive(), 'Broker survived forced fixture cleanup')
             self.assertIsNotNone(broker.child.poll())
             receipt = json.loads((Path(root)/'broker-result.json').read_bytes())
             self.assertTrue(receipt['child_reaped'])
@@ -372,6 +515,12 @@ class Transport(unittest.TestCase):
         for terminal in (p.encode(*frame(), KEY), b'LVP1', bytes(malformed_mac)):
             with self.subTest(terminal=terminal[:16]):
                 records = 0
+                active_child = []
+                original_spawn = __import__('subprocess').Popen
+                def spawn(*args, **kwargs):
+                    child = original_spawn(*args, **kwargs)
+                    active_child.append(child)
+                    return child
                 def delayed_read(stream, key):
                     nonlocal records
                     # Shared mailbox readers also own integer descriptors.
@@ -381,9 +530,9 @@ class Transport(unittest.TestCase):
                         if records == 2:
                             # Let the child exit while terminal bytes are still
                             # being processed; polling before join races.
-                            time.sleep(.15)
+                            self.wait_for(lambda: active_child[0].poll() is not None)
                     return p.read_record(stream, key)
-                with mock.patch('broker.read_record', side_effect=delayed_read):
+                with mock.patch('broker.read_record', side_effect=delayed_read), mock.patch('broker.subprocess.Popen', side_effect=spawn):
                     errors, value, receipt = self.run_broker('terminal', terminal_record=terminal)
                 self.assertEqual(records, 2)
                 self.assertTrue(errors)
@@ -410,13 +559,14 @@ class Transport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = str(Path(sys.executable).resolve())
+            clock = Clock()
             broker = Broker(root, KEY, SESSION, [executable, '-B',
                 str(Path(__file__).with_name('fixture_child.py')), str(MODULE), mode],
-                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=deadline)
+                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=deadline, clock=clock)
             leases = [broker.slots._lease(index) for index in (0, 1)]
             self.assertTrue(all(leases))
             fixture = SimpleNamespace(root=root, broker=broker, leases=leases,
-                                      attempts=[], errors=[], observed=None)
+                                      attempts=[], errors=[], observed=None, clock=clock)
             publish = broker.slots.publish
             def observe_publish(header, payload):
                 index = publish(header, payload)
@@ -430,8 +580,10 @@ class Transport(unittest.TestCase):
                 except Exception as error:
                     fixture.errors.append(error)
             p.atomic_write(root / 'desired.bin', p.encode(state(), b'', KEY))
+            if mode == 'delay':
+                (root / 'release-1').touch()
             with mock.patch.object(broker.slots, 'publish', side_effect=observe_publish):
-                fixture.thread = threading.Thread(target=run)
+                fixture.thread = threading.Thread(target=run, daemon=True)
                 fixture.thread.start()
                 try:
                     self.wait_for(lambda: fixture.attempts)
@@ -441,12 +593,21 @@ class Transport(unittest.TestCase):
                     if fixture.thread.is_alive():
                         p.atomic_write(root / 'stop.bin', p.encode(
                             {'kind': 'stop', 'session': SESSION, 'sequence': 9999}, b'', KEY))
+                    # Release every fixture handshake before joining, even if
+                    # the body failed before its intended release.
+                    for sequence in (1, 2):
+                        (root / ('release-' + str(sequence))).touch()
                     fixture.thread.join(timeout=4)
+                    if fixture.thread.is_alive():
+                        clock.advance(120)
+                        if broker.child is not None and broker.child.poll() is None:
+                            broker.child.kill()
+                        fixture.thread.join(timeout=4)
+                    for lease in leases:
+                        lease.unlink(missing_ok=True)
                     self.assertFalse(fixture.thread.is_alive())
                     fixture.receipt = json.loads((root / 'broker-result.json').read_bytes())
                     self.assertTrue(fixture.receipt['child_reaped'])
-                    for lease in leases:
-                        lease.unlink(missing_ok=True)
 
     def release_and_observe(self, fixture):
         for lease in fixture.leases:
@@ -464,7 +625,6 @@ class Transport(unittest.TestCase):
         with self.contended_broker() as fixture:
             self.release_and_observe(fixture)
             self.assertEqual(fixture.observed, frame())
-            time.sleep(.04)
             self.assertEqual([seq for seq, index in fixture.attempts if index is not None], [1])
         self.assertFalse(fixture.errors)
         self.assertEqual(fixture.receipt['status'], 'stopped')
@@ -473,6 +633,7 @@ class Transport(unittest.TestCase):
 
     def test_permanent_slot_leases_fail_with_original_deadline_and_reap_child(self):
         with self.contended_broker(deadline=.3) as fixture:
+            fixture.clock.advance(.31)
             fixture.thread.join(timeout=1.5)
             self.assertFalse(fixture.thread.is_alive(), 'Permanent leases must not leave broker idle forever')
         self.assertEqual(len(fixture.errors), 1)
@@ -510,17 +671,16 @@ class Transport(unittest.TestCase):
 
     def test_desired_flood_does_not_extend_blocked_publication_deadline(self):
         with self.contended_broker(deadline=.4) as fixture:
-            started = time.monotonic()
-            sequence = 1
-            while fixture.thread.is_alive() and time.monotonic() - started < 1:
-                sequence += 1
+            for sequence in range(2, 6):
                 newer = state(sequence)
                 newer['state']['scene_revision'] = sequence
                 newer['state']['locals'][0]['matrix'][12] = sequence
                 p.atomic_write(fixture.root / 'desired.bin', p.encode(newer, b'', KEY))
-                time.sleep(.025)
+                self.wait_for(lambda: (sequence, None) in fixture.attempts)
+                fixture.clock.advance(.1)
+            fixture.clock.advance(.01)
+            fixture.thread.join(timeout=1.5)
             self.assertFalse(fixture.thread.is_alive(), 'Desired updates must not renew delivery deadline')
-            self.assertLess(time.monotonic() - started, .8)
             self.assertGreater(max(seq for seq, _ in fixture.attempts), 1)
         self.assertEqual(len(fixture.errors), 1)
         self.assertRegex(str(fixture.errors[0]), 'publication deadline')
@@ -533,6 +693,7 @@ class Transport(unittest.TestCase):
             self.wait_for(lambda: fixture.broker.gate.last['sequence'] == 2)
             p.atomic_write(fixture.root / 'stop.bin', p.encode(
                 {'kind': 'stop', 'session': SESSION, 'sequence': 3}, b'', KEY))
+            (fixture.root / 'release-2').touch()
             fixture.thread.join(timeout=2)
             self.assertFalse(fixture.thread.is_alive())
             self.assertTrue(all(lease.exists() for lease in fixture.leases))

@@ -1,4 +1,5 @@
 #include "AsyncSavedWorldCatalog.h"
+#include "core/Profiler.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -25,8 +26,10 @@ struct AsyncSavedWorldCatalog::Impl {
     std::jthread worker;
 
     void Run(const std::stop_token& stop) {
-        std::unique_lock lock(mutex);
-        while (wake.wait(lock, stop, [this] { return pending.has_value(); })) {
+        LUMIN_PROFILE_THREAD("Saved world catalog worker");
+        LUMIN_PROFILE_LOCK(std::unique_lock, lock, mutex, "Saved world catalog lock wait");
+        while (LUMIN_PROFILE_WAIT("Saved world catalog condition wait",
+                                  wake.wait(lock, stop, [this] { return pending.has_value(); }))) {
             if (!pending.has_value())
                 continue;
             Request request = std::move(pending.value());
@@ -35,13 +38,14 @@ struct AsyncSavedWorldCatalog::Impl {
             lock.unlock();
             SavedWorldCatalog result;
             try {
+                LUMIN_PROFILE_ZONE_N("Saved world catalog worker job");
                 result = request.scan(request.cancellation.get_token());
             } catch (const std::exception& e) {
                 result.error = std::string("Saved worlds unavailable: ") + e.what();
             } catch (...) {
                 result.error = "Saved worlds unavailable: validation failed.";
             }
-            lock.lock();
+            LUMIN_PROFILE_WAIT("Saved world catalog lock wait", lock.lock());
             if (request.generation == generation && !stop.stop_requested() &&
                 !request.cancellation.stop_requested())
                 ready = std::move(result);
@@ -60,7 +64,7 @@ AsyncSavedWorldCatalog::~AsyncSavedWorldCatalog() {
 }
 
 void AsyncSavedWorldCatalog::Request(Scan scan) {
-    std::lock_guard lock(m_impl->mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard, lock, m_impl->mutex, "Saved world catalog lock wait");
     m_impl->active.request_stop();
     auto& pending = m_impl->pending;
     if (pending.has_value())
@@ -73,7 +77,7 @@ void AsyncSavedWorldCatalog::Request(Scan scan) {
 }
 
 void AsyncSavedWorldCatalog::Cancel() {
-    std::lock_guard lock(m_impl->mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard, lock, m_impl->mutex, "Saved world catalog lock wait");
     ++m_impl->generation;
     m_impl->active.request_stop();
     auto& pending = m_impl->pending;
@@ -84,7 +88,7 @@ void AsyncSavedWorldCatalog::Cancel() {
 }
 
 std::optional<SavedWorldCatalog> AsyncSavedWorldCatalog::Poll() {
-    std::lock_guard lock(m_impl->mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard, lock, m_impl->mutex, "Saved world catalog lock wait");
     return std::exchange(m_impl->ready, std::nullopt);
 }
 

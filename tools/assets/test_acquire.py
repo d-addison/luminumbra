@@ -4,11 +4,14 @@ import io
 import os
 from pathlib import Path
 import stat
+import sys
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import acquire
 
@@ -21,7 +24,7 @@ class AssetAcquisition(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve(strict=True)
         self.cache = self.root / "cache"
         self.files = {"data/tree.lmesh": b"verified mesh", "data/leaf.ltex": b"verified texture"}
         self.pack, self.archive = self.make_archive(self.files)

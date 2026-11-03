@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // per-voxel material channel + true voxel structure stamping.
 //
 // These gates pin the four load-bearing properties of the structure-stamping
@@ -14,6 +15,7 @@
 //                           byte-exact.
 #include "gtest/gtest.h"
 
+#include "core/FilesystemPath.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
@@ -44,7 +46,8 @@ constexpr int kSeed = 4242;
 // Caves / islands / biomes / hydro are off, with small relief lifted well
 // above SEA_LEVEL so every cairn site stamps (height = 40 + small noise term).
 Systems::TerrainGenParams FixedParams() {
-    Systems::TerrainGenParams p; // start from the documented defaults
+    Systems::TerrainGenParams p =
+        Luminumbra::Test::SyntheticTerrainParams(); // explicit synthetic workload
     p.base_frequency = 0.01f;
     p.base_amplitude = 4.0f; // tiny relief; surface stays ~[36, 44]
     p.height_offset = 40.0f; // comfortably above SEA_LEVEL (= 0)
@@ -54,8 +57,8 @@ Systems::TerrainGenParams FixedParams() {
     p.biomes_enabled = false;
     p.hydro_enabled = false;
     p.structures_enabled = true;
-    p.structures_data_dir =
-        (fs::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "structures").string();
+    p.structures_data_dir = Filesystem::GenericUtf8PathString(fs::path(LUMINUMBRA_SOURCE_ROOT) /
+                                                              "data" / "common" / "structures");
     return p;
 }
 

@@ -1,8 +1,8 @@
 #include "rendering/synthetic_mesh_fixture.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <array>
-#include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -82,24 +82,7 @@ bool HasAllFoliageAssets(const std::filesystem::path& root) {
 }
 
 std::filesystem::path CreateUniqueRoot() {
-    static std::atomic<std::uint64_t> sequence = 0;
-    const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path temp_root = std::filesystem::temp_directory_path();
-
-    for (int attempt = 0; attempt < 128; ++attempt) {
-        const std::filesystem::path candidate =
-            temp_root / ("luminumbra-synthetic-foliage-" + std::to_string(timestamp) + "-" +
-                         std::to_string(sequence.fetch_add(1)));
-        std::error_code error;
-        if (std::filesystem::create_directory(candidate, error)) {
-            return candidate;
-        }
-        if (error) {
-            throw std::runtime_error("cannot create synthetic foliage fixture: " + error.message());
-        }
-    }
-
-    throw std::runtime_error("cannot allocate a unique synthetic foliage fixture directory");
+    return Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-synthetic-foliage-");
 }
 
 void LinkOrCopy(const std::filesystem::path& source, const std::filesystem::path& destination) {

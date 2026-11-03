@@ -1,6 +1,7 @@
 #include "../HeavyComparison.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/HashCheckpoint.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
@@ -28,11 +29,9 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
     }
-    if (runner.Session()) {
+    if (runner.Session())
         h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
-    }
-    h.world_hash = runner.ComputeWorldHash();
-    h.sub = runner.ComputeWorldSubHashes();
+    runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
 }
@@ -260,11 +259,21 @@ int RunHeavy(const ServerCliOptions& options) {
         {"roundtrip_match", roundtrip_ok},
         {"roundtrip_ground_difference", roundtrip_ground_difference},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
+        {"roundtrip_water_difference",
+         orig_at_save.sub.water == loaded_at_load.sub.water
+             ? ""
+             : Luminumbra::WaterHashDifferenceSection(orig_at_save.sub.water,
+                                                      loaded_at_load.sub.water)},
         {"original_final", HeavyHashJson(orig_final)},
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
         {"resim_ground_difference", resim_ground_difference},
         {"resim_mesh_match", resim_mesh_match},
+        {"resim_water_difference",
+         orig_final.sub.water == loaded_final.sub.water
+             ? ""
+             : Luminumbra::WaterHashDifferenceSection(orig_final.sub.water,
+                                                      loaded_final.sub.water)},
         {"boot_settle_original", SettleJson(settle_orig)},
         {"boot_settle_loaded", SettleJson(settle_loaded)},
         {"settle_contract_ok", settle_ok},
@@ -275,8 +284,8 @@ int RunHeavy(const ServerCliOptions& options) {
         {"mesh_excluded_reason",
          "surface mesh is a deterministically-regenerated derived render artifact; async "
          "re-meshing across a save/load boundary reaches identical geometry via a different "
-         "in-memory pending-mesh snapshot. Authoritative sim state "
-         "(terrain/water/entities/ground objects) "
+         "in-memory pending-mesh snapshot. Authoritative sim state (terrain/water/entities/ground "
+         "objects) "
          "round-trips exactly."},
         {"passed", passed},
     };

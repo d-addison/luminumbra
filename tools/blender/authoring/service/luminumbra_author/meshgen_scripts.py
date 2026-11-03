@@ -14,7 +14,7 @@ import importlib.abc
 import importlib.machinery
 import importlib.util
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import site
 import stat
 import sys
@@ -69,7 +69,37 @@ def _windows_path_api():
     kernel.GetFileInformationByHandleEx.restype = w.BOOL
     kernel.GetFinalPathNameByHandleW.argtypes = [w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD]
     kernel.GetFinalPathNameByHandleW.restype = w.DWORD
+    kernel.GetLongPathNameW.argtypes = [w.LPCWSTR, w.LPWSTR, w.DWORD]
+    kernel.GetLongPathNameW.restype = w.DWORD
     return kernel
+
+
+def _windows_path_key(name):
+    path = PureWindowsPath(name)
+    require(path.is_absolute() and len(path.drive) == 2 and path.drive[0].isascii()
+            and path.drive[0].isalpha() and path.drive[1] == ':'
+            and '..' not in path.parts and '\x00' not in name,
+            "toolchain.script_path", "Unsupported companion path.")
+    return path.as_posix().casefold()
+
+
+def _windows_long_path(path):
+    """Expand DOS short names without resolving away reparse components.
+
+    Callers retain no-delete-sharing ancestors and check their reparse tags;
+    spelling normalization must not turn a junction into an accepted target.
+    """
+    import ctypes
+    name = str(path)
+    _windows_path_key(name)
+    kernel = _windows_path_api()
+    size = kernel.GetLongPathNameW(name, None, 0)
+    if not size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    written = kernel.GetLongPathNameW(name, buffer, len(buffer))
+    require(0 < written < len(buffer), "toolchain.script_path", "Cannot obtain long companion path.")
+    return _windows_path_key(buffer.value)
 
 
 def _windows_final_path(handle):
@@ -85,7 +115,7 @@ def _windows_final_path(handle):
     # Accept only normalized DOS drive paths; UNC/device paths fail closed.
     require(name.startswith("\\\\?\\") and len(name) > 6 and name[5:7] == ":\\",
             "toolchain.script_path", "Unsupported companion handle path.")
-    return Path(name[4:]).as_posix().casefold()
+    return _windows_path_key(name[4:])
 
 
 def _windows_directory(path, share=3):
@@ -106,7 +136,7 @@ def _windows_directory(path, share=3):
             if not kernel.GetFileInformationByHandleEx(handle, kind, ctypes.byref(value), ctypes.sizeof(value)):
                 raise ctypes.WinError(ctypes.get_last_error())
         require(not tag.attributes & 0x400, "path.symlink", "Companion directory is a reparse point.")
-        require(tag.attributes & 0x10 and _windows_final_path(handle) == path.as_posix().casefold(),
+        require(tag.attributes & 0x10 and _windows_final_path(handle) == _windows_long_path(path),
                 "toolchain.script_path", "Companion directory handle differs from its canonical path.")
         return handle, (identity.volume, bytes(identity.file_id))
     except BaseException:
@@ -271,7 +301,7 @@ class ScriptInventory:
                     stream = stack.enter_context(file_io.open_regular_reader(self.root / name))
                     import msvcrt
                     final = _windows_final_path(msvcrt.get_osfhandle(stream.fileno()))
-                    require(final == (self.root / name).as_posix().casefold(),
+                    require(final == _windows_long_path(self.root / name),
                             "toolchain.script_path", "Opened companion escapes its canonical project path.")
                 data = stream.read(MAX_DOCUMENT + 1)
                 require(len(data) <= MAX_DOCUMENT, "file.limit", "File exceeds this profile's size limit.")

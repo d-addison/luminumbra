@@ -1,6 +1,7 @@
 #include "StaticDrawPass.h"
 #include "../GBuffer.h"
 #include "../Shader.h"
+#include "rendering/AttributedGl.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -88,7 +89,7 @@ struct GlState {
             glBindSampler(i, samplers[i]);
         }
         glActiveTexture(active);
-        glUseProgram(program);
+        Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, program);
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, array_buffer);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_buffer);
@@ -476,7 +477,8 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
         else
             glEnable(GL_CULL_FACE);
         glBindVertexArray(mesh->vao);
-        glDrawElements(GL_TRIANGLES, mesh->count, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements, GL_TRIANGLES, mesh->count, GL_UNSIGNED_INT, nullptr);
         ++stats.draws;
         stats.indices += static_cast<size_t>(mesh->count);
     }

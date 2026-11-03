@@ -3,12 +3,135 @@
 #include "AudioSpatialCluster.h"
 #include "audio/EnvironmentalAudioModel.h" // pure reverb-proxy param mapping
 #include "core/Log.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
 
 namespace Luminumbra::Client {
+namespace {
+// Capture's VFS owns encoded bytes read through the common verified handle.
+// Streaming decoders retain this memory file until onClose; later jobs and
+// resource-manager cache hits never reopen a previously checked source path.
+struct CaptureAudioFile {
+    std::string bytes;
+    std::size_t position = 0;
+};
+template<typename Character>
+ma_result OpenCaptureAudio(const Character* path, ma_uint32 mode, ma_vfs_file* file) {
+    *file = nullptr;
+    if (mode != MA_OPEN_MODE_READ)
+        return MA_ACCESS_DENIED;
+    try {
+        auto input = std::make_unique<CaptureAudioFile>();
+        if (!Filesystem::capture_content_paths().read_file(
+                std::filesystem::path(path),
+                input->bytes,
+                static_cast<std::size_t>(std::numeric_limits<ma_int64>::max()),
+                Filesystem::MissingContent::Optional))
+            return MA_IO_ERROR;
+        *file = input.release();
+        return MA_SUCCESS;
+    } catch (...) {
+        Filesystem::capture_content_paths().refuse();
+        return MA_IO_ERROR;
+    }
+}
+ma_vfs_callbacks CaptureAudioCallbacks() {
+    return {.onOpen =
+                [](ma_vfs*, const char* path, ma_uint32 mode, ma_vfs_file* file) {
+                    return OpenCaptureAudio(path, mode, file);
+                },
+            .onOpenW =
+                [](ma_vfs*, const wchar_t* path, ma_uint32 mode, ma_vfs_file* file) {
+                    return OpenCaptureAudio(path, mode, file);
+                },
+            .onClose =
+                [](ma_vfs*, ma_vfs_file file) {
+                    delete static_cast<CaptureAudioFile*>(file);
+                    return MA_SUCCESS;
+                },
+            .onRead =
+                [](ma_vfs*, ma_vfs_file file, void* output, std::size_t size, std::size_t* count) {
+                    auto& input = *static_cast<CaptureAudioFile*>(file);
+                    const auto available = std::min(size, input.bytes.size() - input.position);
+                    if (available != 0)
+                        std::memcpy(output, input.bytes.data() + input.position, available);
+                    input.position += available;
+                    *count = available;
+                    return available == 0 && size != 0 ? MA_AT_END : MA_SUCCESS;
+                },
+            .onWrite =
+                [](ma_vfs*, ma_vfs_file, const void*, std::size_t, std::size_t* count) {
+                    *count = 0;
+                    return MA_ACCESS_DENIED;
+                },
+            .onSeek =
+                [](ma_vfs*, ma_vfs_file file, ma_int64 offset, ma_seek_origin origin) {
+                    auto& input = *static_cast<CaptureAudioFile*>(file);
+                    if (origin != ma_seek_origin_start && origin != ma_seek_origin_current &&
+                        origin != ma_seek_origin_end)
+                        return MA_BAD_SEEK;
+                    const auto base = origin == ma_seek_origin_start     ? 0
+                                      : origin == ma_seek_origin_current ? input.position
+                                                                         : input.bytes.size();
+                    const auto distance = offset < 0 ? static_cast<ma_uint64>(-(offset + 1)) + 1
+                                                     : static_cast<ma_uint64>(offset);
+                    if ((offset < 0 && distance > base) ||
+                        (offset >= 0 && distance > input.bytes.size() - base))
+                        return MA_BAD_SEEK;
+                    input.position = offset < 0 ? base - static_cast<std::size_t>(distance)
+                                                : base + static_cast<std::size_t>(distance);
+                    return MA_SUCCESS;
+                },
+            .onTell =
+                [](ma_vfs*, ma_vfs_file file, ma_int64* cursor) {
+                    *cursor = static_cast<ma_int64>(static_cast<CaptureAudioFile*>(file)->position);
+                    return MA_SUCCESS;
+                },
+            .onInfo =
+                [](ma_vfs*, ma_vfs_file file, ma_file_info* info) {
+                    info->sizeInBytes = static_cast<CaptureAudioFile*>(file)->bytes.size();
+                    return MA_SUCCESS;
+                }};
+}
+
+ma_result InitSoundFromFile(ma_engine* engine,
+                            const char* path,
+                            ma_uint32 flags,
+                            ma_sound_group* group,
+                            ma_fence* fence,
+                            ma_sound* sound) {
+    const auto result = ma_sound_init_from_file(engine, path, flags, group, fence, sound);
+    // miniaudio 0.11.22 leaves the source allocation on resource-init failure.
+    // A stream's init notification precedes the worker's final source access;
+    // uninit queues an ordered teardown and waits before we release its storage.
+    // Buffered callers here decode synchronously and roll back before returning.
+    // Later sound-node init failures free and zero the source inside miniaudio.
+    if (result != MA_SUCCESS && sound->pResourceManagerDataSource) {
+        auto* source = sound->pResourceManagerDataSource;
+        if ((flags & MA_SOUND_FLAG_STREAM) != 0) {
+            auto& stream = source->backend.stream;
+            if (ma_resource_manager_data_stream_result(&stream) == MA_BUSY) {
+                // Synchronous init left BUSY only when it could not post the load job.
+                // A failed post consumes an order number, so queued uninit would wait forever.
+                ma_data_source_uninit(&stream.ds);
+            } else {
+                // On page-allocation failure 0.11.22 already uninitializes the decoder,
+                // but leaves this flag set. Other stream-init failures never set it.
+                stream.isDecoderInitialized = MA_FALSE;
+                ma_resource_manager_data_source_uninit(source);
+            }
+        }
+        ma_free(sound->pResourceManagerDataSource, &engine->allocationCallbacks);
+        sound->pResourceManagerDataSource = nullptr;
+    }
+    return result;
+}
+} // namespace
 
 MiniaudioManager::MiniaudioManager(const std::string& root_path)
     : m_rootPath(root_path)
@@ -22,8 +145,18 @@ MiniaudioManager::~MiniaudioManager() {
 }
 
 bool MiniaudioManager::Init() {
+    return Init(ma_engine_init);
+}
+
+bool MiniaudioManager::Init(EngineInitializer initialize_engine) {
     m_engine = std::make_unique<ma_engine>();
-    ma_result result = ma_engine_init(nullptr, m_engine.get());
+    ma_engine_config capture_config = ma_engine_config_init();
+    const bool capture = Filesystem::capture_content_paths().active();
+    if (capture) {
+        m_captureVfs = CaptureAudioCallbacks();
+        capture_config.pResourceManagerVFS = &m_captureVfs;
+    }
+    ma_result result = initialize_engine(capture ? &capture_config : nullptr, m_engine.get());
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize miniaudio engine.");
         m_engine = nullptr;
@@ -246,7 +379,7 @@ void MiniaudioManager::Shutdown() {
 
 bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     const std::string full_path = m_rootPath + bankPath;
-    std::ifstream f(full_path);
+    Filesystem::ContentInput f(full_path);
     if (!f.is_open()) {
         LUMINUMBRA_CORE_ERROR("Failed to open sound bank: " + full_path);
         return false;
@@ -258,6 +391,25 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     } catch (nlohmann::json::parse_error& e) {
         LUMINUMBRA_CORE_ERROR("Failed to parse sound bank JSON: " + full_path + " - " + e.what());
         return false;
+    }
+
+    // Refuse every capture reference before installing any event definitions.
+    // Playback still verifies its own VFS open; discovery never authorizes it.
+    if (Filesystem::capture_content_paths().active()) {
+        try {
+            for (const auto& event : bank_json["events"])
+                for (const auto& file : event.at("files")) {
+                    // Banks may name optional audio that is not installed. The
+                    // stream still verifies every present file's owning handle
+                    // and refuses missing references outside the content trees.
+                    const Filesystem::ContentInput input(m_rootPath + file.get<std::string>());
+                    if (!input && Filesystem::capture_content_paths().refused())
+                        return false;
+                }
+        } catch (...) {
+            Filesystem::capture_content_paths().refuse();
+            return false;
+        }
     }
 
     bool is_streaming = bank_json.value("streaming", false);
@@ -288,7 +440,7 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
     return true;
 }
 
-void MiniaudioManager::UnloadBank(const std::string& bankPath) {
+void MiniaudioManager::UnloadBank(const std::string&) {
     LUMINUMBRA_CORE_WARN("AUDIO WARNING: Unloading banks is not fully implemented.");
 }
 
@@ -320,7 +472,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
         flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
 
     // Handle-based events are gameplay SFX: attach to the sfx bus.
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -395,7 +547,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     auto sound = std::make_unique<ma_sound>();
     const uint32_t flags =
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -427,7 +579,7 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
 
     // spatial one-shots attach to their routed bus group
     // (default sfx; Events voices sidechain-duck the ambient bus).
-    if (ma_sound_init_from_file(
+    if (InitSoundFromFile(
             m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
@@ -484,7 +636,7 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
 
     m_currentMusic = std::make_unique<ma_sound>();
-    ma_result result = ma_sound_init_from_file(
+    ma_result result = InitSoundFromFile(
         m_engine.get(), full_path.c_str(), flags, nullptr, nullptr, m_currentMusic.get());
 
     if (result != MA_SUCCESS) {
@@ -703,15 +855,17 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
         m_windSound = std::make_unique<ma_sound>();
 
         // The wind bed is a looping ambience: route through the ambient bus.
-        if (ma_sound_init_from_file(m_engine.get(),
-                                    windPath.c_str(),
-                                    MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
-                                    GroupFor(BusId::Ambient),
-                                    nullptr,
-                                    m_windSound.get()) == MA_SUCCESS) {
+        if (InitSoundFromFile(m_engine.get(),
+                              windPath.c_str(),
+                              MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
+                              GroupFor(BusId::Ambient),
+                              nullptr,
+                              m_windSound.get()) == MA_SUCCESS) {
             ma_sound_set_looping(m_windSound.get(), true);
             ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
             ma_sound_start(m_windSound.get());
+        } else {
+            m_windSound.reset();
         }
     } else if (m_windSound) {
         ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
@@ -813,12 +967,12 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
     // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable
     // ambient file is diagnosable rather than silent. Ambient beds attach to the
     // ambient bus (child of sfx): user.audio_sfx scales them, events sidechain-duck them.
-    const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(),
-                                                     full_path.c_str(),
-                                                     MA_SOUND_FLAG_DECODE,
-                                                     GroupFor(BusId::Ambient),
-                                                     nullptr,
-                                                     sound.get());
+    const ma_result amb_rc = InitSoundFromFile(m_engine.get(),
+                                               full_path.c_str(),
+                                               MA_SOUND_FLAG_DECODE,
+                                               GroupFor(BusId::Ambient),
+                                               nullptr,
+                                               sound.get());
     if (amb_rc != MA_SUCCESS) {
         LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})",
                              full_path,
@@ -877,6 +1031,10 @@ void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound) {
         case AudioEnvironmentType::Water:
             env_volume_multiplier = 0.6f; // Water muffles sound
             break;
+        case AudioEnvironmentType::Underground:
+        case AudioEnvironmentType::Canyon:
+        case AudioEnvironmentType::Building:
+            break;
     }
 
     float current_volume = ma_sound_get_volume(sound);
@@ -921,9 +1079,8 @@ void MiniaudioManager::SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* ph
     m_spatial_cluster->SetPhysicsSystem(physics_system);
     // The caller re-issues this binding every in-game frame (FrameAudio.cpp) so that a
     // world (re)load rebinds without extra plumbing. Logging is edge-triggered: the
-    // previous unconditional INFO line produced one synchronous logger write per rendered
-    // frame on the render thread (77,659 lines in the PID 66604 session, see
-    // docs/v0.3-acceptance.md), which is a defect regardless of that session's hang cause.
+    // binding emits an INFO line only when it changes, avoiding synchronous logger
+    // writes on the render thread for an unchanged binding.
     if (physics_system == m_cluster_physics_system) {
         return;
     }

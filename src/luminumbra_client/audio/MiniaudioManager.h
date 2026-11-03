@@ -110,6 +110,8 @@ public:
 
     // --- IAudioManager Interface ---
     bool Init() override;
+    using EngineInitializer = ma_result (*)(const ma_engine_config*, ma_engine*);
+    bool Init(EngineInitializer initialize_engine);
     void Update() override;
     void Shutdown() override;
     bool IsPlaybackEnabled() const override {
@@ -244,6 +246,8 @@ private:
     void ApplyAmbientBusGain();
 
     std::string m_rootPath;
+    // Configured only for capture; callbacks outlive all engine decoder jobs.
+    ma_vfs_callbacks m_captureVfs{};
     std::unique_ptr<ma_engine> m_engine;
     std::unordered_map<AudioEventID, AudioEventDefinition> m_eventDefinitions;
 

@@ -3,12 +3,13 @@
 The far authority overlay carries edit-baked signed-distance bricks for the
 volumetric far ladder described in [the distant-world contract](distant-world.md).
 One file holds the bricks of one tile. It is derived render state: it never
-enters a world hash, `validate_save` does not scan it, and builds that predate it
-ignore the `far/` directory.
+enters a world hash and `validate_save` does not scan it. Older non-indexed
+readers ignore the `far/` directory; indexed readers require explicit support
+for derived far members.
 
-This page describes the codec in `world/FarAuthorityOverlay.{h,cpp}`. The bake
-that fills the bricks from edited chunks and the world-open hook that validates
-the directory are separate pieces; the codec accepts any brick producer.
+This page describes the codec in `world/FarAuthorityOverlay.{h,cpp}` and the pure
+edited bake in `world/FarEditedBake.{h,cpp}`. The world-open and transactional
+publication hooks are separate pieces; the codec accepts any brick producer.
 
 ## File name
 
@@ -89,8 +90,9 @@ complete file, or the new complete file when only the final directory flush
 failed.
 
 The generation is the save-level snapshot generation the bake was produced from.
-It is not a chunk's process-local voxel revision. `FarBakeDue` derives bake
-obligations without remembering them: no edited chunks means nothing is due,
+It is not a chunk's process-local voxel revision. Each edited chunk uses its
+contributing indexed region member's generation conservatively. `FarBakeDue`
+derives bake obligations without remembering them: no edited chunks means nothing is due,
 edited chunks with no overlay is due (rebuilt from durable chunk records, never
 from pristine terrain), and otherwise a bake is due when the newest edited chunk
 generation exceeds the overlay generation.
@@ -101,3 +103,49 @@ generation exceeds the overlay generation.
 sign of any non-zero input. `ClassifyFarBrick` marks a brick HomogeneousSolid when
 all 125 densities are negative, HomogeneousAir when all are positive, and Present
 otherwise (any exact zero keeps it Present).
+
+## Pure edited bake and sampling
+
+`FarEditedSourceView` supplies a complete immutable inventory of owned edited
+lattices, including durable records and halo contributors, with prepared or
+committed snapshot identity. Each lattice carries its indexed region member's
+generation. Capture must refuse unreadable expected records. A prepared bake's
+bytes become eligible for publication only after its transaction commits.
+Frozen pristine observations are supplied separately with terrain/cave policy
+already bound; workers never sample the live world or changing save paths.
+
+`ComputeFarEditedAffectedSet` intersects closed edited footprints with closed
+brick supports at all five tiers, including shared faces, edges and corners and
+the six supports displaced by one spacing for central-difference normals.
+Negative coordinates use floor division. `BakeFarEditedTiles` rebuilds every
+affected tile's complete current edited-brick set, preserving earlier edits;
+an empty inventory produces an empty overlay that removes previous overrides.
+Returned extents include changed/removed records and halo dependencies. Callers
+union them into the existing monotone span ledger. The member-generation
+watermark includes halo-only contributors. This service writes no files.
+
+Density interpolation uses double arithmetic in Z/Y/X order. Material selects
+the nearest lattice node, choosing the lower node at a tie; absent material
+arrays use id 0. Wrong array sizes and non-finite source values refuse before
+pristine sampling. Shared authoritative nodes are checked before baking;
+overlapping observations must also agree at every bake coordinate. Quantization
+is always LegacySigned16; exact zero stays Present. A coarse lattice can miss a
+small feature without removing its authoritative record.
+
+`SampleFarOverlay` resolves one tier-lattice coordinate across codec-validated,
+canonically sorted tiles. Agreeing Present boundary samples take precedence over
+tombstones. Otherwise tombstones supply quantized signed brick-edge constants
+and pristine material; conflicting tombstones refuse. Missing returns no sample
+and requires authoritative inventory evidence before pristine substitution.
+
+Caller caps bound source records/samples/probes, combined per-tier candidate
+visits, affected sets, density evaluations, scratch storage and worst-case
+brick/encoded output storage. They are admission limits, not qualified shipping
+defaults. Allocation-free per-footprint counts include the six normal halos;
+the largest footprint per tier bounds the union from below before enumeration.
+Unique brick/tile insertion refuses before exceeding either cap, and vector
+reservations never exceed admitted set storage. Optional affected-set work
+counters expose reservation requests, candidate visits and unique counts,
+including refusals. Failure returns a typed error and preserves the previous
+whole result.
+FSV1 version, reserved bytes and existing wire layout remain unchanged.

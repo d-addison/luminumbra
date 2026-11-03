@@ -1,0 +1,19 @@
+luminumbra.traversal.v2
+workload region_crossing
+duration_seconds 60
+tick_rate 30
+speed_mps 8
+seed 424242
+preset default
+preset_revision 8
+preset_identity 56ffbe1771cddfa6
+content_identity 7583622726659997707
+expected_ticks 1800
+cold_cache true
+points 5
+point 0 8 80 8 0 -6
+point 600 2056 80 8 0 -6
+point 900 2056 80 8 180 -6
+point 1500 8 80 8 180 -6
+point 1800 8 80 8 180 -6
+actions 0

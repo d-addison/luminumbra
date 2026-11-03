@@ -21,7 +21,9 @@ NavGrid FromAscii(const std::vector<std::string>& rows) {
     std::vector<std::uint8_t> cells(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0u);
     for (int z = 0; z < h; ++z)
         for (int x = 0; x < w; ++x)
-            cells[static_cast<std::size_t>(z) * w + x] = (rows[z][x] == '#') ? 0u : 1u;
+            cells[static_cast<std::size_t>(z) * static_cast<std::size_t>(w) +
+                  static_cast<std::size_t>(x)] =
+                (rows[static_cast<std::size_t>(z)][static_cast<std::size_t>(x)] == '#') ? 0u : 1u;
     return NavGrid(w, h, std::move(cells));
 }
 } // namespace

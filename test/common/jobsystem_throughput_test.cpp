@@ -16,9 +16,9 @@ TEST(JobSystemPoolTest, DispatchThroughputBenchmark) {
     constexpr int kBatchCount = kTotalJobs / kJobsPerBatch;
     constexpr auto kMaximumDuration = 10s;
 
+    std::atomic<int> completed{0};
     Luminumbra::JobSystem job_system;
     job_system.startup(1);
-    std::atomic<int> completed{0};
 
     const auto start = std::chrono::steady_clock::now();
     for (int batch = 0; batch < kBatchCount; ++batch) {

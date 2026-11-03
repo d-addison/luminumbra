@@ -45,7 +45,8 @@ def load_frames(files, scale):
 
     images = []
     for f in files:
-        img = Image.open(f).convert("RGB")
+        with Image.open(f) as source:
+            img = source.convert("RGB")
         if scale != 1.0:
             w, h = img.size
             img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
@@ -117,12 +118,13 @@ def selftest():
         assert count == n, f"expected {n} frames, assembled {count}"
         assert os.path.getsize(out_gif) > 0, "gif is empty"
         from PIL import ImageSequence
-        frames = list(ImageSequence.Iterator(Image.open(out_gif)))
-        assert len(frames) == n, f"gif has {len(frames)} frames, expected {n}"
+        with Image.open(out_gif) as source:
+            frame_count = sum(1 for _ in ImageSequence.Iterator(source))
+        assert frame_count == n, f"gif has {frame_count} frames, expected {n}"
         print(f"timelapse selftest OK: {n} synthetic frames -> {out_gif}")
         return 0
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp)
 
 
 def main(argv=None):

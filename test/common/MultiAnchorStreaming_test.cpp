@@ -3,9 +3,11 @@
 // for multi-player / multi-camera streaming. The single-anchor path is covered
 // byte-identically by HeadlessServerTick + PlayerView; this exercises the 2-anchor path
 // the forwarding overload does not reach.
+#include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
+
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -27,7 +29,7 @@ using Luminumbra::world::GameSession;
 #define LUMINUMBRA_SOURCE_ROOT "."
 #endif
 
-// Temp root containing ONLY the world preset (headless — no res/data assets).
+// Temp root containing the preset and its simulation dependencies.
 // The root is unique per fixture instance so concurrent common_tests processes
 // never share (or clobber) a directory; each TEST builds ONE instance and
 // reuses it, so within-run path stability still holds. The destructor removes
@@ -35,13 +37,12 @@ using Luminumbra::world::GameSession;
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ =
-            fs::temp_directory_path() / ("luminumbra_multi_anchor_test_" + std::to_string(stamp));
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_multi_anchor_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;

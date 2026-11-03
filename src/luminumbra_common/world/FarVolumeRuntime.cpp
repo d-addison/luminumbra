@@ -89,8 +89,8 @@ bool FarVolumeSpanLedger::Covers(const FarVolumeSpan& built) const {
         built.max_y >= kFarVolumeExactCoordinateLimitMeters || built.min_y >= built.max_y ||
         built.min_y % edge != 0 || built.max_y % edge != 0)
         return false;
-    return !extra_ ||
-           (built.min_y <= double(extra_->min_y) && built.max_y >= double(extra_->max_y));
+    return !extra_ || (static_cast<double>(built.min_y) <= static_cast<double>(extra_->min_y) &&
+                       static_cast<double>(built.max_y) >= static_cast<double>(extra_->max_y));
 }
 
 } // namespace Luminumbra::World

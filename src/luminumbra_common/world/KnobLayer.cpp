@@ -1,4 +1,5 @@
 #include "world/KnobLayer.h"
+#include "world/TerrainPresetLoader.h"
 
 #include <algorithm>
 #include <charconv>
@@ -173,20 +174,27 @@ nlohmann::json::json_pointer GenPtr(const std::string& dotted) {
 
 bool ParseFloat(const std::string& s, float& out) {
     const char* b = s.c_str();
-    auto [p, ec] = std::from_chars(b, b + s.size(), out);
-    return ec == std::errc();
+    const char* end = b + s.size();
+    auto [p, ec] = std::from_chars(b, end, out);
+    return ec == std::errc() && p == end && std::isfinite(out);
 }
 bool ParseInt(const std::string& s, long long& out) {
+    // Match the form parser: exact integer plus an optional zero fractional suffix.
     const char* b = s.c_str();
-    auto [p, ec] = std::from_chars(b, b + s.size(), out);
-    if (ec == std::errc())
+    const char* end = b + s.size();
+    auto [p, ec] = std::from_chars(b, end, out);
+    if (ec != std::errc())
+        return false;
+    if (p == end)
         return true;
-    float f = 0.0f;
-    if (ParseFloat(s, f)) {
-        out = static_cast<long long>(f);
-        return true;
+    if (*p != '.' || ++p == end)
+        return false;
+    // Work is bounded by this one persisted override value's length.
+    for (; p != end; ++p) {
+        if (*p != '0')
+            return false;
     }
-    return false;
+    return true;
 }
 
 } // namespace
@@ -330,7 +338,7 @@ bool ValidateKnobEndpoints(std::vector<std::string>& errors) {
 }
 
 nlohmann::json ApplyKnobLayer(const nlohmann::json& base, const KnobVector& knobs) {
-    nlohmann::json out = base;
+    nlohmann::json out = ResolveTerrainPresetDefaults(base);
     if (!out.contains("generation_params") || !out["generation_params"].is_object())
         out["generation_params"] = nlohmann::json::object();
 
@@ -352,8 +360,8 @@ nlohmann::json ApplyKnobLayer(const nlohmann::json& base, const KnobVector& knob
         } else if (t > f.on_above) {
             out[jp] = true;
         } else {
-            // Deadband: inherit the baseline's authored flag (default false if the
-            // baseline didn't set it) so a neutral knob never flips a feature.
+            // Deadband: inherit the versioned resolved baseline choice so a neutral
+            // knob preserves both authored off and omitted shipping defaults.
             const bool inherited =
                 out.contains(jp) && out.at(jp).is_boolean() ? out.at(jp).get<bool>() : false;
             out[jp] = inherited;
@@ -370,6 +378,16 @@ static void OverlayOverrides(nlohmann::json& preset, const std::vector<KnobOverr
     for (const KnobOverride& o : overrides) {
         if (o.path.empty())
             continue;
+        if (o.path == "biomes.enabled") {
+            const auto table = GenPtr("biomes.table");
+            const bool on = o.value == "true" || o.value == "1";
+            if (!on)
+                preset[table] = "";
+            else if (!preset.contains(table) || !preset.at(table).is_string() ||
+                     preset.at(table).get<std::string>().empty())
+                preset[table] = "common/biomes.json";
+            continue;
+        }
         const auto jp = GenPtr(o.path);
         if (o.type == "bool") {
             preset[jp] = (o.value == "true" || o.value == "1");
@@ -433,7 +451,9 @@ nlohmann::json& WriteKnobLayer(nlohmann::json& preset,
                                const KnobVector& knobs,
                                const std::vector<KnobOverride>& overrides) {
     // Fully resolve the params first (so non-knob loaders see the real world).
-    nlohmann::json resolved = ResolveKnobLayer(baseline, knobs, overrides);
+    const auto resolved_baseline = ResolveEffectivePreset(baseline);
+    nlohmann::json resolved = ResolveKnobLayer(resolved_baseline, knobs, overrides);
+    preset["schema_rev"] = resolved_baseline.at("schema_rev");
     if (resolved.contains("generation_params") && resolved["generation_params"].is_object())
         preset["generation_params"] = resolved["generation_params"];
     else if (!preset.contains("generation_params"))
@@ -448,8 +468,9 @@ nlohmann::json& WriteKnobLayer(nlohmann::json& preset,
     // The baseline snapshot is the generation_params object of `baseline` (strip
     // any nested knob_layer to avoid recursion).
     nlohmann::json baseline_params = nlohmann::json::object();
-    if (baseline.contains("generation_params") && baseline["generation_params"].is_object()) {
-        baseline_params = baseline["generation_params"];
+    if (resolved_baseline.contains("generation_params") &&
+        resolved_baseline["generation_params"].is_object()) {
+        baseline_params = resolved_baseline["generation_params"];
         baseline_params.erase("knob_layer");
     }
     kl["baseline"] = nlohmann::json::object();

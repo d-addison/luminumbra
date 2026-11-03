@@ -3,10 +3,11 @@
 // Far authority overlay (FSV1): the per-tile file that carries edit-baked
 // signed-distance bricks for the volumetric far ladder. Byte layout, refusal
 // table and limits are documented in docs/far-authority-overlay.md. The overlay
-// is derived render state: it never enters a world hash and older builds ignore
-// the `far/` directory.
+// is derived render state and never enters a world hash. Reader compatibility
+// depends on derived-member support when a commit index is present.
 
 #include "FarTierTable.h"
+#include "FarVolumeTile.h"
 #include "FarWantedSet.h"
 
 #include <array>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -143,5 +145,28 @@ std::int16_t QuantizeFarDensity(float signed_distance_meters);
 // Homogeneous detection: all 125 densities < 0 is HomogeneousSolid, all > 0 is
 // HomogeneousAir, anything else (including any exact 0) is Present.
 FarBrickState ClassifyFarBrick(const std::array<std::int16_t, kFsv1SamplesPerBrick>& density);
+
+enum class FarOverlaySampleError : std::uint8_t {
+    None,
+    WorkLimit,
+    InvalidInput,
+    BoundaryConflict
+};
+
+// Coordinate resolver for generation, shared borders and normal halos. Tiles
+// must be codec-validated and strictly sorted by key. At most eight matching
+// bricks are looked up; max_tiles bounds inventory checks before any lookup.
+// Matching Present samples take precedence over tombstones and must agree in
+// both density and material. With no Present sample, disagreeing tombstones
+// refuse; matching tombstones use the pristine material and LegacySigned16
+// quantized +/-brick edge. Missing is nullopt, never a tombstone or pristine
+// substitution: the caller must establish absence from authoritative inventory.
+// Only tier-lattice coordinates are accepted. Failure preserves output.
+FarOverlaySampleError SampleFarOverlay(std::span<const FarOverlayTile> tiles,
+                                       std::uint8_t tier,
+                                       const FarVolumePosition& position,
+                                       std::uint8_t pristine_material,
+                                       std::size_t max_tiles,
+                                       std::optional<FarVolumeSample>& out);
 
 } // namespace Luminumbra::World

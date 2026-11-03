@@ -5,6 +5,15 @@ import struct
 from .contracts import parse_json, require
 
 
+def select_glb_scene(document, scenes):
+    """Select from validated scenes using the native importer's default rules."""
+    require('scene' in document or len(scenes) <= 1, 'scene.ambiguous',
+            'Select a default scene before exporting multiple scenes.')
+    index = document.get('scene', 0)
+    require(type(index) is int and 0 <= index < len(scenes), 'glb.bounds', 'Invalid scene.')
+    return scenes[index]
+
+
 def validate_glb(data):
     require(len(data) >= 20, "glb.header", "Truncated GLB header.")
     magic, version, length = struct.unpack_from("<4sII", data)

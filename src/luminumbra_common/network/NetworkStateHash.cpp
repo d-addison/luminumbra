@@ -28,7 +28,8 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 std::uint64_t Fnv1a64(const std::string& value) {
     std::uint64_t hash = kFnvOffset;
-    for (const unsigned char byte : value) {
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= kFnvPrime;
     }

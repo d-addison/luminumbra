@@ -54,7 +54,10 @@ int RunNetHost(const ServerCliOptions& options) {
     // Each accepted connection's FIRST frame is its Hello, which carries the client id: it is
     // read PRE-AddClient (below) so the slot id comes from the HANDSHAKE, not the accept order.
     // The Hello's trailing usercmd frames stay buffered in the same transport for PumpInbound.
-    const std::uint64_t seed_num = std::strtoull(options.seed.c_str(), nullptr, 10);
+    auto expected_hello = RuntimeHelloFrom(options);
+    expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+    expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
+    const auto seed_num = expected_hello.seed;
     for (std::uint32_t accepted = 0; accepted < expected_clients; ++accepted) {
         LUMINUMBRA_CORE_INFO("net-host: waiting for client {}/{} over TCP on port {}...",
                              accepted + 1,
@@ -120,13 +123,15 @@ int RunNetHost(const ServerCliOptions& options) {
             listener.Close();
             return 1;
         }
-        if (hello.seed != seed_num || hello.preset != options.preset) {
-            LUMINUMBRA_CORE_ERROR("net-host: client world mismatch (seed host {} != client {}; "
-                                  "preset host '{}' != client '{}')",
-                                  seed_num,
-                                  hello.seed,
-                                  options.preset,
-                                  hello.preset);
+        if (!Luminumbra::Net::HelloMatches(expected_hello, hello)) {
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: client world mismatch (seed host {} != client {}; "
+                "preset host '{}' != client '{}'; "
+                "simulation configuration and resolved preset content hash must match)",
+                seed_num,
+                hello.seed,
+                options.preset,
+                hello.preset);
             for (auto& t : transports)
                 t->Close();
             transport->Close();
@@ -249,11 +254,7 @@ int RunNetJoin(const ServerCliOptions& options) {
     // the shared world (protocol/seed/preset). Same wire form as the lockstep handshake Hello;
     // the host consumes exactly this one frame pre-AddClient, then the usercmd stream follows.
     {
-        Luminumbra::Net::HelloMsg hello;
-        hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
-        hello.preset = options.preset;
-        hello.tick_rate_hz = 30;
-        hello.client_id = player_id;
+        const auto hello = RuntimeHelloFrom(options);
         if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
             LUMINUMBRA_CORE_ERROR(
                 "net-join: failed to send Hello to {}:{}", options.host, connect_port);

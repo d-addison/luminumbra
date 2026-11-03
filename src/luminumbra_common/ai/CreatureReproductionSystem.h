@@ -27,7 +27,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 #include "CreatureBrain.h" // CreatureAction (skip mate-seeking while fleeing)
 #include "CreatureGenome.h"

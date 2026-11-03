@@ -42,11 +42,11 @@ void Panel::SetTitle(const std::string& title) {
             Rml::Element* titleElement = m_headerElement->GetElementById(m_elementId + "_title");
             if (!titleElement) {
                 // Create title element
-                auto title = m_document->CreateElement("div");
-                titleElement = title.get();
+                auto title_node = m_document->CreateElement("div");
+                titleElement = title_node.get();
                 titleElement->SetId(m_elementId + "_title");
                 titleElement->SetClass("panel-title", true);
-                m_headerElement->AppendChild(std::move(title));
+                m_headerElement->AppendChild(std::move(title_node));
             }
 
             titleElement->SetInnerRML(Rml::StringUtilities::EncodeRml(title));
@@ -140,9 +140,8 @@ void Panel::BindTitle(Property<std::string>& property) {
     SetTitle(property.Get());
 
     // Subscribe to changes
-    TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
-        SetTitle(newValue);
-    });
+    TrackSubscription(
+        property, [this](const std::string&, const std::string& newValue) { SetTitle(newValue); });
 }
 
 void Panel::BindExpanded(Property<bool>& property) {
@@ -150,8 +149,8 @@ void Panel::BindExpanded(Property<bool>& property) {
     SetExpanded(property.Get());
 
     // Subscribe to property changes
-    TrackSubscription(
-        property, [this](const bool& oldValue, const bool& newValue) { SetExpanded(newValue); });
+    TrackSubscription(property,
+                      [this](const bool&, const bool& newValue) { SetExpanded(newValue); });
 
     // Update property when panel is toggled
     SetToggleHandler([&property](bool expanded) { property.Set(expanded); });

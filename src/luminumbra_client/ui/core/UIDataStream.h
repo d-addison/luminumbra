@@ -349,7 +349,7 @@ public:
     }
 
     // Debug and monitoring
-    void ShowDebugWindow(bool* p_open = nullptr);
+    void DrawDebugContents();
     void LogStreamState() const;
 
 private:
@@ -363,6 +363,8 @@ private:
 
     // Performance tracking
     StreamStats m_stats;
+
+    char m_debugFilter[256] = {};
 
     static constexpr size_t MAX_DIRTY_STREAMS = 1000; // Prevent memory bloat
 };

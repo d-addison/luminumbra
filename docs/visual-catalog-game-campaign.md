@@ -45,7 +45,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture accepted Tree Small02 source/runtime matched canopy views and exact 30250-surface receipt; preserve frozen packs and distinguish versioned derivatives.
+Next action: Capture accepted Tree Small02 source/runtime matched canopy views and exact 30250-surface receipt; preserve frozen packs and distinguish versioned derivatives. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G02
 
@@ -93,7 +93,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Move or reproduce existing alpha/impostor diagnostic invocation against owned binaries and accepted pack hashes; keep rejected canopy variants explicitly rejected.
+Next action: Move or reproduce existing alpha/impostor diagnostic invocation against owned binaries and accepted pack hashes; keep rejected canopy variants explicitly rejected. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G03
 
@@ -140,7 +140,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Requalify transition probe with owned current binary, capture approach/retreat/orbit samples and per-LOD counts; geometry budget does not prove GPU frame time.
+Next action: Requalify transition probe with owned current binary, capture approach/retreat/orbit samples and per-LOD counts; geometry budget does not prove GPU frame time. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G04
 
@@ -154,8 +154,9 @@ Fixture: Fresh identified engine capture at actual controlled camera/time with c
 
 Source links:
 
-- [docs/visual-baselines.md](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/docs/visual-baselines.md)
-- [tools/perf/validate_render_capture.py](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/tools/perf/validate_render_capture.py)
+- [docs/visual-baselines.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/docs/visual-baselines.md)
+- [tools/perf/validate_render_capture.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/perf/validate_render_capture.py)
+- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/rendering/RenderPipeline.cpp)
 
 Required variants:
 
@@ -187,7 +188,7 @@ Acceptance checks:
 - Fresh identified engine capture at actual controlled camera/time with controller/settled proof, wide and human-height views; old filename does not identify current renderer or pack.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Both historical PNG and report survive with original identities. Black-band diagnosis remains a deficient baseline, not a present-base renderer result or approval.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
 
 Retained evidence:
 
@@ -195,7 +196,7 @@ Retained evidence:
 - [forest-reference.png](assets/visual-baselines/20260908/forest-reference.png) — SHA-256 `c8ea3be89ed6d9a5b33c5501c0c925f31b0a1398667788d02a8ee124fa95f4a7`.
 - [forest-reference.json](assets/visual-baselines/20260908/forest-reference.json) — SHA-256 `b6fdf25209b5abb1ff024a134bdafc68a8d3be4543a3fa3b524b594f46c89dd7`.
 
-Next action: Consume terrain/foliage black-band diagnosis/repair, recapture unchanged elevated reference, then add terrain-grounded composed forest hero and meaningful material/coverage proof.
+Next action: Consume terrain/foliage black-band diagnosis/repair, recapture unchanged elevated reference, then add terrain-grounded composed forest hero and meaningful material/coverage proof. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G05
 
@@ -242,7 +243,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Map named old vegetation/elevated views to new explicit scene manifests; recapture each current preset/camera and diagnose materials/depth before polish.
+Next action: Map named old vegetation/elevated views to new explicit scene manifests; recapture each current preset/camera and diagnose materials/depth before polish. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G06
 
@@ -289,7 +290,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Recover cave/rain/snow scene inputs from source manifests or replace with documented current inputs; qualify actual cave navigability and supported weather stills.
+Next action: Recover cave/rain/snow scene inputs from source manifests or replace with documented current inputs; qualify actual cave navigability and supported weather stills. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G07
 
@@ -303,8 +304,9 @@ Fixture: Use actual create/play/edit/save/menu/restart/load captures and file re
 
 Source links:
 
-- [docs/v0.3-acceptance.md](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/docs/v0.3-acceptance.md)
-- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
+- [docs/v0.3-acceptance.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/docs/v0.3-acceptance.md)
+- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/world_open_refusal_test.cpp)
 
 Required variants:
 
@@ -332,13 +334,13 @@ Acceptance checks:
 - Use actual create/play/edit/save/menu/restart/load captures and file receipts from a newly pinned package; historical narrative does not substitute for published screenshot provenance.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Public engine support or historical acceptance documentation survives. Historical game/campaign helper is not a reproducible current producer in this engine tree; recover it in the game-owned lane or author a pinned replacement.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Reproduce existing save/play/restart flow on new disposable public fixture and pinned package; capture edit restoration with exact file hashes and UI state.
+Next action: Reproduce existing save/play/restart flow on new disposable public fixture and pinned package; capture edit restoration with exact file hashes and UI state. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G08
 
@@ -378,13 +380,13 @@ Acceptance checks:
 - Author and demonstrate a new interactive prefab in the composed game and neutral battery/heat fixtures with installed engine hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.
+Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G09
 
@@ -425,13 +427,13 @@ Acceptance checks:
 - Deliver newly authored foliage with source/provenance and composed game acceptance while preserving all 30,250 accepted Tree Small 02 leaf surfaces.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.
+Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## G10
 
@@ -471,10 +473,10 @@ Acceptance checks:
 - Deliver a newly authored character exercised in the composed game with actual behavior/pose trajectories and installed engine hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.
+Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.

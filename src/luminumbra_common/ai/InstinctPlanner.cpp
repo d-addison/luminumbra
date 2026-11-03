@@ -43,7 +43,8 @@ std::string ReasonFor(const InstinctOpportunity& opportunity, double pressure) {
 }
 
 std::uint32_t HashText(std::uint32_t hash, const std::string& text) {
-    for (const unsigned char ch : text) {
+    for (const char character : text) {
+        const auto ch = static_cast<unsigned char>(character);
         hash ^= ch;
         hash *= 16777619u;
     }
@@ -72,7 +73,8 @@ std::string BuildChecksum(const InstinctPlan& plan) {
 
 std::string JsonEscape(const std::string& value) {
     std::ostringstream out;
-    for (const unsigned char ch : value) {
+    for (const char character : value) {
+        const auto ch = static_cast<unsigned char>(character);
         switch (ch) {
             case '"':
                 out << "\\\"";

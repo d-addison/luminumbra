@@ -66,6 +66,11 @@ public:
     static std::shared_ptr<ConsoleOutput> MakeStdoutOutput();
 
 #ifndef _WIN32
+    // Ignore the default SIGPIPE disposition so closed pipes report write errors.
+    // Process-wide; preserves any handler installed by the host application.
+    // Also used by tools that install their own console logger.
+    static void IgnoreDefaultSigpipe();
+
     // Duplicates an arbitrary file descriptor and writes through write_fn.
     // Returns nullptr if dup fails.
     static std::shared_ptr<ConsoleOutput>

@@ -97,6 +97,8 @@ bool AdaptFarVolumeRenderMesh(const World::FarVolumeMesh& source,
         candidate.origin_meters = source.origin_meters;
         candidate.sampled_max_meters = source.sampled_max_meters;
         candidate.content = source.content;
+        candidate.terrain_content = source.content;
+        candidate.terrain_indices = source.indices.size();
         if (!World::FarVolumeReserveCharged(candidate.vertices,
                                             source.vertices.size(),
                                             source.vertices.size(),

@@ -17,7 +17,7 @@ TEST(WaterSimulationCadence, ActiveHighResolutionChunksKeepMediumLikeCadence) {
     constexpr std::size_t kAwakeChunks = 80;
     constexpr std::size_t kMediumWindow = 64;
     constexpr std::size_t kHighWindow = 16;
-    constexpr std::size_t kTicks = 20;
+    constexpr std::size_t kCadenceTicks = 20;
 
     std::vector<Candidate> candidates;
     candidates.reserve(kAwakeChunks);
@@ -31,7 +31,7 @@ TEST(WaterSimulationCadence, ActiveHighResolutionChunksKeepMediumLikeCadence) {
     std::vector<std::size_t> high_passes(kAwakeChunks, 0);
     std::size_t medium_cursor = 0;
     std::size_t high_cursor = 0;
-    for (std::size_t tick = 0; tick < kTicks; ++tick) {
+    for (std::size_t tick = 0; tick < kCadenceTicks; ++tick) {
         for (std::size_t i = 0; i < kMediumWindow; ++i) {
             ++medium_passes[(medium_cursor + i) % kAwakeChunks];
         }
@@ -46,7 +46,7 @@ TEST(WaterSimulationCadence, ActiveHighResolutionChunksKeepMediumLikeCadence) {
     }
 
     for (std::size_t i = 36; i < 44; ++i) {
-        EXPECT_EQ(high_passes[i], kTicks)
+        EXPECT_EQ(high_passes[i], kCadenceTicks)
             << "active High chunk " << i << " did not receive one simulation pass per wall tick";
         EXPECT_GE(high_passes[i], medium_passes[i])
             << "active High chunk cadence fell below the flat Medium scheduler";

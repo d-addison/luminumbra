@@ -1,0 +1,335 @@
+--- a/Include/RmlUi/Core/Animation.h
++++ b/Include/RmlUi/Core/Animation.h
+@@ -63,1 +63,1 @@
+-	TransitionList(bool none, bool all, Vector<Transition> transitions) : none(none), all(all), transitions(std::move(transitions)) {}
++	TransitionList(bool initial_none, bool initial_all, Vector<Transition> initial_transitions) : none(initial_none), all(initial_all), transitions(std::move(initial_transitions)) {}
+--- a/Include/RmlUi/Core/CallbackTexture.h
++++ b/Include/RmlUi/Core/CallbackTexture.h
+@@ -64,1 +64,1 @@
+-	CallbackTexture(RenderManager* render_manager, StableVectorIndex resource_handle) : UniqueRenderResource(render_manager, resource_handle) {}
++	CallbackTexture(RenderManager* initial_render_manager, StableVectorIndex initial_resource_handle) : UniqueRenderResource(initial_render_manager, initial_resource_handle) {}
+@@ -73,1 +73,1 @@
+-	CallbackTextureInterface(RenderManager& render_manager, RenderInterface& render_interface, TextureHandle& texture_handle, Vector2i& dimensions);
++	CallbackTextureInterface(RenderManager& initial_render_manager, RenderInterface& initial_render_interface, TextureHandle& initial_texture_handle, Vector2i& initial_dimensions);
+--- a/Include/RmlUi/Core/Colour.h
++++ b/Include/RmlUi/Core/Colour.h
+@@ -49,2 +49,2 @@
+-	/// @param[in] alpha Initial alpha value of the colour.
+-	inline Colour(ColourType rgb = ColourType{0}, ColourType alpha = ColourType{AlphaDefault});
++	/// @param[in] initial_alpha Initial alpha value of the colour.
++	inline Colour(ColourType rgb = ColourType{0}, ColourType initial_alpha = ColourType{AlphaDefault});
+@@ -52,5 +52,5 @@
+-	/// @param[in] red Initial red value of the colour.
+-	/// @param[in] green Initial green value of the colour.
+-	/// @param[in] blue Initial blue value of the colour.
+-	/// @param[in] alpha Initial alpha value of the colour.
+-	inline Colour(ColourType red, ColourType green, ColourType blue, ColourType alpha = ColourType{AlphaDefault});
++	/// @param[in] initial_red Initial red value of the colour.
++	/// @param[in] initial_green Initial green value of the colour.
++	/// @param[in] initial_blue Initial blue value of the colour.
++	/// @param[in] initial_alpha Initial alpha value of the colour.
++	inline Colour(ColourType initial_red, ColourType initial_green, ColourType initial_blue, ColourType initial_alpha = ColourType{AlphaDefault});
+--- a/Include/RmlUi/Core/Colour.inl
++++ b/Include/RmlUi/Core/Colour.inl
+@@ -32,1 +32,1 @@
+-Colour<ColourType, AlphaDefault, PremultipliedAlpha>::Colour(ColourType rgb, ColourType alpha) : red(rgb), green(rgb), blue(rgb), alpha(alpha)
++Colour<ColourType, AlphaDefault, PremultipliedAlpha>::Colour(ColourType rgb, ColourType initial_alpha) : red(rgb), green(rgb), blue(rgb), alpha(initial_alpha)
+@@ -36,2 +36,2 @@
+-Colour<ColourType, AlphaDefault, PremultipliedAlpha>::Colour(ColourType red, ColourType green, ColourType blue, ColourType alpha) :
+-	red(red), green(green), blue(blue), alpha(alpha)
++Colour<ColourType, AlphaDefault, PremultipliedAlpha>::Colour(ColourType initial_red, ColourType initial_green, ColourType initial_blue, ColourType initial_alpha) :
++	red(initial_red), green(initial_green), blue(initial_blue), alpha(initial_alpha)
+--- a/Include/RmlUi/Core/CompiledFilterShader.h
++++ b/Include/RmlUi/Core/CompiledFilterShader.h
+@@ -53,1 +53,1 @@
+-	CompiledFilter(RenderManager* render_manager, CompiledFilterHandle resource_handle) : UniqueRenderResource(render_manager, resource_handle) {}
++	CompiledFilter(RenderManager* initial_render_manager, CompiledFilterHandle initial_resource_handle) : UniqueRenderResource(initial_render_manager, initial_resource_handle) {}
+@@ -69,1 +69,1 @@
+-	CompiledShader(RenderManager* render_manager, CompiledShaderHandle resource_handle) : UniqueRenderResource(render_manager, resource_handle) {}
++	CompiledShader(RenderManager* initial_render_manager, CompiledShaderHandle initial_resource_handle) : UniqueRenderResource(initial_render_manager, initial_resource_handle) {}
+--- a/Include/RmlUi/Core/ComputedValues.h
++++ b/Include/RmlUi/Core/ComputedValues.h
+@@ -214,1 +214,1 @@
+-		explicit ComputedValues(Element* element) : element(element) {}
++		explicit ComputedValues(Element* initial_element) : element(initial_element) {}
+--- a/Include/RmlUi/Core/DataStructHandle.h
++++ b/Include/RmlUi/Core/DataStructHandle.h
+@@ -44,2 +44,2 @@
+-	StructHandle(DataTypeRegister* type_register, StructDefinition* struct_definition) :
+-		type_register(type_register), struct_definition(struct_definition)
++	StructHandle(DataTypeRegister* initial_type_register, StructDefinition* initial_struct_definition) :
++		type_register(initial_type_register), struct_definition(initial_struct_definition)
+--- a/Include/RmlUi/Core/DataTypes.h
++++ b/Include/RmlUi/Core/DataTypes.h
+@@ -67,2 +67,2 @@
+-	DataAddressEntry(String name) : name(std::move(name)), index(-1) {}
+-	DataAddressEntry(int index) : index(index) {}
++	DataAddressEntry(String initial_name) : name(std::move(initial_name)), index(-1) {}
++	DataAddressEntry(int initial_index) : index(initial_index) {}
+--- a/Include/RmlUi/Core/DataVariable.h
++++ b/Include/RmlUi/Core/DataVariable.h
+@@ -52,1 +52,1 @@
+-	DataVariable(VariableDefinition* definition, void* ptr) : definition(definition), ptr(ptr) {}
++	DataVariable(VariableDefinition* initial_definition, void* initial_ptr) : definition(initial_definition), ptr(initial_ptr) {}
+@@ -85,1 +85,1 @@
+-	VariableDefinition(DataVariableType type) : type(type) {}
++	VariableDefinition(DataVariableType initial_type) : type(initial_type) {}
+@@ -109,1 +109,1 @@
+-	FuncDefinition(DataGetFunc get, DataSetFunc set);
++	FuncDefinition(DataGetFunc initial_get, DataSetFunc initial_set);
+@@ -122,1 +122,1 @@
+-	ScalarFuncDefinition(DataTypeGetFunc<T> get, DataTypeSetFunc<T> set) : VariableDefinition(DataVariableType::Scalar), get(get), set(set) {}
++	ScalarFuncDefinition(DataTypeGetFunc<T> initial_get, DataTypeSetFunc<T> initial_set) : VariableDefinition(DataVariableType::Scalar), get(initial_get), set(initial_set) {}
+@@ -159,2 +159,2 @@
+-	ArrayDefinition(VariableDefinition* underlying_definition) :
+-		VariableDefinition(DataVariableType::Array), underlying_definition(underlying_definition)
++	ArrayDefinition(VariableDefinition* initial_underlying_definition) :
++		VariableDefinition(DataVariableType::Array), underlying_definition(initial_underlying_definition)
+@@ -194,1 +194,1 @@
+-	BasePointerDefinition(VariableDefinition* underlying_definition);
++	BasePointerDefinition(VariableDefinition* initial_underlying_definition);
+@@ -211,1 +211,1 @@
+-	PointerDefinition(VariableDefinition* underlying_definition) : BasePointerDefinition(underlying_definition) {}
++	PointerDefinition(VariableDefinition* initial_underlying_definition) : BasePointerDefinition(initial_underlying_definition) {}
+@@ -220,2 +220,2 @@
+-	MemberObjectDefinition(VariableDefinition* underlying_definition, MemberType Object::*member_ptr) :
+-		BasePointerDefinition(underlying_definition), member_ptr(member_ptr)
++	MemberObjectDefinition(VariableDefinition* initial_underlying_definition, MemberType Object::*initial_member_ptr) :
++		BasePointerDefinition(initial_underlying_definition), member_ptr(initial_member_ptr)
+@@ -234,2 +234,2 @@
+-	MemberGetFuncDefinition(VariableDefinition* underlying_definition, MemberType Object::*member_get_func_ptr) :
+-		BasePointerDefinition(underlying_definition), member_get_func_ptr(member_get_func_ptr)
++	MemberGetFuncDefinition(VariableDefinition* initial_underlying_definition, MemberType Object::*initial_member_get_func_ptr) :
++		BasePointerDefinition(initial_underlying_definition), member_get_func_ptr(initial_member_get_func_ptr)
+@@ -254,4 +254,4 @@
+-	MemberScalarGetSetFuncDefinition(VariableDefinition* underlying_definition, MemberGetType Object::*member_get_func_ptr,
+-		MemberSetType Object::*member_set_func_ptr) :
+-		VariableDefinition(underlying_definition->Type()),
+-		underlying_definition(underlying_definition), member_get_func_ptr(member_get_func_ptr), member_set_func_ptr(member_set_func_ptr)
++	MemberScalarGetSetFuncDefinition(VariableDefinition* initial_underlying_definition, MemberGetType Object::*initial_member_get_func_ptr,
++		MemberSetType Object::*initial_member_set_func_ptr) :
++		VariableDefinition(initial_underlying_definition->Type()),
++		underlying_definition(initial_underlying_definition), member_get_func_ptr(initial_member_get_func_ptr), member_set_func_ptr(initial_member_set_func_ptr)
+--- a/Include/RmlUi/Core/Debug.h
++++ b/Include/RmlUi/Core/Debug.h
+@@ -115,1 +115,1 @@
+-	RmlUiAssertNonrecursive(bool& entered) : entered(entered)
++	RmlUiAssertNonrecursive(bool& initial_entered) : entered(initial_entered)
+@@ -117,2 +117,2 @@
+-		RMLUI_ASSERTMSG(!entered, "A method defined as non-recursive was entered twice!");
+-		entered = true;
++		RMLUI_ASSERTMSG(!initial_entered, "A method defined as non-recursive was entered twice!");
++		initial_entered = true;
+--- a/Include/RmlUi/Core/Decorator.h
++++ b/Include/RmlUi/Core/Decorator.h
+@@ -115,2 +115,2 @@
+-	DecoratorInstancerInterface(RenderManager& render_manager, const StyleSheet& style_sheet, const PropertySource* property_source) :
+-		render_manager(render_manager), style_sheet(style_sheet), property_source(property_source)
++	DecoratorInstancerInterface(RenderManager& initial_render_manager, const StyleSheet& initial_style_sheet, const PropertySource* initial_property_source) :
++		render_manager(initial_render_manager), style_sheet(initial_style_sheet), property_source(initial_property_source)
+--- a/Include/RmlUi/Core/ElementText.h
++++ b/Include/RmlUi/Core/ElementText.h
+@@ -94,1 +94,1 @@
+-		Line(String text, Vector2f position) : text(std::move(text)), position(position), width(0) {}
++		Line(String initial_text, Vector2f initial_position) : text(std::move(initial_text)), position(initial_position), width(0) {}
+--- a/Include/RmlUi/Core/Geometry.h
++++ b/Include/RmlUi/Core/Geometry.h
+@@ -58,1 +58,1 @@
+-	Geometry(RenderManager* render_manager, StableVectorIndex resource_handle);
++	Geometry(RenderManager* initial_render_manager, StableVectorIndex initial_resource_handle);
+--- a/Include/RmlUi/Core/Matrix4.h
++++ b/Include/RmlUi/Core/Matrix4.h
+@@ -53,1 +53,1 @@
+-		inline StrideVector(VectorsType& vectors, int idx) noexcept : vectors(vectors), idx(idx) {}
++		inline StrideVector(VectorsType& initial_vectors, int initial_idx) noexcept : vectors(initial_vectors), idx(initial_idx) {}
+@@ -69,1 +69,1 @@
+-		inline StrideAccess(VectorsType& vectors) noexcept : vectors(vectors) {}
++		inline StrideAccess(VectorsType& initial_vectors) noexcept : vectors(initial_vectors) {}
+@@ -77,1 +77,1 @@
+-		inline ConstStrideVector(const VectorsType& vectors, int idx) noexcept : vectors(vectors), idx(idx) {}
++		inline ConstStrideVector(const VectorsType& initial_vectors, int initial_idx) noexcept : vectors(initial_vectors), idx(initial_idx) {}
+@@ -85,1 +85,1 @@
+-		inline ConstStrideAccess(const VectorsType& vectors) noexcept : vectors(vectors) {}
++		inline ConstStrideAccess(const VectorsType& initial_vectors) noexcept : vectors(initial_vectors) {}
+@@ -93,1 +93,1 @@
+-		inline PackedVector(VectorType& vector) noexcept : vector(vector) {}
++		inline PackedVector(VectorType& initial_vector) noexcept : vector(initial_vector) {}
+@@ -122,1 +122,1 @@
+-		inline PackedAccess(VectorsType& vectors) noexcept : vectors(vectors) {}
++		inline PackedAccess(VectorsType& initial_vectors) noexcept : vectors(initial_vectors) {}
+@@ -130,1 +130,1 @@
+-		inline ConstPackedAccess(const VectorsType& vectors) noexcept : vectors(vectors) {}
++		inline ConstPackedAccess(const VectorsType& initial_vectors) noexcept : vectors(initial_vectors) {}
+--- a/Include/RmlUi/Core/NumericValue.h
++++ b/Include/RmlUi/Core/NumericValue.h
+@@ -41,1 +41,1 @@
+-	NumericValue(float number, Unit unit) noexcept : number(number), unit(unit) {}
++	NumericValue(float initial_number, Unit initial_unit) noexcept : number(initial_number), unit(initial_unit) {}
+--- a/Include/RmlUi/Core/ObserverPtr.h
++++ b/Include/RmlUi/Core/ObserverPtr.h
+@@ -132,1 +132,1 @@
+-	explicit ObserverPtr(Detail::ObserverPtrBlock* block) noexcept : block(block)
++	explicit ObserverPtr(Detail::ObserverPtrBlock* initial_block) noexcept : block(initial_block)
+@@ -134,2 +134,2 @@
+-		if (block)
+-			block->num_observers += 1;
++		if (initial_block)
++			initial_block->num_observers += 1;
+--- a/Include/RmlUi/Core/Property.h
++++ b/Include/RmlUi/Core/Property.h
+@@ -43,1 +43,1 @@
+-	PropertySource(String path, int line_number, String rule_name) : path(std::move(path)), line_number(line_number), rule_name(std::move(rule_name))
++	PropertySource(String initial_path, int initial_line_number, String initial_rule_name) : path(std::move(initial_path)), line_number(initial_line_number), rule_name(std::move(initial_rule_name))
+@@ -58,1 +58,1 @@
+-	Property(PropertyType value, Unit unit, int specificity = -1) : value(value), unit(unit), specificity(specificity)
++	Property(PropertyType initial_value, Unit initial_unit, int initial_specificity = -1) : value(initial_value), unit(initial_unit), specificity(initial_specificity)
+@@ -64,1 +64,1 @@
+-	Property(EnumType value) : value(static_cast<int>(value)), unit(Unit::KEYWORD), specificity(-1)
++	Property(EnumType initial_value) : value(static_cast<int>(initial_value)), unit(Unit::KEYWORD), specificity(-1)
+--- a/Include/RmlUi/Core/PropertyIdSet.h
++++ b/Include/RmlUi/Core/PropertyIdSet.h
+@@ -112,1 +112,1 @@
+-	PropertyIdSetIterator(const PropertyIdSet* container, size_t id_index) : container(container), id_index(id_index) { ProceedToNextValid(); }
++	PropertyIdSetIterator(const PropertyIdSet* initial_container, size_t initial_id_index) : container(initial_container), id_index(initial_id_index) { ProceedToNextValid(); }
+--- a/Include/RmlUi/Core/Rectangle.h
++++ b/Include/RmlUi/Core/Rectangle.h
+@@ -111,1 +111,1 @@
+-	Rectangle(Vector2Type p0, Vector2Type p1) : p0(p0), p1(p1) {}
++	Rectangle(Vector2Type initial_p0, Vector2Type initial_p1) : p0(initial_p0), p1(initial_p1) {}
+--- a/Include/RmlUi/Core/RenderBox.h
++++ b/Include/RmlUi/Core/RenderBox.h
+@@ -47,2 +47,2 @@
+-	RenderBox(Vector2f fill_size, Vector2f border_offset, EdgeSizes border_widths, CornerSizes border_radius) :
+-		fill_size(fill_size), border_offset(border_offset), border_widths(border_widths), border_radius(border_radius)
++	RenderBox(Vector2f initial_fill_size, Vector2f initial_border_offset, EdgeSizes initial_border_widths, CornerSizes initial_border_radius) :
++		fill_size(initial_fill_size), border_offset(initial_border_offset), border_widths(initial_border_widths), border_radius(initial_border_radius)
+--- a/Include/RmlUi/Core/ScrollTypes.h
++++ b/Include/RmlUi/Core/ScrollTypes.h
+@@ -56,3 +56,3 @@
+-	ScrollIntoViewOptions(ScrollAlignment vertical = ScrollAlignment::Start, ScrollAlignment horizontal = ScrollAlignment::Nearest,
+-		ScrollBehavior behavior = ScrollBehavior::Instant, ScrollParentage parentage = ScrollParentage::All) :
+-		vertical(vertical), horizontal(horizontal), behavior(behavior), parentage(parentage)
++	ScrollIntoViewOptions(ScrollAlignment initial_vertical = ScrollAlignment::Start, ScrollAlignment initial_horizontal = ScrollAlignment::Nearest,
++		ScrollBehavior initial_behavior = ScrollBehavior::Instant, ScrollParentage initial_parentage = ScrollParentage::All) :
++		vertical(initial_vertical), horizontal(initial_horizontal), behavior(initial_behavior), parentage(initial_parentage)
+--- a/Include/RmlUi/Core/StyleSheetTypes.h
++++ b/Include/RmlUi/Core/StyleSheetTypes.h
+@@ -45,1 +45,1 @@
+-	KeyframeBlock(float normalized_time) : normalized_time(normalized_time) {}
++	KeyframeBlock(float initial_normalized_time) : normalized_time(initial_normalized_time) {}
+--- a/Include/RmlUi/Core/StyleTypes.h
++++ b/Include/RmlUi/Core/StyleTypes.h
+@@ -40,1 +40,1 @@
+-		LengthPercentageAuto(Type type, float value = 0) : type(type), value(value) {}
++		LengthPercentageAuto(Type initial_type, float initial_value = 0) : type(initial_type), value(initial_value) {}
+@@ -46,1 +46,1 @@
+-		LengthPercentage(Type type, float value = 0) : type(type), value(value) {}
++		LengthPercentage(Type initial_type, float initial_value = 0) : type(initial_type), value(initial_value) {}
+@@ -53,1 +53,1 @@
+-		NumberAuto(Type type, float value = 0) : type(type), value(value) {}
++		NumberAuto(Type initial_type, float initial_value = 0) : type(initial_type), value(initial_value) {}
+@@ -77,4 +76,0 @@
+-	using Top = LengthPercentageAuto;
+-	using Right = LengthPercentageAuto;
+-	using Bottom = LengthPercentageAuto;
+-	using Left = LengthPercentageAuto;
+@@ -102,2 +98,2 @@
+-		LineHeight(float value, InheritType inherit_type, float inherit_value) :
+-			value(value), inherit_type(inherit_type), inherit_value(inherit_value)
++		LineHeight(float initial_value, InheritType initial_inherit_type, float initial_inherit_value) :
++			value(initial_value), inherit_type(initial_inherit_type), inherit_value(initial_inherit_value)
+@@ -109,3 +105,3 @@
+-		VerticalAlign(Type type = Baseline) : type(type), value(0) {}
+-		VerticalAlign(float value) : type(Length), value(value) {}
+-		VerticalAlign(Type type, float value) : type(type), value(value) {}
++		VerticalAlign(Type initial_type = Baseline) : type(initial_type), value(0) {}
++		VerticalAlign(float initial_value) : type(Length), value(initial_value) {}
++		VerticalAlign(Type initial_type, float initial_value) : type(initial_type), value(initial_value) {}
+@@ -151,0 +148,4 @@
++	using Top = LengthPercentageAuto;
++	using Right = LengthPercentageAuto;
++	using Bottom = LengthPercentageAuto;
++	using Left = LengthPercentageAuto;
+--- a/Include/RmlUi/Core/UniqueRenderResource.h
++++ b/Include/RmlUi/Core/UniqueRenderResource.h
+@@ -51,1 +51,1 @@
+-	UniqueRenderResource(RenderManager* render_manager, Handle resource_handle) : render_manager(render_manager), resource_handle(resource_handle) {}
++	UniqueRenderResource(RenderManager* initial_render_manager, Handle initial_resource_handle) : render_manager(initial_render_manager), resource_handle(initial_resource_handle) {}
+--- a/Include/RmlUi/Core/Vector2.h
++++ b/Include/RmlUi/Core/Vector2.h
+@@ -51,3 +51,3 @@
+-	/// @param[in] x Initial x-value of the vector.
+-	/// @param[in] y Initial y-value of the vector.
+-	inline Vector2(Type x, Type y);
++	/// @param[in] initial_x Initial x-value of the vector.
++	/// @param[in] initial_y Initial y-value of the vector.
++	inline Vector2(Type initial_x, Type initial_y);
+--- a/Include/RmlUi/Core/Vector2.inl
++++ b/Include/RmlUi/Core/Vector2.inl
+@@ -40,1 +40,1 @@
+-Vector2<Type>::Vector2(Type x, Type y) : x(x), y(y)
++Vector2<Type>::Vector2(Type initial_x, Type initial_y) : x(initial_x), y(initial_y)
+--- a/Include/RmlUi/Core/Vector3.h
++++ b/Include/RmlUi/Core/Vector3.h
+@@ -51,4 +51,4 @@
+-	/// @param[in] x Initial x-value of the vector.
+-	/// @param[in] y Initial y-value of the vector.
+-	/// @param[in] z Initial z-value of the vector.
+-	inline Vector3(Type x, Type y, Type z);
++	/// @param[in] initial_x Initial x-value of the vector.
++	/// @param[in] initial_y Initial y-value of the vector.
++	/// @param[in] initial_z Initial z-value of the vector.
++	inline Vector3(Type initial_x, Type initial_y, Type initial_z);
+--- a/Include/RmlUi/Core/Vector3.inl
++++ b/Include/RmlUi/Core/Vector3.inl
+@@ -42,1 +42,1 @@
+-Vector3<Type>::Vector3(Type x, Type y, Type z) : x(x), y(y), z(z)
++Vector3<Type>::Vector3(Type initial_x, Type initial_y, Type initial_z) : x(initial_x), y(initial_y), z(initial_z)
+--- a/Include/RmlUi/Core/Vector4.h
++++ b/Include/RmlUi/Core/Vector4.h
+@@ -52,5 +52,5 @@
+-	/// @param[in] x Initial x-value of the vector.
+-	/// @param[in] y Initial y-value of the vector.
+-	/// @param[in] z Initial z-value of the vector.
+-	/// @param[in] w Initial omega-value of the vector.
+-	inline Vector4(Type x, Type y, Type z, Type w);
++	/// @param[in] initial_x Initial x-value of the vector.
++	/// @param[in] initial_y Initial y-value of the vector.
++	/// @param[in] initial_z Initial z-value of the vector.
++	/// @param[in] initial_w Initial omega-value of the vector.
++	inline Vector4(Type initial_x, Type initial_y, Type initial_z, Type initial_w);
+@@ -58,1 +58,1 @@
+-	inline Vector4(Vector3<Type> const& v, Type w);
++	inline Vector4(Vector3<Type> const& v, Type initial_w);
+--- a/Include/RmlUi/Core/Vector4.inl
++++ b/Include/RmlUi/Core/Vector4.inl
+@@ -42,1 +42,1 @@
+-Vector4<Type>::Vector4(Type x, Type y, Type z, Type w) : x(x), y(y), z(z), w(w)
++Vector4<Type>::Vector4(Type initial_x, Type initial_y, Type initial_z, Type initial_w) : x(initial_x), y(initial_y), z(initial_z), w(initial_w)
+@@ -46,1 +46,1 @@
+-Vector4<Type>::Vector4(Vector3<Type> const& v, Type w) : x(v.x), y(v.y), z(v.z), w(w)
++Vector4<Type>::Vector4(Vector3<Type> const& v, Type initial_w) : x(v.x), y(v.y), z(v.z), w(initial_w)
+--- a/Source/Core/CallbackTexture.cpp
++++ b/Source/Core/CallbackTexture.cpp
+@@ -49,2 +49,2 @@
+-CallbackTextureInterface::CallbackTextureInterface(RenderManager& render_manager, RenderInterface& render_interface, TextureHandle& texture_handle,
+-	Vector2i& dimensions) : render_manager(render_manager), render_interface(render_interface), texture_handle(texture_handle), dimensions(dimensions)
++CallbackTextureInterface::CallbackTextureInterface(RenderManager& initial_render_manager, RenderInterface& initial_render_interface, TextureHandle& initial_texture_handle,
++	Vector2i& initial_dimensions) : render_manager(initial_render_manager), render_interface(initial_render_interface), texture_handle(initial_texture_handle), dimensions(initial_dimensions)
+--- a/Source/Core/DataVariable.cpp
++++ b/Source/Core/DataVariable.cpp
+@@ -127,2 +127,2 @@
+-FuncDefinition::FuncDefinition(DataGetFunc get, DataSetFunc set) :
+-	VariableDefinition(DataVariableType::Scalar), get(std::move(get)), set(std::move(set))
++FuncDefinition::FuncDefinition(DataGetFunc initial_get, DataSetFunc initial_set) :
++	VariableDefinition(DataVariableType::Scalar), get(std::move(initial_get)), set(std::move(initial_set))
+@@ -147,2 +147,2 @@
+-BasePointerDefinition::BasePointerDefinition(VariableDefinition* underlying_definition) :
+-	VariableDefinition(underlying_definition->Type()), underlying_definition(underlying_definition)
++BasePointerDefinition::BasePointerDefinition(VariableDefinition* initial_underlying_definition) :
++	VariableDefinition(initial_underlying_definition->Type()), underlying_definition(initial_underlying_definition)
+--- a/Source/Core/Geometry.cpp
++++ b/Source/Core/Geometry.cpp
+@@ -34,1 +34,1 @@
+-Geometry::Geometry(RenderManager* render_manager, StableVectorIndex resource_handle) : UniqueRenderResource(render_manager, resource_handle) {}
++Geometry::Geometry(RenderManager* initial_render_manager, StableVectorIndex initial_resource_handle) : UniqueRenderResource(initial_render_manager, initial_resource_handle) {}

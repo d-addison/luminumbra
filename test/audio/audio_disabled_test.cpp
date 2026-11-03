@@ -1,11 +1,13 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include "audio/NullAudioManager.h"
 #include "core/RuntimeScenarioConfig.h"
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -23,13 +25,18 @@ auto Parse(std::vector<std::string> arguments, const fs::path& root = {}) {
     return ParseRuntimeScenarioConfig(static_cast<int>(argv.size()), argv.data(), root);
 }
 
+auto ParsePaths(std::vector<std::string> arguments) {
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+        static_cast<int>(argv.size()), argv.data());
+}
+
 class TemporaryDirectory {
 public:
     TemporaryDirectory() {
-        path = fs::temp_directory_path() /
-               ("luminumbra-null-audio-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        fs::create_directory(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-null-audio-");
     }
     ~TemporaryDirectory() {
         std::error_code error;
@@ -38,8 +45,8 @@ public:
     fs::path path;
 };
 
-TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder) {
-    EXPECT_FALSE(Parse({"client"}).audio_playback_enabled());
+TEST(AudioDisabledTest, RealLaunchParserDefaultsOnAndDisableWinsInEitherOrder) {
+    EXPECT_TRUE(Parse({"client"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--no-audio"}).audio_playback_enabled());
     EXPECT_TRUE(Parse({"client", "--enable-audio"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--enable-audio", "--no-audio"}).audio_playback_enabled());
@@ -50,9 +57,53 @@ TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder
               fs::path("requested.json"));
 }
 
+TEST(RuntimePathOptionsTest, DefaultsAndAbsoluteOptionsInBothSpellings) {
+    TemporaryDirectory directory;
+    EXPECT_TRUE(ParsePaths({"client"}).runtime_root.empty());
+    EXPECT_TRUE(ParsePaths({"client"}).save_root.empty());
+    const auto save = directory.path / "private" / "storage";
+    const auto separate = ParsePaths(
+        {"client", "--runtime-root", directory.path.string(), "--save-root", save.string()});
+    EXPECT_EQ(separate.runtime_root, directory.path);
+    EXPECT_EQ(separate.save_root, save);
+    EXPECT_TRUE(fs::is_directory(save));
+    const auto assigned = ParsePaths(
+        {"client", "--runtime-root=" + directory.path.string(), "--save-root=" + save.string()});
+    EXPECT_EQ(assigned.runtime_root, directory.path);
+    EXPECT_EQ(assigned.save_root, save);
+}
+
+TEST(RuntimePathOptionsTest, RefusesMissingEmptyRelativeAndDuplicateOptions) {
+    TemporaryDirectory directory;
+    for (const std::string flag : {"--runtime-root", "--save-root"}) {
+        EXPECT_THROW(ParsePaths({"client", flag}), std::invalid_argument);
+        EXPECT_THROW(ParsePaths({"client", flag + "="}), std::invalid_argument);
+        EXPECT_THROW(ParsePaths({"client", flag, ""}), std::invalid_argument);
+        EXPECT_THROW(ParsePaths({"client", flag, "relative"}), std::invalid_argument);
+        EXPECT_THROW(ParsePaths({"client", flag, "--no-audio"}), std::invalid_argument);
+        EXPECT_THROW(
+            ParsePaths(
+                {"client", flag, directory.path.string(), flag + "=" + directory.path.string()}),
+            std::invalid_argument);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        EXPECT_THROW(ParsePaths({"client", flag, "C:relative"}), std::invalid_argument);
+        EXPECT_THROW(ParsePaths({"client", flag, R"(\root-relative)"}), std::invalid_argument);
+#endif
+    }
+}
+
+TEST(RuntimePathOptionsTest, RefusesSaveRootThatCannotBeCreated) {
+    TemporaryDirectory directory;
+    const auto file = directory.path / "file";
+    std::ofstream(file) << "occupied";
+    EXPECT_THROW(ParsePaths({"client", "--save-root", file.string()}), std::invalid_argument);
+    EXPECT_THROW(ParsePaths({"client", "--save-root", (file / "storage").string()}),
+                 std::invalid_argument);
+}
+
 TEST(AudioDisabledTest, SavedNonzeroVolumesCannotEnablePlaybackOrRetainRequestHistory) {
     TemporaryDirectory directory;
-    const auto config = Parse({"client"}, directory.path);
+    const auto config = Parse({"client", "--no-audio"}, directory.path);
     ASSERT_FALSE(config.audio_playback_enabled());
     NullAudioManager audio(config.audio_telemetry_path);
     ASSERT_TRUE(audio.Init());

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import threading
 import time
 
@@ -29,7 +30,7 @@ def mailbox(path, key):
 
 class Broker:
     def __init__(self, root, key, session, command, executable_sha256, project_root,
-                 deadline=60.0, startup_deadline=60.0):
+                 deadline=60.0, startup_deadline=60.0, *, clock=None):
         self.root, self.key, self.session = safe_path(root), key, session
         self.project_root = safe_path(project_root)
         require(self.project_root.is_dir(), 'Project root')
@@ -40,6 +41,7 @@ class Broker:
         require(0 < startup_deadline <= 60, 'Startup deadline')
         self.command, self.deadline = command, deadline
         self.startup_deadline = startup_deadline
+        self.clock = clock or time.monotonic
         self.gate = StateGate(session)
         self.slots = Slots(root, key, session, create=True)
         self.child = None
@@ -75,9 +77,17 @@ class Broker:
         self.writer = threading.Thread(target=send, daemon=True)
         self.writer.start()
 
+    def _wait(self, completed, timeout, message):
+        """Use the same deadline clock for pipe completion and rendering."""
+        until = self.clock() + timeout
+        while not completed():
+            require(self.clock() < until, message)
+            time.sleep(.01)
+
     def _finish_write(self, timeout):
-        self.writer.join(timeout=timeout)
-        require(not self.writer.is_alive() and not self.writer_error, 'Incomplete state write')
+        self._wait(lambda: not self.writer.is_alive(), timeout, 'Incomplete state write')
+        self.writer.join(timeout=0)
+        require(not self.writer_error, 'Incomplete state write')
 
     def _read(self):
         try:
@@ -125,8 +135,8 @@ class Broker:
             # Own the process before starting either reader: Thread.start may
             # fail after Popen succeeds and must still reap the child.
             self.child = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, env=env, bufsize=0, shell=False)
-            startup_started = time.monotonic()
+                                          stderr=subprocess.PIPE, env=env, bufsize=0, shell=False, close_fds=True)
+            startup_started = self.clock()
             self.reader = threading.Thread(target=self._read, daemon=True)
             self.reader.start()
             self.stderr_reader = threading.Thread(target=self._stderr, daemon=True)
@@ -146,9 +156,12 @@ class Broker:
                     self._send(shutdown)
                     self._finish_write(min(self.deadline, 5))
                     self.child.stdin.close()
-                    require(self.child.wait(timeout=min(self.deadline, 5)) == 0,
-                            'Host shutdown failed')
-                    self.reader.join(timeout=min(self.deadline, 5))
+                    self._wait(lambda: self.child.poll() is not None, min(self.deadline, 5),
+                               'Host shutdown deadline')
+                    require(self.child.wait(timeout=0) == 0, 'Host shutdown failed')
+                    self._wait(lambda: not self.reader.is_alive(), min(self.deadline, 5),
+                               'Host shutdown response deadline')
+                    self.reader.join(timeout=0)
                     require(not self.reader.is_alive() and self.reader_eof and not self.errors,
                             'Host shutdown response invalid or incomplete')
                     require(self.responses.empty(), 'Unsolicited shutdown frame')
@@ -166,18 +179,18 @@ class Broker:
                     # Frame slots are allocated before Popen; they prove nothing
                     # about installed renderer initialization. Never renew this
                     # deadline when desired-state mailboxes are coalesced.
-                    require(time.monotonic() - startup_started < self.startup_deadline,
+                    require(self.clock() - startup_started < self.startup_deadline,
                             'Host startup deadline')
                     self._publish_readiness()
                 if shutdown is None and outstanding is not None:
                     # One delivery deadline survives coalescing and lease retries.
                     # A desired-state flood cannot keep an unpublished session alive.
-                    require(time.monotonic() - outstanding < self.deadline,
+                    require(self.clock() - outstanding < self.deadline,
                             'Frame publication deadline')
                 if self.host_ready is not None and active is None and pending is not None:
                     active, pending = pending, None
                     # Small writes happen in a separate thread with the same render deadline.
-                    started = time.monotonic()
+                    started = self.clock()
                     if outstanding is None:
                         outstanding = started
                     self._send(active)
@@ -198,33 +211,50 @@ class Broker:
                 if completed is not None:
                     # Both reader leases may be held briefly. Keep exactly this
                     # latest completed frame until publication or supersession.
-                    require(time.monotonic() - outstanding < self.deadline,
+                    require(self.clock() - outstanding < self.deadline,
                             'Frame publication deadline')
                     if self.slots.publish(*completed) is not None:
                         published += 1
                         completed = outstanding = None
                 require(not self.errors and self.child.poll() is None, 'Host disconnected or invalid response')
                 if active:
-                    require(not self.writer_error and time.monotonic() - started < self.deadline, 'Host deadline/write')
+                    require(not self.writer_error and self.clock() - started < self.deadline, 'Host deadline/write')
                 time.sleep(0.01)
         except BaseException as error:
             failure = {'type': type(error).__name__, 'error': str(error)[:512]}
             raise
         finally:
+            primary_error = sys.exc_info()[0] is not None
+            cleanup_errors = []
+            def cleanup(action):
+                try: action()
+                except BaseException as error: cleanup_errors.append(error)
             if self.child is not None:
-                if self.child.poll() is None:
-                    self.child.terminate()
+                if self.child.returncode is None:
+                    cleanup(self.child.terminate)
                     try:
                         self.child.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        self.child.kill()
-                        self.child.wait(timeout=2)
+                        cleanup(self.child.kill)
+                        cleanup(lambda: self.child.wait(timeout=2))
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                        cleanup(self.child.kill)
+                        cleanup(lambda: self.child.wait(timeout=2))
                 for thread in (self.reader, self.stderr_reader, self.writer):
                     if thread is not None and thread.ident is not None:
-                        thread.join(timeout=2)
-                self.child.stdin.close()
-                self.child.stdout.close()
-                self.child.stderr.close()
+                        cleanup(lambda thread=thread: thread.join(timeout=2))
+                        if thread.is_alive():
+                            cleanup_errors.append(Refusal('Host I/O thread did not terminate'))
+                for stream in (self.child.stdin, self.child.stdout, self.child.stderr):
+                    cleanup(stream.close)
+                if os.name == 'nt':
+                    cleanup(self.child._handle.Close)
+            if cleanup_errors:
+                stopped = False
+                if failure is None:
+                    error = cleanup_errors[0]
+                    failure = {'type': type(error).__name__, 'error': str(error)[:512]}
             atomic_write(self.root / 'broker-result.json', canonical({
                 'session': self.session, 'status': 'stopped' if stopped else 'failed',
                 'broker_pid': os.getpid(),
@@ -233,12 +263,14 @@ class Broker:
                 'last_sequence': self.gate.last['sequence'] if self.gate.last else None,
                 'published': published, 'dropped': dropped,
                 'child_returncode': self.child.returncode if self.child else None,
-                'child_reaped': self.child is not None and self.child.poll() is not None,
+                'child_reaped': self.child is not None and self.child.returncode is not None,
                 'reader_errors': self.errors[:2],
                 'writer_errors': getattr(self, 'writer_error', [])[:2],
                 'plane_validation': validation_backend(),
                 'qualification': 'transport-only-no-renderer-or-Blender-claim'}))
             atomic_write(self.root / 'host-stderr.log', bytes(self.stderr_tail))
+            if cleanup_errors and not primary_error:
+                raise cleanup_errors[0]
 
 
 def main():

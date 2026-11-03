@@ -36,7 +36,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <entt/entt.hpp>
+#include <entt/entity/registry.hpp>
 
 #include "PlantGrowthSystem.h" // BreedPlants, ExpressGenome, namespace luminumbra::foliage, Comp alias
 

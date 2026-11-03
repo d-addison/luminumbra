@@ -13,9 +13,12 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
 #include "luminumbra_common/systems/WindFieldSystem.h"
@@ -84,8 +87,8 @@ TEST(AmbientNoiseDispatch, FractalAndSimplexMatchTerrainCeiling) {
     fractal->SetOctaveCount(2);
     reference->SetOctaveCount(2);
 
-    // Full AVX-512-width arrays keep this dispatch test independent of the
-    // separate short-position-array padding defect in WindFieldSystem::Update.
+    // Full AVX-512-width arrays keep this dispatch test independent of tail padding; the
+    // padding of real call sites is covered by AmbientInputBounds.
     std::array<float, 16> x{}, z{}, actual{}, expected{};
     for (std::size_t i = 0; i < x.size(); ++i) {
         x[i] = (static_cast<float>(i) - 7.5f) * 0.375f;
@@ -107,6 +110,108 @@ TEST(WindFieldSystem, GeometryMatchesPinnedShape) {
     EXPECT_EQ(wind.extent_cells(), kWindExtentCells);
     EXPECT_FLOAT_EQ(wind.cell_size_m(), kWindCellSizeM);
     EXPECT_EQ(kWindLayerCount, 3);
+}
+
+TEST(WindFieldSystem, RegionalBackendRefusesUnpairedCallbacks) {
+    WindFieldSystem wind(kSeed);
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f, 5.0f); },
+                             [] { return std::string("regional wind"); });
+    EXPECT_THROW(
+        wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(1.0f, 0.0f); }, {}),
+        std::invalid_argument);
+    EXPECT_THROW(wind.BindRegionalBackend({}, [] { return std::string("other wind"); }),
+                 std::invalid_argument);
+    // A refused binding leaves the previous backend in place.
+    EXPECT_EQ(wind.ComputeWindSubHash(), "regional wind");
+    EXPECT_EQ(wind.SampleWind(Vec3(0.0f), WindLayer::Ground).y, 5.0f);
+}
+
+TEST(WindFieldSystem, RegionalCallbacksReceivePositionAndSelectedLayer) {
+    WindFieldSystem wind(kSeed);
+    int sample_calls = 0;
+    wind.BindRegionalBackend(
+        [&sample_calls](const Vec3& position, WindLayer selected_layer) {
+            ++sample_calls;
+            const auto layer_offset = static_cast<float>(selected_layer);
+            return Vec2(position.x + 10.0f * layer_offset, position.z - 5.0f * layer_offset);
+        },
+        [] { return std::string("regional wind"); });
+    wind.Update(17, Vec3(3.0f, 100.0f, 4.0f));
+    EXPECT_EQ(sample_calls, 1);
+    EXPECT_EQ(wind.last_tick(), 17u);
+    // Update explicitly samples ground: (3,4) / sqrt(9+16) = (0.6,0.8).
+    EXPECT_FLOAT_EQ(wind.BaseDirection().x, 0.6f);
+    EXPECT_FLOAT_EQ(wind.BaseDirection().y, 0.8f);
+    EXPECT_EQ(wind.ComputeWindSubHash(), "regional wind");
+
+    constexpr std::array layers{WindLayer::Ground, WindLayer::Mid, WindLayer::High};
+    const std::array expected{Vec2(2.0f, 7.0f), Vec2(12.0f, 2.0f), Vec2(22.0f, -3.0f)};
+    for (std::size_t index = 0; index < layers.size(); ++index) {
+        const auto sampled = wind.SampleWind(Vec3(2.0f, 1000.0f, 7.0f), layers[index]);
+        EXPECT_EQ(sampled.x, expected[index].x);
+        EXPECT_EQ(sampled.y, expected[index].y);
+    }
+    constexpr std::array heights{-1.0f, 31.0f, 32.0f, 127.0f, 128.0f, 512.0f};
+    for (std::size_t index = 0; index < heights.size(); ++index) {
+        const auto sampled = wind.SampleWind(Vec3(2.0f, heights[index], 7.0f));
+        EXPECT_EQ(sampled.x, expected[index / 2].x);
+        EXPECT_EQ(sampled.y, expected[index / 2].y);
+    }
+    EXPECT_EQ(sample_calls, 10);
+
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f); },
+                             [] { return std::string("regional wind"); });
+    wind.Update(18, kAnchor);
+    EXPECT_EQ(wind.BaseDirection().x, 0.0f);
+    EXPECT_EQ(wind.BaseDirection().y, 0.0f);
+}
+
+TEST(WindFieldSystem, EmptyRegionalCallbacksPreserveLegacySamplesAndHash) {
+    WindFieldSystem baseline(kSeed);
+    WindFieldSystem wind(kSeed);
+    wind.BindRegionalBackend({}, {});
+    EXPECT_EQ(wind.ComputeWindSubHash(), baseline.ComputeWindSubHash());
+
+    // Seed a known base direction through the public callback, then remove it.
+    // The regional update leaves the constructor's cell grid untouched.
+    wind.BindRegionalBackend([](const Vec3&, WindLayer) { return Vec2(0.0f, 5.0f); },
+                             [] { return std::string("regional wind"); });
+    wind.Update(1, kAnchor);
+    wind.BindRegionalBackend({}, {});
+    // Out-of-region legacy wind = normalized (0,5) times the layer speeds 6,9,13.
+    constexpr std::array heights{0.0f, 32.0f, 128.0f};
+    constexpr std::array speeds{6.0f, 9.0f, 13.0f};
+    for (std::size_t index = 0; index < heights.size(); ++index) {
+        const auto sampled = wind.SampleWind(Vec3(1000000.0f, heights[index], 1000000.0f));
+        EXPECT_EQ(sampled.x, 0.0f);
+        EXPECT_EQ(sampled.y, speeds[index]);
+        const auto inside = wind.SampleWind(Vec3(0.0f, heights[index], 0.0f));
+        const auto original = baseline.SampleWind(Vec3(0.0f, heights[index], 0.0f));
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(inside.x), std::bit_cast<std::uint32_t>(original.x));
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(inside.y), std::bit_cast<std::uint32_t>(original.y));
+    }
+
+    const WindFieldSystem::StormPerturbation perturbation{
+        Vec2(-12.0f, 12.0f), 120.0f, Vec2(5.0f, 1.0f), 0.8f};
+    baseline.InjectStormPerturbation(perturbation);
+    wind.InjectStormPerturbation(perturbation);
+    for (const std::uint64_t tick : {1u, 45u, 90u}) {
+        baseline.Update(tick, Vec3(-1.0f, 100.0f, 25.0f));
+        wind.Update(tick, Vec3(-1.0f, 100.0f, 25.0f));
+        EXPECT_EQ(wind.last_tick(), tick);
+        EXPECT_EQ(wind.ComputeWindSubHash(), baseline.ComputeWindSubHash());
+        for (const auto height : heights) {
+            for (const auto coordinate : {-768.0f, -0.1f, 0.0f, 767.0f, 768.0f}) {
+                const Vec3 position(coordinate, height, coordinate);
+                const auto sampled = wind.SampleWind(position);
+                const auto original = baseline.SampleWind(position);
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(sampled.x),
+                          std::bit_cast<std::uint32_t>(original.x));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(sampled.y),
+                          std::bit_cast<std::uint32_t>(original.y));
+            }
+        }
+    }
 }
 
 TEST(WindFieldSystem, SubHashIsDeterministicAcrossRuns) {

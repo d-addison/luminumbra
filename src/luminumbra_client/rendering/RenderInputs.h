@@ -46,7 +46,7 @@ struct GBufferPassInput {
     // Exclusive selected far submission. Legacy uses the pass-owned shader;
     // ladder consumes value commands synchronously through its owned backend.
     FarWorldSelection far_selection;
-    FarLodSystem* legacy_far = nullptr;
+    FarLodSystem* legacy_far = nullptr; // effective Legacy compatibility only
     FarWorldSubmitFn submit_ladder;
 
     // Root path for resolving on-disk LOD mesh variants (procgen tree palette).
@@ -82,6 +82,7 @@ struct GBufferDrawStats {
     std::size_t far_indices = 0;            // call site: '+=' (far_indices_drawn)
     std::size_t skinned_draws = 0;          // call site: '+=' (skinned_draws)
     std::size_t skinned_indices = 0;        // call site: '+=' (skinned_indices_drawn)
+    std::uint64_t far_water_indices = 0;    // actual combined G-buffer submission
     std::size_t authored_draws = 0;
     std::size_t authored_indices = 0;
 };
@@ -106,6 +107,13 @@ struct WaterDrawItem {
 // calls, ctx.screen_quad_vao for the caustics quad, ctx.opaque_scene +
 // ctx.gbuffer_depth (adopted) for the SSR/refraction reads, and ctx.lit_scene
 // for the draw target. So WaterPassInput carries ONLY the draw-item list.
+constexpr bool LadderWaterPassEligible(u32 snapshot_version,
+                                       u32 uploaded_version,
+                                       u32 indices,
+                                       bool valid_allocation,
+                                       bool enabled) noexcept {
+    return enabled && valid_allocation && indices != 0 && snapshot_version == uploaded_version;
+}
 struct WaterPassInput {
     std::vector<WaterDrawItem> draw_items;
 };

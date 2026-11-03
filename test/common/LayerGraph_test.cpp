@@ -11,8 +11,8 @@
 //   - unrecognized future keys survive (passthrough);
 //   - the fixed topology / stage decomposition is correct.
 //
-// Pinned to a FIXED self-contained literal, NOT default.json (that file is owned
-// by the concurrent worldgen agent). No GL, no streaming — a pure JSON transform.
+// Pinned to a fixed self-contained literal, independent of authored default.json
+// changes. No GL, no streaming — a pure JSON transform.
 
 #include <gtest/gtest.h>
 

@@ -3,6 +3,7 @@
 // genome sampling from a species' per-gene ranges.
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -22,6 +23,17 @@ const char* const kWheat = R"({
   "id": "wheat", "render_archetype": "grass_crop", "perennial": false, "lifespan_ticks": 900,
   "genes": { "GrowthRate": [0.6, 0.9], "MaxScale": [0.15, 0.35], "Yield": [0.55, 0.90] }
 })";
+
+TEST(SpeciesRegistry, SpeciesIdPreservesByteHash) {
+    EXPECT_EQ(F::SpeciesId16(""), 3123u);
+    EXPECT_EQ(F::SpeciesId16("wheat"), 7403u);
+    EXPECT_EQ(F::SpeciesId16("oak"), 56013u);
+    EXPECT_EQ(F::SpeciesId16("\x80"), 46541u);
+    EXPECT_EQ(F::SpeciesId16("\xff"), 53088u);
+    EXPECT_EQ(F::SpeciesId16("w\x80\xff"
+                             "heat"),
+              51681u);
+}
 
 TEST(SpeciesRegistry, ParsesFieldsAndGeneRanges) {
     F::SpeciesRegistry reg;
@@ -56,8 +68,8 @@ TEST(SpeciesRegistry, SampleGenomeStaysInRangeAndIsDeterministic) {
     ASSERT_NE(w, nullptr);
 
     auto sample = [&] {
-        DeterministicRng rng =
-            DeterministicRng::seeded(F::SpeciesGeneIndex("GrowthRate") + 1, 7, 3);
+        DeterministicRng rng = DeterministicRng::seeded(
+            static_cast<std::uint64_t>(F::SpeciesGeneIndex("GrowthRate") + 1), 7, 3);
         return F::SpeciesRegistry::SampleGenome(*w, rng);
     };
     const auto a = sample();

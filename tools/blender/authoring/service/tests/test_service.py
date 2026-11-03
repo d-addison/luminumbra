@@ -1,4 +1,6 @@
 """Fault injection for publication; native compiler acceptance is a separate lane."""
+from contextlib import ExitStack
+import errno
 import json
 import os
 from pathlib import Path
@@ -13,14 +15,17 @@ import time
 import unittest
 import zipfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from luminumbra_author import service as service_module
+from luminumbra_author import locking as locking_module
+from luminumbra_author import process as process_module
 from luminumbra_author.__main__ import dispatch
 from luminumbra_author.contracts import (ASSET, PROFILE, PREFAB_PROFILE, TOOLCHAIN, Refusal, atomic_json,
                                          canonical, digest, read_json, validate_asset)
 from luminumbra_author.formats import mesh_info, clip_info, validate_glb
+from luminumbra_author.locking import ProjectLock, WindowsFileLock
 from luminumbra_author.service import BuildService, TERMINAL
 from package import build as package_build
 
@@ -38,6 +43,332 @@ def triangle(count=1):
     vertices = b"".join(struct.pack("<8f", x, y, 0, 0, 0, 1, x, y)
                         for x, y in ((0, 0), (1, 0), (0, 1)))
     return header + vertices + struct.pack("<3I", 0, 1, 2) * count
+
+
+class FileLockBackend:
+    """Inject handle ownership and release failures without host dependencies."""
+    def __init__(self):
+        self.owners = {}
+        self.attempts = []
+        self.release_threads = []
+        self.release_error = None
+
+    def acquire(self, stream):
+        self.attempts.append(stream)
+        key = Path(stream.name).resolve()
+        if key in self.owners:
+            raise BlockingIOError(errno.EAGAIN, "Project is locked")
+        self.owners[key] = stream
+
+    def release(self, stream):
+        if self.release_error is not None:
+            raise self.release_error
+        key = Path(stream.name).resolve()
+        if self.owners.get(key) is not stream:
+            raise OSError("Handle does not own the lock")
+        del self.owners[key]
+        self.release_threads.append(threading.get_ident())
+
+
+class Locking(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name)
+        self.lockfile = self.project / "session.lock"
+        self.backend = FileLockBackend()
+
+    def open(self, backend=None):
+        lock = ProjectLock(self.project, self.lockfile,
+                           backend=self.backend if backend is None else backend)
+        self.addCleanup(lock.close)
+        return lock
+
+    def windows_kernel(self):
+        kernel = SimpleNamespace(CreateMutexW=Mock(return_value=41),
+                                 CloseHandle=Mock(return_value=True))
+        for replacement in (
+                patch.object(locking_module.ctypes, "WinDLL", return_value=kernel, create=True),
+                patch.object(locking_module.ctypes, "get_last_error", return_value=0, create=True)):
+            replacement.start()
+            self.addCleanup(replacement.stop)
+        return kernel
+
+    def test_windows_migration_marker_matches_legacy_name_and_is_not_thread_owned(self):
+        kernel = self.windows_kernel()
+        marker = locking_module.WindowsMigrationLock(self.project)
+        marker.acquire()
+        identity = digest(os.path.normcase(str(self.project.resolve())).encode("utf-8"))
+        kernel.CreateMutexW.assert_called_once_with(None, False, "Local\\LuminumbraAuthorBuild_" + identity)
+        errors = []
+        def close():
+            try:
+                marker.close()
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=close, daemon=True)
+        self.addCleanup(thread.join, 5)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        marker.close()
+        kernel.CloseHandle.assert_called_once_with(41)
+        self.assertIsNone(marker.handle)
+
+    def test_windows_migration_refuses_existing_mutex_and_closes_failed_handle(self):
+        kernel = self.windows_kernel()
+        marker = locking_module.WindowsMigrationLock(self.project)
+        with patch.object(locking_module.ctypes, "get_last_error", return_value=183):
+            with self.assertRaises(BlockingIOError):
+                marker.acquire()
+        kernel.CloseHandle.assert_called_once_with(41)
+        self.assertIsNone(marker.handle)
+        kernel.CreateMutexW.return_value = None
+        with self.assertRaisesRegex(OSError, "Cannot create"):
+            marker.acquire()
+        kernel.CloseHandle.assert_called_once_with(41)
+
+    def test_windows_file_lock_retains_marker_until_unlock_and_retries_handle_close(self):
+        kernel = self.windows_kernel()
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0, locking=Mock())
+        with patch.dict(sys.modules, msvcrt=runtime):
+            lock = self.open(WindowsFileLock(self.project))
+            def close(handle):
+                runtime.locking.assert_called_with(lock.stream.fileno(), runtime.LK_UNLCK, 1)
+                return False
+            kernel.CloseHandle.side_effect = close
+            with self.assertRaisesRegex(OSError, "Cannot close"):
+                lock.close()
+            self.assertFalse(lock.closed)
+            self.assertFalse(lock.stream.closed)
+            self.assertEqual(lock.backend.migration.handle, 41)
+            kernel.CloseHandle.side_effect = None
+            lock.close()
+            self.assertTrue(lock.closed)
+            self.assertIsNone(lock.backend.migration.handle)
+            self.assertEqual(runtime.locking.call_count, 2)
+
+    def test_windows_legacy_contention_closes_file_handle(self):
+        kernel = self.windows_kernel()
+        backend = WindowsFileLock(self.project)
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0, locking=Mock())
+        streams = []
+        def acquire(stream):
+            streams.append(stream)
+            WindowsFileLock.acquire(backend, stream)
+        with patch.dict(sys.modules, msvcrt=runtime), \
+             patch.object(locking_module.ctypes, "get_last_error", return_value=183), \
+             patch.object(backend, "acquire", side_effect=acquire):
+            with self.assertRaises(BlockingIOError):
+                self.open(backend)
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(streams[0].closed)
+        kernel.CloseHandle.assert_called_once_with(41)
+
+    def close_from_threads(self, lock, count=1):
+        errors = []
+        ready = threading.Barrier(count + 1)
+        def close():
+            try:
+                ready.wait(timeout=5)
+                lock.close()
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=close, daemon=True) for _ in range(count)]
+        started, released = [], False
+        try:
+            for thread in threads:
+                thread.start()
+                started.append(thread)
+            ready.wait(timeout=5)
+            released = True
+        finally:
+            if not released:
+                ready.abort()
+            with ExitStack() as cleanup:
+                def join(thread):
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+                for thread in started:
+                    cleanup.callback(join, thread)
+        self.assertEqual(errors, [])
+
+    def test_cross_thread_release_and_double_close(self):
+        owner_thread = threading.get_ident()
+        lock = self.open()
+        self.close_from_threads(lock)
+        lock.close()
+        self.assertTrue(lock.closed)
+        self.assertTrue(lock.stream.closed)
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.assertNotEqual(self.backend.release_threads[0], owner_thread)
+        self.open()
+
+    def test_concurrent_close_releases_once(self):
+        lock = self.open()
+        self.close_from_threads(lock, count=4)
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.open()
+
+    def test_contention_closes_only_the_failed_handle(self):
+        lock = self.open()
+        with self.assertRaises(BlockingIOError):
+            self.open()
+        self.assertTrue(self.backend.attempts[-1].closed)
+        self.assertFalse(lock.stream.closed)
+        self.assertEqual(self.backend.release_threads, [])
+        lock.close()
+        self.open()
+
+    def test_release_error_propagates_and_can_be_retried(self):
+        lock = self.open()
+        error = OSError("Injected unlock failure")
+        self.backend.release_error = error
+        try:
+            with self.assertRaises(OSError) as caught:
+                lock.close()
+            self.assertIs(caught.exception, error)
+            self.assertFalse(lock.closed)
+            self.assertFalse(lock.stream.closed)
+            with self.assertRaises(BlockingIOError):
+                self.open()
+        finally:
+            self.backend.release_error = None
+        self.close_from_threads(lock)
+        lock.close()
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.open()
+
+    def test_handle_close_error_propagates_without_unlocking_twice(self):
+        lock = self.open()
+        with patch.object(lock.stream, "close", side_effect=OSError("Injected close failure")):
+            with self.assertRaisesRegex(OSError, "Injected close failure"):
+                lock.close()
+        self.assertFalse(lock.closed)
+        lock.close()
+        self.assertTrue(lock.closed)
+        self.assertEqual(len(self.backend.release_threads), 1)
+
+    def test_windows_backend_uses_nonblocking_byte_zero_and_surfaces_errors(self):
+        self.windows_kernel()
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0)
+        calls = []
+        def locking(fd, mode, size):
+            calls.append((fd, mode, size, stream.tell()))
+        runtime.locking = locking
+        with self.lockfile.open("a+b") as stream, patch.dict(sys.modules, msvcrt=runtime):
+            stream.seek(23)
+            backend = WindowsFileLock(self.project)
+            backend.acquire(stream)
+            stream.seek(42)
+            backend.release(stream)
+            self.assertEqual(calls, [(stream.fileno(), 1, 1, 0), (stream.fileno(), 0, 1, 0)])
+            backend.acquire(stream)
+            with patch.object(runtime, "locking", side_effect=OSError(errno.EACCES, "Locked")):
+                with self.assertRaises(BlockingIOError):
+                    backend.acquire(stream)
+                with self.assertRaises(PermissionError):
+                    backend.release(stream)
+            error = OSError(errno.EBADF, "Invalid handle")
+            with patch.object(runtime, "locking", side_effect=error):
+                with self.assertRaises(OSError) as caught:
+                    backend.acquire(stream)
+                self.assertIs(caught.exception, error)
+            backend.release(stream)
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_lock_releases_from_another_thread(self):
+        lock = self.open(WindowsFileLock(self.project))
+        with self.assertRaises(BlockingIOError):
+            self.open(WindowsFileLock(self.project))
+        self.close_from_threads(lock)
+        lock.close()
+        self.open(WindowsFileLock(self.project))
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_lock_contends_with_another_process(self):
+        lock = self.open(WindowsFileLock(self.project))
+        script = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from luminumbra_author.locking import ProjectLock
+project = Path(sys.argv[2])
+try:
+    lock = ProjectLock(project, project / 'session.lock')
+except BlockingIOError:
+    sys.exit(2)
+lock.close()
+"""
+        command = [sys.executable, "-I", "-B", "-c", script,
+                   str(Path(__file__).resolve().parents[1]), str(self.project)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        legacy_script = """
+import ctypes
+from ctypes import wintypes
+import hashlib
+import os
+from pathlib import Path
+import sys
+project = Path(sys.argv[2])
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+kernel.CreateMutexW.restype = wintypes.HANDLE
+kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel.CloseHandle.restype = wintypes.BOOL
+kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel.ReleaseMutex.restype = wintypes.BOOL
+identity = hashlib.sha256(os.path.normcase(str(project.resolve())).encode('utf-8')).hexdigest()
+handle = kernel.CreateMutexW(None, True, 'Local\\\\LuminumbraAuthorBuild_' + identity)
+error = ctypes.get_last_error()
+if not handle:
+    raise ctypes.WinError(error)
+if error != 183:
+    kernel.ReleaseMutex(handle)
+kernel.CloseHandle(handle)
+sys.exit(2 if error == 183 else 0)
+"""
+        legacy_command = [sys.executable, "-I", "-B", "-c", legacy_script, command[-2], command[-1]]
+        result = subprocess.run(legacy_command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        lock.close()
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(legacy_command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Hold the exact older service mutex and probe from a new process.
+        marker = locking_module.WindowsMigrationLock(self.project)
+        handle = marker.kernel.CreateMutexW(None, True, marker.name)
+        self.assertTrue(handle)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
+        finally:
+            marker.kernel.ReleaseMutex.argtypes = [locking_module.wintypes.HANDLE]
+            marker.kernel.ReleaseMutex.restype = locking_module.wintypes.BOOL
+            marker.kernel.ReleaseMutex(handle)
+            marker.kernel.CloseHandle(handle)
+        self.open(WindowsFileLock(self.project))
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_process_exit_releases_lock(self):
+        script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from luminumbra_author.locking import ProjectLock
+project = Path(sys.argv[2])
+lock = ProjectLock(project, project / 'session.lock')
+os._exit(7)
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", script,
+                                 str(Path(__file__).resolve().parents[1]), str(self.project)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.open(WindowsFileLock(self.project))
 
 
 class Project(unittest.TestCase):
@@ -136,6 +467,170 @@ class Project(unittest.TestCase):
             with self.subTest(emit_lods=emit_lods, cap=cap), patch.object(service, "_invoke") as invoke:
                 service._compile("unused", source, outputs, emit_lods, cap)
                 invoke.assert_called_once_with("unused", source, outputs / "asset.lmesh", arguments)
+
+    def test_compile_receipt_failure_closes_pipe_and_reaps_supervisor(self):
+        service = self.open()
+        job_id = "1" * 32
+        service.jobs[job_id] = {"job_id": job_id, "status": "compiling"}
+        failure = OSError("Injected engine receipt publication failure")
+        spawn = subprocess.Popen
+        workers = []
+
+        def supervisor(*args, **kwargs):
+            worker = spawn([sys.executable, "-I", "-B", "-c",
+                            "import sys; sys.stdin.buffer.read()"],
+                           stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            workers.append(worker)
+            return worker
+
+        def save(job):
+            self.assertIs(job["engine_executed"], True)
+            self.assertIsNone(workers[0].poll())
+            raise failure
+
+        try:
+            with patch.object(service_module.subprocess, "Popen", side_effect=supervisor), \
+                 patch.object(service, "_save", side_effect=save):
+                with self.assertRaises(OSError) as caught:
+                    service._invoke(job_id, self.root / "input.glb",
+                                    self.root / "outputs" / "asset.lmesh", [])
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(len(workers), 1)
+            self.assertTrue(workers[0].stdin.closed)
+            self.assertEqual(workers[0].returncode, 0)
+        finally:
+            for worker in workers:
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(worker._handle.Close)
+                    cleanup.callback(worker.stdin.close)
+                    cleanup.callback(worker.wait, timeout=5)
+                    if worker.poll() is None:
+                        worker.kill()
+
+    def test_compile_receipt_failure_preserves_error_through_cleanup_failures(self):
+        service = self.open()
+        service.jobs["unused"] = {"job_id": "unused", "status": "compiling"}
+        failure = OSError("Injected engine receipt publication failure")
+        for phase in ("close", "wait", "kill", "reap", "timeout"):
+            with self.subTest(phase=phase):
+                worker = Mock()
+                if phase == "close":
+                    worker.stdin.close.side_effect = OSError("Injected pipe close failure")
+                elif phase == "wait":
+                    worker.wait.side_effect = [OSError("Injected wait failure"), 0]
+                else:
+                    worker.wait.side_effect = [subprocess.TimeoutExpired("supervisor", 10),
+                                              OSError("Injected reap failure") if phase == "reap" else 0]
+                    if phase == "kill":
+                        worker.kill.side_effect = OSError("Injected kill failure")
+                with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+                     patch.object(service, "_save", side_effect=failure):
+                    with self.assertRaises(OSError) as caught:
+                        service._invoke("unused", self.root / "input.glb",
+                                        self.root / "outputs" / "asset.lmesh", [])
+                self.assertIs(caught.exception, failure)
+                worker.stdin.close.assert_called_once_with()
+                self.assertEqual(worker.wait.call_args_list[0].kwargs, {"timeout": 10})
+                if phase in ("wait", "kill", "reap", "timeout"):
+                    worker.kill.assert_called_once_with()
+                    self.assertEqual(worker.wait.call_count, 2)
+                    self.assertEqual(worker.wait.call_args.kwargs, {"timeout": 10})
+
+    def test_compile_deadline_setup_failure_closes_and_reaps_supervisor(self):
+        service = self.open()
+        failure = RuntimeError("Injected deadline setup failure")
+        worker = Mock()
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_change"), \
+             patch.object(service_module.time, "monotonic", side_effect=failure):
+            with self.assertRaises(RuntimeError) as caught:
+                service._invoke("unused", self.root / "input.glb",
+                                self.root / "outputs" / "asset.lmesh", [])
+        self.assertIs(caught.exception, failure)
+        worker.stdin.close.assert_called_once_with()
+        worker.wait.assert_called_once_with(timeout=10)
+
+    def test_compile_success_still_reaps_after_pipe_close_failure(self):
+        service = self.open()
+        failure = OSError("Injected pipe close failure")
+        worker = Mock(returncode=0)
+        worker.poll.return_value = 0
+        worker.stdin.close.side_effect = failure
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_change"), \
+             patch.object(service_module, "read_json", return_value={
+                 "timed_out": False, "cancelled": False, "returncode": 0}):
+            with self.assertRaises(OSError) as caught:
+                service._invoke("unused", self.root / "input.glb",
+                                self.root / "outputs" / "asset.lmesh", [])
+        self.assertIs(caught.exception, failure)
+        worker.wait.assert_called_once_with(timeout=10)
+
+    def test_shutdown_retains_project_until_failed_receipt_supervisor_is_reaped(self):
+        service = self.open()
+        waiting, release, shutdown = (threading.Event() for _ in range(3))
+        worker = Mock(returncode=None)
+        worker.stdin.closed = False
+        failure = OSError("Injected engine receipt publication failure")
+        save, executor_shutdown = service._save, service.executor.shutdown
+        errors = []
+
+        def close_pipe():
+            worker.stdin.closed = True
+
+        def reap(*, timeout):
+            self.assertTrue(worker.stdin.closed)
+            waiting.set()
+            self.assertTrue(release.wait(5))
+            worker.returncode = 0
+            return 0
+
+        def publish(job):
+            if job.get("engine_executed") and job["status"] == "compiling":
+                raise failure
+            save(job)
+
+        def stop_executor(*args, **kwargs):
+            shutdown.set()
+            return executor_shutdown(*args, **kwargs)
+
+        def close_service():
+            try:
+                service.close()
+            except BaseException as error:
+                errors.append(error)
+
+        worker.stdin.close.side_effect = close_pipe
+        worker.wait.side_effect = reap
+        closer = threading.Thread(target=close_service, daemon=True)
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_save", side_effect=publish), \
+             patch.object(service.executor, "shutdown", side_effect=stop_executor):
+            try:
+                job = service.submit("asset.json", 1)
+                self.assertTrue(waiting.wait(5), "Supervisor cleanup never acquired ownership")
+                closer.start()
+                self.assertTrue(shutdown.wait(5))
+                self.assertTrue(closer.is_alive())
+                self.assertFalse(service.project_lock.closed)
+                self.assertIsNone(worker.returncode)
+                with self.assertRaises(Refusal) as caught:
+                    BuildService(self.project, self.toolchain)
+                self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            finally:
+                release.set()
+                if closer.ident is not None:
+                    closer.join(timeout=5)
+                service.close()
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(worker.returncode, 0)
+        self.assertTrue(service.project_lock.closed)
+        result = service.status(job["job_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["findings"], [Refusal("job.failed", str(failure)).finding])
+        self.open()
 
     def test_max_tris_actual_count_and_failed_publication(self):
         service = self.open()
@@ -778,6 +1273,469 @@ class Project(unittest.TestCase):
         self.assertEqual(recovered.status(second["job_id"])["status"], "succeeded")
         self.assertEqual(recovered.generation()["job_id"], second["job_id"])
 
+    def recovery_directory(self, service, job_id, *, receipt=True):
+        directory = service.root / "jobs" / job_id
+        directory.mkdir()
+        if receipt:
+            atomic_json(directory / "receipt.json", {
+                "schema": service_module.RECEIPT, "mode": "NATIVE",
+                "job_id": job_id, "status": "compiling", "findings": []})
+        (directory / "source.data").write_bytes(b"Preserved source")
+        (directory / "outputs").mkdir()
+        (directory / "outputs" / "partial.data").write_bytes(b"Partial output")
+        return directory
+
+    def test_quarantine_waits_for_windows_supervisor_directory_release(self):
+        service = self.open()
+        service.close()
+        rename = Path.rename
+        cases = ((5, False, False), (32, True, False), (33, True, True))
+        for index, (code, receipt, replay) in enumerate(cases, 1):
+            with self.subTest(winerror=code, receipt=receipt, replay=replay):
+                directory = self.recovery_directory(service, f"{index:032x}", receipt=receipt)
+                before = {path.relative_to(directory): path.read_bytes()
+                          for path in directory.rglob("*") if path.is_file()}
+                intent = service.root / "quarantine-pending.json"
+                if replay:
+                    container = service.root / "quarantine" / "20000101T000000Z"
+                    container.mkdir(parents=True, exist_ok=True)
+                    atomic_json(intent, {"job_id": directory.name, "container": container.name})
+                error = PermissionError(errno.EACCES, "Supervisor still holds its working directory")
+                error.winerror = code
+                attempts, sleeps = [], []
+                def move(path, target):
+                    if path == directory:
+                        attempts.append(target)
+                        if len(attempts) <= 2:
+                            if receipt:
+                                self.assertEqual(read_json(intent)["job_id"], directory.name)
+                            self.assertEqual({member.relative_to(directory): member.read_bytes()
+                                              for member in directory.rglob("*") if member.is_file()}, before)
+                            raise error
+                    return rename(path, target)
+                with patch.object(Path, "rename", move), \
+                     patch.object(service_module.time, "monotonic", return_value=0), \
+                     patch.object(service_module.time, "sleep", side_effect=sleeps.append):
+                    recovered = self.open()
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(attempts, [attempts[0]] * 3)
+                self.assertEqual(sleeps, [0.05, 0.05])
+                archived = attempts[0]
+                self.assertEqual({path.relative_to(archived): path.read_bytes()
+                                  for path in archived.rglob("*") if path.is_file()}, before)
+                self.assertFalse(intent.exists())
+                if receipt:
+                    self.assertEqual(recovered.status(directory.name)["status"], "failed")
+                    self.assertEqual(recovered.status(directory.name)["findings"][0]["rule_id"],
+                                     "job.orphaned")
+                    self.assertEqual([path.name for path in directory.iterdir()], ["receipt.json"])
+                else:
+                    self.assertFalse(directory.exists())
+                recovered.close()
+
+    def test_quarantine_deadline_keeps_intent_and_releases_project_for_replay(self):
+        service = self.open()
+        service.close()
+        directory = self.recovery_directory(service, "1" * 32)
+        original = read_json(directory / "receipt.json")
+        rename = Path.rename
+        clock, sleeps = [100.0], []
+        error = PermissionError(errno.EACCES, "Supervisor directory remains pinned")
+        error.winerror = 32
+        def move(path, target):
+            if path == directory:
+                raise error
+            return rename(path, target)
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 0.05)
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch.object(Path, "rename", move), \
+             patch.object(service_module.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(service_module.time, "sleep", side_effect=sleep):
+            with self.assertRaises(OSError) as caught:
+                self.open()
+        self.assertIs(caught.exception, error)
+        self.assertAlmostEqual(sum(sleeps), 10)
+        self.assertEqual(read_json(directory / "receipt.json"), original)
+        intent = read_json(service.root / "quarantine-pending.json")
+        archived = service.root / "quarantine" / intent["container"] / directory.name
+        self.assertFalse(archived.exists())
+        recovered = self.open()
+        self.assertEqual(recovered.status(directory.name)["status"], "failed")
+        self.assertEqual(read_json(archived / "receipt.json"), original)
+        self.assertEqual((archived / "outputs" / "partial.data").read_bytes(), b"Partial output")
+        self.assertFalse((service.root / "quarantine-pending.json").exists())
+
+    def test_quarantine_does_not_retry_other_errors(self):
+        service = self.open()
+        service.close()
+        directory = self.recovery_directory(service, "1" * 32)
+        original = read_json(directory / "receipt.json")
+        rename = Path.rename
+        for code in (None, 2, 80):
+            with self.subTest(winerror=code):
+                error = OSError(errno.EIO, "Unrelated rename failure")
+                if code is not None:
+                    error.winerror = code
+                def move(path, target):
+                    if path == directory:
+                        raise error
+                    return rename(path, target)
+                with patch.object(Path, "rename", move), \
+                     patch.object(service_module.time, "sleep") as sleep:
+                    with self.assertRaises(OSError) as caught:
+                        self.open()
+                self.assertIs(caught.exception, error)
+                sleep.assert_not_called()
+                self.assertEqual(read_json(directory / "receipt.json"), original)
+        self.assertEqual(self.open().status(directory.name)["status"], "failed")
+
+    def test_quarantine_moves_share_one_recovery_deadline(self):
+        service = self.open()
+        service.close()
+        directories = {self.recovery_directory(service, digit * 32) for digit in ("1", "2")}
+        rename = Path.rename
+        clock, sleeps, moved = [0.0], [], []
+        error = PermissionError(errno.EACCES, "Supervisor directory remains pinned")
+        error.winerror = 32
+        def move(path, target):
+            if path in directories:
+                if not moved and clock[0] >= 6:
+                    moved.append((path, target))
+                else:
+                    raise error
+            return rename(path, target)
+        def sleep(delay):
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch.object(Path, "rename", move), \
+             patch.object(service_module.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(service_module.time, "sleep", side_effect=sleep):
+            with self.assertRaises(OSError) as caught:
+                self.open()
+        self.assertIs(caught.exception, error)
+        self.assertAlmostEqual(sum(sleeps), 10)
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(read_json(moved[0][1] / "receipt.json")["status"], "compiling")
+        self.assertEqual(read_json(moved[0][0] / "receipt.json")["status"], "failed")
+        pending = read_json(service.root / "quarantine-pending.json")
+        self.assertNotEqual(pending["job_id"], moved[0][0].name)
+        recovered = self.open()
+        for directory in directories:
+            self.assertEqual(recovered.status(directory.name)["status"], "failed")
+
+    def test_recovery_quarantines_stale_jobs_only_after_lock_acquisition(self):
+        backend = FileLockBackend()
+        def project_lock(project, lockfile):
+            return ProjectLock(project, lockfile, backend=backend)
+        with patch.object(service_module, "ProjectLock", side_effect=project_lock):
+            service = self.open()
+            committed = self.success(service)
+            pointer = (service.root / "current.json").read_bytes()
+            generation = service.generation()
+            missing = service.root / "jobs" / ("1" * 32)
+            interrupted = service.root / "jobs" / ("2" * 32)
+            for directory in (missing, interrupted):
+                directory.mkdir()
+                (directory / "source.data").write_bytes(b"Preserve this user data")
+                (directory / "outputs").mkdir()
+                (directory / "outputs" / "partial.data").write_bytes(b"Unfinished output")
+            original = {**committed, "job_id": interrupted.name, "status": "compiling"}
+            atomic_json(interrupted / "receipt.json", original)
+            before = {directory.name: {path.relative_to(directory): path.read_bytes()
+                      for path in directory.rglob("*") if path.is_file()}
+                      for directory in (missing, interrupted)}
+            with self.assertRaises(Refusal) as caught:
+                self.open()
+            self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            self.assertFalse((service.root / "quarantine").exists())
+            self.assertTrue(missing.is_dir())
+            self.assertEqual(read_json(interrupted / "receipt.json"), original)
+            service.close()
+            recovered = self.open()
+            quarantined = list((service.root / "quarantine").iterdir())
+            self.assertEqual(len(quarantined), 1)
+            self.assertRegex(quarantined[0].name, r"^[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?$")
+            self.assertEqual({path.name for path in quarantined[0].iterdir()}, set(before))
+            for directory in quarantined[0].iterdir():
+                self.assertEqual({path.relative_to(directory): path.read_bytes()
+                                  for path in directory.rglob("*") if path.is_file()},
+                                 before[directory.name])
+            self.assertFalse(missing.exists())
+            self.assertEqual([path.name for path in interrupted.iterdir()], ["receipt.json"])
+            self.assertEqual(recovered.status(interrupted.name)["status"], "failed")
+            self.assertEqual(recovered.status(interrupted.name)["findings"][0]["rule_id"], "job.orphaned")
+            self.assertEqual(recovered.status(committed["job_id"]), committed)
+            self.assertEqual((service.root / "current.json").read_bytes(), pointer)
+            self.assertEqual(recovered.generation(), generation)
+            recovered.close()
+            reopened = self.open()
+            self.assertEqual(reopened.status(interrupted.name)["status"], "failed")
+            self.assertEqual(list((reopened.root / "quarantine").iterdir()), quarantined)
+
+    def test_recovery_preserves_empty_and_populated_quarantine_collisions(self):
+        service = self.open()
+        service.close()
+        quarantine = service.root / "quarantine"
+        quarantine.mkdir()
+        stamp = "20000101T000000Z"
+        empty = quarantine / stamp
+        populated = quarantine / f"{stamp}-1"
+        empty.mkdir()
+        populated.mkdir()
+        (populated / "nested").mkdir()
+        canary = populated / "nested" / "source.data"
+        canary.write_bytes(b"Preserve existing quarantine data")
+        entries = [empty, populated, *populated.rglob("*")]
+        before = {path: path.stat() for path in entries}
+        stale = [service.root / "jobs" / (digit * 32) for digit in ("1", "2")]
+        for directory in stale:
+            directory.mkdir()
+            (directory / "source.data").write_bytes(directory.name.encode())
+        with patch.object(service_module.time, "strftime", return_value=stamp):
+            recovered = self.open()
+            container = quarantine / f"{stamp}-2"
+            self.assertEqual(set(quarantine.iterdir()), {empty, populated, container})
+            self.assertEqual({path.name for path in container.iterdir()},
+                             {path.name for path in stale})
+            for directory in stale:
+                self.assertFalse(directory.exists())
+                self.assertEqual((container / directory.name / "source.data").read_bytes(),
+                                 directory.name.encode())
+            self.assertEqual(list((recovered.root / "jobs").iterdir()), [])
+            recovered.close()
+            # Another pass in the same second must allocate its own container.
+            later = service.root / "jobs" / ("3" * 32)
+            later.mkdir()
+            (later / "source.data").write_bytes(b"Later recovery")
+            reopened = self.open()
+            fresh = quarantine / f"{stamp}-3"
+            self.assertEqual(set(quarantine.iterdir()), {empty, populated, container, fresh})
+            self.assertEqual([path.name for path in fresh.iterdir()], [later.name])
+            self.assertEqual((fresh / later.name / "source.data").read_bytes(), b"Later recovery")
+            self.assertEqual(list((reopened.root / "jobs").iterdir()), [])
+        for path, info in before.items():
+            with self.subTest(path=path.relative_to(quarantine)):
+                after = path.stat()
+                self.assertEqual((after.st_dev, after.st_ino, after.st_mtime_ns),
+                                 (info.st_dev, info.st_ino, info.st_mtime_ns))
+        self.assertEqual(list(empty.iterdir()), [])
+        self.assertEqual(set(populated.rglob("*")), {populated / "nested", canary})
+        self.assertEqual(canary.read_bytes(), b"Preserve existing quarantine data")
+        for directory in stale:
+            self.assertEqual((container / directory.name / "source.data").read_bytes(),
+                             directory.name.encode())
+
+    def test_quarantine_transition_resumes_after_each_io_failure(self):
+        service = self.open()
+        service.close()
+        write = service_module.atomic_json
+        rename, mkdir, unlink = Path.rename, Path.mkdir, Path.unlink
+        phases = ("intent_before", "intent_after", "move_before", "move_after",
+                  "mkdir_before", "mkdir_after", "save_during", "save_after",
+                  "intent_remove_before", "intent_remove_after")
+        for index, phase in enumerate(phases, 1):
+            with self.subTest(phase=phase):
+                job_id = f"{index:032x}"
+                directory = service.root / "jobs" / job_id
+                directory.mkdir()
+                original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                            "job_id": job_id, "status": "compiling", "findings": []}
+                write(directory / "receipt.json", original)
+                (directory / "source.data").write_bytes(b"Preserved source")
+                (directory / "outputs").mkdir()
+                (directory / "outputs" / "partial.data").write_bytes(b"Partial output")
+                before = {path.relative_to(directory): path.read_bytes()
+                          for path in directory.rglob("*") if path.is_file()}
+                intent = service.root / "quarantine-pending.json"
+                error = OSError("Injected quarantine failure")
+
+                def save(path, value):
+                    if path == intent and phase == "intent_before":
+                        raise error
+                    if path == directory / "receipt.json" and phase == "save_during":
+                        # Fail after writing and flushing the complete temporary receipt.
+                        with patch.object(os, "fsync", side_effect=error):
+                            write(path, value)
+                    write(path, value)
+                    if ((path == intent and phase == "intent_after")
+                            or (path == directory / "receipt.json" and phase == "save_after")):
+                        raise error
+
+                def move(path, target):
+                    if path == directory and phase == "move_before":
+                        raise error
+                    result = rename(path, target)
+                    if path == directory and phase == "move_after":
+                        raise error
+                    return result
+
+                def create(path, *args, **kwargs):
+                    recreating = path == directory and kwargs.get("exist_ok") is True
+                    if recreating and phase == "mkdir_before":
+                        raise error
+                    result = mkdir(path, *args, **kwargs)
+                    if recreating and phase == "mkdir_after":
+                        raise error
+                    return result
+
+                def remove(path, *args, **kwargs):
+                    if path == intent and phase == "intent_remove_before":
+                        raise error
+                    result = unlink(path, *args, **kwargs)
+                    if path == intent and phase == "intent_remove_after":
+                        raise error
+                    return result
+
+                with patch.object(service_module, "atomic_json", side_effect=save), \
+                     patch.object(Path, "rename", move), \
+                     patch.object(Path, "mkdir", create), \
+                     patch.object(Path, "unlink", remove):
+                    with self.assertRaisesRegex(OSError, "Injected quarantine failure"):
+                        self.open()
+
+                recovered = self.open()
+                result = recovered.status(job_id)
+                self.assertEqual(result, {**original, "status": "failed", "findings": [
+                    service_module.Refusal("job.orphaned",
+                        "Service exited before publication; submit a new build.").finding]})
+                self.assertEqual(read_json(directory / "receipt.json"), result)
+                self.assertEqual([path.name for path in directory.iterdir()], ["receipt.json"])
+                evidence = list((service.root / "quarantine").glob(f"*/{job_id}"))
+                self.assertEqual(len(evidence), 1)
+                self.assertEqual({path.relative_to(evidence[0]): path.read_bytes()
+                                  for path in evidence[0].rglob("*") if path.is_file()}, before)
+                self.assertFalse(intent.exists())
+                recovered.close()
+                reopened = self.open()
+                self.assertEqual(reopened.status(job_id), result)
+                self.assertEqual(list((service.root / "quarantine").glob(f"*/{job_id}")), evidence)
+                reopened.close()
+
+    def test_quarantine_replay_keeps_intent_across_repeated_save_failures(self):
+        service = self.open()
+        service.close()
+        directory = service.root / "jobs" / ("1" * 32)
+        directory.mkdir()
+        original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                    "job_id": directory.name, "status": "compiling", "findings": []}
+        atomic_json(directory / "receipt.json", original)
+        (directory / "source.data").write_bytes(b"Preserve this evidence")
+        write = service_module.atomic_json
+
+        def fail_save(path, value):
+            if path == directory / "receipt.json":
+                raise OSError("Injected receipt failure")
+            write(path, value)
+
+        with patch.object(service_module, "atomic_json", side_effect=fail_save):
+            for _ in range(3):
+                with self.assertRaisesRegex(OSError, "Injected receipt failure"):
+                    self.open()
+                intent = read_json(service.root / "quarantine-pending.json")
+                archived = service.root / "quarantine" / intent["container"] / directory.name
+                self.assertEqual(read_json(archived / "receipt.json"), original)
+                self.assertEqual((archived / "source.data").read_bytes(), b"Preserve this evidence")
+                self.assertEqual(list((service.root / "quarantine").iterdir()), [archived.parent])
+        # A pending transition must not bypass exclusive project ownership.
+        with_owner = ProjectLock(self.project, service.root / "session.lock")
+        try:
+            with self.assertRaises(Refusal) as caught:
+                self.open()
+            self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            self.assertEqual(read_json(service.root / "quarantine-pending.json"), intent)
+            self.assertFalse((directory / "receipt.json").exists())
+        finally:
+            with_owner.close()
+        recovered = self.open()
+        self.assertEqual(recovered.status(directory.name)["status"], "failed")
+        self.assertEqual(read_json(archived / "receipt.json"), original)
+        self.assertFalse((service.root / "quarantine-pending.json").exists())
+
+    def test_quarantine_replay_refuses_invalid_intent_without_moving_source(self):
+        service = self.open()
+        service.close()
+        directory = service.root / "jobs" / ("1" * 32)
+        directory.mkdir()
+        original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                    "job_id": directory.name, "status": "compiling", "findings": []}
+        atomic_json(directory / "receipt.json", original)
+        intent = service.root / "quarantine-pending.json"
+        invalid = ([], {}, {"job_id": "../outside", "container": "20000101T000000Z"},
+                   {"job_id": directory.name, "container": "../outside"},
+                   {"job_id": directory.name, "container": 1})
+        for transition in invalid:
+            with self.subTest(transition=transition):
+                atomic_json(intent, transition)
+                with self.assertRaises(Refusal) as caught:
+                    self.open()
+                self.assertEqual(caught.exception.finding["rule_id"], "state.invalid")
+                self.assertEqual(read_json(intent), transition)
+                self.assertEqual(read_json(directory / "receipt.json"), original)
+                self.assertFalse((service.root / "quarantine").exists())
+        intent.unlink()
+        self.assertEqual(self.open().status(directory.name)["status"], "failed")
+
+    def test_recovery_reclaims_receiptless_jobs_before_retained_limit(self):
+        service = self.open()
+        service.close()
+        for index in range(257):
+            (service.root / "jobs" / f"{index:032x}").mkdir()
+        recovered = self.open()
+        self.assertEqual(list((service.root / "jobs").iterdir()), [])
+        containers = list((service.root / "quarantine").iterdir())
+        self.assertEqual(len(containers), 1)
+        self.assertEqual({path.name for path in containers[0].iterdir()},
+                         {f"{index:032x}" for index in range(257)})
+        self.success(recovered)
+
+    def test_recovery_refuses_linked_quarantine_and_preserves_stale_job(self):
+        service = self.open()
+        service.close()
+        stale = service.root / "jobs" / ("1" * 32)
+        stale.mkdir()
+        (stale / "source.data").write_bytes(b"Keep")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "canary").write_bytes(b"Untouched")
+        try:
+            (service.root / "quarantine").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Directory symlink capability unavailable: {error}")
+        with self.assertRaises(Refusal) as caught:
+            self.open()
+        self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+        self.assertEqual((stale / "source.data").read_bytes(), b"Keep")
+        self.assertEqual([path.name for path in outside.iterdir()], ["canary"])
+        self.assertEqual((outside / "canary").read_bytes(), b"Untouched")
+        quarantine = service.root / "quarantine"
+        (quarantine.rmdir if os.name == "nt" else quarantine.unlink)()
+        self.open()
+
+    def test_close_surfaces_lock_release_error_and_retries_after_shutdown(self):
+        backend = FileLockBackend()
+        def project_lock(project, lockfile):
+            return ProjectLock(project, lockfile, backend=backend)
+        with patch.object(service_module, "ProjectLock", side_effect=project_lock):
+            service = self.open()
+            backend.release_error = OSError("Injected unlock failure")
+            try:
+                with self.assertRaisesRegex(OSError, "Injected unlock failure"):
+                    service.close()
+                self.assertTrue(service.closed)
+                self.assertFalse(service.project_lock.closed)
+                with self.assertRaises(Refusal) as caught:
+                    self.open()
+                self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            finally:
+                backend.release_error = None
+            service.close()
+            service.close()
+            self.assertEqual(len(backend.release_threads), 1)
+            self.open()
+
     def test_exclusive_project_lock_and_cleanup(self):
         first = self.open()
         with self.assertRaises(Refusal) as refusal:
@@ -903,28 +1861,210 @@ class Formats(unittest.TestCase):
 
 
 class Supervisor(unittest.TestCase):
+    def setUp(self):
+        # Platform simulations belong to the subject module. Mutating the
+        # shared os/sys/threading modules also changes pathlib and live workers.
+        for name in ('os', 'sys', 'signal', 'threading', 'subprocess'):
+            context = patch.object(process_module, name,
+                                   SimpleNamespace(**vars(getattr(process_module, name))))
+            context.start()
+            self.addCleanup(context.stop)
+
+    def test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms(self):
+        for host in ("nt", "posix"):
+            for phase in ("construct", "watcher_start", "reader_start"):
+                with self.subTest(host=host, phase=phase):
+                    failure = RuntimeError("Injected thread setup failure")
+                    worker = Mock()
+                    worker.poll.return_value = None
+                    watcher, reader = Mock(), Mock()
+                    if phase != "construct":
+                        (watcher if phase == "watcher_start" else reader).start.side_effect = failure
+                    with patch.object(process_module.os, "name", host), \
+                         patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
+                         patch.object(process_module.signal, "SIGKILL", 9, create=True), \
+                         patch.object(process_module.os, "killpg", create=True) as kill_group, \
+                         patch.object(process_module.subprocess, "Popen", return_value=worker) as spawn, \
+                         patch.object(process_module.threading, "Thread",
+                                      side_effect=failure if phase == "construct" else [watcher, reader]):
+                        with self.assertRaises(RuntimeError) as caught:
+                            process_module.supervise(["unused"], "unused.json", 1)
+                    self.assertIs(caught.exception, failure)
+                    if phase == "construct":
+                        spawn.assert_not_called()
+                    else:
+                        worker.wait.assert_called_once_with(timeout=5)
+                        worker.stdout.close.assert_called_once_with()
+                        if host == "nt":
+                            worker.kill.assert_called_once_with()
+                            kill_group.assert_not_called()
+                        else:
+                            kill_group.assert_called_once_with(worker.pid, 9)
+                    reader.join.assert_not_called()
+
+    def test_thread_start_error_survives_all_compiler_cleanup_failures(self):
+        failure = RuntimeError("Injected watcher start failure")
+        worker, watcher = Mock(), Mock()
+        worker.poll.return_value = None
+        watcher.start.side_effect = failure
+        for action in (worker.kill, worker.wait, worker.stdout.close):
+            action.side_effect = OSError("Injected compiler cleanup failure")
+        with patch.object(process_module.os, "name", "nt"), \
+             patch.object(process_module.sys, "platform", "win32"), \
+             patch.object(process_module.subprocess, "Popen", return_value=worker), \
+             patch.object(process_module.threading, "Thread", return_value=watcher):
+            with self.assertRaises(RuntimeError) as caught:
+                process_module.supervise(["unused"], "unused.json", 1)
+        self.assertIs(caught.exception, failure)
+        worker.kill.assert_called_once_with()
+        worker.wait.assert_called_once_with(timeout=5)
+        worker.stdout.close.assert_called_once_with()
+
+    def test_supervisor_cleanup_failure_still_reaps_joins_and_closes(self):
+        for phase in ("kill", "wait", "join", "close"):
+            with self.subTest(phase=phase):
+                failure = OSError("Injected compiler cleanup failure")
+                worker, watcher, reader = Mock(), Mock(), Mock()
+                worker.poll.return_value = None
+                worker.wait.side_effect = [0, failure if phase == "wait" else 0]
+                if phase != "wait":
+                    {"kill": worker.kill, "join": reader.join,
+                     "close": worker.stdout.close}[phase].side_effect = failure
+                with patch.object(process_module.os, "name", "nt"), \
+                     patch.object(process_module.sys, "platform", "win32"), \
+                     patch.object(process_module.subprocess, "Popen", return_value=worker), \
+                     patch.object(process_module.threading, "Thread", side_effect=[watcher, reader]), \
+                     patch.object(process_module, "atomic_json") as publish:
+                    with self.assertRaises(OSError) as caught:
+                        process_module.supervise(["unused"], "unused.json", 1)
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(worker.wait.call_count, 2)
+                self.assertEqual(worker.wait.call_args.kwargs, {"timeout": 5})
+                reader.join.assert_called_once_with(timeout=5)
+                worker.stdout.close.assert_called_once_with()
+                publish.assert_not_called()
+
+    def test_owned_worker_event_setup_failure_precedes_spawn_on_both_platforms(self):
+        for host in ("nt", "posix"):
+            with self.subTest(host=host):
+                failure = RuntimeError("Injected event setup failure")
+                with patch.object(process_module.os, "name", host), \
+                     patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
+                     patch.object(process_module, "_require_pidfds"), \
+                     patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)) as command, \
+                     patch.object(process_module.os, "close"), \
+                     patch.object(process_module.subprocess, "Popen") as spawn, \
+                     patch.object(process_module.threading, "Event", side_effect=failure):
+                    with self.assertRaises(RuntimeError) as caught:
+                        process_module.run_owned(["unused"], b"", timeout=1, cancel=Mock())
+                self.assertIs(caught.exception, failure)
+                spawn.assert_not_called()
+                command.assert_not_called()
+
+    def test_owned_worker_control_close_failure_still_kills_reaps_and_closes(self):
+        failure = OSError("Injected control close failure")
+        worker = Mock()
+        closed = []
+
+        def close(fd):
+            closed.append(fd)
+            if fd == 11:
+                raise failure
+
+        with patch.object(process_module.os, "name", "posix"), \
+             patch.object(process_module.sys, "platform", "linux"), \
+             patch.object(process_module, "_require_pidfds"), \
+             patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)), \
+             patch.object(process_module.os, "close", side_effect=close), \
+             patch.object(process_module.subprocess, "Popen", return_value=worker), \
+             patch.object(process_module, "ProcessTree") as tree:
+            with self.assertRaises(OSError) as caught:
+                process_module.run_owned(["unused"], b"", timeout=1)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(closed, [11, 12])
+        tree.assert_not_called()
+        worker.kill.assert_called_once_with()
+        worker.wait.assert_called_once()
+        for stream in (worker.stdin, worker.stdout, worker.stderr):
+            stream.close.assert_called_once_with()
+
+    def test_host_simulations_supply_apis_unavailable_on_windows(self):
+        # Use module-local copies so the runner keeps its real filesystem host.
+        host_os = SimpleNamespace(**vars(process_module.os))
+        host_os.name = "nt"
+        for name in ("killpg", "getpgrp", "waitpid", "WNOHANG", "pidfd_open"):
+            host_os.__dict__.pop(name, None)
+        host_signal = SimpleNamespace(**vars(process_module.signal))
+        for name in ("SIGKILL", "pidfd_send_signal"):
+            host_signal.__dict__.pop(name, None)
+        host_sys = SimpleNamespace(**vars(process_module.sys))
+        host_sys.platform = "win32"
+        with patch.object(process_module, "os", host_os), \
+             patch.object(process_module, "signal", host_signal), \
+             patch.object(process_module, "sys", host_sys):
+            self.test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms()
+            self.test_owned_worker_event_setup_failure_precedes_spawn_on_both_platforms()
+            self.test_owned_worker_control_close_failure_still_kills_reaps_and_closes()
+            self.test_thread_start_error_survives_all_compiler_cleanup_failures()
+            self.test_supervisor_cleanup_failure_still_reaps_joins_and_closes()
+
     def run_child(self, script, timeout=5, cancel=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "result.json"
-            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
-            command = [sys.executable, "-m", "luminumbra_author", "_compiler", str(output), str(timeout),
-                       sys.executable, "-c", script]
+            ready = root / "compiler-ready"
+            fixture = ("from pathlib import Path; Path(" + repr(str(ready)) + ").touch(); " + script)
+            # Trigger TimeoutExpired only after the real compiler has entered
+            # the fixture. Startup throughput cannot consume a 100 ms budget.
+            bootstrap = """import subprocess,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from luminumbra_author import process
+original = subprocess.Popen
+class Child(original):
+    def wait(self, timeout=None):
+        if sys.argv[4] == 'expire' and timeout == .1:
+            until = time.monotonic()+5
+            while not Path(sys.argv[3]).exists():
+                if time.monotonic() >= until:
+                    raise AssertionError('Compiler readiness was not observed')
+                time.sleep(.005)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return super().wait(timeout=timeout)
+process.subprocess.Popen = Child
+process.supervise([sys.executable,'-I','-B','-c',sys.argv[5]],sys.argv[2],float(sys.argv[6]))
+"""
+            command = [sys.executable, "-I", "-B", "-c", bootstrap,
+                       str(Path(__file__).resolve().parents[1]), str(output), str(ready),
+                       "expire" if timeout == .1 else "normal", fixture, str(timeout)]
             child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, env=env)
-            if cancel:
-                child.stdin.close()
+                                     stderr=subprocess.PIPE, close_fds=True)
             try:
+                if cancel:
+                    until = time.monotonic() + 5
+                    while not ready.exists():
+                        self.assertLess(time.monotonic(), until, "Compiler did not enter fixture")
+                        time.sleep(.005)
+                    child.stdin.close()
                 child.wait(timeout=10)
                 self.assertEqual(child.returncode, 0, child.stderr.read().decode())
                 return read_json(output)
             finally:
-                child.stdin.close()
-                if child.poll() is None:
-                    child.kill()
-                    child.wait()
-                child.stdout.close()
-                child.stderr.close()
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(child._handle.Close)
+                    cleanup.callback(child.stderr.close)
+                    cleanup.callback(child.stdout.close)
+                    try:
+                        # EOF lets the supervisor reap its compiler before the
+                        # owner itself exits, including on an assertion failure.
+                        child.stdin.close()
+                    finally:
+                        if child.poll() is None:
+                            try:
+                                child.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                child.kill()
+                                child.wait(timeout=10)
 
     def test_logs_are_drained_and_bounded(self):
         result = self.run_child("print('x' * 200000)")

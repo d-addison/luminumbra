@@ -177,7 +177,8 @@ TEST(ReplicationDeltaLoop, FullSnapshotModeStillWorks) {
     cond.latency_ticks = 1;
     cond.seed = 1;
     NetworkSim sim(cond);
-    ReplicationServer server; // delta compression OFF (default)
+    ReplicationServer server;
+    server.SetDeltaCompression(false); // Exercise the explicit full-snapshot fallback.
     server.AddClient(kClientId, &sim.A());
     ReplicationClient client(kClientId, &sim.B());
 

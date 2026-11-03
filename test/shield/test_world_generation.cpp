@@ -1,6 +1,8 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 #include <chrono> // For performance testing
 #include <functional>
+#include <future>
 #include <iostream> // For printing benchmark results
 #include <memory>   // For std::unique_ptr
 #include <numeric>  // For std::accumulate
@@ -62,10 +64,10 @@ protected:
         params_sky_world.base_amplitude = 10.0f;
     }
 
-    TerrainGenParams params_guaranteed_surface;
-    TerrainGenParams params_archipelago;
-    TerrainGenParams params_underwater_world;
-    TerrainGenParams params_sky_world;
+    TerrainGenParams params_guaranteed_surface = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_archipelago = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_underwater_world = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_sky_world = Luminumbra::Test::SyntheticTerrainParams();
 };
 
 /**
@@ -78,6 +80,8 @@ protected:
         world_system =
             std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params_underwater_world, 1337);
         water_system = std::make_unique<WaterSystem>(nullptr, world_system.get());
+        water_system->SetSimResolution(8);
+        water_system->SetHydrology(false, 0, 0);
         world_system->SetWaterSystem(water_system.get());
     }
 
@@ -103,7 +107,25 @@ TEST_F(WorldGenerationTest, ChunkIsGeneratedWithSDFAndHeightmap) {
 }
 
 TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
-    SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params_guaranteed_surface, 1337);
+    // Keep real generation pending: an unticked inline dispatch has already
+    // completed and published Idle before returning to its caller.
+    struct WorkerRelease {
+        std::promise<void> promise;
+        ~WorkerRelease() {
+            promise.set_value();
+        }
+    } release;
+    auto entered = std::make_shared<std::promise<void>>();
+    auto started = entered->get_future();
+    const auto resume = release.promise.get_future().share();
+    jobs.dispatch([entered, resume]() {
+        entered->set_value();
+        resume.wait();
+    });
+    started.get();
     const IVec3 coords{0, 0, 0};
 
     world_system.dispatch_generation_jobs({coords});
@@ -118,6 +140,8 @@ TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
     EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
     EXPECT_TRUE(chunk->mesh_vertices.empty());
     EXPECT_TRUE(chunk->mesh_indices.empty());
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(world_system.get_last_streaming_budget_stats().scheduled_meshing, 0u);
 }
 
 TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
@@ -405,6 +429,8 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
 
     SHIELD_WorldSystem world(&jobs, nullptr, params_sky_world, 1337);
     WaterSystem water(&jobs, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     world.SetWaterSystem(&water);
 
     auto chunk = std::make_shared<Chunk>(IVec3{0, 6, 0});

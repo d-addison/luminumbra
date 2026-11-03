@@ -24,7 +24,11 @@ local tooling rather than the maintained documentation tree.
 Use an isolated CMake preset from the repository root:
 
 ```sh
-cmake --preset debug
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
+cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset debug --parallel
 ctest --preset debug --no-tests=error --output-on-failure
 ```

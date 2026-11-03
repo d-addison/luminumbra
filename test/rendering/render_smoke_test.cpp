@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -242,7 +243,8 @@ std::string ReadRenderPipelineCombinedSources() {
 
 std::string JsonEscape(const std::string& value) {
     std::ostringstream escaped;
-    for (const unsigned char ch : value) {
+    for (const char character : value) {
+        const auto ch = static_cast<unsigned char>(character);
         switch (ch) {
             case '"':
                 escaped << "\\\"";
@@ -960,7 +962,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
 
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -995,7 +997,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     const unsigned char caustics_px[4] = {255, 255, 255, 255};
     GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
 
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -1181,7 +1183,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
         ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
         for (int y = kRes - 1; y >= 0; --y) {
             for (int x = 0; x < kRes; ++x) {
-                const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                const size_t i = (static_cast<size_t>(y) * kRes + static_cast<size_t>(x)) * 4;
                 ppm.put(static_cast<char>(px[i + 0]));
                 ppm.put(static_cast<char>(px[i + 1]));
                 ppm.put(static_cast<char>(px[i + 2]));
@@ -1641,14 +1643,14 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // tint multiply would zero the albedo, so author it at 1.0 below.
     std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
     auto set_row1 = [&](int id, int layer, float tiling) {
-        const size_t base = (static_cast<size_t>(256) + id) * 4u; // row 1
+        const size_t base = (static_cast<size_t>(256) + static_cast<size_t>(id)) * 4u; // row 1
         lut[base + 0] = static_cast<float>(layer) / 255.0f;
         lut[base + 1] = static_cast<float>(layer) / 255.0f;
         lut[base + 2] = std::min(tiling / 64.0f, 1.0f);
         lut[base + 3] = 1.0f; // has_texture
     };
     auto set_row2 = [&](int id, float albedo_scale) {
-        const size_t base = (static_cast<size_t>(2) * 256u + id) * 4u; // row 2
+        const size_t base = (static_cast<size_t>(2) * 256u + static_cast<size_t>(id)) * 4u; // row 2
         lut[base + 0] = 0.0f;         // emissive_intensity/scale (non-emissive)
         lut[base + 1] = albedo_scale; //  albedo_scale (G channel)
     };
@@ -1656,7 +1658,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // baked albedo by this, so it MUST be authored to 1.0 or textured plates go
     // black. Default no-op tint = [1,1,1].
     auto set_row3 = [&](int id) {
-        const size_t base = (static_cast<size_t>(3) * 256u + id) * 4u; // row 3
+        const size_t base = (static_cast<size_t>(3) * 256u + static_cast<size_t>(id)) * 4u; // row 3
         lut[base + 0] = 1.0f;
         lut[base + 1] = 1.0f;
         lut[base + 2] = 1.0f;
@@ -1688,13 +1690,17 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     GLuint fbo = 0, gpos = 0, gnorm = 0, galbedo = 0, gmat = 0, gdepth = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    auto make_color = [&](GLuint& t, GLenum ifmt, GLenum fmt, GLenum type, int attach) {
+    auto make_color = [&](GLuint& t, GLint ifmt, GLenum fmt, GLenum type, int attach) {
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
         glTexImage2D(GL_TEXTURE_2D, 0, ifmt, kRes, kRes, 0, fmt, type, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attach, GL_TEXTURE_2D, t, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(attach),
+                               GL_TEXTURE_2D,
+                               t,
+                               0);
     };
     make_color(gpos, GL_RGB16F, GL_RGB, GL_FLOAT, 0);
     make_color(gnorm, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1);
@@ -1856,7 +1862,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
             for (int y = kRes - 1; y >= 0; --y) { // flip to top-down
                 for (int x = 0; x < kRes; ++x) {
-                    const size_t i = (static_cast<size_t>(y) * kRes + x) * 4;
+                    const size_t i = (static_cast<size_t>(y) * kRes + static_cast<size_t>(x)) * 4;
                     ppm.put(static_cast<char>(frame[i + 0]));
                     ppm.put(static_cast<char>(frame[i + 1]));
                     ppm.put(static_cast<char>(frame[i + 2]));
@@ -1925,13 +1931,13 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             double mean = 0;
             for (float x : v)
                 mean += x;
-            mean /= v.size();
+            mean /= static_cast<double>(v.size());
             double var = 0;
             for (float x : v) {
                 double d = x - mean;
                 var += d * d;
             }
-            return static_cast<float>(std::sqrt(var / v.size()));
+            return static_cast<float>(std::sqrt(var / static_cast<double>(v.size())));
         };
         pr.shading_spatial_stddev[0] = stddev(shadeA);
         pr.shading_spatial_stddev[1] = stddev(shadeB);
@@ -2244,10 +2250,18 @@ TEST(RenderSmokeTest, ProceduralLeafHasACutoutAndConsistentAlbedo) {
         glReadBuffer(GL_COLOR_ATTACHMENT2);
         std::array<unsigned char, 4> corner{};
         glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner.data());
-        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, centers[far_lod].data());
+        glReadPixels(32,
+                     32,
+                     1,
+                     1,
+                     GL_RGBA,
+                     GL_UNSIGNED_BYTE,
+                     centers[static_cast<std::size_t>(far_lod)].data());
         EXPECT_EQ(corner[3], 0) << "the empty corner must reveal the scene behind the leaf";
-        EXPECT_GT(centers[far_lod][1], 20) << "the leaf center must retain green reflectance";
-        EXPECT_GT(centers[far_lod][3], 180) << "the leaf must remain a matte surface";
+        EXPECT_GT(centers[static_cast<std::size_t>(far_lod)][1], 20)
+            << "the leaf center must retain green reflectance";
+        EXPECT_GT(centers[static_cast<std::size_t>(far_lod)][3], 180)
+            << "the leaf must remain a matte surface";
     }
     EXPECT_EQ(centers[0], centers[1]);
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
@@ -2324,12 +2338,12 @@ public:
         glDeleteVertexArrays(1, &vao);
     }
     void texture(int unit, const std::vector<glm::vec4>& pixels, int rows = 1) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D,
                      0,
                      GL_RGBA32F,
-                     static_cast<GLsizei>(pixels.size() / rows),
+                     static_cast<GLsizei>(pixels.size() / static_cast<std::size_t>(rows)),
                      rows,
                      0,
                      GL_RGBA,
@@ -2371,8 +2385,8 @@ TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     for (int x = 0; x < 32; ++x) {
         // Float literals: MSVC reports an int-to-float narrowing conversion for an
         // int ternary here, and the render tests build with warnings as errors.
-        EXPECT_FLOAT_EQ(pixels[x].r, x < 16 ? 0.0f : 1.0f);
-        EXPECT_FLOAT_EQ(pixels[x].g, x < 16 ? 1.0f : 0.0f);
+        EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].r, x < 16 ? 0.0f : 1.0f);
+        EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].g, x < 16 ? 1.0f : 0.0f);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
@@ -2459,15 +2473,15 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
         ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
         const GLuint vertex =
             CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
-        programs[path] = glCreateProgram();
-        glAttachShader(programs[path], vertex);
-        glAttachShader(programs[path], fragment);
-        glLinkProgram(programs[path]);
+        programs[static_cast<std::size_t>(path)] = glCreateProgram();
+        glAttachShader(programs[static_cast<std::size_t>(path)], vertex);
+        glAttachShader(programs[static_cast<std::size_t>(path)], fragment);
+        glLinkProgram(programs[static_cast<std::size_t>(path)]);
         glDeleteShader(vertex);
         glDeleteShader(fragment);
         GLint linked = GL_FALSE;
-        glGetProgramiv(programs[path], GL_LINK_STATUS, &linked);
-        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[path]);
+        glGetProgramiv(programs[static_cast<std::size_t>(path)], GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[static_cast<std::size_t>(path)]);
     }
     FullscreenFloatProbe probe;
     float largest_shadow = 0, largest_difference = 0;
@@ -2476,7 +2490,7 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
             for (int condition = 0; condition < 4; ++condition) {
                 std::array<std::array<glm::vec4, FullscreenFloatProbe::width>, 2> samples{};
                 for (int path = 0; path < 2; ++path) {
-                    const GLuint program = programs[path];
+                    const GLuint program = programs[static_cast<std::size_t>(path)];
                     glUseProgram(program);
                     glUniform1i(glGetUniformLocation(program, "u_cloudShadowEnabled"),
                                 condition != 1);
@@ -2494,15 +2508,18 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
                                 -2500,
                                 condition == 3 ? 950.0f : 17.0f,
                                 -1400);
-                    samples[path] = probe.draw();
+                    samples[static_cast<std::size_t>(path)] = probe.draw();
                 }
                 for (int i = 0; i < FullscreenFloatProbe::width; ++i) {
                     largest_difference =
-                        std::max(largest_difference, std::abs(samples[0][i].r - samples[1][i].r));
-                    largest_shadow = std::max(largest_shadow, samples[0][i].r);
+                        std::max(largest_difference,
+                                 std::abs(samples[0][static_cast<std::size_t>(i)].r -
+                                          samples[1][static_cast<std::size_t>(i)].r));
+                    largest_shadow =
+                        std::max(largest_shadow, samples[0][static_cast<std::size_t>(i)].r);
                     if (condition != 0) {
-                        EXPECT_FLOAT_EQ(samples[0][i].r, 0);
-                        EXPECT_FLOAT_EQ(samples[1][i].r, 0);
+                        EXPECT_FLOAT_EQ(samples[0][static_cast<std::size_t>(i)].r, 0);
+                        EXPECT_FLOAT_EQ(samples[1][static_cast<std::size_t>(i)].r, 0);
                     }
                 }
             }
@@ -2563,7 +2580,7 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
                                               "u_caustics_texture",
                                               "u_underwater_texture"};
     for (int i = 0; i < 6; ++i)
-        glUniform1i(glGetUniformLocation(program, samplers[i]), i);
+        glUniform1i(glGetUniformLocation(program, samplers[static_cast<std::size_t>(i)]), i);
     probe.texture(0, {glm::vec4(0.3f, 0.2f, 0.1f, 1.0f)});
     probe.texture(2, {glm::vec4(0.5f, 0.5f, 1.0f, 1.0f)});
     probe.texture(3, {glm::vec4(0.5f, 0.5f, 0.0f, 0.0f)});
@@ -2717,7 +2734,7 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     // A bright foreground object may neither emit shafts nor receive the sky proxy.
     std::vector<glm::vec4> depths(32, glm::vec4(0.0f));
     for (int x = 14; x < 22; ++x)
-        depths[x] = glm::vec4(0.5f);
+        depths[static_cast<std::size_t>(x)] = glm::vec4(0.5f);
     probe.texture(0, {glm::vec4(1.0f)});
     probe.texture(1, depths);
     const auto occluded = probe.draw();
@@ -2790,12 +2807,12 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
         for (int x = 0; x < size; ++x) {
             const float value = (x + y) % 2 ? 0.7f : 0.2f;
             for (int c = 0; c < 3; ++c)
-                scene[(y * size + x) * 4 + c] = value;
+                scene[static_cast<std::size_t>((y * size + x) * 4 + c)] = value;
         }
     }
     const auto upload = [&](int unit, const std::vector<float>& pixels) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -2807,8 +2824,8 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
     std::vector<float> normals(size * size * 4, 0.0f);
     const auto normal = [&](float x, float y) {
         for (int i = 0; i < size * size; ++i) {
-            normals[i * 4] = x;
-            normals[i * 4 + 1] = y;
+            normals[static_cast<std::size_t>(i * 4)] = x;
+            normals[static_cast<std::size_t>(i * 4 + 1)] = y;
         }
         upload(2, normals);
     };
@@ -2900,8 +2917,8 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
     std::array<GLuint, 3> inputs{};
     glGenTextures(3, inputs.data());
     const auto upload = [&](int unit, const std::vector<glm::vec4>& pixels) {
-        glActiveTexture(GL_TEXTURE0 + unit);
-        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[static_cast<std::size_t>(unit)]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -3023,14 +3040,19 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
         int opaque = 0, partial = 0;
         float max_error = 0, clear_luma = 0, storm_luma = 0;
         for (int i = 0; i < size * size; ++i) {
-            if (mask[i].a < 0.05f)
+            if (mask[static_cast<std::size_t>(i)].a < 0.05f)
                 continue;
-            opaque += mask[i].a > 0.99f;
-            partial += mask[i].a > 0.1f && mask[i].a < 0.9f;
+            opaque += mask[static_cast<std::size_t>(i)].a > 0.99f;
+            partial += mask[static_cast<std::size_t>(i)].a > 0.1f &&
+                       mask[static_cast<std::size_t>(i)].a < 0.9f;
             for (int channel = 0; channel < 3; ++channel)
-                max_error = std::max(max_error, std::abs(storm[i][channel] - expected[i][channel]));
-            clear_luma += glm::dot(glm::vec3(clear[i]), glm::vec3(0.299f, 0.587f, 0.114f));
-            storm_luma += glm::dot(glm::vec3(storm[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+                max_error = std::max(max_error,
+                                     std::abs(storm[static_cast<std::size_t>(i)][channel] -
+                                              expected[static_cast<std::size_t>(i)][channel]));
+            clear_luma += glm::dot(glm::vec3(clear[static_cast<std::size_t>(i)]),
+                                   glm::vec3(0.299f, 0.587f, 0.114f));
+            storm_luma += glm::dot(glm::vec3(storm[static_cast<std::size_t>(i)]),
+                                   glm::vec3(0.299f, 0.587f, 0.114f));
         }
         EXPECT_GT(opaque, 200);
         EXPECT_GT(partial, 20);
@@ -3044,7 +3066,9 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
         const auto identity = pixels();
         for (int i = 0; i < size * size; ++i)
             for (int channel = 0; channel < 3; ++channel)
-                ASSERT_NEAR(identity[i][channel], clear[i][channel], 0.0002f);
+                ASSERT_NEAR(identity[static_cast<std::size_t>(i)][channel],
+                            clear[static_cast<std::size_t>(i)][channel],
+                            0.0002f);
     }
     // A blade against cleared sky must still occlude shafts at its true alpha,
     // even though the G-buffer depth contains no terrain there. Sampling the
@@ -3092,8 +3116,10 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
     float silhouette_error = 0;
     for (int i = 0; i < size * size; ++i)
         for (int channel = 0; channel < 3; ++channel)
-            silhouette_error = std::max(
-                silhouette_error, std::abs(actual_rays[i][channel] - occluded_rays[i][channel]));
+            silhouette_error =
+                std::max(silhouette_error,
+                         std::abs(actual_rays[static_cast<std::size_t>(i)][channel] -
+                                  occluded_rays[static_cast<std::size_t>(i)][channel]));
     EXPECT_LT(silhouette_error, 0.0002f)
         << "soft grass silhouettes must occlude rays before the common weather grade";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
@@ -3146,9 +3172,9 @@ TEST(RenderSmokeTest, GrassRemainsVisibleInUpperFrameAndOnRisingGround) {
         glDisable(GL_RASTERIZER_DISCARD);
         glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
         for (int vertex = 0; vertex < 12; ++vertex) {
-            EXPECT_NEAR(positions[vertex * 4 + 3], 1.0f, 0.001f);
-            EXPECT_GE(positions[vertex * 4 + 1], 0.48f);
-            EXPECT_LE(positions[vertex * 4 + 1], 0.76f)
+            EXPECT_NEAR(positions[static_cast<std::size_t>(vertex * 4 + 3)], 1.0f, 0.001f);
+            EXPECT_GE(positions[static_cast<std::size_t>(vertex * 4 + 1)], 0.48f);
+            EXPECT_LE(positions[static_cast<std::size_t>(vertex * 4 + 1)], 0.76f)
                 << "visible uphill grass must not be collapsed into an offscreen point";
         }
     }
@@ -3199,8 +3225,8 @@ TEST(RenderSmokeTest, GrassWindBendIsBoundedByBladeHeight) {
     glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     for (int vertex = 0; vertex < 12; ++vertex) {
-        const float x = positions[vertex * 4];
-        const float y = positions[vertex * 4 + 1];
+        const float x = positions[static_cast<std::size_t>(vertex * 4)];
+        const float y = positions[static_cast<std::size_t>(vertex * 4 + 1)];
         EXPECT_LE(std::abs(x), 0.035f + 0.20f * 0.5f + 0.001f);
         if (y < 0) {
             EXPECT_LE(std::abs(x), 0.036f) << "wind must leave the root anchored";
@@ -3259,7 +3285,7 @@ TEST(RenderSmokeTest, GrassBladeNarrowsToATip) {
     const auto width = [&](int y) {
         int count = 0;
         for (int x = 0; x < size; ++x)
-            count += pixels[(y * size + x) * 4 + 3] > 128;
+            count += pixels[static_cast<std::size_t>((y * size + x) * 4 + 3)] > 128;
         return count;
     };
     const int lower_width = width(36);
@@ -3331,7 +3357,8 @@ TEST(RenderSmokeTest, RoughAmbientReflectionMatchesIntegratedGgx) {
         for (const float ndv : {1.0f, 0.5f, 0.1f, 0.02f}) {
             SCOPED_TRACE(::testing::Message() << "roughness=" << roughness << " N.V=" << ndv);
             const auto pixel = render(roughness, ndv);
-            const double quantized_roughness = std::lround(roughness * 255.0f) / 255.0;
+            const double quantized_roughness =
+                static_cast<double>(std::lround(roughness * 255.0f)) / 255.0;
             const auto normal = DecodeOctahedral(128.0f / 255.0f, 128.0f / 255.0f);
             const double actual_ndv = ndv * normal[2] - std::sqrt(1.0f - ndv * ndv) * normal[0];
             const double reference = onscreen(integrate(quantized_roughness, actual_ndv));
@@ -3524,7 +3551,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     // --- Synthetic G-buffer (1x1 textures, value-replicated across the quad) ---
     // A crystal fragment: view-space position in front of the camera, +Z normal,
     // dark albedo so the emission dominates, material id 6 in the normal alpha.
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -3549,7 +3576,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
 
     // Shadow cascades + terrain array as 1x1x1 arrays (distinct sampler types
     // need distinct units; an unbound/shared sampler is undefined).
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -3851,7 +3878,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
-    auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -3860,7 +3887,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         return t;
     };
-    auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
+    auto make_array_tex = [&](GLint ifmt, GLenum fmt, GLenum type, const void* data) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -4077,7 +4104,7 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
     GLuint integrated = make_volume();
 
     // Shadow samplers need valid array bindings even though the lights are black.
-    auto make_array = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* px) {
+    auto make_array = [&](GLint ifmt, GLenum fmt, GLenum type, const void* px) {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D_ARRAY, t);
@@ -4441,12 +4468,260 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
     EXPECT_NE(source.find("BuildFarLodWorkerTile"), std::string::npos);
     EXPECT_NE(source.find("rebase_authoritative_tile"), std::string::npos);
-    EXPECT_NE(source.find("GenerateChunkData(scratch, 1)"), std::string::npos);
-    const std::size_t stale_check = source.find("const bool snapshot_stale");
-    const std::size_t owner_save = source.find("save_tile(result.tile");
+    const std::string worker_signature = "FarLodWorkerBuildOutcome BuildFarLodWorkerTile(";
+    const std::string generation_call = "world.GenerateChunkData(generated_chunk, 1);";
+    const auto extract_worker = [&worker_signature](const std::string& text) {
+        const std::size_t begin = text.find(worker_signature);
+        if (begin == std::string::npos)
+            return std::string{};
+        // Namespace-level functions end at an unindented closing brace. Inner
+        // scopes in this source are indented, including the generation loop.
+        const std::size_t end = text.find("\n}", begin);
+        return end == std::string::npos ? std::string{} : text.substr(begin, end + 2 - begin);
+    };
+    const auto worker_generates_chunk = [&extract_worker,
+                                         &generation_call](const std::string& text) {
+        return extract_worker(text).find(generation_call) != std::string::npos;
+    };
+    ASSERT_FALSE(extract_worker(source).empty());
+    EXPECT_TRUE(worker_generates_chunk(source));
+
+    // Removing the live call must fail the same oracle even if an unrelated
+    // function or comment elsewhere still contains the exact generation token.
+    std::string missing_generation = source;
+    const std::size_t live_call =
+        missing_generation.find(generation_call, missing_generation.find(worker_signature));
+    ASSERT_NE(live_call, std::string::npos);
+    missing_generation.erase(live_call, generation_call.size());
+    missing_generation += "\n" + generation_call;
+    EXPECT_NE(missing_generation.find(generation_call), std::string::npos);
+    EXPECT_FALSE(worker_generates_chunk(missing_generation));
+    EXPECT_FALSE(worker_generates_chunk(generation_call));
+    EXPECT_FALSE(worker_generates_chunk(worker_signature + generation_call));
+    EXPECT_TRUE(worker_generates_chunk(worker_signature + "\r\n" + generation_call + "\r\n}\r\n"));
+    const std::size_t stale_check = source.find("if (!build_result_current(result)");
+    const std::size_t owner_save = source.find("m_tile_saves.enqueue(");
     ASSERT_NE(stale_check, std::string::npos);
     ASSERT_NE(owner_save, std::string::npos);
     EXPECT_LT(stale_check, owner_save);
+
+    // Scope the contract to the live definitions: an unrelated/dead helper's
+    // generation call cannot prove that the dispatched worker completes its
+    // halo. Each fixed fragment list walks only its bounded source section.
+    const auto section = [](std::string_view text, std::string_view begin, std::string_view end) {
+        const std::size_t first = text.find(begin);
+        EXPECT_NE(first, std::string_view::npos) << begin;
+        if (first == std::string_view::npos)
+            return std::string_view{};
+        const std::size_t last = text.find(end, first + begin.size());
+        EXPECT_NE(last, std::string_view::npos) << end;
+        if (last == std::string_view::npos)
+            return std::string_view{};
+        return text.substr(first, last - first);
+    };
+    const auto expect_ordered = [](std::string_view text,
+                                   std::initializer_list<std::string_view> fragments) {
+        std::size_t offset = 0;
+        for (const std::string_view fragment : fragments) {
+            const std::size_t found = text.find(fragment, offset);
+            ASSERT_NE(found, std::string_view::npos) << fragment;
+            offset = found + fragment.size();
+        }
+    };
+    const std::string world_source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
+    ASSERT_FALSE(world_source.empty());
+    const auto capture_body = section(world_source,
+                                      "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(",
+                                      "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(");
+    expect_ordered(
+        capture_body,
+        {("snapshot->capture_epoch = m_far_lod_capture_epoch.fetch_add(1u, "
+          "std::memory_order_acq_rel) + 1u;"),
+         "snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);",
+         ("snapshot->authority_revision = "
+          "m_far_lod_authority_revision.load(std::memory_order_acquire);"),
+         "snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);",
+         "snapshot->min_chunk_coords = IVec2(min_chunk_x, min_chunk_z);",
+         "entry.voxel_revision = chunk->voxel_revision();",
+         "entry.authority_durable = !chunk->is_voxel_data_dirty();",
+         "entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);",
+         "snapshot->entries.push_back(std::move(entry));"});
+
+    const auto worker = section(
+        source, "FarLodWorkerBuildOutcome BuildFarLodWorkerTile(", "FarLodSystem::FarLodSystem()");
+    expect_ordered(
+        worker,
+        {"tile.params_hash != snapshot.params_hash",
+         "world.acquire_worldgen_sample_scope();",
+         "rebase_authoritative_tile(world, std::move(tile), tier, rx, rz, snapshot.params_hash)",
+         "for (const Systems::FarLodSdfSnapshotEntry& entry : snapshot.entries)",
+         "entry.provenance != ChunkSdfProvenance::LoadedOrEdited ||",
+         "!is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)",
+         "continue;",
+         "entry.as_reduction_snapshot();",
+         "overlay_authority(reduction, belongs_to_region(entry, rx, rz),"});
+    expect_ordered(
+        worker,
+        {"if (!authority_spans.empty())",
+         "world.acquire_worldgen_sample_scope();",
+         "world.GetTerrainHeightAt(",
+         "for (const auto& [chunk_z, chunk_x, chunk_y] : required)",
+         "if (exists != pending.end())",
+         "continue;",
+         "Chunk generated_chunk(IVec3(chunk_x, chunk_y, chunk_z));",
+         "world.GenerateChunkData(generated_chunk, 1);",
+         "generated.source_kind = World::FarLodBrickSourceKind::RegenerableCache;",
+         "generated.sdf_data = std::move(generated_chunk.sdf_data);",
+         "generated.material_data = std::move(generated_chunk.material_data);",
+         "if (!reduce_world_brick(tier,",
+         "generated,",
+         "if (!add_or_overlay_world_brick(pending, std::move(incoming), false, outcome.error))",
+         "return outcome;",
+         "if (!finalize_assembly(assembly, pending, outcome.error))",
+         "return outcome;",
+         "if (!derive_assembly_water(tile, assembly, outcome.changed, outcome.error))",
+         "return outcome;",
+         "World::MarchingCubes::GenerateFarLodRegionMesh(tile, assembly, outcome.mesh);",
+         "outcome.ok = true;"});
+    EXPECT_EQ(worker.find("save_tile("), std::string_view::npos);
+    EXPECT_EQ(worker.find("find_streamed_chunk("), std::string_view::npos);
+    EXPECT_EQ(worker.find("snapshot_streamed_chunks("), std::string_view::npos);
+
+    const auto rebase = section(source, "rebase_authoritative_tile(", "u32 far_brick_crc(");
+    expect_ordered(
+        rebase,
+        {"World::BuildPristineFarLodTile(world, tier, rx, rz, params_hash)",
+         "descriptor.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative",
+         "continue;",
+         "fresh.sdf_bricks.push_back(descriptor);",
+         "fresh.sdf_density_q.insert(",
+         "fresh.sdf_material.insert(",
+         "fresh.edited = true;"});
+
+    const auto schedule =
+        section(source, "void FarLodSystem::update(", "void FarLodSystem::set_horizon(");
+    expect_ordered(
+        schedule,
+        {"shared_ptr<const Systems::FarLodSdfSnapshot> sdf_snapshot",
+         "world_system.capture_far_lod_sdf_snapshot(want.rx, want.rz);",
+         "if (!sdf_snapshot)",
+         "continue;",
+         "const bool persistence_allowed =",
+         "std::none_of(sdf_snapshot->entries.begin(),",
+         "return entry.provenance == ChunkSdfProvenance::LoadedOrEdited &&",
+         "!entry.authority_durable;",
+         "m_job_system->dispatch_batch(",
+         "[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir, persistence_allowed]",
+         "BuildFarLodWorkerTile(*world, *sdf_snapshot, tier, rx, rz, save_dir);",
+         "result.epoch = epoch;",
+         "result.sdf_snapshot = sdf_snapshot;",
+         "result.capture_epoch = sdf_snapshot->capture_epoch;",
+         "result.params_hash = sdf_snapshot->params_hash;",
+         "result.authority_revision = sdf_snapshot->authority_revision;",
+         "result.region_authority_revision = sdf_snapshot->region_authority_revision;",
+         "result.persistence_allowed = persistence_allowed;",
+         "result.mesh = std::move(outcome.mesh);",
+         "result.tile = std::move(tile);"});
+
+    // Both spellings construct the same guard in the enclosing scope. Require
+    // publication immediately after acquiring the shared mutex, on both the
+    // failed-build and successful-build paths, with no intervening scope exit.
+    const auto has_guarded_completion = [](std::string_view text) {
+        std::string compact;
+        for (const char ch : text) {
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+                compact.push_back(ch);
+        }
+        const std::string publish = "shared->completed.push_back(std::move(result));";
+        return compact.find("std::lock_guard<std::mutex>lock(shared->mutex);" + publish) !=
+                   std::string::npos ||
+               compact.find("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,lock,shared->mutex,"
+                            "\"Farbuildlockwait\");" +
+                            publish) != std::string::npos;
+    };
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "if (!outcome.ok)", "World::FarLodTile& tile = outcome.tile;")));
+    EXPECT_TRUE(has_guarded_completion(
+        section(schedule, "result.tile = std::move(tile);", "JobPriority::Normal")));
+
+    const std::string plain_guard = "std::lock_guard<std::mutex> lock(shared->mutex);";
+    const std::string profiled_guard =
+        "LUMIN_PROFILE_LOCK(\r\n std::lock_guard<std::mutex>, lock, shared->mutex, "
+        "\"Far build lock wait\");";
+    const std::string publication = "shared->completed.push_back(std::move(result));";
+    for (const auto& guard : {plain_guard, profiled_guard}) {
+        EXPECT_TRUE(has_guarded_completion(guard + "\n" + publication));
+        EXPECT_FALSE(has_guarded_completion("{" + guard + "}\n" + publication));
+        EXPECT_FALSE(has_guarded_completion(publication + guard));
+        std::string wrong_mutex = guard;
+        wrong_mutex.replace(wrong_mutex.find("shared->mutex"), 13, "other->mutex");
+        EXPECT_FALSE(has_guarded_completion(wrong_mutex + publication));
+        EXPECT_FALSE(has_guarded_completion(guard));
+    }
+    EXPECT_FALSE(has_guarded_completion(publication));
+    EXPECT_FALSE(has_guarded_completion(""));
+    EXPECT_FALSE(has_guarded_completion("LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>"));
+
+    const auto admission =
+        section(source, "bool FarLodSystem::build_result_current(", "void FarLodSystem::update(");
+    expect_ordered(
+        admission,
+        {"return m_world && result.epoch == m_epoch && result.sdf_snapshot &&",
+         "result.capture_epoch == result.sdf_snapshot->capture_epoch &&",
+         "result.params_hash == result.sdf_snapshot->params_hash &&",
+         "result.params_hash == m_params_hash &&",
+         "result.authority_revision == result.sdf_snapshot->authority_revision &&",
+         "result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&",
+         "m_world->far_lod_region_authority_revision(result.rx, result.rz) &&",
+         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "if (!build_result_current(result) || result.authority_build_failed ||",
+         "result.mesh.vertices.empty() || result.mesh.indices.empty())",
+         "++m_stats.builds_failed_total;",
+         "continue;",
+         "if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed)",
+         "m_tile_saves.enqueue(",
+         "result.save_dir, std::move(result.tile), m_world, result.authority_revision)",
+         "m_ready_builds.push_back(std::move(result));"});
+    const auto integrate = section(
+        source, "void FarLodSystem::integrate_completed_builds()", "void FarLodSystem::update(");
+    expect_ordered(
+        integrate,
+        {"queue_completed_saves();",
+         "const bool current = build_result_current(head);",
+         "!budget.admit(head.upload_bytes, m_frame - head.queued_frame, m_pending.size())",
+         "m_ready_builds.pop_front();",
+         "if (!current)",
+         "++m_stats.builds_failed_total;",
+         "continue;",
+         "const bool persistence_pending =",
+         "result.tile_changed && !result.save_dir.empty() && !result.persistence_allowed;",
+         "glGenVertexArrays(1, &region.vao);",
+         "region.persistence_pending = persistence_pending;",
+         "m_residents.emplace(key, region);"});
+    EXPECT_EQ(integrate.find("save_tile("), std::string_view::npos);
+
+    const auto current = section(world_source,
+                                 "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(",
+                                 "SHIELD_WorldSystem::find_streamed_chunk(");
+    expect_ordered(current,
+                   {"snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||",
+                    "snapshot.authority_revision !=",
+                    "m_far_lod_authority_revision.load(std::memory_order_acquire)",
+                    "return false;",
+                    "!HasPublishedFarLodSdf(current.get()) ||",
+                    "current->voxel_revision() != entry.voxel_revision ||",
+                    "current->sdf_provenance() != entry.provenance",
+                    "return false;",
+                    "++captured_resident_sdfs;",
+                    "m_activation_index.columns();",
+                    "snapshot.min_chunk_coords.x + dx, snapshot.min_chunk_coords.y + dz",
+                    "HasPublishedFarLodSdf(chunk.get())",
+                    "++published_sdfs;",
+                    "return published_sdfs == captured_resident_sdfs;"});
+    const auto drain = section(
+        source, "void FarLodSystem::prepare_world_swap()", "void FarLodSystem::release_region(");
+    expect_ordered(drain, {"wait_for_builds();", "m_world = nullptr;", "++m_epoch;"});
 }
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
@@ -4931,6 +5206,53 @@ public:
         return Draw(
             mesh, origin, view, 1040, cells, false, arrival, child_y, camera, false, arrival_child);
     }
+    float NearClippedBoundary(std::span<const FarWorldLiveCell> cells, int sample_column) {
+        const glm::dvec3 origin(0, -256, -1024), camera(0, 200, 0);
+        const auto view = glm::lookAt(glm::vec3(0), glm::vec3(0, -200, -200), glm::vec3(0, 1, 0));
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        // World Y=0 is the exact local Y=256 boundary. All endpoints lie
+        // outside the 176 m vertex guard; only the apex crosses the near plane.
+        mesh.vertices = {{{-120, 256, 624}, {0, 1, 0}, 1},
+                         {{120, 256, 624}, {0, 1, 0}, 1},
+                         {{0, 256, 1324}, {0, 1, 0}, 1}};
+        const auto projection =
+            ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto relative = mesh.vertices[i].position + glm::vec3(origin - camera);
+            EXPECT_GT(glm::length(relative), 176);
+            const auto clip = projection * view * glm::vec4(relative, 1);
+            if (i < 2) {
+                EXPECT_GT(clip.w - clip.z, 0);
+            } else {
+                EXPECT_LT(clip.w - clip.z, 0);
+            }
+        }
+        // Give the offscreen neighbours different constant Y planes. If either
+        // piece of the clipped quad uses ID 0 or 2 instead of source ID 1,
+        // farTileLocal restores Y=240 or Y=272 and selects the wrong owner.
+        for (const float y : {240.0f, 272.0f}) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                auto vertex = mesh.vertices[i];
+                vertex.position.x += 100000;
+                vertex.position.y = y;
+                mesh.vertices.push_back(vertex);
+            }
+        }
+        mesh.indices = {3, 4, 5, 2, 0, 1, 6, 7, 8};
+        return Draw(mesh,
+                    origin,
+                    view,
+                    1040,
+                    cells,
+                    false,
+                    false,
+                    {0, 256},
+                    camera,
+                    false,
+                    -1,
+                    sample_column);
+    }
 
 private:
     GLint Location(const char* name) const {
@@ -4949,7 +5271,8 @@ private:
                glm::vec2 child_y,
                const glm::dvec3& camera = glm::dvec3(0),
                bool remap_arrival_origin = true,
-               int arrival_child = -1) {
+               int arrival_child = -1,
+               int sample_column = kProbeEdge / 2) {
         glUseProgram(program_);
         const auto projection =
             ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
@@ -5012,7 +5335,7 @@ private:
             SubmitLive(mesh, glm::vec3(centre), projection, view, cells);
         std::array<float, 4> pixel{};
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(kProbeEdge / 2, kProbeEdge / 2, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        glReadPixels(sample_column, kProbeEdge / 2, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
         return pixel[2];
     }
@@ -5065,6 +5388,7 @@ private:
         glUniform1i(Location("u_farWorldLadder"), 0);
         glUniform1i(Location("u_useInstanceOrigin"), 1);
         glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);
+        pool_.mark_submitted(allocation.block_index);
         glBindVertexArray(0);
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
         pool_.free(handle);
@@ -5101,16 +5425,16 @@ TEST(RenderSmokeTest, FarWorldLiveEdgesCaveCeilingsAndCullerReplacementSubmissio
     ASSERT_TRUE(context.ready()) << context.error();
     FarWorldShaderProbe probe;
     ASSERT_TRUE(probe.Init());
-    const std::array floor{FarWorldLiveCell{0, 0, -13, 0}};
+    const std::array floor{FarWorldLiveCell{0, 0, -13, kFarWorldTerrainReady}};
     EXPECT_EQ(probe.Point({8, 8, -200}, 1040, floor), 0);
     EXPECT_LT(probe.Point({8, 8, -200}, 1040, floor, true), -199);
     EXPECT_LT(probe.Point({8, 17, -200}, 1040, floor), -199);
     // Exact upper Y boundary; rotated boundary planes are covered separately below.
-    const std::array below{FarWorldLiveCell{0, -1, -13, 0}};
+    const std::array below{FarWorldLiveCell{0, -1, -13, kFarWorldTerrainReady}};
     EXPECT_LT(probe.Point({0, 0, -200}, 1040, below), -199);
     EXPECT_EQ(probe.Point({1, -.01f, -200}, 1040, below), 0);
     EXPECT_LT(probe.Point({8, -8, -200}, 1040, floor), -199);
-    const std::array negative{FarWorldLiveCell{-1, -2, -13, 0}};
+    const std::array negative{FarWorldLiveCell{-1, -2, -13, kFarWorldTerrainReady}};
     EXPECT_EQ(probe.Point({-8, -24, -200}, 1040, negative), 0);
     EXPECT_LT(probe.Point({-8, -24, -200}, 1040, negative, true), -199);
     EXPECT_LT(probe.Point({-16.01f, -24, -200}, 1040, negative), -199);
@@ -5146,11 +5470,12 @@ TEST(RenderSmokeTest, FarWorldRotatedCamerasPreserveHalfOpenChunkBoundaries) {
                 const auto centre = boundary.centre + translation;
                 FarWorldLiveCell cell;
                 ASSERT_TRUE(FarWorldChunkCell({centre.x, centre.y, centre.z}, cell));
+                cell.reserved = kFarWorldTerrainReady;
                 const std::array owner{cell};
                 std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
                 --lower_coords[static_cast<std::size_t>(boundary.axis)];
-                const std::array lower{
-                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const std::array lower{FarWorldLiveCell{
+                    lower_coords[0], lower_coords[1], lower_coords[2], kFarWorldTerrainReady}};
                 const auto expected_depth = -static_cast<float>(glm::length(centre - camera));
                 // The exact edge belongs to the upper cell, never the lower one.
                 EXPECT_NEAR(
@@ -5209,11 +5534,12 @@ TEST(RenderSmokeTest, FarWorldCanonicalTileLocalsOwnExactCellsWithFractionalCame
                 cell.x += shift;
                 cell.y += shift;
                 cell.z += shift;
+                cell.reserved = kFarWorldTerrainReady;
                 const std::array owner{cell};
                 std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
                 --lower_coords[static_cast<std::size_t>(boundary.axis)];
-                const std::array lower{
-                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const std::array lower{FarWorldLiveCell{
+                    lower_coords[0], lower_coords[1], lower_coords[2], kFarWorldTerrainReady}};
                 const auto depth =
                     -static_cast<float>(glm::length(origin + glm::dvec3(boundary.local) - camera));
                 // Only the asserted integer cell owns the exact boundary. A
@@ -5244,8 +5570,8 @@ TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
     ASSERT_TRUE(probe.Init());
     const glm::dvec3 origin(-1024, -256, -1024);
     const glm::dvec3 camera(-53.39f, -67.13f, 43.21f);
-    const std::array owner{FarWorldLiveCell{-1, -2, -13, 0}};
-    const std::array lower{FarWorldLiveCell{-2, -2, -13, 0}};
+    const std::array owner{FarWorldLiveCell{-1, -2, -13, kFarWorldTerrainReady}};
+    const std::array lower{FarWorldLiveCell{-2, -2, -13, kFarWorldTerrainReady}};
     const auto sample = [&](glm::vec3 local, int plane_axis, auto cells) {
         return probe.TileBoundary(
             origin, local, camera, plane_axis, cells, false, {0, 256}, -1, true);
@@ -5264,6 +5590,31 @@ TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
     EXPECT_LT(sample(below, 1, owner), -176);
     EXPECT_LT(sample(above, 1, lower), -176);
     EXPECT_EQ(sample(above, 1, owner), 0);
+}
+
+TEST(RenderSmokeTest, FarWorldNearClippedBoundaryRetainsSourcePrimitiveId) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    const std::array owner{FarWorldLiveCell{-5, 0, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, 0, -13, kFarWorldTerrainReady}};
+    const std::array below{FarWorldLiveCell{-5, -1, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, -1, -13, kFarWorldTerrainReady}};
+    const std::array above{FarWorldLiveCell{-5, 1, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, 1, -13, kFarWorldTerrainReady}};
+    // At centre-row NDC X=+/-174/257 these samples lie on opposite sides of
+    // either diagonal of the near-clipped quad, covering both generated pieces.
+    // They intersect world Y=0, Z=-200 at view Z=-sqrt(200^2 + 200^2).
+    for (const int column : {41, 215}) {
+        SCOPED_TRACE(::testing::Message() << "column=" << column);
+        EXPECT_NEAR(probe.NearClippedBoundary({}, column), -std::sqrt(80000.0f), .01);
+        EXPECT_EQ(probe.NearClippedBoundary(owner, column), 0);
+        EXPECT_NEAR(probe.NearClippedBoundary(below, column), -std::sqrt(80000.0f), .01);
+        EXPECT_NEAR(probe.NearClippedBoundary(above, column), -std::sqrt(80000.0f), .01);
+    }
 }
 
 TEST(RenderSmokeTest, FarWorldCanonicalArrivalUsesLocalChildAndSpanBoundaries) {
@@ -5593,7 +5944,7 @@ public:
                 for (GLuint column = 0; column < 4; ++column) {
                     glDisableVertexAttribArray(3 + column);
                     glm::vec4 value(0);
-                    value[column] = 1;
+                    value[static_cast<int>(column)] = 1;
                     glVertexAttrib4fv(3 + column, &value[0]);
                 }
                 glVertexAttrib3f(7, 1, 1, 1);
@@ -5994,13 +6345,13 @@ std::string LinkedFragmentSource(GLuint program) {
     glGetAttachedShaders(program, static_cast<GLsizei>(stages.size()), &count, stages.data());
     for (GLsizei i = 0; i < count; ++i) {
         GLint type = 0, length = 0;
-        glGetShaderiv(stages[i], GL_SHADER_TYPE, &type);
+        glGetShaderiv(stages[static_cast<std::size_t>(i)], GL_SHADER_TYPE, &type);
         if (type != GL_FRAGMENT_SHADER)
             continue;
-        glGetShaderiv(stages[i], GL_SHADER_SOURCE_LENGTH, &length);
+        glGetShaderiv(stages[static_cast<std::size_t>(i)], GL_SHADER_SOURCE_LENGTH, &length);
         std::string source(static_cast<std::size_t>(length), '\0');
         GLsizei written = 0;
-        glGetShaderSource(stages[i], length, &written, source.data());
+        glGetShaderSource(stages[static_cast<std::size_t>(i)], length, &written, source.data());
         source.resize(static_cast<std::size_t>(written));
         return source;
     }
@@ -6735,6 +7086,40 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
     EXPECT_NEAR(far_clip.y / far_clip.w, -jitter.y, 1e-6);
 }
 } // namespace
+
+TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    const auto baseline_runtime = pipeline.get_runtime_render_stats();
+    const auto baseline_resources = pipeline.get_resource_registry_stats();
+    constexpr std::size_t resident_bytes = 4096, resident_vertex_arrays = 3;
+    TerrainCullingTestPeer::SeedRetainedLegacyInventory(
+        pipeline, resident_bytes, resident_vertex_arrays);
+
+    // Observe immediately after each drain, before any frame can refresh the caches.
+    for (int swap = 0; swap < 2; ++swap) {
+        pipeline.prepare_world_swap();
+        const auto runtime = pipeline.get_runtime_render_stats();
+        const auto resources = pipeline.get_resource_registry_stats();
+        EXPECT_EQ(runtime.estimated_vram_bytes,
+                  baseline_runtime.estimated_vram_bytes + resident_bytes);
+        EXPECT_EQ(resources.vertex_arrays,
+                  baseline_resources.vertex_arrays + resident_vertex_arrays);
+        EXPECT_EQ(resources.buffers, baseline_resources.buffers + resident_vertex_arrays * 2u);
+        EXPECT_FALSE(resources.empty_after_shutdown);
+    }
+
+    pipeline.shutdown();
+    EXPECT_EQ(pipeline.get_runtime_render_stats().estimated_vram_bytes,
+              baseline_runtime.estimated_vram_bytes);
+    const auto released = pipeline.get_resource_registry_stats();
+    EXPECT_EQ(released.vertex_arrays, baseline_resources.vertex_arrays);
+    EXPECT_EQ(released.buffers, baseline_resources.buffers);
+    EXPECT_TRUE(released.empty_after_shutdown);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
 
 TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
     HiddenGlContext context;

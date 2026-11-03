@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/FarVolume.h"
 
@@ -19,7 +20,7 @@ FarVolumeRequest PristineHeld() {
     return {{3, 6, 7}, {-64, 64}, 91};
 }
 Luminumbra::Systems::TerrainGenParams PristinePlaneParams() {
-    Luminumbra::Systems::TerrainGenParams params;
+    Luminumbra::Systems::TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.peaks_amplitude = 0.0f;
     params.continental_spline = {{-1.0f, 0.0f}, {1.0f, 0.0f}};
@@ -42,7 +43,7 @@ FarVolumeCompilationLimits PristinePlaneLimits() {
 
 TEST(FarVolumeWorld, RejectsMissingRetainedBinding) {
     const Luminumbra::Systems::SHIELD_WorldSystem world(
-        nullptr, nullptr, Luminumbra::Systems::TerrainGenParams{}, 1337);
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
     FarVolumeMemoryPool pool(1024);
     FarVolumeCompilation output;
     output.tile.request = PristineHeld();
@@ -66,7 +67,7 @@ TEST(FarVolumeWorld, RejectsMissingRetainedBinding) {
 
 TEST(FarVolumeWorld, RefusalPreservesPriorOutputAndCharge) {
     const Luminumbra::Systems::SHIELD_WorldSystem world(
-        nullptr, nullptr, Luminumbra::Systems::TerrainGenParams{}, 1337);
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
     FarVolumeMemoryPool pool(1024);
     FarVolumeMemoryLease retained(pool);
     FarVolumeCompilation output;
@@ -96,7 +97,7 @@ TEST(FarVolumeWorld, RefusalPreservesPriorOutputAndCharge) {
 
 TEST(FarVolumeWorld, NullPoolKeepsLegacyRefusal) {
     const Luminumbra::Systems::SHIELD_WorldSystem world(
-        nullptr, nullptr, Luminumbra::Systems::TerrainGenParams{}, 1337);
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
     FarVolumeCompilation expected, actual;
     expected.tile.request = actual.tile.request = PristineHeld();
     FarVolumeFacadeFailure uncharged, charged;

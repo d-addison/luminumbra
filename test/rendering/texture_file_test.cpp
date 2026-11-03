@@ -1,8 +1,9 @@
 #include "luminumbra_client/rendering/RenderPipeline.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <fstream>
 
 namespace Luminumbra::Rendering {
@@ -15,10 +16,8 @@ struct TextureFileTestPeer {
 } // namespace Luminumbra::Rendering
 
 TEST(TextureFile, RejectsOversizedTruncatedTrailingAndExcessMipPayloads) {
-    const auto path =
-        std::filesystem::temp_directory_path() /
-        ("luminumbra-texture-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".ltex");
+    const Luminumbra::TestSupport::ScopedTempFile file("luminumbra-texture-", ".ltex");
+    const auto& path = file.Path();
     const auto write = [&](uint32_t width, uint16_t mips, size_t payload) {
         std::ofstream out(path, std::ios::binary);
         const auto pod = [&](auto value) {
@@ -43,5 +42,4 @@ TEST(TextureFile, RejectsOversizedTruncatedTrailingAndExcessMipPayloads) {
     EXPECT_FALSE(TextureFileTestPeer::Load(path));
     write(0xffffffffu, 1, 4);
     EXPECT_FALSE(TextureFileTestPeer::Load(path));
-    std::filesystem::remove(path);
 }

@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 out vec4 FragColor;
 
 in vec2 TexCoords;
@@ -94,6 +95,34 @@ vec3 sunTransmittance(float cosZenith) {
     return texture(u_transmittanceLut, vec2(u, 0.0)).rgb;
 }
 
+// Mirrors FarWorldFog.h, including the two historical caps and display mapping.
+float aerialOuterFade(float rayDistance, float outerRadius) {
+    return 1.0 - smoothstep(0.9 * outerRadius, outerRadius, rayDistance);
+}
+
+vec4 composeFinalFog(float analyticFog, vec3 inscatter, bool froxelOn,
+                     vec4 fx, float rawRayDistance, bool ladder) {
+    float fog = min(analyticFog, 0.94);
+    if (froxelOn) {
+        vec3 fxL = fx.rgb;
+        fxL = fxL * (2.51 * fxL + 0.03) / (fxL * (2.43 * fxL + 0.59) + 0.14);
+        fxL = pow(max(fxL, vec3(0.0)), vec3(1.0 / 2.2));
+        float fxFog = clamp(1.0 - fx.a, 0.0, 1.0);
+        vec3 blended_num = inscatter * fog * fx.a + fxL * fxFog;
+        float outFog = clamp(fog * fx.a + fxFog, 0.0, 0.94);
+        if (outFog > 1e-4) {
+            inscatter = blended_num / outFog;
+        }
+        fog = outFog;
+    }
+    // A unit fade is an identity: 1 - (1 - fog) would lose low alpha bits.
+    if (ladder && aerialOuterFade(rawRayDistance, 16384.0) < 1.0) {
+        float finalTransmittance = (1.0 - fog) * aerialOuterFade(rawRayDistance, 16384.0);
+        fog = 1.0 - finalTransmittance;
+    }
+    return vec4(inscatter, fog);
+}
+
 void main() {
     float sceneDepth = texture(gDepth, TexCoords).r;
 
@@ -105,8 +134,14 @@ void main() {
         if (sceneDepth <= 0.0) {
             d = u_underwaterVisibility * 4.0; // far/surface -> deep murk
         } else {
-            vec3 wp = worldPositionFromDepth(TexCoords, sceneDepth);
-            d = length(wp - u_viewPos);
+            if (u_farWorldLadder != 0) {
+                vec3 vp = vec3(0.0);
+                d = reconstructFarWorldDepthPosition(TexCoords, sceneDepth, u_inverseProjection, vp)
+                    ? length(vp) : u_underwaterVisibility * 4.0;
+            } else {
+                vec3 wp = worldPositionFromDepth(TexCoords, sceneDepth);
+                d = length(wp - u_viewPos);
+            }
         }
         float murk = 1.0 - exp(-d / max(1.0, u_underwaterVisibility));
         FragColor = vec4(u_underwaterTint, clamp(murk, 0.0, 0.92));
@@ -120,9 +155,25 @@ void main() {
         return;
     }
 
-    vec3 worldPos = worldPositionFromDepth(TexCoords, sceneDepth);
-    vec3 toFrag = worldPos - u_viewPos;
-    float dist = min(length(toFrag), u_aerialMaxDistance);
+    vec3 worldPos;
+    vec3 toFrag;
+    float rawRayDistance;
+    if (u_farWorldLadder != 0) {
+        vec3 viewPosition = vec3(0.0);
+        if (!reconstructFarWorldDepthPosition(TexCoords, sceneDepth, u_inverseProjection, viewPosition)) {
+            FragColor = vec4(0.0);
+            return;
+        }
+        // Distance stays in view space: large world translations cannot weaken the fade.
+        rawRayDistance = length(viewPosition);
+        toFrag = mat3(u_inverseView) * viewPosition;
+        worldPos = u_viewPos + toFrag;
+    } else {
+        worldPos = worldPositionFromDepth(TexCoords, sceneDepth);
+        toFrag = worldPos - u_viewPos;
+        rawRayDistance = length(toFrag);
+    }
+    float dist = min(rawRayDistance, u_aerialMaxDistance);
     vec3 viewDir = normalize(toFrag);
 
     // Integrate an exponential aerosol density along the sightline. A uniform
@@ -200,32 +251,13 @@ void main() {
     vec3 mistColor = mix(vec3(0.82, 0.84, 0.90), aHue, 0.35); // pale, faintly warm
     inscatter = mix(inscatter, mistColor, mistAmt * 0.7);
 
-    // Keep a hint of far terrain rather than a pure sky veil so the long view
-    // still reads (Distant-Horizons style) instead of dissolving to flat sky.
-    fog = min(fog, 0.94);
-
-    //  froxel volumetrics (, ): compose the froxel media IN FRONT
-    // of the analytic haze — total = froxelL + T_froxel * analytic. The volume's
-    // W coordinate is the exponential-slice mapping of the RADIAL view distance
-    // (FroxelGrid.h DepthToTextureW).
+    // Evaluation uses the clamped distance. Only the final fade uses the raw ray.
+    vec4 fx = vec4(0.0, 0.0, 0.0, 1.0);
     if (u_volumetricMode == 1) {
         float dClamped = clamp(dist, FROXEL_NEAR, FROXEL_FAR);
         float w = clamp(log(dClamped / FROXEL_NEAR) / log(FROXEL_FAR / FROXEL_NEAR), 0.0, 1.0);
-        vec4 fx = texture(u_froxelIntegrated, vec3(TexCoords, w));
-        // Same display mapping the analytic in-scatter goes through (this pass
-        // composites over an already-tonemapped target).
-        vec3 fxL = fx.rgb;
-        fxL = fxL * (2.51 * fxL + 0.03) / (fxL * (2.43 * fxL + 0.59) + 0.14);
-        fxL = pow(max(fxL, vec3(0.0)), vec3(1.0 / 2.2));
-        float fxFog = clamp(1.0 - fx.a, 0.0, 1.0);
-        vec3 blended_num = inscatter * fog * fx.a + fxL * fxFog;
-        float outFog = clamp(fog * fx.a + fxFog, 0.0, 0.94);
-        if (outFog > 1e-4) {
-            inscatter = blended_num / outFog;
-        }
-        fog = outFog;
+        fx = texture(u_froxelIntegrated, vec3(TexCoords, w));
     }
-
-    // alpha = fog composites the aerial haze OVER the lit terrain.
-    FragColor = vec4(inscatter, fog);
+    FragColor = composeFinalFog(fog, inscatter, u_volumetricMode == 1,
+                               fx, rawRayDistance, u_farWorldLadder != 0);
 }

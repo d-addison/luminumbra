@@ -1,4 +1,6 @@
 #include "SsaoPass.h"
+#include "core/Profiler.h"
+#include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
@@ -169,6 +171,7 @@ void SsaoPass::reset_shaders() {
 // the fullscreen quad, screen size, quality, and camera from the RenderContext.
 // The ssao_draws stat bump moved to the call site (the pipeline owns stats).
 void SsaoPass::execute_ssao(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL SsaoPass.execute_ssao");
     const Camera& camera = *ctx.camera;
     const int quality = ctx.ssao_quality;
     // quality 3 = half-res GTAO: render into the 1/2-per-axis FBO (1/4 the fragments),
@@ -180,10 +183,12 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         glViewport(0, 0, static_cast<GLsizei>(m_ssao.halfW), static_cast<GLsizei>(m_ssao.halfH));
     glClear(GL_COLOR_BUFFER_BIT);
     const glm::mat4 projection =
-        ReversedZPerspective(glm::radians(camera.Zoom),
-                             (float)ctx.screen_width / (float)ctx.screen_height,
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
+        ctx.far_world_ladder
+            ? ctx.gbuffer_projection
+            : ReversedZPerspective(glm::radians(camera.Zoom),
+                                   (float)ctx.screen_width / (float)ctx.screen_height,
+                                   camera.GetNearPlane(),
+                                   camera.GetFarPlane());
     // the G-buffer position/normal are the INTERNAL (scaled) extent, so the AO
     // march metric + noise tiling must use the internal size (at scale 1.0 internal==screen,
     // byte-identical). The half-res GTAO sub-scaling composes on top of this.
@@ -193,6 +198,11 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO. Reads the SAME
         // view-space G-buffer. High = 3x6 = 18 spp; Low = 2x4 = 8 spp.
         m_ssao.gtaoShader->use();
+        m_ssao.gtaoShader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+        m_ssao.gtaoShader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
+        m_ssao.gtaoShader->setInt("gDepth", 2);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
         glActiveTexture(GL_TEXTURE1);
@@ -210,6 +220,11 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         m_ssao.gtaoShader->setFloat("u_radius", 0.8f);
     } else {
         m_ssao.ssaoShader->use();
+        m_ssao.ssaoShader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+        m_ssao.ssaoShader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
+        m_ssao.ssaoShader->setInt("gDepth", 3);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
         glActiveTexture(GL_TEXTURE1);
@@ -225,7 +240,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     if (halfres)
         glViewport(0,
@@ -236,6 +251,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
 }
 
 void SsaoPass::execute_blur(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL SsaoPass.execute_blur");
     // Half-res GTAO (quality 3): joint-bilateral depth-aware upsample of the half-res
     // AO into the full-res blur target (replaces the box blur; also denoises).
     if (ctx.ssao_quality == 3 && m_ssao.halfFBO != 0 && m_ssao.upsampleShader &&
@@ -247,6 +263,12 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
                    static_cast<GLsizei>(ctx.internal_h())); // internal extent
         glClear(GL_COLOR_BUFFER_BIT);
         m_ssao.upsampleShader->use();
+        m_ssao.upsampleShader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+        m_ssao.upsampleShader->setMat4("u_gbufferInverseProjection",
+                                       ctx.gbuffer_inverse_projection);
+        m_ssao.upsampleShader->setInt("gDepth", 2);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_ssao.halfTex);
         glActiveTexture(GL_TEXTURE1);
@@ -256,7 +278,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
         m_ssao.upsampleShader->setVec2(
             "u_halfTexel", glm::vec2(1.0f / (float)m_ssao.halfW, 1.0f / (float)m_ssao.halfH));
         glBindVertexArray(ctx.screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
@@ -268,7 +290,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
     m_ssao.blurShader->setInt("u_ssaoInput", 0);
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
