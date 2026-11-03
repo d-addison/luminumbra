@@ -48,7 +48,7 @@ jobs:
               'linux-x64-gcc-asan-ccache-', 'windows-x64-msvc-ccache-',
               'windows-x64-ucrt64-gcc-ccache-', 'perf-linux-x64-gcc-ccache-',
               'perf-paired-linux-x64-gcc-', 'qualification-server-linux-x64-gcc-',
-              'tidy-cache-',
+              'tidy-cache-', 'fast-deps-v1-',
           )
           BUDGET = 9_500_000_000
           RECENCY_GRACE = timedelta(hours=6)

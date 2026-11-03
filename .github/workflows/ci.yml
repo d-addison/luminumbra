@@ -651,18 +651,53 @@ jobs:
             libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev \
             libxkbcommon-dev ninja-build pkg-config python3-numpy python3-pil \
             wayland-protocols xorg-dev
+      - name: Restore fast dependency sources
+        id: fast-deps
+        if: steps.route.outputs.native != 'false'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scratch/fast-deps
+          key: fast-deps-v1-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'vendor/CMakeLists.txt', 'tools/ci/deps-lock.json', 'tools/ci/offline_deps.py', 'tools/ci/path_safety.py', 'tools/ci/jolt_startup.py', 'cmake/jolt_startup.cmake', 'cmake/patches/jolt-startup.*') }}
+      - name: Populate missing fast dependency sources
+        if: steps.route.outputs.native != 'false' && steps.fast-deps.outputs.cache-hit != 'true'
+        run: >-
+          python3 -I -B tools/ci/offline_deps.py snapshot
+          --cache scratch/fast-deps/sources --lock scratch/fast-deps/lock.json
+      - name: Verify and stage isolated fast dependency sources
+        id: stage-deps
+        if: steps.route.outputs.native != 'false'
+        run: |
+          for compiler in gcc clang; do
+            python3 -I -B tools/ci/offline_deps.py stage --build-local \
+              --cache scratch/fast-deps/sources --lock scratch/fast-deps/lock.json \
+              --dest "scratch/fast-$compiler-deps" --init "scratch/fast-$compiler-init.cmake"
+          done
+          bytes=$(du -sb scratch/fast-deps | cut -f1)
+          echo "FetchContent source cache: $bytes bytes (save cap 500000000)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$bytes" -le 500000000 ]; then
+            echo 'cacheable=true' >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::FetchContent sources exceed the 500 MB save cap; using them only on this runner'
+          fi
+      - name: Save fast dependency sources
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.stage-deps.outputs.cacheable == 'true' && steps.fast-deps.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scratch/fast-deps
+          key: ${{ steps.fast-deps.outputs.cache-primary-key }}
       - name: Configure GCC and Clang databases and generate headers
         if: steps.route.outputs.native != 'false'
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/fast-gcc
-          cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
+          cmake -C scratch/fast-gcc-init.cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build build/fast-gcc --target glad --parallel 2
           python3 -I -B tools/ci/rmlui_source.py init --root build/fast-clang
-          cmake -S . -B build/fast-clang -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
+          cmake -C scratch/fast-clang-init.cmake -S . -B build/fast-clang -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
