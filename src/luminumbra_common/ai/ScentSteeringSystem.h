@@ -80,6 +80,8 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
 
         const int cx = WorldToCell(tf.position.x, origin_x, cell_size);
         const int cz = WorldToCell(tf.position.z, origin_z, cell_size);
+        if (!field.SimulationCellAllowed(cx, cz))
+            continue;
         float dx = 0.0f;
         float dz = 0.0f;
         const float conf = field.GradientSteer(

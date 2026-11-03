@@ -9,8 +9,14 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
 #include "luminumbra_common/systems/AetherFieldSystem.h"
@@ -64,6 +70,131 @@ TEST(AetherFieldSystem, GeometryMatchesPinnedShape) {
     EXPECT_EQ(aether.extent_cells(), kAetherExtentCells);
     EXPECT_FLOAT_EQ(aether.cell_size_m(), kAetherCellSizeM);
     EXPECT_EQ(aether.diffuse_iterations(), kAetherDiffuseIterations);
+}
+
+TEST(AetherFieldSystem, RegionalCallbacksPopulateRenderGridAndDirectSamples) {
+    AetherFieldSystem aether(kSeed);
+    WindFieldSystem wind(kSeed);
+    int wind_calls = 0;
+    wind.BindRegionalBackend(
+        [&wind_calls](const Vec3&, Luminumbra::Systems::WindLayer) {
+            ++wind_calls;
+            return Luminumbra::Vec2(100.0f);
+        },
+        [] { return std::string("regional wind"); });
+    std::size_t sample_calls = 0;
+    aether.BindRegionalBackend(
+        [&sample_calls](const Vec3& position) {
+            ++sample_calls;
+            return 4096.0f + position.x + 2.0f * position.z + position.y;
+        },
+        [] { return std::string("regional aether"); });
+    aether.Update(17, Vec3(25.0f, 100.0f, -1.0f), &wind);
+    EXPECT_EQ(aether.last_tick(), 17u);
+    EXPECT_EQ(sample_calls, 4096u);
+    EXPECT_EQ(wind_calls, 0);
+    EXPECT_EQ(aether.ComputeAetherSubHash(), "regional aether");
+    // floor(25/24)-32 = -31; floor(-1/24)-32 = -33.
+    const auto& field_grid = aether.grid();
+    EXPECT_EQ(field_grid.origin_cell_x(), -31);
+    EXPECT_EQ(field_grid.origin_cell_z(), -33);
+    for (int row = 0; row < 64; ++row) {
+        for (int column = 0; column < 64; ++column) {
+            // First cell centre (-732,-780), then +24 m per column/row, y = 0.
+            const float expected =
+                1804.0f + 24.0f * static_cast<float>(column) + 48.0f * static_cast<float>(row);
+            EXPECT_EQ(field_grid.at(column, row), expected);
+        }
+    }
+    // Direct sampling preserves the full position and is not clamped to the texture extent.
+    EXPECT_EQ(aether.SampleAether(Vec3(24.0f, 7.0f, -12.0f)), 4103.0f);
+    EXPECT_EQ(aether.SampleAether(Vec3(2400.0f, 7.0f, -12.0f)), 6479.0f);
+    EXPECT_EQ(sample_calls, 4098u);
+}
+
+TEST(AetherFieldSystem, EmptyRegionalCallbacksPreserveLegacySamplesAndHash) {
+    AetherFieldSystem baseline(kSeed);
+    AetherFieldSystem aether(kSeed);
+    aether.BindRegionalBackend({}, {});
+    EXPECT_EQ(aether.ComputeAetherSubHash(), baseline.ComputeAetherSubHash());
+
+    aether.BindRegionalBackend(
+        [](const Vec3& position) { return 4096.0f + position.x + 2.0f * position.z; },
+        [] { return std::string("regional aether"); });
+    aether.Update(1, Vec3(25.0f, 100.0f, -1.0f));
+    aether.BindRegionalBackend({}, {});
+    // Legacy sampling uses floor(24/24)=1, floor(-12/24)=-1: local cell (32,32).
+    // Its centre is (36,-12), so the stored value is 4096+36-24=4108, ignoring y.
+    EXPECT_EQ(aether.SampleAether(Vec3(24.0f, 100.0f, -12.0f)), 4108.0f);
+    // x=792 is global cell 33, local column 64: outside the 64-cell footprint.
+    EXPECT_EQ(aether.SampleAether(Vec3(792.0f, 0.0f, -12.0f)), 0.0f);
+    EXPECT_EQ(aether.SampleAether(Vec3(-745.0f, 0.0f, -12.0f)), 0.0f);
+
+    WindFieldSystem wind(kSeed);
+    for (const WindFieldSystem* advection : {static_cast<const WindFieldSystem*>(nullptr),
+                                             static_cast<const WindFieldSystem*>(&wind)}) {
+        for (const std::uint64_t tick : {1u, 45u, 90u}) {
+            wind.Update(tick, kAnchor);
+            baseline.Update(tick, kAnchor, advection);
+            aether.Update(tick, kAnchor, advection);
+            EXPECT_EQ(aether.last_tick(), tick);
+            EXPECT_EQ(aether.ComputeAetherSubHash(), baseline.ComputeAetherSubHash());
+            const auto& actual_cells = aether.grid().cells();
+            const auto& original_cells = baseline.grid().cells();
+            ASSERT_EQ(actual_cells.size(), original_cells.size());
+            for (std::size_t index = 0; index < actual_cells.size(); ++index) {
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(actual_cells[index]),
+                          std::bit_cast<std::uint32_t>(original_cells[index]));
+            }
+            EXPECT_EQ(aether.SampleAether(Vec3(1000000.0f)), 0.0f);
+        }
+    }
+}
+
+TEST(AetherFieldSystem, RegionalBackendRefusesUnpairedCallbacks) {
+    AetherFieldSystem aether(kSeed);
+    aether.BindRegionalBackend([](const Vec3&) { return 0.75f; },
+                               [] { return std::string("regional aether"); });
+    EXPECT_THROW(aether.BindRegionalBackend([](const Vec3&) { return 0.5f; }, {}),
+                 std::invalid_argument);
+    EXPECT_THROW(aether.BindRegionalBackend({}, [] { return std::string("other aether"); }),
+                 std::invalid_argument);
+    // A refused binding leaves the previous backend in place.
+    EXPECT_EQ(aether.ComputeAetherSubHash(), "regional aether");
+    EXPECT_EQ(aether.SampleAether(Vec3(0.0f)), 0.75f);
+}
+
+TEST(AetherFieldSystem, RegionalRenderGridRejectsUnrepresentableAnchors) {
+    AetherFieldSystem aether(kSeed);
+    std::size_t sample_calls = 0;
+    aether.BindRegionalBackend(
+        [&sample_calls](const Vec3&) {
+            ++sample_calls;
+            return 0.75f;
+        },
+        [] { return std::string("regional aether"); });
+    const float extreme = (std::numeric_limits<float>::max)();
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    // 24 * 2^63 metres reaches the integer conversion boundary exactly.
+    for (const float coordinate :
+         {extreme, -extreme, 0x1.8p67f, -0x1.8p67f, infinity, -infinity, invalid}) {
+        for (const auto& anchor : {Vec3(coordinate, 0.0f, 0.0f), Vec3(0.0f, 0.0f, coordinate)}) {
+            aether.Update(1, kAnchor);
+            EXPECT_EQ(aether.grid().at(0, 0), 0.75f);
+            sample_calls = 0;
+            aether.Update(2, anchor);
+            EXPECT_EQ(sample_calls, 0u);
+            EXPECT_EQ(aether.last_tick(), 2u);
+            EXPECT_EQ(aether.grid().origin_cell_x(), 0);
+            EXPECT_EQ(aether.grid().origin_cell_z(), 0);
+            for (const float value : aether.grid().cells()) {
+                EXPECT_EQ(value, 0.0f);
+            }
+            EXPECT_EQ(aether.SampleAether(anchor), 0.75f);
+            EXPECT_EQ(aether.ComputeAetherSubHash(), "regional aether");
+        }
+    }
 }
 
 TEST(AetherFieldSystem, SubHashIsDeterministicAcrossRuns) {
