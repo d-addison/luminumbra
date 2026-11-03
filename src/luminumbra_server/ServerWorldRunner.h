@@ -28,6 +28,10 @@
 
 namespace Luminumbra::Server {
 
+inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
+// A failed scheduled autosave is retried after this many ticks, not at the next interval.
+inline constexpr std::uint64_t kAutosaveRetryTicks = 30;
+
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
@@ -58,6 +62,8 @@ struct ServerWorldRunnerConfig {
     std::uint64_t autosave_interval_ticks = 9000;
     // Explicit workload override, applied before world creation or loading.
     bool finite_hydrology = true;
+    bool autosave_default_when_unset = false;
+    std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the
@@ -300,6 +306,8 @@ private:
     std::string ComputeAvailabilityDigest();
     bool m_booted = false;
     bool m_shutdown = false;
+    // Ticks until a failed scheduled autosave is retried; 0 when none is pending.
+    std::uint64_t m_autosave_retry_countdown = 0;
     BootSettleStats m_boot_settle; //  settle-exit stats (see getter)
 };
 

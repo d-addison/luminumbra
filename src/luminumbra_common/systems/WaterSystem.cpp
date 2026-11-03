@@ -11,6 +11,7 @@
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
 #include <algorithm>
+#include <array>
 #include <chrono> // (water-kernel perf) sub-phase wall timers — telemetry only, never hashed
 #include <cmath>
 #include <glm/gtx/compatibility.hpp>
@@ -285,6 +286,13 @@ int PositiveMod(int value, int divisor) {
     return result < 0 ? result + divisor : result;
 }
 
+// Sleep flags and the calm counter are saved only with water that is already durable.
+// They never make regenerable water authoritative.
+void MarkWaterBookkeeping(Chunk& chunk) {
+    if (chunk.needs_authority())
+        chunk.mark_water_state_dirty();
+}
+
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
 // is ). Injects deterministic river sources, runs flux -> K outflow-clamp -> symmetric apply on
 // the int32 depth/bed/edge_flux, applies the sea/edge sink + evaporation, and regenerates the float
@@ -319,8 +327,10 @@ void StepChunkWaterFixed(Chunk& c,
     const int n = res * res;
     // Bed/depth are authoritative. Flux may be absent in adopted grids; restore
     // the historical zero-momentum initialization, bounded to 2 * 32 * 32 entries.
-    if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n))
+    if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n)) {
         c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0);
+        c.mark_water_state_dirty();
+    }
 
     std::vector<std::int32_t>& depth = c.water_depth_mm;
     std::vector<std::int32_t>& bed = c.water_bed_mm;
@@ -339,6 +349,24 @@ void StepChunkWaterFixed(Chunk& c,
     thread_local std::vector<std::int32_t> tl_depth_before;
     tl_depth_before.assign(depth.begin(), depth.end()); // for the activity delta + remesh signal
     const std::vector<std::int32_t>& depth_before = tl_depth_before;
+    // Durable change is judged on the final state against kernel entry; tentative edge flux that
+    // the outflow clamp returns to its entry value leaves the chunk clean.
+    thread_local std::array<std::int32_t, 2 * 32 * 32> tl_flux_entry{};
+    thread_local std::array<bool, 2 * 32 * 32> tl_flux_written{};
+    thread_local std::vector<std::size_t> tl_flux_edges;
+    for (const auto edge : tl_flux_edges)
+        tl_flux_written[edge] = false;
+    tl_flux_edges.clear();
+    const auto write_flux = [&](std::size_t edge, std::int32_t value) {
+        if (flux[edge] == value)
+            return;
+        if (!tl_flux_written[edge]) {
+            tl_flux_edges.push_back(edge);
+            tl_flux_entry[edge] = flux[edge];
+            tl_flux_written[edge] = true;
+        }
+        flux[edge] = value;
+    };
     for (auto& d : depth)
         out_src += AddWaterDepth(d, 0);
 
@@ -423,7 +451,7 @@ void StepChunkWaterFixed(Chunk& c,
             q = 2000000000LL;
         if (q < -2000000000LL)
             q = -2000000000LL;
-        flux[eidx] = static_cast<std::int32_t>(q);
+        write_flux(eidx, static_cast<std::int32_t>(q));
     };
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
@@ -431,11 +459,11 @@ void StepChunkWaterFixed(Chunk& c,
             if (x + 1 < res)
                 compute_edge(i, IDX(x + 1, z), 2 * i + 0);
             else
-                flux[2 * i + 0] = 0;
+                write_flux(2 * i + 0, 0);
             if (z + 1 < res)
                 compute_edge(i, IDX(x, z + 1), 2 * i + 1);
             else
-                flux[2 * i + 1] = 0;
+                write_flux(2 * i + 1, 0);
         }
 
     // --- : K outflow-clamp per cell (Sigma_out <= depth -> non-negative + mass-exact) ---
@@ -473,7 +501,8 @@ void StepChunkWaterFixed(Chunk& c,
                 for (int k = 0; k < ne; ++k) {
                     const std::int64_t mag = static_cast<std::int64_t>(*e[k]) * sgn[k]; // positive
                     const std::int64_t scaled = (mag * d) / out; // floor toward 0
-                    *e[k] = static_cast<std::int32_t>(scaled * sgn[k]);
+                    write_flux(static_cast<std::size_t>(e[k] - flux.data()),
+                               static_cast<std::int32_t>(scaled * sgn[k]));
                 }
             }
         }
@@ -549,6 +578,13 @@ void StepChunkWaterFixed(Chunk& c,
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
         }
+    }
+    const bool flux_changed =
+        std::any_of(tl_flux_edges.begin(), tl_flux_edges.end(), [&](std::size_t edge) {
+            return flux[edge] != tl_flux_entry[edge];
+        });
+    if (max_delta > 0 || flux_changed) {
+        c.mark_water_state_dirty();
     }
 }
 
@@ -929,6 +965,8 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
         }
     }
     cp->has_water_sim.store(true);
+    if (cp->needs_authority())
+        cp->mark_water_state_dirty();
     m_water_activity_cache.erase(cp->get_id());
     cp->water_mesh_generated.store(false);
     cp->water_mesh_dirty_ticks = 0;
@@ -1094,6 +1132,7 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                chunk.mark_water_state_dirty();
                 m_water_activity_cache.erase(chunk.get_id());
             }
         }
@@ -1160,6 +1199,7 @@ void WaterSystem::update(entt::registry& registry,
     }
     for (Chunk* chunk : chunks_to_wake) {
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
+        MarkWaterBookkeeping(*chunk);
     }
 
     // Bound per-tick work to MAX_WATER_CELLS_PER_TICK. Medium retains its historical flat rotating
@@ -1377,7 +1417,10 @@ void WaterSystem::update(entt::registry& registry,
                                  static_cast<std::int64_t>(A->water_depth_mm[ai]) -
                                      std::numeric_limits<std::int32_t>::max());
                 }
+                const std::int32_t flux_prev = A->water_edge_flux[slot];
                 A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
+                if (A->water_edge_flux[slot] != flux_prev)
+                    A->mark_water_state_dirty();
                 AddWaterDepth(A->water_depth_mm[ai], -q);
                 AddWaterDepth(B->water_depth_mm[bi], q);
                 if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
@@ -1385,6 +1428,8 @@ void WaterSystem::update(entt::registry& registry,
                 if (q != 0) {
                     A->is_water_sleeping.store(false, std::memory_order_relaxed);
                     B->is_water_sleeping.store(false, std::memory_order_relaxed);
+                    A->mark_water_state_dirty();
+                    B->mark_water_state_dirty();
                     if (have_mirror_A)
                         A->water_level_data[ai] =
                             static_cast<float>(static_cast<std::int64_t>(A->water_bed_mm[ai]) +
@@ -1415,8 +1460,11 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
+        const auto previous_counter = chunk->ticks_below_threshold;
+        const bool was_sleeping = chunk->is_water_sleeping.load(std::memory_order_relaxed);
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
-            chunk->ticks_below_threshold++;
+            if (chunk->ticks_below_threshold < std::numeric_limits<int>::max())
+                chunk->ticks_below_threshold++;
             if (chunk->ticks_below_threshold >= TICKS_TO_SLEEP) {
                 // GO TO SLEEP: Chunk has been calm for long enough.
                 chunk->is_water_sleeping.store(true, std::memory_order_relaxed);
@@ -1426,6 +1474,9 @@ void WaterSystem::update(entt::registry& registry,
             chunk->ticks_below_threshold = 0;
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
         }
+        if (chunk->ticks_below_threshold != previous_counter ||
+            chunk->is_water_sleeping.load(std::memory_order_relaxed) != was_sleeping)
+            MarkWaterBookkeeping(*chunk);
         if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
             m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
         }
@@ -1621,6 +1672,7 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                    target_chunk.mark_water_state_dirty();
                     m_water_activity_cache.erase(target_chunk.get_id());
                 }
             }
@@ -1671,6 +1723,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
         if (edited) {
             c.stage_water_seed_inputs({});
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
+            c.mark_water_state_dirty();
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
             m_water_activity_cache.erase(c.get_id());
@@ -1752,6 +1805,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
+        chunk.mark_water_state_dirty();
         return true;
     }
 
@@ -1914,6 +1968,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
 
     chunk.has_water_sim.store(true);
+    chunk.mark_water_state_dirty();
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     chunk.current_water_resolution.store(new_resolution);

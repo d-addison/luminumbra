@@ -916,7 +916,8 @@ int Restore(int from, const char* source, int to, const char* destination) {
     const auto resolved_destination = ResolveAt(to, destination);
     if (!BeforePublish(ResolveAt(from, source), resolved_destination))
         return -1;
-    if (active && !active->restore_occupant.empty() && !active->restore_blocked) {
+    if (active && std::string(source) == "artifact" && resolved_destination == active->target &&
+        !active->restore_occupant.empty() && !active->restore_blocked) {
         active->restore_blocked = true;
         std::filesystem::rename(active->restore_occupant, active->target);
     }
@@ -1791,6 +1792,46 @@ TEST_F(CreatedWorldCleanup, ExclusiveFilePublicationMovesBytesAndRetainsRollback
     }
 }
 
+#if !defined(_WIN32)
+TEST_F(CreatedWorldCleanup, BoundPublicationStageRefusesInvalidNamesAndDirectoryIdentities) {
+    const auto source = Root() / "source";
+    const auto destination = Root() / "destination";
+    const auto slots = Root() / "slots";
+    ASSERT_TRUE(std::filesystem::create_directory(slots));
+    Write(source, "owned");
+    Write(slots / "occupied", "foreign");
+    struct stat info {};
+    ASSERT_EQ(::stat(slots.c_str(), &info), 0);
+    const std::array<std::uint64_t, 3> identity{
+        static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0};
+    const int descriptor = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+    ASSERT_GE(descriptor, 0);
+    for (const auto* name : {"", ".", "..", "../escape", "nested/name", "occupied"}) {
+        SCOPED_TRACE(name);
+        const Luminumbra::Persistence::BoundPublicationStage stage{
+            .directory = slots, .name = name, .directory_identity = identity, .report = nullptr};
+        EXPECT_THROW(
+            CreatedWorldArtifacts::publish_bound_file(source, destination, descriptor, &stage),
+            std::runtime_error);
+        EXPECT_EQ(Read(source), "owned");
+        EXPECT_FALSE(std::filesystem::exists(destination));
+        EXPECT_EQ(Read(slots / "occupied"), "foreign");
+    }
+    for (const auto& directory : {slots, source, Root() / "absent"}) {
+        const Luminumbra::Persistence::BoundPublicationStage stage{.directory = directory,
+                                                                   .name = "incoming",
+                                                                   .directory_identity = {},
+                                                                   .report = nullptr};
+        EXPECT_THROW(
+            CreatedWorldArtifacts::publish_bound_file(source, destination, descriptor, &stage),
+            std::runtime_error);
+        EXPECT_EQ(Read(source), "owned");
+        EXPECT_FALSE(std::filesystem::exists(destination));
+    }
+    EXPECT_EQ(::close(descriptor), 0);
+}
+#endif
+
 TEST_F(CreatedWorldCleanup, FileAppearingAfterPublicationValidationIsNeverOverwritten) {
     CreatedWorldArtifacts artifacts;
     const auto save = Root() / "created-world";
@@ -2061,4 +2102,47 @@ TEST_F(CreatedWorldCleanup, RestoringAMismatchCannotOverwriteAnotherConcurrentOc
     EXPECT_EQ(Read(file), "second replacement\n");
 }
 #endif
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRollbackRetainsExistingContentsAndDirectory) {
+    const auto save = Root() / "existing-save";
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    Write(save / "unowned.bin", "existing bytes");
+    CreatedWorldArtifacts artifacts;
+    artifacts.bind_existing_root(save);
+    artifacts.write_file(save / "preset.json", "created bytes");
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+    EXPECT_EQ(Read(save / "unowned.bin"), "existing bytes");
+    EXPECT_FALSE(std::filesystem::exists(save / "preset.json"));
+}
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRefusesSubstitutedFileAndAllowsRetry) {
+    const auto save = Root() / "existing-save";
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    CreatedWorldArtifacts artifacts;
+    artifacts.bind_existing_root(save);
+    const auto file = save / "preset.json";
+    const auto retained = save / "retained.json";
+    artifacts.write_file(file, "created bytes");
+    std::filesystem::rename(file, retained);
+    Write(file, "other owner");
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(file), "other owner");
+    ASSERT_TRUE(std::filesystem::remove(file));
+    std::filesystem::rename(retained, file);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(file));
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+}
+
+TEST_F(CreatedWorldCleanup, BorrowedRootRefusesMissingAndNonDirectoryInputs) {
+    CreatedWorldArtifacts artifacts;
+    const auto path = Root() / "missing";
+    EXPECT_THROW(artifacts.bind_existing_root(path), std::filesystem::filesystem_error);
+    Write(path, "file bytes");
+    EXPECT_THROW(artifacts.bind_existing_root(path), std::runtime_error);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(path), "file bytes");
+}
+
 } // namespace

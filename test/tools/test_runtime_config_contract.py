@@ -99,11 +99,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         publish = service[service.index("classNewFilePublication{"):]
         publish = publish[:publish.index("boolCompressPayload(")]
-        self.assertIn("::link(m_temp.c_str(),m_destination.c_str())", publish)
-        self.assertIn("::syscall(SYS_renameat2,AT_FDCWD,m_temp.c_str(),AT_FDCWD,"
-                      "m_destination.c_str(),RENAME_NOREPLACE)", publish)
-        self.assertIn("::renamex_np(m_temp.c_str(),m_destination.c_str(),RENAME_EXCL)", publish)
-        self.assertIn("errno==ENOSYS||errno==EINVAL||errno==EOPNOTSUPP", publish)
+        self.assertIn("CreatedWorldArtifacts::publish_bound_file(m_temp,m_destination,m_descriptor)", publish)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_destination,m_descriptor,false)", publish)
         self.assertIn("Detail::WindowsPublishWithoutReplacement(std::exchange(m_handle,INVALID_HANDLE_VALUE),"
                       "m_temp,m_destination,GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES)", publish)
         self.assertIn("::FlushFileBuffers(m_handle)", publish)
@@ -119,9 +116,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("::MoveFileExW(", publish)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
         self.assertNotIn("std::rename(", publish)
-        self.assertIn("::fstat(m_descriptor,&published)==0", publish)
-        self.assertIn("::lstat(m_destination.c_str(),&named)==0", publish)
-        self.assertIn("published.st_dev==named.st_dev&&published.st_ino==named.st_ino", publish)
+        publication = journal[journal.index("voidpublish_posix("):journal.index("voidcreate_owned_directory(")]
+        self.assertIn("::fstatat(quarantine.directory(),quarantine.entry(),&info,AT_SYMLINK_NOFOLLOW)", publication)
+        self.assertIn("moved!=source.identity", publication)
+        self.assertIn("quarantine.directory(),quarantine.entry(),target_parent.get(),target_name.c_str()", publication)
+        self.assertIn("Detail::RenameWithoutReplacement(", publication)
         self.assertIn("m_published&&!m_committed", publish)
         self.assertIn("::SetFileInformationByHandle(m_handle,FileDispositionInfo,", publish)
         self.assertIn("returnFlushRemovalDirectory(m_destination,errors);", publish)
@@ -255,8 +254,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         interrupt = "InterruptBeforeRegionReplaceForTesting().exchange(false,std::memory_order_acq_rel)"
         self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors,artifacts)"),
                         write.index(interrupt))
-        self.assertLess(write.index(interrupt), write.index("ReplaceRegionFileAtomically("))
-        interrupted = write[write.index(interrupt):write.index("ReplaceRegionFileAtomically(")]
+        self.assertLess(write.index(interrupt), write.index("ReplaceMember("))
+        interrupted = write[write.index(interrupt):write.index("ReplaceMember(")]
         self.assertIn("RemoveTemporaryFile(temp_path,artifacts);", interrupted)
         self.assertIn("returnfalse;", interrupted)
         fixture = compact_cpp((ROOT / "test/common/GraphicsPresets_test.cpp")
@@ -283,7 +282,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn('if(StagingNameEquals(destination.filename(),"active-regions.arl"))', cleanup)
         self.assertIn('elseif(ReclaimOwnedLedgerStaging(entry.path()))', cleanup)
         self.assertLess(cleanup.index('StagingNameEquals(destination.filename(),"active-regions.arl")'),
-                        cleanup.index('entry.is_regular_file(kind_error)'))
+                        cleanup.index('StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)'))
+        self.assertIn("abandoned.identity(identity)&&abandoned.remove_bound()", cleanup)
         owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
         self.assertLess(owned.index("ValidStagingOwnership(staging,payload,record)"),
                         owned.index("payload.remove()"))
@@ -303,10 +303,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         native = service[service.index("classStagingFile{"):service.index("std::filesystem::pathOwnershipPath(")]
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
-                         "FILE_DISPOSITION_INFO", "::lstat(m_path.c_str(),&named)",
+                         "Detail::WindowsDisposeLink(retiring)", "ReadFileIdentity(path,named)",
                          "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
         self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+        identity = service[service.index("boolReadFileIdentity("):service.index("boolSameFileIdentity(")]
+        self.assertIn("::lstat(path.c_str(),&information)", identity)
 
     def test_ledger_orphan_cleanup_validates_proof_and_absence_before_verified_removal(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -413,7 +415,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                    "LedgerStagingtemporary(staging)", "temporary.available(errors)", "temporary.prepare(bytes,errors)",
                    "BeforeActiveRegionsReplaceForTesting()", "temporary.valid(errors)",
                    "temporary.record_payload(*artifacts)",
-                   "ReplaceRegionFileAtomically(temporary.path(),path,errors,artifacts,&temporary.payload())",
+                   "ReplaceMember(temporary.path(),path,errors,artifacts,&temporary.payload())",
                    "if(temporary.installed_at(path))temporary.published(errors)", "ledger=std::move(saved)")
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -462,17 +464,25 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         retention.index("constboolretired=close()"))
         self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", retention)
         record = service[service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)"):
-                         service.index("boolremove(unsignedlinks=1)")]
+                         service.index("boolremove(unsignedlinks=1,constBoundPublicationStage*stage=nullptr)")]
         self.assertLess(record.index("retain_publication_identity()"),
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
         publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
         ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
-                   "::ReplaceFileW(", "constDWORDattributes_error=::GetLastError()",
+                   "::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)", "constDWORDattributes_error=::GetLastError()",
                    "if(retained_payload)retained_payload->retain_publication_identity();",
                    "autofile=::CreateFileW(temp.c_str(),",
                    "Detail::WindowsPublishWithoutReplacement(")
-        positions = [publication.index(value) for value in ordered]
+        positions = []
+        offset = 0
+        for value in ordered:
+            position = publication.index(value, offset)
+            positions.append(position)
+            offset = position + len(value)
+        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)")
+        self.assertIn("if(retained_payload)retained_payload->retain_publication_identity();",
+                      publication[:replacement])
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("retain_file_identity", finish)
         prepare = service[service.index("boolprepare(conststd::string&bytes,"):
@@ -558,7 +568,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          service.index("std::filesystem::pathOwnershipPath(")]
         self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", native)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", native)
-        self.assertIn("::lstat(m_path.c_str(),&named)", native)
+        self.assertIn("ReadFileIdentity(path,named)", native)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_path,m_descriptor,false,stage)", native)
         self.assertIn("info.nNumberOfLinks>links", native)
         self.assertIn("info.st_nlink>links", native)
 
@@ -620,7 +631,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for call in ('StagingNameHasPrefix(entry.path().filename(),prefix)',
                      'StagingNameEquals(destination.filename(),"active-regions.arl")',
                      'StagingNameEquals(entry.path().extension(),".owner")'):
-            self.assertLess(cleanup.index(call), cleanup.index("entry.is_regular_file(kind_error)"))
+            self.assertLess(cleanup.index(call),
+                            cleanup.index("StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)"))
 
     def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -731,8 +743,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           "SavedPresetCompatible(save_dir)", "prepared_chunks.prepare(",
                           "prepared_chunks.publish(", "prepared_plants.publish(", "write_file_durably(energy_path,energy_bytes)",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
-                          "m_activeRegionLedger.mark_saved(",
-                          "chunk->clear_voxel_data_dirty()"):
+                          "saved_ledger.mark_saved(",
+                          "transaction->defer_until_commit(acknowledge)"):
             self.assertLess(ownership, sequence.index(operation))
 
     def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
@@ -793,7 +805,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         ledger = service[service.index("boolWorldSaveService::save_active_regions("):]
         self.assertLess(ledger.index("ReclaimAbandonedStaging(staging);"),
-                        ledger.index("if(ledger.records().empty()"))
+                        ledger.index("if(!has_ledger)"))
         remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
         self.assertLess(remove.index("ReclaimAbandonedStaging(destination);"),
                         remove.index("std::filesystem::remove(destination,error);"))
@@ -819,14 +831,14 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
         start = service.index("if(m_empty){")
-        end = service.index("returnFlushRemovalDirectory(path,errors);", start)
+        end = service.index("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", start)
         empty_roster = service[start:end]
         self.assertIn("std::filesystem::remove(path,ec);}if(ec){", empty_roster)
         self.assertLess(empty_roster.index("LockPublication(path)"),
                         empty_roster.index("std::filesystem::remove(path,ec)"))
         self.assertIn("if(!AllowPublication(path,true,errors)){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
-        self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
+        self.assertIn("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", service[end:])
 
 
 class RegionalEnergySourceContract(unittest.TestCase):

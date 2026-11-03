@@ -1,0 +1,296 @@
+#pragma once
+
+// Snapshot commit index, ownership journal and recovery.
+//
+// An "indexed" save directory contains chunks/region/snapshot.json. An indexed directory is only
+// ever changed through a SaveTransaction: members are journaled (undo copies) before they are
+// replaced, the new index is renamed last (the durable commit point), and the journal is deleted
+// afterwards. Recovery at world open rolls an interrupted transaction back, or discards a stale
+// journal when the committed index already carries the transaction's new generation.
+//
+// All functions here are owner-thread only. They never run unless a save directory is indexed or a
+// flag-on GameSession save opens a transaction. Ordinary unindexed flag-off saves are untouched.
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace Luminumbra::Persistence {
+
+class CreatedWorldArtifacts;
+class TransactionOwnership;
+struct BoundPublicationStage;
+
+namespace detail {
+// Indexed publication excludes readers until commit/rollback. Reentrant reads and
+// writer-owned reads do not reacquire the shared mutex; readers never take writer ownership.
+class SnapshotReadOwnership {
+public:
+    SnapshotReadOwnership();
+    ~SnapshotReadOwnership();
+    SnapshotReadOwnership(const SnapshotReadOwnership&) = delete;
+    SnapshotReadOwnership& operator=(const SnapshotReadOwnership&) = delete;
+
+private:
+    bool m_locked = false;
+};
+class SnapshotWriteOwnership {
+public:
+    SnapshotWriteOwnership();
+    ~SnapshotWriteOwnership();
+    SnapshotWriteOwnership(const SnapshotWriteOwnership&) = delete;
+    SnapshotWriteOwnership& operator=(const SnapshotWriteOwnership&) = delete;
+
+private:
+    std::unique_lock<std::shared_mutex> m_lock;
+};
+} // namespace detail
+
+enum class MemberClass : std::uint8_t {
+    Authoritative,
+    Derived
+};
+
+struct SnapshotMember {
+    std::string path; // relative to the save root, '/' separators
+    MemberClass cls = MemberClass::Authoritative;
+    bool present = true;
+    std::uint64_t bytes = 0;
+    std::uint64_t fnv64 = 0;
+    std::uint64_t generation = 0;
+};
+
+struct SnapshotIndex {
+    std::uint64_t generation = 0; // 0 = no index
+    std::uint64_t tick = 0;
+    std::uint64_t txn_id = 0;
+    std::vector<std::array<float, 3>> anchors;
+    std::vector<SnapshotMember> members; // sorted by path, unique
+};
+
+inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
+inline constexpr const char* kJournalSchema = "luminumbra.journal.v4";
+inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
+inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
+inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
+
+// <save>/chunks/region/snapshot.json
+std::filesystem::path snapshot_index_path(const std::filesystem::path& save_dir);
+// <save>/journal
+std::filesystem::path journal_directory(const std::filesystem::path& save_dir);
+
+// Allow-list for relative member paths: world_info.json, aether_state.efs and
+// chunks/region/{world-manifest.json, plant-entities.json, active-regions.arl, r.<int>.<int>.lmr}.
+// Rejects empty, absolute, drive/UNC, backslash and any ".." component. snapshot.json itself is not
+// a member.
+bool member_path_allowed(std::string_view relative_path);
+
+// Canonical deterministic JSON encoding / strict decoding. decode enforces the schema, sorted
+// unique member paths, member_path_allowed, the member cap and the index size cap.
+std::string encode_snapshot_index(const SnapshotIndex& index);
+bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::string& error);
+
+// An absent index file is a clean miss: returns true with out = {} (generation 0).
+bool read_snapshot_index(const std::filesystem::path& save_dir,
+                         SnapshotIndex& out,
+                         std::vector<std::string>* errors,
+                         const std::stop_token& stop = {});
+bool snapshot_index_exists(const std::filesystem::path& save_dir);
+
+// FNV-1a 64 over raw bytes (shared by the index and the journal).
+std::uint64_t fnv1a64_bytes(const void* data, std::size_t size);
+// Whole-file size + FNV-1a 64. A missing file returns false with exists=false.
+bool hash_file(const std::filesystem::path& path,
+               std::uint64_t& bytes,
+               std::uint64_t& fnv64,
+               bool& exists,
+               std::vector<std::string>* errors,
+               const std::stop_token& stop = {});
+
+// True when <save>/journal exists. Read-only; used by the catalog.
+bool journal_pending(const std::filesystem::path& save_dir);
+
+enum class RecoveryOutcome : std::uint8_t {
+    NothingToDo,
+    DiscardedStale,
+    RolledBack,
+    Failed
+};
+
+// Idempotent recovery follows the protected identities and undo records. Failed appends a
+// diagnostic.
+RecoveryOutcome recover_pending_journal(const std::filesystem::path& save_dir,
+                                        std::vector<std::string>* errors);
+
+// Callback supplied by the integration layer so the transaction can compute the fingerprint of a
+// touched member when committing (region files hash their lod-0 record stream, everything else
+// hashes raw bytes) and validate it before publication. Returns false and fills error on a corrupt
+// member.
+struct MemberDigest {
+    bool present = false;
+    std::uint64_t bytes = 0;
+    std::uint64_t fnv64 = 0;
+};
+using MemberDigestFn = bool (*)(const std::filesystem::path& save_dir,
+                                std::string_view relative_path,
+                                MemberDigest& out,
+                                std::string& error);
+
+class SaveTransaction {
+public:
+    // Opens the thread_local "active transaction" slot for save_dir. Only one may be active per
+    // thread.
+    // For initial creation, artifacts must outlive the transaction. Publication records the
+    // index's identities there; abort uses that journal's identity-checked rollback.
+    SaveTransaction(std::filesystem::path save_dir,
+                    std::uint64_t tick,
+                    std::vector<std::array<float, 3>> anchors,
+                    MemberDigestFn digest_fn,
+                    CreatedWorldArtifacts* artifacts = nullptr);
+    SaveTransaction(const SaveTransaction&) = delete;
+    SaveTransaction& operator=(const SaveTransaction&) = delete;
+    ~SaveTransaction(); // aborts (rolls back) when still Open; no-op once Committed
+
+    // The active transaction of this thread for the same save_dir (canonical comparison), else
+    // nullptr.
+    static SaveTransaction* active_for(const std::filesystem::path& save_dir);
+
+    // Runs recovery, loads the previous index (may be absent), and creates the journal directory.
+    bool begin(std::vector<std::string>* errors);
+    // Journals the given relative member paths (undo copies + durable txn.json) BEFORE the caller
+    // replaces them. Already protected paths are skipped. The index file is protected on the first
+    // call.
+    bool protect(const std::vector<std::string>& relative_paths, std::vector<std::string>* errors);
+    // Internal writer coordination: journal incoming identities before publication, then
+    // verify the protected occupant under the publication lock. Journal/control writes bypass
+    // member coordination; the persistence integration owns their identities separately.
+    static bool prepare_publication(const std::filesystem::path& destination,
+                                    const std::filesystem::path& incoming,
+                                    std::vector<std::string>* errors);
+    static bool publication_identity(const std::filesystem::path& destination,
+                                     std::array<std::uint64_t, 3>& expected,
+                                     std::array<std::uint64_t, 3>& incoming);
+    static bool publication_stages(const std::filesystem::path& destination,
+                                   BoundPublicationStage& source,
+                                   BoundPublicationStage& retired);
+    static bool check_publication_target(const std::filesystem::path& destination,
+                                         std::vector<std::string>* errors);
+    // A writer may supply a digest of its admitted output, bound to the installed native
+    // version. Commit reuses it only for the standard member validator and an unchanged file.
+    void remember_written_digest(const std::filesystem::path& destination,
+                                 const MemberDigest& digest,
+                                 const std::array<std::uint64_t, 8>& version);
+    // Commits: validates every protected member, publishes the new
+    // index (durable commit point), then deletes the journal. Failure before the commit point rolls
+    // back.
+    bool commit(std::vector<std::string>* errors);
+    // Joined writers acknowledge memory only at this transaction's durable commit point.
+    // Aborted transactions discard their callbacks.
+    void defer_until_commit(std::function<void()> action);
+    // Rolls back (Open -> RolledBack). No-op after commit.
+    void abort(std::vector<std::string>* errors);
+
+    [[nodiscard]] bool committed() const {
+        return m_state == State::Committed;
+    }
+    [[nodiscard]] const std::filesystem::path& save_dir() const {
+        return m_save_dir;
+    }
+    [[nodiscard]] std::uint64_t new_generation() const {
+        return m_new_generation;
+    }
+    [[nodiscard]] bool member_is_protected(const std::string& relative) const {
+        return m_protected.contains(relative);
+    }
+    [[nodiscard]] bool was_indexed() const {
+        return m_previous.generation != 0;
+    }
+
+private:
+    enum class State : std::uint8_t {
+        Idle,
+        Open,
+        Committing,
+        Committed,
+        RollingBack,
+        RolledBack
+    };
+    struct Entry {
+        std::string path;
+        std::string action; // "replace" | "create"
+        std::uint64_t prev_bytes = 0;
+        std::uint64_t prev_fnv64 = 0;
+        std::string undo; // relative to the journal directory, empty for create
+        std::array<std::uint64_t, 3> previous_identity{};
+        std::array<std::uint64_t, 3> installed_identity{};
+        std::array<std::uint64_t, 3> incoming_identity{};
+        std::array<std::uint64_t, 3> restored_identity{};
+        std::array<std::uint64_t, 3> undo_identity{};
+        std::array<std::uint64_t, 3> rollback_retired_identity{};
+        std::string undo_temporary;
+        std::string incoming_temporary;
+        std::string restored_temporary;
+        std::size_t rollback_reserve = 0;
+        std::array<std::uint64_t, 8> previous_version{};
+        std::array<std::uint64_t, 8> installed_version{};
+        std::array<std::uint64_t, 8> incoming_version{};
+    };
+    bool check_member_version(const Entry& entry, std::vector<std::string>* errors) const;
+    bool write_journal(std::vector<std::string>* errors);
+    // Hands the thread's active slot back once this transaction can no longer publish.
+    void release_registration() noexcept;
+
+    std::unique_ptr<TransactionOwnership> m_ownership;
+    std::filesystem::path m_save_dir;
+    std::uint64_t m_tick = 0;
+    std::vector<std::array<float, 3>> m_anchors;
+    MemberDigestFn m_digest_fn = nullptr;
+    CreatedWorldArtifacts* m_artifacts = nullptr;
+    State m_state = State::Idle;
+    SnapshotIndex m_previous;
+    std::uint64_t m_txn_id = 0;
+    std::uint64_t m_new_generation = 0;
+    std::vector<Entry> m_entries;
+    std::size_t m_rollback_reserve = 0;
+    std::array<std::shared_ptr<const void>, 16> m_rollback_handles;
+    std::unordered_set<std::string> m_protected;
+    std::unordered_map<std::string, std::size_t> m_entry_indices;
+    std::vector<std::size_t> m_changed_entries;
+    struct WrittenDigest {
+        MemberDigest digest;
+        std::array<std::uint64_t, 8> version;
+    };
+    std::unordered_map<std::string, WrittenDigest> m_written_digests;
+    std::vector<std::function<void()>> m_committed_actions;
+    std::uint64_t m_next_undo = 0;
+    bool m_registered = false;
+    std::array<std::uint64_t, 3> m_journal_identity{};
+    std::array<std::uint64_t, 3> m_undo_directory_identity{};
+    std::array<std::uint64_t, 3> m_control_identity{};
+};
+
+// Test hook: invoked at real publication sites ("journal-published", "before-replace",
+// "after-retire", "after-replace", "before-delete", "after-delete", "commit-point",
+// "journal-unlinked", "before-rollback", "rollback-entry", "publication-quarantined",
+// "retirement-quarantined").
+using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
+void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
+void report_snapshot_step(const char* step, const std::filesystem::path& path);
+
+// File callbacks can mutate an otherwise exclusively owned publication. A writer
+// may transfer observations across rename only while this revision is unchanged.
+std::uint64_t snapshot_observation_revision();
+void invalidate_snapshot_observations();
+
+} // namespace Luminumbra::Persistence

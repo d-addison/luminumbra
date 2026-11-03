@@ -158,6 +158,8 @@ public:
     void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
     void mark_edited(RegionKey key, const WorldClock& clock);
+    // Wakes an existing Frozen record whose authority changed; never creates or alters others.
+    void wake_frozen(RegionKey key) noexcept;
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
