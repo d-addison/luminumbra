@@ -813,6 +813,9 @@ public:
     const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
         return m_activation_index.counters();
     }
+    std::uint64_t debug_dirty_generation() const {
+        return m_dirty_generation;
+    }
     // Owner-thread diagnostic in dispatch/publication order. Returns at most
     // 1024 coordinates, including unpublished batches whose workers finished.
     std::vector<IVec3> generation_queue_prefix(std::size_t max_count) const;
@@ -1072,8 +1075,10 @@ public:
     bool restore_authoritative_chunk(const IVec3& coords);
     void release_clean_parked_chunks();
     void note_persistence_outcome(bool ok) {
-        m_evictions_suspended = !ok;
-        ++m_dirty_generation;
+        if (m_evictions_suspended != !ok) {
+            m_evictions_suspended = !ok;
+            ++m_dirty_generation;
+        }
     }
 
 private:

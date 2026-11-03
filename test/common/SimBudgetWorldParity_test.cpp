@@ -282,4 +282,67 @@ INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          [](const testing::TestParamInfo<bool>& parameter) {
                              return parameter.param ? "Enabled" : "Disabled";
                          });
+
+class SimBudgetAutosave : public testing::TestWithParam<std::string> {
+protected:
+    fs::path root;
+
+    void SetUp() override {
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("sim_budget_autosave_");
+        fs::create_directories(root / "worlds/atlas/presets");
+        const auto preset = GetParam() + ".json";
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets" / preset,
+                      root / "worlds/atlas/presets" / preset);
+        fs::create_directories(root / "data");
+        fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data/common",
+                 root / "data/common",
+                 fs::copy_options::recursive);
+    }
+    void TearDown() override {
+        std::error_code ec;
+        fs::remove_all(root, ec);
+    }
+};
+
+TEST_P(SimBudgetAutosave, StationaryCaptureStaysSettledAcrossAutosaves) {
+    // Cross several capture autosaves while keeping the integration workload bounded.
+    constexpr std::uint64_t ticks = 120;
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = root.generic_string() + "/";
+    config.seed = "1337";
+    config.preset = GetParam();
+    config.surface_radius = 1;
+    config.collision_radius = 1;
+    config.avatar_count = 0;
+    config.moving_anchor = false;
+    config.ecology_roster = true;
+    config.planted_roster = true;
+    config.sim_budget = true;
+    config.autosave_interval_ticks = 30;
+    Luminumbra::Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot());
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    ASSERT_TRUE(runner.Session()->FiniteHydrologyEnabled());
+    const auto report = runner.RunFixedTicks(ticks);
+    ASSERT_EQ(report.ticks_executed, ticks);
+    EXPECT_FALSE(report.region_fault) << report.region_fault_message;
+    EXPECT_EQ(report.autosave_passes, ticks / config.autosave_interval_ticks);
+    EXPECT_EQ(runner.Session()->GetPersistenceStatus().failures, 0u);
+    const auto& samples =
+        runner.Session()
+            ->GetSimBudgetTelemetry()
+            .SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::ServerStreaming)];
+    ASSERT_EQ(samples.size(), ticks);
+    for (const auto& sample : samples) {
+        EXPECT_EQ(sample.work, 0u) << "tick=" << sample.tick;
+    }
+    runner.Shutdown();
+}
+
+INSTANTIATE_TEST_SUITE_P(CapturePresets,
+                         SimBudgetAutosave,
+                         testing::Values("default", "mountains", "archipelago"),
+                         [](const testing::TestParamInfo<std::string>& parameter) {
+                             return parameter.param;
+                         });
 } // namespace
