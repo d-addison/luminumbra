@@ -200,6 +200,7 @@ struct GameSession::LoadedWorldState {
     std::optional<WorldCalendar> render_calendar;
     std::optional<ActiveRegionLedger> ledger;
     GroundObjectStore ground_objects;
+    GroundNotifications ground_notifications;
     bool snapshot_present = false;
     bool requires_index = false;
     Ecs::EntityRegistrySnapshot plants;
@@ -528,7 +529,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
-    if (m_activeRegionsEnabled && (m_simulationBatchInProgress || m_saveEventDeliveryInProgress))
+    if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
     class BatchGuard {
     public:
@@ -2045,41 +2046,15 @@ std::string GroundEventPayload(const GroundObject& object) {
            std::to_string(object.z_mm);
 }
 
-// Floor division for a positive divisor: negative quotients round toward minus infinity.
-std::int64_t FloorDivide(std::int64_t value, std::int64_t divisor) {
-    const std::int64_t quotient = value / divisor;
-    return (value % divisor != 0 && value < 0) ? quotient - 1 : quotient;
+Vec3 GroundProbePosition(const GroundObject& object) {
+    return {static_cast<float>(object.x_mm) / 1000.0f,
+            static_cast<float>(object.y_mm) / 1000.0f,
+            static_cast<float>(object.z_mm) / 1000.0f};
 }
 
-// (chunk x, chunk z) of every streamed chunk that is not still loading.
-std::set<std::pair<int, int>>
-ResidentChunkColumns(const std::vector<std::shared_ptr<Luminumbra::Chunk>>& chunks) {
-    std::set<std::pair<int, int>> columns;
-    for (const auto& chunk : chunks) {
-        if (!chunk || chunk->get_state() == ChunkState::Loading)
-            continue;
-        columns.emplace(chunk->get_coords().x, chunk->get_coords().z);
-    }
-    return columns;
-}
-
-// Settles an unsettled object with an owner-thread downward terrain probe.
-// Returns false, leaving the object unchanged, when its chunk column is not resident or the
-// height is not finite.
-bool SettleGroundObjectOnTerrain(GroundObject& object,
-                                 const std::set<std::pair<int, int>>& columns,
-                                 const Systems::SHIELD_WorldSystem& world) {
+bool SettleGroundObjectOnTerrain(GroundObject& object, const std::optional<float>& height) {
     if (object.settled())
         return true;
-    const std::int64_t column_x_mm = static_cast<std::int64_t>(CHUNK_SIZE_X) * 1000;
-    const std::int64_t column_z_mm = static_cast<std::int64_t>(CHUNK_SIZE_Z) * 1000;
-    const std::pair<int, int> column{static_cast<int>(FloorDivide(object.x_mm, column_x_mm)),
-                                     static_cast<int>(FloorDivide(object.z_mm, column_z_mm))};
-    if (!columns.contains(column))
-        return false;
-    const auto height = world.ProbeTerrainBelow({static_cast<float>(object.x_mm) / 1000.0f,
-                                                 static_cast<float>(object.y_mm) / 1000.0f,
-                                                 static_cast<float>(object.z_mm) / 1000.0f});
     if (!height || !std::isfinite(*height))
         return false;
     const double y_mm = static_cast<double>(*height) * 1000.0;
@@ -2133,8 +2108,8 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     }
     // A failure from here on still consumes the id.
     candidate.id = id;
-    SettleGroundObjectOnTerrain(
-        candidate, ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks()), *m_worldSystem);
+    SettleGroundObjectOnTerrain(candidate,
+                                m_worldSystem->ProbeTerrainBelow(GroundProbePosition(candidate)));
     if (!m_groundObjects.insert(candidate))
         return 0;
     if (!MarkGroundRegionEdited(candidate)) {
@@ -2183,12 +2158,20 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     std::vector<RegionKey> due = m_regionSchedule.due;
     std::sort(due.begin(), due.end());
     due.erase(std::unique(due.begin(), due.end()), due.end());
-    // Resident chunk columns, built on the first unsettled object of this call.
-    std::optional<std::set<std::pair<int, int>>> columns;
-    const auto settle = [this, &columns](GroundObject& object) {
-        if (!columns.has_value())
-            columns = ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks());
-        return SettleGroundObjectOnTerrain(object, columns.value(), *m_worldSystem);
+    std::vector<Vec3> positions;
+    std::map<std::uint64_t, std::size_t> probe_indices;
+    for (const RegionKey key : due) {
+        for (const auto& object : m_groundObjects.in_region(key)) {
+            if (!object.settled()) {
+                probe_indices.emplace(object.id, positions.size());
+                positions.push_back(GroundProbePosition(object));
+            }
+        }
+    }
+    const auto heights = positions.empty() ? std::vector<std::optional<float>>{}
+                                           : m_worldSystem->ProbeTerrainBelowBatch(positions);
+    const auto settle = [&probe_indices, &heights](GroundObject& object) {
+        return SettleGroundObjectOnTerrain(object, heights.at(probe_indices.at(object.id)));
     };
     for (const RegionKey key : due) {
         if (!m_groundObjects.owns_region(key))
@@ -2535,7 +2518,6 @@ bool PersistSavedPreset(const fs::path& save_dir,
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
                                       Persistence::CreatedWorldArtifacts* artifacts) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
-        (m_activeRegionsEnabled && m_simulationEventBus.pending_count() != 0) ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
          (m_activeRegionsEnabled || !m_renderCalendar)) ||
@@ -2553,9 +2535,19 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
     if (!PersistSavedPreset(save_dir, m_savedPresetJson, artifacts))
         return false;
     if (m_activeRegionsEnabled) {
+        GroundNotifications notifications;
+        // Fault recovery saves retire notifications without invoking consumers.
+        if (!m_regionFault) {
+            notifications.next_sequence = m_simulationEventBus.next_sequence();
+            for (const auto& event : m_simulationEventBus.pending_events()) {
+                if (event.topic == "ground.spawned" || event.topic == "ground.despawned")
+                    notifications.events.push_back(event);
+            }
+        }
         // Creation has an empty store; later saves join the enclosing snapshot transaction.
         if ((Persistence::SaveTransaction::active_for(save_dir) || !m_groundObjects.empty()) &&
-            !Persistence::WorldSaveService::save_ground_objects(m_groundObjects, save_dir))
+            !Persistence::WorldSaveService::save_ground_objects(
+                m_groundObjects, save_dir, nullptr, notifications))
             return false;
         auto ledger = m_activeRegionLedger;
         return Persistence::WorldSaveService::save_metadata_and_active_regions(
@@ -2666,28 +2658,6 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         save_dir, report, full_snapshot, m_activeRegionsEnabled || full_snapshot);
 }
 
-bool GameSession::DrainEventsBeforeSave() {
-    if (!m_activeRegionsEnabled || m_simulationEventBus.pending_count() == 0)
-        return true;
-    // Pending notifications are not persisted. Deliver before capturing any save state;
-    // consumers that leave queued work or events must reach a clean boundary before saving.
-    struct DeliveryGuard {
-        bool& active;
-        ~DeliveryGuard() {
-            active = false;
-        }
-    } guard{m_saveEventDeliveryInProgress};
-    m_saveEventDeliveryInProgress = true;
-    try {
-        m_simulationEventBus.drain(m_worldClock.tick(), [this] { return !m_regionFault; });
-    } catch (const std::exception& error) {
-        LatchRegionFault(m_worldClock.tick(), error.what());
-    } catch (...) {
-        LatchRegionFault(m_worldClock.tick(), "Unknown simulation consumer fault");
-    }
-    return !m_regionFault && m_regionWork.empty() && m_simulationEventBus.pending_count() == 0;
-}
-
 bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
@@ -2731,9 +2701,6 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                          .count());
         }
     } outcome{*this, save_started, false};
-
-    if (!DrainEventsBeforeSave())
-        return false;
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -3169,7 +3136,8 @@ bool GameSession::ReadPreparedWorldState(
                                                                 save_dir,
                                                                 state.ledger->next_persistent_id(),
                                                                 &errors,
-                                                                stop)) {
+                                                                stop,
+                                                                &state.ground_notifications)) {
             state.input_refused = true;
             error = errors.empty() ? "Corrupt ground objects." : errors.front();
             return false;
@@ -3235,6 +3203,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         saved.ledger->restore_clock(saved.clock);
         ReplaceActiveRegionLedger(std::move(*saved.ledger));
         m_groundObjects = std::move(saved.ground_objects);
+        m_simulationEventBus.restore_pending(std::move(saved.ground_notifications.events),
+                                             saved.ground_notifications.next_sequence);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;

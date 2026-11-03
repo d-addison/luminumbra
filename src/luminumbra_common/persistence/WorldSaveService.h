@@ -158,16 +158,18 @@ public:
                                     const std::stop_token& stop = {});
 
     // Ground object store persisted as region/ground-objects.json (SIBLING to the chunk container).
-    // An EMPTY store writes NO file (and removes a stale one). Absent file: out is cleared, true.
+    // Empty objects and delivery state write no file. Absent file clears both outputs.
     static std::filesystem::path ground_objects_path(const std::filesystem::path& save_dir);
     static bool save_ground_objects(const world::GroundObjectStore& store,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    const world::GroundNotifications& notifications = {});
     static bool load_ground_objects(world::GroundObjectStore& out,
                                     const std::filesystem::path& save_dir,
                                     std::uint64_t next_id,
                                     std::vector<std::string>* errors = nullptr,
-                                    const std::stop_token& stop = {});
+                                    const std::stop_token& stop = {},
+                                    world::GroundNotifications* notifications = nullptr);
     // load_world refusal rules for ground objects: every object lies in a region the ledger
     // records and no object was spawned after the metadata clock. Absent file: true.
     static bool validate_ground_objects(const std::filesystem::path& save_dir,

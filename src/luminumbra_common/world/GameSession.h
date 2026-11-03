@@ -564,8 +564,7 @@ public:
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
-        return !m_activeRegionsEnabled || (!m_simulationBatchInProgress &&
-                                           !m_saveEventDeliveryInProgress && m_regionWork.empty());
+        return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
 
     // --- Fixed-rate simulation ---
@@ -693,8 +692,6 @@ private:
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;
     bool m_simulationBatchInProgress = false;
-    bool m_saveEventDeliveryInProgress = false;
-    bool DrainEventsBeforeSave();
     bool CreateWorldInternal(const std::string& name,
                              const std::string& seed,
                              const std::string& worldType,

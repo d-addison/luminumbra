@@ -1,6 +1,7 @@
 #include "../../src/luminumbra_common/simulation/SimulationEventBus.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -63,5 +64,46 @@ int main() {
         return fail("simulation event bus subscribers observed a non-deterministic order");
     }
 
+    for (const bool throws : {false, true}) {
+        OrderedEventBus interrupted;
+        bool keep_delivering = true;
+        std::vector<std::string> first, middle, last;
+        interrupted.subscribe([&](const auto& event) { first.push_back(event.payload); });
+        interrupted.subscribe([&](const auto& event) {
+            middle.push_back(event.payload);
+            if (event.payload == "one") {
+                interrupted.publish(2, "test", "three");
+                keep_delivering = false;
+                if (throws)
+                    throw std::runtime_error("consumer fault");
+            }
+        });
+        interrupted.subscribe([&](const auto& event) { last.push_back(event.payload); });
+        interrupted.publish(1, "test", "one");
+        interrupted.publish(1, "test", "two");
+        interrupted.publish(3, "test", "future");
+        bool caught = false;
+        try {
+            const auto partial = interrupted.drain(1, [&] { return keep_delivering; });
+            if (!partial.empty())
+                return fail("aborted delivery reported an incomplete event as delivered");
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (caught != throws || first != std::vector<std::string>{"one"} || middle != first ||
+            !last.empty() || interrupted.pending_count() != 4)
+            return fail("aborted delivery lost pending events or reached later handlers");
+        keep_delivering = true;
+        const auto retried = interrupted.drain(2, [&] { return keep_delivering; });
+        const std::vector<std::string> expected{"one", "two", "three"};
+        if (retried.size() != 3 || first != expected || middle != expected || last != expected ||
+            interrupted.pending_count() != 1)
+            return fail("delivery retry skipped or duplicated a handler");
+        interrupted.drain(3);
+        const std::vector<std::string> complete{"one", "two", "three", "future"};
+        if (first != complete || middle != complete || last != complete ||
+            interrupted.pending_count() != 0)
+            return fail("future events did not survive aborted delivery");
+    }
     return 0;
 }

@@ -421,3 +421,59 @@ TEST(GroundObjectStoreTest, CanonicalBytesEmptyAndStable) {
     EXPECT_EQ(store.region_bytes(RegionKey{5, 5}), "");
     EXPECT_EQ(store.serialize(), FileJson(ObjectJson(1)));
 }
+
+TEST(GroundObjectStoreTest, DeeplyNestedInputRefusesBeforeParsingAndPreservesOutputs) {
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeObject(99)));
+    GroundNotifications notifications{7, {{3, 0, 6, "ground.spawned", "kept"}}};
+    const auto before = store.serialize(notifications);
+    const std::string nested = std::string("{\"schema\":") + std::string(100000, '[') + "0" +
+                               std::string(100000, ']') + "}";
+    std::string error;
+    EXPECT_FALSE(GroundObjectStore::parse(nested, 100, store, error, &notifications));
+    EXPECT_NE(error.find("nesting depth"), std::string::npos);
+    EXPECT_EQ(store.serialize(notifications), before);
+}
+
+TEST(GroundObjectStoreTest, NotificationsRoundTripWithoutChangingLegacyBytesOrHash) {
+    GroundObjectStore store, restored;
+    ASSERT_TRUE(store.insert(MakeObject(1)));
+    const auto legacy = store.serialize();
+    const auto hash = store.canonical_bytes();
+    GroundNotifications notifications{9,
+                                      {{4, -1, 3, "ground.spawned", "1,1,0,0,0"},
+                                       {100, 2, 8, "ground.despawned", "quoted \"[{}]\\"}}};
+    GroundNotifications loaded;
+    std::string error;
+    ASSERT_TRUE(
+        GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded))
+        << error;
+    EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
+    EXPECT_EQ(restored.canonical_bytes(), hash);
+    EXPECT_EQ(loaded.next_sequence, 9u);
+    ASSERT_EQ(loaded.events.size(), 2u);
+    EXPECT_EQ(loaded.events.back().tick, 100u);
+    ASSERT_TRUE(GroundObjectStore::parse(legacy, 2, restored, error, &loaded));
+    EXPECT_EQ(restored.serialize(), legacy);
+    EXPECT_EQ(loaded.next_sequence, 0u);
+    EXPECT_TRUE(loaded.events.empty());
+    // Notifications also survive the removal of the final object.
+    ASSERT_TRUE(store.erase(1));
+    ASSERT_TRUE(
+        GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded));
+    EXPECT_TRUE(restored.empty());
+    EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
+}
+
+TEST(GroundObjectStoreTest, InvalidNotificationsRefuseTransactionally) {
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeObject(1)));
+    const GroundNotifications notifications{2, {{4, 0, 1, "ground.spawned", "1,1,0,0,0"}}};
+    const auto bytes = store.serialize(notifications);
+    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"next_sequence\":2", "\"next_sequence\":1")));
+    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "ground.spawned", "script.trigger")));
+    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"lane\":0", "\"lane\":2147483648")));
+    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"tick\":4", "\"tick\":4.5")));
+    EXPECT_TRUE(
+        RefusedUntouched(Replace(bytes, "\"sequence\":1", "\"sequence\":1,\"sequence\":1")));
+}

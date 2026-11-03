@@ -1,4 +1,5 @@
 #include "GroundObjectStore.h"
+#include "persistence/SavedInputLimits.h"
 
 #include <nlohmann/json.hpp>
 
@@ -261,8 +262,10 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
     return result;
 }
 
-std::string GroundObjectStore::serialize() const {
-    if (m_objects.empty()) {
+std::string GroundObjectStore::serialize(const GroundNotifications& notifications) const {
+    const bool has_notifications =
+        notifications.next_sequence != 0 || !notifications.events.empty();
+    if (m_objects.empty() && !has_notifications) {
         return {};
     }
     std::string out = std::string("{\"schema\":\"") + kSchema + "\",\"objects\":[";
@@ -295,14 +298,33 @@ std::string GroundObjectStore::serialize() const {
         AppendField(out, "flags", std::to_string(object.flags));
         out += '}';
     }
-    out += "]}\n";
+    out += ']';
+    if (has_notifications) {
+        out +=
+            ",\"notifications\":{\"next_sequence\":" + std::to_string(notifications.next_sequence) +
+            ",\"events\":[";
+        bool first_event = true;
+        for (const auto& event : notifications.events) {
+            if (!first_event)
+                out += ',';
+            first_event = false;
+            out += "{\"tick\":" + std::to_string(event.tick) +
+                   ",\"lane\":" + std::to_string(event.lane) +
+                   ",\"sequence\":" + std::to_string(event.sequence) +
+                   ",\"topic\":" + Json(event.topic).dump() +
+                   ",\"payload\":" + Json(event.payload).dump() + '}';
+        }
+        out += "]}";
+    }
+    out += "}\n";
     return out;
 }
 
 bool GroundObjectStore::parse(std::string_view bytes,
                               std::uint64_t next_id,
                               GroundObjectStore& out,
-                              std::string& error) {
+                              std::string& error,
+                              GroundNotifications* notifications) {
     if (bytes.empty()) {
         error = "ground objects: empty input";
         return false;
@@ -311,10 +333,15 @@ bool GroundObjectStore::parse(std::string_view bytes,
         error = "ground objects: file exceeds size cap";
         return false;
     }
+    if (!Persistence::SavedInputLimits::JsonDepthAllowed(bytes)) {
+        error = "ground objects: JSON nesting depth exceeds compatibility limit";
+        return false;
+    }
     try {
         const Json document =
             Json::parse(bytes.data(), bytes.data() + bytes.size(), nullptr, false);
-        if (document.is_discarded() || !document.is_object() || document.size() != 2 ||
+        if (document.is_discarded() || !document.is_object() ||
+            document.size() != (document.contains("notifications") ? 3u : 2u) ||
             !document.contains("schema") || !document.contains("objects")) {
             error = "ground objects: malformed document";
             return false;
@@ -393,12 +420,51 @@ bool GroundObjectStore::parse(std::string_view bytes,
             }
         }
 
-        const std::string canonical = temporary.serialize();
+        GroundNotifications pending;
+        if (document.contains("notifications")) {
+            const auto& state = document.at("notifications");
+            if (!state.is_object() || state.size() != 2 || !state.contains("next_sequence") ||
+                !state.contains("events") ||
+                !ReadUnsigned(state, "next_sequence", kU64Max, pending.next_sequence) ||
+                !state.at("events").is_array()) {
+                error = "ground objects: malformed notifications";
+                return false;
+            }
+            for (const auto& value : state.at("events")) {
+                luminumbra::simulation::SimulationEvent event;
+                std::int64_t lane = 0;
+                if (!value.is_object() || value.size() != 5 || !value.contains("tick") ||
+                    !value.contains("lane") || !value.contains("sequence") ||
+                    !value.contains("topic") || !value.contains("payload") ||
+                    !ReadUnsigned(value, "tick", kU64Max, event.tick) ||
+                    !ReadSigned(value, "lane", lane) ||
+                    lane < std::numeric_limits<std::int32_t>::min() ||
+                    lane > std::numeric_limits<std::int32_t>::max() ||
+                    !ReadUnsigned(value, "sequence", kU64Max, event.sequence) ||
+                    event.sequence >= pending.next_sequence ||
+                    (!pending.events.empty() && event.sequence <= pending.events.back().sequence) ||
+                    !value.at("topic").is_string() || !value.at("payload").is_string()) {
+                    error = "ground objects: malformed notification";
+                    return false;
+                }
+                event.lane = static_cast<std::int32_t>(lane);
+                event.topic = value.at("topic").get<std::string>();
+                event.payload = value.at("payload").get<std::string>();
+                if (event.topic != "ground.spawned" && event.topic != "ground.despawned") {
+                    error = "ground objects: unsupported notification topic";
+                    return false;
+                }
+                pending.events.push_back(std::move(event));
+            }
+        }
+        const std::string canonical = temporary.serialize(pending);
         if (std::string_view(canonical) != bytes) {
             error = "ground objects: bytes are not canonical";
             return false;
         }
         out = std::move(temporary);
+        if (notifications)
+            *notifications = std::move(pending);
         return true;
     } catch (const std::exception&) {
         error = "ground objects: parse exception";

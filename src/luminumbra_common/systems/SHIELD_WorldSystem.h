@@ -471,8 +471,11 @@ public:
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
     // Owner-thread downward probe over available terrain truth. Never generates or performs IO;
-    // full-resolution resident SDF supersedes the procedural surface in its vertical band.
+    // Missing terrain bands refuse; verified generated heightmaps permit procedural fallback.
     std::optional<float> ProbeTerrainBelow(const Vec3& requested) const;
+    // Shares column indexing and exact-position results within this owner-thread call.
+    std::vector<std::optional<float>>
+    ProbeTerrainBelowBatch(const std::vector<Vec3>& requests) const;
 
     // Owner-thread capture for bounded boot input jobs. No streamed chunks,
     // callbacks or live-world pointers escape; exact immutable noise nodes,

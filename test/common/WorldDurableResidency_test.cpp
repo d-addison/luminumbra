@@ -1069,6 +1069,8 @@ public:
         // CTest runs cases in separate processes; bound each small fixture's worker pool.
         jobs.startup(2);
         session = std::make_unique<GameSession>();
+        // This fixture requires dry, regenerable water; weather rain is enabled by default.
+        session->SetWeatherRainEnabled(false);
         session->SetActiveRegionsEnabled(active_regions);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());

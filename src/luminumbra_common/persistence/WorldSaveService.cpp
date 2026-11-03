@@ -4016,7 +4016,9 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         return false;
     }
     TransactionScope scope(save_dir,
-                           {"world_info.json", "chunks/region/active-regions.arl"},
+                           {"world_info.json",
+                            "chunks/region/active-regions.arl",
+                            world::GroundObjectStore::kRelativePath},
                            errors,
                            metadata.contains("snapshotFormat") ||
                                (metadata.contains("container_version") &&
@@ -4349,9 +4351,10 @@ std::filesystem::path WorldSaveService::ground_objects_path(const std::filesyste
 
 bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           const world::GroundNotifications& notifications) {
     const SaveGuard guard;
-    const std::string bytes = store.serialize();
+    const std::string bytes = store.serialize(notifications);
     if (bytes.size() > world::GroundObjectStore::kMaxFileBytes) {
         AddError(errors, "Ground objects exceed the file capacity.");
         return false;
@@ -4359,7 +4362,7 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
     TransactionScope scope(save_dir, {world::GroundObjectStore::kRelativePath}, errors, true);
     if (!scope.ok() || !validate_save(save_dir, errors))
         return false;
-    if (store.empty()) {
+    if (bytes.empty()) {
         bool missing = false;
         {
             const SavedInputFile input(ground_objects_path(save_dir));
@@ -4377,7 +4380,8 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                                            const std::filesystem::path& save_dir,
                                            std::uint64_t next_id,
                                            std::vector<std::string>* errors,
-                                           const std::stop_token& stop) {
+                                           const std::stop_token& stop,
+                                           world::GroundNotifications* notifications) {
     const detail::SnapshotReadOwnership ownership;
     const std::filesystem::path path = ground_objects_path(save_dir);
     if (stop.stop_requested()) {
@@ -4425,11 +4429,14 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
     }
     if (!present) {
         out.clear();
+        if (notifications)
+            *notifications = {};
         return true; // A verified absent member is a clean miss.
     }
     world::GroundObjectStore parsed;
+    world::GroundNotifications pending;
     std::string error;
-    if (!world::GroundObjectStore::parse(bytes, next_id, parsed, error)) {
+    if (!world::GroundObjectStore::parse(bytes, next_id, parsed, error, &pending)) {
         AddError(errors, "Ground objects load failed: " + error);
         return false;
     }
@@ -4438,6 +4445,8 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         return false;
     }
     out = std::move(parsed);
+    if (notifications)
+        *notifications = std::move(pending);
     return true;
 }
 

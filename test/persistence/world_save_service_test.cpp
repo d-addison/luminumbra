@@ -3098,6 +3098,17 @@ TEST(WorldSaveService, GroundObjectsJoinedEmptySaveRemovesFileAndRetainsAbsentMe
     GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
     std::vector<std::string> errors;
+    // Joined writers validate the installed snapshot, including object ownership.
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ledger.mark_edited(GroundObjectStore::region_of(*store.find(id)), clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
     ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors))
         << JoinErrors(errors);
     for (int attempt = 0; attempt < 2; ++attempt) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ActiveRegionLedger.h"
+#include "simulation/SimulationEventBus.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,12 @@
 #include <vector>
 
 namespace Luminumbra::world {
+
+// Delivery state is persisted with objects, but does not enter their hash projection.
+struct GroundNotifications {
+    std::uint64_t next_sequence = 0;
+    std::vector<luminumbra::simulation::SimulationEvent> events;
+};
 
 // One persistent ground object (S5). Positions are integer millimetres; no floating point is ever
 // persisted or hashed.
@@ -93,22 +100,27 @@ public:
     // despawn_after != 0 and active_age >= despawn_after is removed and reported.
     AgeResult age_region(RegionKey key, const SettleFn& settle);
 
-    // Canonical file bytes. Empty string for an empty store (an empty store writes no file).
+    // Canonical file bytes. Empty string when objects and notification state are empty.
     // Format, exactly (no whitespace other than the single trailing newline):
     //   {"schema":"luminumbra.ground_objects.v1","objects":[{"id":N,"type":N,"x_mm":N,
     //   "y_mm":N,"z_mm":N,"spawn_tick":N,"active_age":N,"despawn_after":N,"payload":N,
     //   "flags":N},...]}\n
     // (the example is wrapped; the real output is one line). Objects ascend by id.
-    [[nodiscard]] std::string serialize() const;
+    // Optional notifications add "notifications":{"next_sequence":N,"events":[...]} to
+    // the envelope. Events ascend by sequence and contain tick, lane, sequence, topic, payload.
+    // With empty notification state, legacy bytes are unchanged.
+    [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {}) const;
     // Strict transactional parse. Refuses (false, `error` set, `out` untouched) on: size >
-    // kMaxFileBytes, malformed JSON, wrong schema, unknown/missing/duplicate keys, a non-integer
-    // number, any invalid object, ids not strictly ascending, more than kMaxObjects, an id >=
-    // `next_id`, or bytes that differ from serialize() of the parsed result (rejects alternate
-    // encodings). An empty `bytes` is not valid input (callers handle absence themselves).
+    // kMaxFileBytes, excessive nesting, malformed JSON, wrong schema, unknown/missing/duplicate
+    // keys, a non-integer number, any invalid object, ids not strictly ascending, more than
+    // kMaxObjects, an id >= `next_id`, or bytes that differ from serialize() of the parsed result
+    // (rejects alternate encodings). An empty `bytes` is not valid input (callers handle absence
+    // themselves).
     static bool parse(std::string_view bytes,
                       std::uint64_t next_id,
                       GroundObjectStore& out,
-                      std::string& error);
+                      std::string& error,
+                      GroundNotifications* notifications = nullptr);
 
     // Hash text. Empty string when the store is empty, otherwise
     // "ground_objects:v1:" + region_bytes of every object, i.e. objects_bytes(all).
