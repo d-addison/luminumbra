@@ -59,6 +59,7 @@ jobs:
       needs_python: ${{ steps.paths.outputs.needs_python }}
       needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
       heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
+      needs_server_perf: ${{ steps.server-paths.outputs.needs_server_perf }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,6 +109,41 @@ jobs:
             fi
           else
             all_lanes
+          fi
+      - name: Classify server performance paths
+        id: server-paths
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_REF: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Load policy from the base; old or invalid policy keeps measurements on.
+          all_perf() {
+            echo 'needs_server_perf=true' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ "$CI_BASE_REF" != devel ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ -z "$CI_REPOSITORY" ] || [ -z "$CI_HEAD_REPOSITORY" ] ||
+             [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_perf
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_perf
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-perf-paths.py"; then
+            rm -f "$RUNNER_TEMP/classified-perf-paths.txt"
+            if GITHUB_OUTPUT="$RUNNER_TEMP/classified-perf-paths.txt" python3 -I -B "$RUNNER_TEMP/trusted-perf-paths.py" classify-performance --root "$GITHUB_WORKSPACE" &&
+               python3 -I -B -c '
+          import pathlib, sys
+          rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert rows in (["needs_server_perf=true"], ["needs_server_perf=false"])
+          ' "$RUNNER_TEMP/classified-perf-paths.txt"; then
+              cat "$RUNNER_TEMP/classified-perf-paths.txt" >> "$GITHUB_OUTPUT"
+            else
+              all_perf
+            fi
+          else
+            all_perf
           fi
 
   runner-contract:
@@ -244,18 +280,16 @@ jobs:
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    # Runs on ready pull requests that target main (the promotion gate, where the
-    # water verdict is required before release) and on pushes to main and devel
-    # (so merged devel tips get complete verdicts after the fact). It is skipped on
-    # pull requests that target devel: it is not a required devel check and costs
-    # about 48 runner-minutes per push. The event.before guard stays because a
-    # first push to a branch has no base to compare against; schedule and manual
-    # events are excluded on purpose (they define no base/candidate SHA pair).
+    # Ready devel PRs run only for server performance inputs; main promotions
+    # and merged tips keep complete verdicts. Reuse the paired build and capture
+    # caps on standard runners. A first push has no base to compare against;
+    # schedule and manual events likewise define no base/candidate SHA pair.
     needs: changes
     if: >-
-      !cancelled() && needs.changes.outputs.needs_cpp != 'false' &&
+      !cancelled() &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      ((github.event_name == 'pull_request' && (github.base_ref == 'main' ||
+      (github.base_ref == 'devel' && (needs.changes.result != 'success' || needs.changes.outputs.needs_server_perf != 'false')))) ||
       (github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') &&
       github.event.before != '0000000000000000000000000000000000000000'))
