@@ -225,6 +225,8 @@ public:
     }
 
 private:
+    friend struct EnergyFieldStateTestAccess;
+
     // Derived only from one page's stored values; never serialized or hashed. A 384 m
     // physical page overlaps at most four 512 m owners. Writers invalidate before editing.
     struct RegionalPageFacts {
@@ -240,6 +242,7 @@ private:
 
     private:
         friend class EnergyFieldState;
+        friend struct EnergyFieldStateTestAccess;
         // cell-major, channel-interleaved: values[(lz*kEnergyPageCells+lx)*channels+ch]
         std::vector<std::uint16_t> values;
         std::uint64_t last_step = 0; // cadence step this page was last current at
@@ -251,6 +254,15 @@ private:
         int channel = 0;
         std::uint64_t emitter_id = 0;
         std::uint32_t amount = 0;
+    };
+
+    // Derived, unsaved snapshot facts. Owner counts allow records/ages to change
+    // without a page walk; empty keys retain the full validation's removal order.
+    // Legacy writers, queues and restore clear this; regional ticks maintain it.
+    struct RegionalValidation {
+        std::map<RegionKey, std::size_t> owner_pages;
+        std::vector<std::int64_t> empty_pages;
+        std::uint64_t record_bytes = 0;
     };
 
     [[nodiscard]] static std::int64_t PackPageKey(int px, int pz) noexcept;
@@ -272,9 +284,6 @@ private:
     void NormalizeAllPages();
 
     [[nodiscard]] bool RegionalRecordFits(const EnergyFieldState* replacements = nullptr) const;
-    [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
-                                              const EnergyAges& ages,
-                                              std::vector<std::int64_t>* empty_pages) const;
 
     int m_channels = 1;
     // Window origin in world cell coords, page-aligned. Valid once anchored.
@@ -290,6 +299,7 @@ private:
     std::uint64_t m_next_fire_tick = kEnergyCadenceTicks;
     std::map<std::int64_t, Page> m_pages; // ORDERED — deterministic iteration
     std::vector<PendingDeposit> m_pending;
+    mutable std::optional<RegionalValidation> m_regional_validation;
 };
 
 } // namespace luminumbra::fields

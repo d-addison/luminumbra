@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <span>
@@ -20,9 +21,35 @@
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/WorldClock.h"
 
+namespace luminumbra::fields {
+
+struct EnergyFieldStateTestAccess {
+    static bool Validated(const EnergyFieldState& field) {
+        return field.m_regional_validation.has_value();
+    }
+    static void Invalidate(EnergyFieldState& field) {
+        field.m_regional_validation.reset();
+    }
+    static void ForgetPageFacts(EnergyFieldState& field, int px, int pz) {
+        field.m_pages.at(EnergyFieldState::PackPageKey(px, pz)).regional_summary.reset();
+    }
+    static bool HasPageFacts(const EnergyFieldState& field, int px, int pz) {
+        return field.m_pages.at(EnergyFieldState::PackPageKey(px, pz)).regional_summary.has_value();
+    }
+    static void TamperPageShape(EnergyFieldState& field, int px, int pz) {
+        field.m_pages.at(EnergyFieldState::PackPageKey(px, pz)).values.pop_back();
+    }
+    static void Normalize(EnergyFieldState& field) {
+        field.NormalizeAllPages();
+    }
+};
+
+} // namespace luminumbra::fields
+
 namespace {
 
 using luminumbra::fields::EnergyFieldState;
+using luminumbra::fields::EnergyFieldStateTestAccess;
 using luminumbra::fields::kEnergyCadenceTicks;
 using luminumbra::fields::kEnergyDecayD;
 using luminumbra::fields::kEnergyDecayShift;
@@ -1286,4 +1313,193 @@ TEST(RegionalEnergy, RegionalWriterRefusesIncompatibleLegacyPagesWithoutChanging
     }
     const EnergyFieldState excess_channels(65);
     EXPECT_THROW(static_cast<void>(excess_channels.SerializeRegionalRecord()), std::length_error);
+}
+
+TEST(RegionalEnergy, AffectedValidationMatchesFullWalkWithThousandsOfDormantPages) {
+    EnergyFieldState field;
+    auto records = TwoEnergyOwners();
+    records.at({1, 0}).state = RegionState::Frozen;
+    EnergyAges ages{{{0, 0}, 7}, {{1, 0}, 5}};
+    std::string initial = "EFS1 1 8\nP -5 -5\nP 0 0 136:17\nP 1 0 4:16000 5:500\nP 8 8\n";
+    for (int page = 100; page < 2148; ++page) {
+        initial += "P " + std::to_string(page) + " 100 0:777\n";
+        const auto owner = EnergyFieldState::OwnerOfCell(page * kEnergyPageCells, 1600);
+        records[owner].state = RegionState::Frozen;
+        ages[owner] = 19;
+    }
+    ASSERT_TRUE(field.DeserializeRecord(initial, 0));
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 300));
+    ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+    auto reference = field;
+    const std::array due{RegionKey{0, 0}};
+    for (std::uint64_t tick = 1; tick <= 17; ++tick) {
+        SCOPED_TRACE(tick);
+        // Unset summaries expose any accidental dormant-page walk, including capacity checks.
+        for (int page = 100; page < 2148; ++page)
+            EnergyFieldStateTestAccess::ForgetPageFacts(field, page, 100);
+        EnergyFieldStateTestAccess::Invalidate(reference);
+        EnergyResult actual, expected;
+        ASSERT_TRUE(field.TickRegional(tick, records, due, ages, actual));
+        ASSERT_TRUE(reference.TickRegional(tick, records, due, ages, expected));
+        for (int page = 100; page < 2148; ++page) {
+            EXPECT_FALSE(EnergyFieldStateTestAccess::HasPageFacts(field, page, 100));
+        }
+        EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        EXPECT_LE(actual.staged_pages, 2u);
+        EXPECT_EQ(actual.ages, expected.ages);
+        EXPECT_EQ(actual.clipped_raw, expected.clipped_raw);
+        EXPECT_EQ(actual.staged_pages, expected.staged_pages);
+        EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
+        ASSERT_EQ(actual.work.size(), expected.work.size());
+        for (std::size_t i = 0; i < actual.work.size(); ++i) {
+            EXPECT_EQ(actual.work[i].key, expected.work[i].key);
+            EXPECT_EQ(actual.work[i].region_ticks, expected.work[i].region_ticks);
+            EXPECT_EQ(actual.work[i].entity_updates, expected.work[i].entity_updates);
+            EXPECT_EQ(actual.work[i].water_cells, expected.work[i].water_cells);
+            EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
+        }
+        ASSERT_TRUE(reference.ValidateRegionalOwners(records, expected.ages));
+        EXPECT_EQ(field.page_count(), reference.page_count());
+        EXPECT_EQ(field.page_count(), 2050u);
+        EXPECT_EQ(field.SerializeRegionalRecord(), reference.SerializeRegionalRecord());
+        EXPECT_EQ(field.CanonicalRegionalBytes(), reference.CanonicalRegionalBytes());
+        EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
+        ages = actual.ages;
+    }
+}
+
+TEST(RegionalEnergy, FullValidationRejectsTamperedDormantPagesDespiteCachedValidation) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:100\nP 100 100 0:777\n"));
+    const auto dormant = EnergyFieldState::OwnerOfCell(1600, 1600);
+    EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}, {dormant, ActiveRegionRecord{}}};
+    records[dormant].state = RegionState::Frozen;
+    const EnergyAges ages{{{0, 0}, 0}, {dormant, 19}};
+    ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+    const auto saved = field.SerializeRegionalRecord();
+    const auto snapshot = field;
+    // Leave both markers and page summaries intact to exercise full validation's refresh.
+    EnergyFieldStateTestAccess::TamperPageShape(field, 100, 100);
+    const std::array due{RegionKey{0, 0}};
+    EnergyResult result;
+    ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(result.staged_pages, 0u);
+    auto restored = field;
+    for (auto* state : {&field, &restored}) {
+        EXPECT_FALSE(state->ValidateRegionalOwners(records, result.ages));
+        EXPECT_FALSE(EnergyFieldStateTestAccess::Validated(*state));
+        EXPECT_FALSE(state->ValidateRegionalOwners(records, result.ages));
+        EXPECT_FALSE(state->TickRegional(2, records, {}, result.ages, result));
+    }
+
+    // A well-formed page tampered to a new owner must fail joint load admission.
+    const auto at = saved.find("P 100 100");
+    ASSERT_NE(at, std::string::npos);
+    auto tampered = saved;
+    tampered.replace(at, std::string("P 100 100").size(), "P 102 100");
+    restored = snapshot;
+    ASSERT_TRUE(restored.DeserializeRegionalRecord(tampered));
+    EXPECT_FALSE(EnergyFieldStateTestAccess::Validated(restored));
+    EXPECT_FALSE(restored.ValidateRegionalOwners(records, ages));
+    EXPECT_FALSE(restored.TickRegional(1, records, due, ages, result));
+    ASSERT_TRUE(restored.DeserializeRegionalRecord(saved));
+    ASSERT_TRUE(restored.ValidateRegionalOwners(records, ages));
+    restored = snapshot;
+    EXPECT_TRUE(restored.ValidateRegionalOwners(records, ages));
+}
+
+TEST(RegionalEnergy, MutationEntryPointsClearValidationAndRegionalTicksMaintainIt) {
+    const EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}};
+    const EnergyAges ages{{{0, 0}, 0}};
+    EnergyFieldState initial;
+    ASSERT_TRUE(initial.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:100\n"));
+    ASSERT_TRUE(initial.ValidateRegionalOwners(records, ages));
+    // All public writers other than TickRegional, plus the normalization boundary.
+    const std::vector<std::pair<const char*, std::function<void(EnergyFieldState&)>>> mutations{
+        {"anchor",
+         [](auto& field) {
+             field.SetAnchorCell(0, 0);
+         }},
+        {"legacy queue",
+         [](auto& field) {
+             field.QueueDeposit(1, 0, 0, 0, 1);
+         }},
+        {"regional queue",
+         [](auto& field) {
+             EXPECT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 1));
+         }},
+        {"legacy tick",
+         [](auto& field) {
+             field.Tick(1);
+         }},
+        {"legacy deserialize",
+         [](auto& field) {
+             EXPECT_TRUE(field.DeserializeRecord("EFS1 1 8\nP 0 0 0:101\n", 0));
+         }},
+        {"regional deserialize",
+         [](auto& field) {
+             EXPECT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:101\n"));
+         }},
+        {"empty restore",
+         [](auto& field) {
+             field.ResetEmptyAtTick(9);
+         }},
+        {"normalize",
+         [](auto& field) {
+             EnergyFieldStateTestAccess::Normalize(field);
+         }},
+        {"legacy serialize",
+         [](auto& field) {
+             static_cast<void>(field.SerializeRecord(0));
+         }},
+    };
+    for (const auto& [name, mutate] : mutations) {
+        SCOPED_TRACE(name);
+        auto field = initial;
+        ASSERT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        mutate(field);
+        EXPECT_FALSE(EnergyFieldStateTestAccess::Validated(field));
+        EnergyResult result;
+        ASSERT_TRUE(field.TickRegional(1, records, {}, ages, result));
+        EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+    }
+    auto field = initial;
+    EXPECT_FALSE(field.DeserializeRecord("bad", 0));
+    EXPECT_FALSE(field.DeserializeRegionalRecord("bad"));
+    EXPECT_FALSE(field.QueueRegionalDeposit(1, 0, 0, -1, 1));
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+    static_cast<void>(field.SerializeRegionalRecord());
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+    EnergyResult result;
+    const std::array due{RegionKey{0, 0}};
+    ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+}
+
+TEST(RegionalEnergy, CachedOwnersTrackRemovalAndStillRequireCurrentRecordsAndAges) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:1\nP 100 100 0:777\n"));
+    const auto dormant = EnergyFieldState::OwnerOfCell(1600, 1600);
+    EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}, {dormant, ActiveRegionRecord{}}};
+    records[dormant].state = RegionState::Frozen;
+    EnergyAges ages{{{0, 0}, 7}, {dormant, 19}};
+    ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+    auto corrupted = field;
+    EnergyFieldStateTestAccess::TamperPageShape(corrupted, 0, 0);
+    const std::array due{RegionKey{0, 0}};
+    EnergyResult result;
+    EXPECT_FALSE(corrupted.TickRegional(1, records, due, ages, result));
+    ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(field.page_count(), 1u);
+    ages = result.ages;
+    ages.erase({0, 0});
+    records.erase({0, 0});
+    ASSERT_TRUE(field.TickRegional(2, records, {}, ages, result));
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+    const auto before = field.SerializeRegionalRecord();
+    EXPECT_FALSE(field.TickRegional(3, records, {}, {}, result));
+    EXPECT_FALSE(field.TickRegional(3, {}, {}, {}, result));
+    EXPECT_EQ(field.SerializeRegionalRecord(), before);
+    const std::array frozen_due{dormant};
+    EXPECT_FALSE(field.TickRegional(3, records, frozen_due, ages, result));
 }
