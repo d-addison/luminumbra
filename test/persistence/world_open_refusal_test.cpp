@@ -3239,9 +3239,10 @@ TEST_F(WorldOpenRefusal, CleanOversizedRegionDoesNotBlockIndependentPayloadSaves
         std::shared_ptr<Chunk> chunk;
         ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
         chunk->clear_voxel_data_dirty();
-        // Each maximum finite float needs more than 20 encoded bytes, even
-        // before indentation. This one resident chunk exceeds the 64 MiB cap.
-        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 20 + 1,
+        // The compact array encoding stores each float in four bytes, and base64 grows that by a
+        // third, so a quarter of the cap in floats is enough for this one resident chunk to
+        // exceed the 64 MiB record cap.
+        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 4 + 1,
                                      std::numeric_limits<float>::max());
         const auto region = WorldSaveService::region_file_path(session->GetWorldSaveDir(), 0, 0);
         const auto region_before = Read(region);
