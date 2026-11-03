@@ -1455,7 +1455,8 @@ TEST(WaterSeedInputs, FluxOnlyChangesPersistWithoutDepthDelta) {
             fixture.water().SetHydrology(true, 0, 0);
             fixture.tick();
             ASSERT_FALSE(chunk.needs_authority());
-            const auto cells = static_cast<std::size_t>(resolution) * resolution;
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
             chunk.water_bed_mm.assign(cells, 4000);
             chunk.water_depth_mm.assign(cells, 0);
             chunk.water_edge_flux.assign(2 * cells, 0);
