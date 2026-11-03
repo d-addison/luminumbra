@@ -7575,12 +7575,12 @@ TEST(GameSessionHeadlessWorldTest, GroundProbeWaitsForMissingEditedSurfaceBand) 
     ASSERT_TRUE(world->adopt_streamed_chunk(surface));
     const auto hit = world->ProbeTerrainBelow({x, start, z});
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, bottom + 4.0f);
+    EXPECT_EQ(hit.value_or(0.0f), bottom + 4.0f);
     TickOnce(session);
     const auto* object = session.GetGroundObjects().find(id);
     ASSERT_NE(object, nullptr);
     EXPECT_TRUE(object->settled());
-    EXPECT_EQ(object->y_mm, std::llround(static_cast<double>(*hit) * 1000.0));
+    EXPECT_EQ(object->y_mm, std::llround(static_cast<double>(hit.value_or(0.0f)) * 1000.0));
 
     // Height-only generation permits fallback only with complete, current terrain data.
     surface->sdf_data.clear();
@@ -7638,8 +7638,8 @@ TEST(GameSessionHeadlessWorldTest, BatchedTerrainProbesMatchIndividualQueriesAnd
     }
     ASSERT_TRUE(batched[0].has_value());
     ASSERT_TRUE(batched[1].has_value());
-    EXPECT_EQ(*batched[0], 2.5f);
-    EXPECT_EQ(*batched[1], 12.5f);
+    EXPECT_EQ(batched[0].value_or(0.0f), 2.5f);
+    EXPECT_EQ(batched[1].value_or(0.0f), 12.5f);
     TickOnce(session);
     for (std::size_t i = 0; i < ids.size(); ++i) {
         const auto* object = session.GetGroundObjects().find(ids[i]);

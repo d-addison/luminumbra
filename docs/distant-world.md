@@ -445,26 +445,6 @@ in the engine guide:
 | `plant-entities.json` (existing; persistent identities are recorded in a versioned sibling identity map, the plant payload bytes are unchanged) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
 | scent grid section of `field-pages.fpg` (the near scent field is historical state; it is persisted so near creatures that consume it resume continuously) | `<save>/chunks/region/` | re-seeded empty | refuse | refuse as future format |
 
-The `luminumbra.ground_objects.v1` JSON envelope has an `objects` array and an
-optional `notifications` object. Notifications contain `next_sequence` (the
-unsigned event sequence cursor) and `events`, ordered by strictly increasing
-sequence. Each event contains integer `tick`, signed 32-bit `lane`, unsigned
-`sequence` below the cursor, and string `topic` and `payload`; supported topics
-are `ground.spawned` and `ground.despawned`. Field order is canonical as listed,
-with `schema`, `objects`, then `notifications` at the root and one trailing newline.
-The whole file remains limited to 4 MiB, with nesting admitted by the shared
-64-container JSON depth limit before parsing. Missing notifications restore an
-empty queue and zero cursor, preserving older files. Empty delivery state keeps
-the existing object-file bytes; empty objects with delivery state retain the file.
-
-Saving never delivers simulation notifications. Reload restores ground events
-with their original due ticks, lanes, sequences and payloads, so consumers run at
-the usual end-of-tick delivery point and completed work feeds the following
-schedule. Other publishers' pending events are cleared on load. A faulted save
-omits notification state without invoking consumers, allowing recovery even
-with future events whose delivery ticks cannot be reached. Flag-off saves do
-not write this state.
-
 Persisted creature records inventory every evolution-relevant component and
 reference (creature, genome, needs, mortality and decay, thirst, circadian,
 alarm, pack, territory and bias, migration, scavenging, sensing, reproduction
