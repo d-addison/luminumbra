@@ -289,6 +289,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
     common/FieldPageState_test.cpp
+    common/FoliageFieldPages_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -562,6 +563,13 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
     gtest_main
     luminumbra_common
 )
+
+# This large test translation unit also needs room for its COFF sections on MSVC.
+# Keep the option source-local, as for the headless session regressions.
+if(MSVC)
+    set_source_files_properties(rendering/render_smoke_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+endif()
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
@@ -1570,6 +1578,7 @@ add_executable(frontier_gates_test
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
     ai/scent_field_test.cpp
+    ai/scent_field_gates_test.cpp
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp

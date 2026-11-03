@@ -6,6 +6,12 @@
 
 #include "luminumbra_common/ai/ScentField.h"
 
+#include <array>
+#include <bit>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+
 namespace {
 using luminumbra::ai::ScentField;
 } // namespace
@@ -185,4 +191,165 @@ TEST(ScentField, WindCarriesScentFartherDownwindThanDiffusionAlone) {
     // Far downwind (+X of the source), the advected field carries measurably more scent.
     EXPECT_GT(wind.Sample(0, 14, 6), still.Sample(0, 14, 6));
     EXPECT_GT(wind.Sample(0, 14, 6), 0.0);
+}
+
+TEST(ScentField, RegionalFrozenEdgeSealsDepositsAdvectionDiffusionAndClamp) {
+    ScentField field(8, 4, 1);
+    field.RestoreCell(0, 4, 2, 80.0);
+    const ScentField::CellGate due = [](int x, int) {
+        return x < 4;
+    };
+    const ScentField::EdgeGate sealed = [](int x, int, int nx, int) {
+        return x < 4 && nx < 4;
+    };
+    field.BindDepositGate(due);
+    field.Deposit(0, 4, 2, 20.0);
+    field.Step(0.25, 4, 0.1, -1.0, 0.0, due, sealed);
+    field.Clamp(1e-9, 1e6, due);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 4, 2), 80.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 5, 2), 0.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 3, 2), 1e-9);
+}
+
+TEST(ScentField, RegionalCommonBorderExchangesWithoutInteriorEvaporation) {
+    ScentField field(4, 2, 1);
+    field.RestoreCell(0, 1, 0, 40.0);
+    const ScentField::CellGate neither_due = [](int, int) {
+        return false;
+    };
+    const ScentField::EdgeGate border = [](int x, int, int nx, int) {
+        return (x == 1 && nx == 2) || (x == 2 && nx == 1);
+    };
+    field.Step(0.25, 1, 0.1, 0.0, 0.0, neither_due, border);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 1, 0), 30.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 2, 0), 10.0);
+}
+
+TEST(ScentField, UngatedAndOpenGatesMatchHandTracedLegacyBits) {
+    // Row-major input [0,16;32,48], rate 1/4, one iteration, keep 3/4.
+    // No wind: horizontal fluxes -4,-4 then vertical -8,-8 give [12,20;28,36].
+    // Smoothing accumulators [12,16;20,24] / (3/4), then evaporation * (3/4),
+    // give exactly [12,16;20,24].
+    // Wind (1/2,-1/2): bilinear backtraces give [16,24;32,40]. Horizontal fluxes
+    // -2,-2 then vertical -4,-4 give [22,26;30,34]. Smoothing accumulators
+    // [18,20;22,24] / (3/4), then evaporation * (3/4), give [18,20;22,24].
+    const ScentField::CellGate all_cells = [](int, int) {
+        return true;
+    };
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) {
+        return true;
+    };
+    for (const bool with_wind : {false, true}) {
+        SCOPED_TRACE(with_wind);
+        ScentField legacy_call(2, 2);
+        legacy_call.Deposit(0, 1, 0, 16.0);
+        legacy_call.Deposit(0, 0, 1, 32.0);
+        legacy_call.Deposit(0, 1, 1, 48.0);
+        auto empty_gates = legacy_call;
+        auto open_gates = legacy_call;
+        const double wind_x = with_wind ? 0.5 : 0.0;
+        const double wind_z = with_wind ? -0.5 : 0.0;
+        if (with_wind) {
+            legacy_call.Step(0.25, 1, 0.25, wind_x, wind_z);
+        } else {
+            legacy_call.Step(0.25, 1, 0.25);
+        }
+        empty_gates.Step(0.25, 1, 0.25, wind_x, wind_z, {}, {});
+        open_gates.Step(0.25, 1, 0.25, wind_x, wind_z, all_cells, all_edges);
+        const std::array<double, 4> expected =
+            with_wind ? std::array{18.0, 20.0, 22.0, 24.0} : std::array{12.0, 16.0, 20.0, 24.0};
+        for (int z = 0; z < 2; ++z) {
+            for (int x = 0; x < 2; ++x) {
+                const auto bits =
+                    std::bit_cast<std::uint64_t>(expected[static_cast<std::size_t>(z * 2 + x)]);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(legacy_call.Sample(0, x, z)), bits);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(empty_gates.Sample(0, x, z)), bits);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(open_gates.Sample(0, x, z)), bits);
+            }
+        }
+        // Clamp, then pure evaporation: [19,19;20,23] or [19,20;22,23], halved.
+        legacy_call.Clamp(19.0, 23.0);
+        empty_gates.Clamp(19.0, 23.0, {});
+        open_gates.Clamp(19.0, 23.0, all_cells);
+        legacy_call.Step(0.0, 0, 0.5);
+        empty_gates.Step(0.0, 0, 0.5, 0.0, 0.0, {}, {});
+        open_gates.Step(0.0, 0, 0.5, 0.0, 0.0, all_cells, all_edges);
+        const std::array<double, 4> decayed =
+            with_wind ? std::array{9.5, 10.0, 11.0, 11.5} : std::array{9.5, 9.5, 10.0, 11.5};
+        for (int z = 0; z < 2; ++z) {
+            for (int x = 0; x < 2; ++x) {
+                const auto bits =
+                    std::bit_cast<std::uint64_t>(decayed[static_cast<std::size_t>(z * 2 + x)]);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(legacy_call.Sample(0, x, z)), bits);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(empty_gates.Sample(0, x, z)), bits);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(open_gates.Sample(0, x, z)), bits);
+            }
+        }
+    }
+}
+
+TEST(ScentField, GatedDiffusionRetainsLegacyRateValidation) {
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) {
+        return true;
+    };
+    for (const double invalid_rate : {0.5, std::numeric_limits<double>::infinity()}) {
+        ScentField legacy_call(2, 2);
+        ScentField gated(2, 2);
+        EXPECT_THROW(legacy_call.Step(invalid_rate, 1, 0.0), std::invalid_argument);
+        EXPECT_THROW(gated.Step(invalid_rate, 1, 0.0, 0.0, 0.0, {}, all_edges),
+                     std::invalid_argument);
+    }
+}
+
+TEST(ScentField, GatedDiffusionKeepsRoundoffIntermediatesLikeTheLegacySolver) {
+    // One iteration leaves the center at -0x1p-53 before smoothing; both solvers
+    // must carry that intermediate into the smoothing pass instead of rejecting it.
+    const double center = 0x1.0000000000003p0;
+    ScentField legacy_call(3, 3, 1);
+    ScentField gated(3, 3, 1);
+    legacy_call.Deposit(0, 1, 1, center);
+    gated.Deposit(0, 1, 1, center);
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) {
+        return true;
+    };
+
+    EXPECT_NO_THROW(legacy_call.Step(0.25, 1, 0.0));
+    EXPECT_NO_THROW(gated.Step(0.25, 1, 0.0, 0.0, 0.0, {}, all_edges));
+    for (int z = 0; z < 3; ++z) {
+        for (int x = 0; x < 3; ++x) {
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(gated.Sample(0, x, z)),
+                      std::bit_cast<std::uint64_t>(legacy_call.Sample(0, x, z)));
+        }
+    }
+}
+
+TEST(ScentField, GatedDiffusionSettlesRoundoffInNonparticipatingCells) {
+    // Open edges diffuse into cells whose owner is not due; those cells skip
+    // smoothing, so the -0x1p-53 intermediate must not survive the step. An
+    // empty exchange gate opens every edge and must settle the same way.
+    const ScentField::CellGate none = [](int, int) {
+        return false;
+    };
+    const ScentField::CellGate all = [](int, int) {
+        return true;
+    };
+    const ScentField::EdgeGate all_edges = [](int, int, int, int) {
+        return true;
+    };
+    for (const ScentField::EdgeGate& exchange : {ScentField::EdgeGate{}, all_edges}) {
+        SCOPED_TRACE(exchange ? "callback exchange" : "empty exchange");
+        ScentField f(3, 3, 1);
+        f.Deposit(0, 1, 1, 0x1.0000000000003p0);
+
+        EXPECT_NO_THROW(f.Step(0.25, 1, 0.0, 0.0, 0.0, none, exchange));
+        for (int z = 0; z < 3; ++z) {
+            for (int x = 0; x < 3; ++x) {
+                EXPECT_GE(f.Sample(0, x, z), 0.0);
+            }
+        }
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(f.Sample(0, 1, 1)),
+                  std::bit_cast<std::uint64_t>(0.0));
+        EXPECT_NO_THROW(f.Step(0.25, 0, 0.1, 0.0, 0.0, all, exchange));
+        EXPECT_NO_THROW(f.Step(0.25, 0, 0.0, 0.5, -0.5, all, exchange));
+    }
 }
