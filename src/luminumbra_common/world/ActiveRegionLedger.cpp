@@ -104,6 +104,11 @@ void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
     record.last_edit = clock.tick();
     record.wake_pending = true;
 }
+void ActiveRegionLedger::wake_frozen(RegionKey key) noexcept {
+    const auto record = m_records.find(key);
+    if (record != m_records.end() && record->second.state == RegionState::Frozen)
+        record->second.wake_pending = true;
+}
 void ActiveRegionLedger::pin(RegionKey key, bool pinned, const WorldClock& clock) {
     if (!pinned && !m_records.contains(key))
         return;

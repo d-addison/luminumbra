@@ -274,6 +274,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
@@ -1614,6 +1615,7 @@ add_executable(frontier_gates_test
     persistence/persistence_hardening_test.cpp
     persistence/water_cursor_hash_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE

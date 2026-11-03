@@ -519,6 +519,62 @@ TEST(HeightSamplingContract, ChunkMaterialWorkReusesHydroLakeAndFeatureCells) {
     EXPECT_THROW(world.ClassifyVertexMaterials(nullptr, too_many, nullptr), std::length_error);
 }
 
+TEST(HeightSamplingContract, SurfaceBreakReuseTracksAllInputsAndCellCollisions) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.surface_breaks_enabled = true;
+    params.surface_break_density = 1.0f;
+    params.feature_cell_size = 128.0f;
+    params.max_feature_radius = 48.0f;
+    const auto bits = [](const SHIELD_WorldSystem::SurfaceBreakInfo& feature) {
+        return std::array<std::uint32_t, 6>{static_cast<std::uint32_t>(feature.found),
+                                            Bits(feature.x),
+                                            Bits(feature.z),
+                                            Bits(feature.radius),
+                                            Bits(feature.depth),
+                                            static_cast<std::uint32_t>(feature.shaft)};
+    };
+    const auto sample = [&](const auto& settings, int seed, int x, int z) {
+        const SHIELD_WorldSystem world(nullptr, nullptr, settings, seed);
+        return world.SurfaceBreakInCell(x, z);
+    };
+    const auto baseline = sample(params, 1337, -1, 2);
+    ASSERT_TRUE(baseline.found);
+    for (int variation = 0; variation < 5; ++variation) {
+        auto changed = params;
+        int seed = 1337;
+        int x = -1;
+        int z = 2;
+        switch (variation) {
+            case 0:
+                changed.surface_break_density = 0.0f;
+                break;
+            case 1:
+                changed.feature_cell_size *= 2.0f;
+                break;
+            case 2:
+                changed.max_feature_radius = 3.0f;
+                break;
+            case 3:
+                ++seed;
+                break;
+            case 4:
+                x += 8;
+                z -= 8;
+                break;
+        }
+        SCOPED_TRACE(variation);
+        // A fresh worker has no retained cells and supplies the cold result.
+        const auto expected = std::async(std::launch::async, [=] {
+                                  const SHIELD_WorldSystem cold(nullptr, nullptr, changed, seed);
+                                  return cold.SurfaceBreakInCell(x, z);
+                              }).get();
+        EXPECT_NE(bits(expected), bits(baseline));
+        EXPECT_EQ(bits(sample(changed, seed, x, z)), bits(expected));
+        EXPECT_EQ(bits(sample(changed, seed, x, z)), bits(expected));
+        EXPECT_EQ(bits(sample(params, 1337, -1, 2)), bits(baseline));
+    }
+}
+
 TEST(HeightSamplingContract, MaterialWorkingSetsEvictWithoutChangingResults) {
     const auto loaded = Luminumbra::world::LoadTerrainPreset(PresetPath("default"));
     ASSERT_TRUE(loaded.ok);

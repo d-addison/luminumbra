@@ -1,4 +1,5 @@
 #include "../support/CalendarMetadataCases.h"
+#include "../support/IndexedSaveFixture.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/SessionExit.h"
@@ -51,6 +52,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stop_token>
 #include <string>
@@ -131,6 +133,115 @@ void ExpectMissingPresetReason(const std::string& error, const fs::path& expecte
     ASSERT_EQ(error.rfind(prefix, 0), 0u);
     EXPECT_EQ(fs::path(error.substr(prefix.size())).lexically_normal(),
               expected_path.lexically_normal());
+}
+
+// Each pass leaves its read batch, so only the open reader keeps admission warm.
+void ExpectWarmReaderPasses(const fs::path& save_dir,
+                            std::uint32_t count,
+                            WorldSaveService::ChunkReader& reader) {
+    const auto validations = WorldSaveService::decode_count_for_testing();
+    const auto compressions = WorldSaveService::record_compression_count_for_testing();
+    const auto coordinates = Persistence::SyntheticChunkCoords(count);
+    const auto reads_before_passes = WorldSaveService::region_read_count_for_testing();
+    std::set<std::pair<int, int>> touched_regions;
+    // Admit each touched region once, then leave each read pass entirely.
+    for (const auto& coords : coordinates) {
+        int region_x = 0, region_z = 0;
+        WorldSaveService::region_coords_for_chunk(coords, region_x, region_z);
+        touched_regions.emplace(region_x, region_z);
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+        ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
+    }
+    const auto region_reads = WorldSaveService::region_read_count_for_testing();
+    EXPECT_EQ(region_reads, reads_before_passes + touched_regions.size());
+    const auto fingerprints = WorldSaveService::region_fingerprint_count_for_testing();
+    const auto admitted_parses = Persistence::saved_json_parse_count_for_testing();
+    const auto admitted_decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    for (std::uint64_t pass_number = 0; pass_number < 3; ++pass_number) {
+        const WorldSaveService::ChunkReadBatch pass;
+        for (const auto& coords : coordinates) {
+            const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+            ASSERT_EQ(read.status, WorldSaveService::ChunkReadStatus::Found) << read.error;
+            ASSERT_TRUE(read.chunk);
+            EXPECT_EQ(read.chunk->get_coords(), coords);
+        }
+        EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads);
+        EXPECT_EQ(WorldSaveService::region_fingerprint_count_for_testing(), fingerprints);
+        EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), admitted_parses);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
+                  admitted_decodes + (pass_number + 1) * count);
+        EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations);
+        EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+    }
+}
+
+void ExpectReaderRefusesChangedBytes(const fs::path& root,
+                                     const fs::path& save_dir,
+                                     std::uint32_t count,
+                                     WorldSaveService::ChunkReader& reader) {
+    const auto coordinates = Persistence::SyntheticChunkCoords(count);
+    const auto region_reads = WorldSaveService::region_read_count_for_testing();
+    // Even an unrelated publication invalidates this open reader.
+    const auto published = root / "publication.bin";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(published, "published"));
+    const auto reread = WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader);
+    ASSERT_EQ(reread.status, WorldSaveService::ChunkReadStatus::Found) << reread.error;
+    EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), region_reads + 1);
+    fs::remove(published);
+    // External edits have no publication revision: fresh bytes must still refuse them.
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coordinates.front(), rx, rz);
+    const auto region_path = WorldSaveService::region_file_path(save_dir, rx, rz);
+    const auto original_region = Read(region_path);
+    auto changed_region = original_region;
+    ASSERT_GT(changed_region.size(), 8u);
+    changed_region[8] ^= 1; // record identity, same file length
+    Write(region_path, changed_region);
+    {
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto refused =
+            WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader);
+        EXPECT_EQ(refused.status, WorldSaveService::ChunkReadStatus::Error);
+        EXPECT_FALSE(refused.chunk);
+        EXPECT_FALSE(refused.error.empty());
+    }
+    Write(region_path, original_region);
+    changed_region = original_region;
+    changed_region.back() ^= 1; // payload-only edit, with an unchanged manifest
+    Write(region_path, changed_region);
+    bool refused_payload = false;
+    for (const auto& coords : coordinates) {
+        int chunk_rx = 0, chunk_rz = 0;
+        WorldSaveService::region_coords_for_chunk(coords, chunk_rx, chunk_rz);
+        if (chunk_rx != rx || chunk_rz != rz)
+            continue;
+        const WorldSaveService::ChunkReadBatch pass;
+        const auto read = WorldSaveService::read_chunk(save_dir, coords, true, &reader);
+        if (read.status == WorldSaveService::ChunkReadStatus::Error) {
+            refused_payload = true;
+            EXPECT_FALSE(read.chunk);
+            EXPECT_FALSE(read.error.empty());
+        }
+    }
+    EXPECT_TRUE(refused_payload);
+    Write(region_path, original_region);
+    const auto index_path = Persistence::snapshot_index_path(save_dir);
+    const auto original_index = Read(index_path);
+    Write(index_path, "{");
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, coordinates.front(), true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    Write(index_path, original_index);
+    const IVec3 absent_coords(3200, 0, 3200);
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, absent_coords, true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Absent);
+    int absent_rx = 0, absent_rz = 0;
+    WorldSaveService::region_coords_for_chunk(absent_coords, absent_rx, absent_rz);
+    const auto absent_region = WorldSaveService::region_file_path(save_dir, absent_rx, absent_rz);
+    Write(absent_region, "");
+    EXPECT_EQ(WorldSaveService::read_chunk(save_dir, absent_coords, true, &reader).status,
+              WorldSaveService::ChunkReadStatus::Error);
+    fs::remove(absent_region);
 }
 
 struct WorldOpenFixtureState {
@@ -217,7 +328,7 @@ protected:
             fs::rename(region, save / "chunks/region/r.invalid.lmr");
         } else if (kind == 21) {
             auto json = nlohmann::json::parse(Read(manifest));
-            json["schema"] = "luminumbra.persistence.world_manifest.v2";
+            json["schema"] = "luminumbra.persistence.world_manifest.v3";
             Write(manifest, json.dump());
         } else if (kind == 18) {
             auto json = nlohmann::json::parse(Read(manifest));
@@ -240,7 +351,7 @@ protected:
             } else if (kind == 23)
                 json.erase("container_version"); // mixed old metadata and current chunks
             else if (kind == 24)
-                json["container_version"] = 3;
+                json["container_version"] = 4;
             else if (kind == 25)
                 json["container_version"] = "2";
             else if (kind == 27)
@@ -671,10 +782,11 @@ TEST_F(WorldOpenRefusal, SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequir
         EXPECT_EQ(DiskBytes(save), before);
         ASSERT_TRUE(session.SaveWorld());
         const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
-        if (patch.contains("calendar"))
+        if (patch.contains("calendar")) {
             EXPECT_EQ(written.at("calendar"), patch.at("calendar"));
-        else
+        } else {
             EXPECT_EQ(written.contains("renderCalendar"), patch.contains("renderCalendar"));
+        }
     }
 }
 
@@ -1272,6 +1384,76 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, IndexedOpenValidatesOnceWithoutCompressionAcrossRepeatedOpens) {
+    for (const std::uint32_t count : {4u, 32u}) {
+        SCOPED_TRACE(count);
+        Persistence::SyntheticSaveSpec spec;
+        spec.world_id = "indexed-open-" + std::to_string(count);
+        spec.chunk_count = count;
+        spec.payload = Persistence::FixturePayload::Flat;
+        spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
+        const auto report = Persistence::WriteSyntheticSave(spec, root);
+        ASSERT_TRUE(report.ok) << report.error;
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(report.save_dir, [] { return true; }));
+        const auto before = DiskBytes(root);
+        GameSession reopened;
+        reopened.SetRootPath(RootString());
+        reopened.SetJobSystem(&jobs);
+        for (int opening = 0; opening < 3; ++opening) {
+            SCOPED_TRACE(opening);
+            const auto validations = WorldSaveService::decode_count_for_testing();
+            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+            const auto compressions = WorldSaveService::record_compression_count_for_testing();
+            const auto parses = Persistence::saved_json_parse_count_for_testing();
+            ASSERT_TRUE(reopened.LoadWorld(spec.world_id)) << reopened.GetWorldOpenError();
+            EXPECT_EQ(WorldSaveService::decode_count_for_testing(), validations + 1);
+            EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + count);
+            EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+            // Metadata, embedded preset and manifest: each DOM is parsed once per open.
+            EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 3);
+            EXPECT_EQ(DiskBytes(root), before);
+            WorldSaveService::ChunkReader reader;
+            ASSERT_NO_FATAL_FAILURE(ExpectWarmReaderPasses(report.save_dir, count, reader));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectReaderRefusesChangedBytes(root, report.save_dir, count, reader));
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        const auto region = WorldSaveService::region_file_path(report.save_dir, 0, 0);
+        auto damaged = Read(region);
+        ASSERT_FALSE(damaged.empty());
+        damaged.back() ^= 1;
+        Write(region, damaged);
+        const auto damaged_bytes = DiskBytes(root);
+        const auto* previous_world = reopened.GetWorldSystem();
+        EXPECT_FALSE(reopened.LoadWorld(spec.world_id));
+        EXPECT_FALSE(reopened.GetWorldOpenError().empty());
+        EXPECT_EQ(reopened.GetWorldSystem(), previous_world);
+        EXPECT_EQ(DiskBytes(root), damaged_bytes);
+        EXPECT_FALSE(Persistence::InspectSavedWorld(root, spec.world_id).error.empty());
+    }
+}
+
+TEST_F(WorldOpenRefusal, ParsedSavedJsonReuseStillChecksChangedBytesAndLimits) {
+    const Persistence::SavedJsonReadScope scope;
+    nlohmann::json document;
+    bool missing = false;
+    Persistence::SavedJsonFailure failure = Persistence::SavedJsonFailure::None;
+    const auto path = save / "world_info.json";
+    const auto parses = Persistence::saved_json_parse_count_for_testing();
+    ASSERT_TRUE(Persistence::ReadSavedJson(path, 4096, document, missing));
+    ASSERT_FALSE(missing);
+    const auto original = document;
+    ASSERT_TRUE(Persistence::ReadSavedJson(path, 4096, document, missing));
+    EXPECT_EQ(document, original);
+    EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 1);
+    EXPECT_FALSE(Persistence::ReadSavedJson(path, 1, document, missing, true, &failure));
+    EXPECT_EQ(failure, Persistence::SavedJsonFailure::Limit);
+    Write(path, "{");
+    EXPECT_FALSE(Persistence::ReadSavedJson(path, 4096, document, missing, true, &failure));
+    EXPECT_EQ(failure, Persistence::SavedJsonFailure::Malformed);
+    EXPECT_EQ(Persistence::saved_json_parse_count_for_testing(), parses + 2);
+}
+
 TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnything) {
     Persistence::SyntheticSaveSpec spec;
     spec.world_id = "synthetic-lifecycle";
@@ -1397,7 +1579,9 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
     EXPECT_NE(runner.Session()->SystemConfigIdentity(), GameSession{}.SystemConfigIdentity());
     const auto ledger_path =
         WorldSaveService::active_regions_path(runner.Session()->GetWorldSaveDir());
-    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_TRUE(WorldSaveService::remove_member(runner.Session()->GetWorldSaveDir(),
+                                                "chunks/region/active-regions.arl"));
+    ASSERT_FALSE(fs::exists(ledger_path));
     ASSERT_TRUE(runner.Session()->LoadWorldState()) << runner.Session()->GetWorldOpenError();
     EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
     EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
@@ -1994,6 +2178,19 @@ public:
         Persistence::detail::set_file_publication_hook_for_testing(&Publish);
     }
 
+    void ArmMetadata(const fs::path& destination) {
+        Target() = destination / "world_info.json";
+        Reached() = false;
+        Persistence::detail::set_file_publication_hook_for_testing(&Publish);
+    }
+
+    void ArmPlantRemoval(const fs::path& destination, const fs::path& displaced) {
+        Target() = WorldSaveService::plant_entities_path(destination);
+        Displaced() = displaced;
+        Reached() = false;
+        Persistence::detail::set_file_publication_hook_for_testing(&SubstitutePlant);
+    }
+
     void Reset() {
         Persistence::detail::set_file_publication_hook_for_testing(nullptr);
         // A writer may already have loaded the hook. Keep its target immutable
@@ -2005,6 +2202,10 @@ public:
     }
 
 private:
+    static fs::path& Displaced() {
+        static fs::path displaced;
+        return displaced;
+    }
     static fs::path& Target() {
         static fs::path target;
         return target;
@@ -2017,6 +2218,14 @@ private:
         if (!removing && path == Target()) {
             Reached() = true;
             return false;
+        }
+        return true;
+    }
+    static bool SubstitutePlant(const fs::path& path, bool removing) {
+        if (removing && path == Target() && !Reached()) {
+            fs::rename(path, Displaced());
+            Write(path, "foreign plant occupant");
+            Reached() = true;
         }
         return true;
     }
@@ -2153,20 +2362,120 @@ TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegio
     }
 }
 
+class RollbackProgressObservation {
+public:
+    RollbackProgressObservation(const fs::path& directory,
+                                const std::string& chunks,
+                                const std::string& plants,
+                                bool energy_failure,
+                                const std::shared_ptr<Chunk>& chunk)
+        : directory_(directory)
+        , chunks_(chunks)
+        , plants_(plants)
+        , energy_failure_(energy_failure)
+        , chunk_(chunk) {
+        current() = this;
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(&Observe);
+    }
+    ~RollbackProgressObservation() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        current() = nullptr;
+    }
+    bool observed = false;
+    Luminumbra::u32 voxel_revision = 0;
+    Luminumbra::u32 water_revision = 0;
+
+private:
+    static RollbackProgressObservation*& current() {
+        static RollbackProgressObservation* observation = nullptr;
+        return observation;
+    }
+    static void Observe(const char* step, const fs::path& directory) {
+        auto* observation = current();
+        if (!observation || std::string_view(step) != "before-rollback" ||
+            directory != observation->directory_)
+            return;
+        // This event runs after writer scopes and publication stripes have unwound.
+        observation->observed = true;
+        EXPECT_NE(Read(WorldSaveService::region_file_path(directory, 0, 0)), observation->chunks_);
+        if (observation->energy_failure_) {
+            EXPECT_NE(Read(WorldSaveService::plant_entities_path(directory)), observation->plants_);
+        } else {
+            EXPECT_EQ(Read(WorldSaveService::plant_entities_path(directory)), observation->plants_);
+        }
+        observation->voxel_revision = observation->chunk_->voxel_revision();
+        observation->water_revision = observation->chunk_->water_revision();
+    }
+    fs::path directory_;
+    std::string chunks_;
+    std::string plants_;
+    bool energy_failure_;
+    std::shared_ptr<Chunk> chunk_;
+};
+
+void ExpectCompleteSaveFailure(int save_path,
+                               world::GameSession* session,
+                               Server::ServerWorldRunner& runner,
+                               const fs::path& destination,
+                               world::WorldStateSaveReport& report) {
+    switch (save_path) {
+        case 0:
+            EXPECT_FALSE(session->SaveWorldState(&report));
+            break;
+        case 1:
+            EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+            break;
+        case 2:
+            EXPECT_FALSE(session->SaveWorld());
+            break;
+        case 3:
+            EXPECT_FALSE(session->SaveWorldStateTo(destination, &report, /*full_snapshot=*/true));
+            break;
+        case 4: {
+            bool spawn_captured = false;
+            Client::SaveSessionOnExit(
+                session,
+                true,
+                [&] {
+                    spawn_captured = true;
+                    session->SetSpawnPoint(Vec3(29, 31, 37));
+                },
+                [] { ADD_FAILURE() << "Failed exit save reported success"; });
+            EXPECT_TRUE(spawn_captured);
+            break;
+        }
+        case 5: {
+            const auto tick_report = runner.RunFixedTicks(1);
+            EXPECT_EQ(tick_report.ticks_executed, 1u);
+            EXPECT_EQ(tick_report.autosave_passes, 0u);
+            EXPECT_EQ(tick_report.autosave_writes, 0u);
+            break;
+        }
+        case 6:
+            runner.Shutdown(&report);
+            break;
+        default:
+            FAIL() << "Unexpected save path " << save_path;
+    }
+}
+
 TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPending) {
     const auto [regions, failure_and_path] = GetParam();
     const bool energy_failure = failure_and_path % 2 != 0;
     const int save_path = failure_and_path / 2;
-    auto config = SnapshotRunnerConfig(RootString(), regions != 0);
+    auto config = SnapshotRunnerConfig(RootString(), regions == 1);
     if (save_path == 5)
         config.autosave_interval_ticks = 1;
     Server::ServerWorldRunner runner(config);
-    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions != 0));
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions == 1));
     auto* session = runner.Session();
     std::shared_ptr<Chunk> chunk;
     ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
     ASSERT_TRUE(session->SaveWorldState());
     const auto canonical = session->GetWorldSaveDir();
+    if (regions == 2) {
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(canonical, [] { return true; }));
+    }
     const auto destination = save_path == 3
                                  ? root / "alternate/worlds/saves" / session->GetMetadata().worldId
                                  : canonical;
@@ -2174,6 +2483,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
         fs::create_directories(destination.parent_path());
         fs::copy(canonical, destination, fs::copy_options::recursive);
     }
+    const auto committed_tree = DiskBytes(destination);
     const auto old_metadata = Read(destination / "world_info.json");
     const auto old_ledger = Read(WorldSaveService::active_regions_path(destination));
     const auto old_plants = Read(WorldSaveService::plant_entities_path(destination));
@@ -2192,34 +2502,13 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     // before its destructor attempts a shutdown save.
     SiblingWriteFailure failure;
     ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
+    std::unique_ptr<RollbackProgressObservation> observation;
+    if (regions != 0)
+        observation = std::make_unique<RollbackProgressObservation>(
+            destination, old_chunks, old_plants, energy_failure, chunk);
     world::WorldStateSaveReport report;
-    if (save_path == 0)
-        EXPECT_FALSE(session->SaveWorldState(&report));
-    else if (save_path == 1)
-        EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
-    else if (save_path == 2)
-        EXPECT_FALSE(session->SaveWorld());
-    else if (save_path == 3)
-        EXPECT_FALSE(session->SaveWorldStateTo(destination, &report, /*full_snapshot=*/true));
-    else if (save_path == 4) {
-        bool spawn_captured = false;
-        Client::SaveSessionOnExit(
-            session,
-            true,
-            [&] {
-                spawn_captured = true;
-                session->SetSpawnPoint(Vec3(29, 31, 37));
-            },
-            [] { ADD_FAILURE() << "Failed exit save reported success"; });
-        EXPECT_TRUE(spawn_captured);
-    } else if (save_path == 5) {
-        const auto tick_report = runner.RunFixedTicks(1);
-        EXPECT_EQ(tick_report.ticks_executed, 1u);
-        EXPECT_EQ(tick_report.autosave_passes, 0u);
-        EXPECT_EQ(tick_report.autosave_writes, 0u);
-    } else {
-        runner.Shutdown(&report);
-    }
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectCompleteSaveFailure(save_path, session, runner, destination, report));
     EXPECT_TRUE(failure.reached());
     failure.Reset();
     EXPECT_FALSE(report.saved);
@@ -2227,19 +2516,32 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_EQ(Read(destination / "world_info.json"), old_metadata);
     EXPECT_EQ(Read(WorldSaveService::active_regions_path(destination)), old_ledger);
-    // Prove the injection reached the sibling writer after durable chunk progress.
-    EXPECT_NE(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
-    EXPECT_EQ(Read(destination / "aether_state.efs"), old_energy);
-    if (energy_failure)
-        EXPECT_NE(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
-    else
+    if (regions != 0) {
+        ASSERT_NE(observation, nullptr);
+        EXPECT_TRUE(observation->observed);
+        EXPECT_EQ(chunk->voxel_revision(), observation->voxel_revision);
+        EXPECT_EQ(chunk->water_revision(), observation->water_revision);
+        EXPECT_EQ(DiskBytes(destination), committed_tree);
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
         EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+    } else {
+        // Ordinary unindexed saves retain durable partial progress after sibling failure.
+        EXPECT_NE(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
+        if (energy_failure) {
+            EXPECT_NE(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+        } else {
+            EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+        }
+    }
+    EXPECT_EQ(Read(destination / "aether_state.efs"), old_energy);
+    observation.reset();
     EXPECT_TRUE(WorldSaveService::validate_save(destination));
     if (save_path != 6) {
-        if (save_path == 3)
+        if (save_path == 3) {
             ASSERT_TRUE(session->SaveWorldStateTo(destination, nullptr, /*full_snapshot=*/true));
-        else
+        } else {
             ASSERT_TRUE(session->SaveWorld());
+        }
         EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 3);
         EXPECT_NE(Read(destination / "world_info.json"), old_metadata);
         if (save_path == 3) {
@@ -2258,7 +2560,158 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
 // Each CTest entry exercises one writer, host entry point and region mode.
 INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
-                         testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
+                         testing::Combine(testing::Values(0, 1, 2), testing::Range(0, 14)));
+
+TEST_F(WorldOpenRefusal, FailedScheduledAutosaveRetriesAfterFixedTickBackoff) {
+    constexpr std::uint64_t kInterval = 100;
+    static_assert(Server::kAutosaveRetryTicks > 1 && Server::kAutosaveRetryTicks < kInterval);
+    auto config = SnapshotRunnerConfig(RootString(), true);
+    config.autosave_interval_ticks = kInterval;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
+    auto* session = runner.Session();
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+    const auto save_dir = session->GetWorldSaveDir();
+    const double dt = session->GetSimulationClock().fixed_dt();
+    while ((session->GetSimulationTickCount() + 1) % kInterval != 0)
+        ASSERT_EQ(session->TickSimulation(dt), 1u);
+    const std::uint64_t boundary = session->GetSimulationTickCount() + 1;
+
+    SiblingWriteFailure failure;
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(save_dir, true));
+    auto tick_report = runner.RunFixedTicks(1);
+    EXPECT_TRUE(failure.reached());
+    failure.Reset();
+    EXPECT_EQ(tick_report.autosave_passes, 0u);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+
+    tick_report = runner.RunFixedTicks(Server::kAutosaveRetryTicks - 1);
+    EXPECT_EQ(tick_report.autosave_passes, 0u);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    tick_report = runner.RunFixedTicks(1);
+    EXPECT_EQ(tick_report.autosave_passes, 1u);
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, session->GetMetadata().worldId).clock.tick(),
+              boundary + Server::kAutosaveRetryTicks);
+    EXPECT_TRUE(WorldSaveService::validate_save(save_dir));
+    runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, IndexedFlagOffFinalMetadataFailureRollsBackEnergyAndEmptyPlants) {
+    for (const bool remove_energy : {false, true}) {
+        SCOPED_TRACE(remove_energy);
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), false));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        ASSERT_TRUE(session->SaveWorldState());
+        const auto destination = session->GetWorldSaveDir();
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(destination, [] { return true; }));
+        const auto baseline = DiskBytes(destination);
+        const auto old_chunks = Read(WorldSaveService::region_file_path(destination, 0, 0));
+        const auto old_plants = Read(WorldSaveService::plant_entities_path(destination));
+        ASSERT_FALSE(old_plants.empty());
+        std::vector<entt::entity> plants;
+        for (const auto entity : session->GetRegistry().view<Components::PlantGrowthComponent>())
+            plants.push_back(entity);
+        for (const auto entity : plants)
+            session->GetRegistry().destroy(entity);
+        if (remove_energy) {
+            session->GetEnergyFieldState()->ResetEmptyAtTick(session->GetSimulationTickCount());
+        } else {
+            session->GetEnergyFieldState()->QueueDeposit(7, 0, 0, 0, 500);
+            session->GetEnergyFieldState()->Tick(0);
+        }
+        chunk->heightmap_data.front() = 47.0f;
+        chunk->mark_voxel_data_dirty();
+        session->SetSpawnPoint(Vec3(21, 22, 23));
+        SiblingWriteFailure failure;
+        failure.ArmMetadata(destination);
+        {
+            RollbackProgressObservation observation(
+                destination, old_chunks, old_plants, true, chunk);
+            EXPECT_FALSE(session->SaveWorld());
+            EXPECT_TRUE(observation.observed);
+            EXPECT_EQ(chunk->voxel_revision(), observation.voxel_revision);
+            EXPECT_EQ(chunk->water_revision(), observation.water_revision);
+        }
+        EXPECT_TRUE(failure.reached());
+        failure.Reset();
+        EXPECT_EQ(DiskBytes(destination), baseline);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(Persistence::journal_pending(destination));
+        EXPECT_TRUE(WorldSaveService::validate_save(destination));
+        ASSERT_TRUE(session->SaveWorld());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(fs::exists(WorldSaveService::plant_entities_path(destination)));
+        EXPECT_EQ(fs::exists(destination / "aether_state.efs"), !remove_energy);
+        runner.Shutdown();
+    }
+}
+
+TEST_F(WorldOpenRefusal, IndexedEmptyPlantRemovalPreservesSubstitutedOccupantAndJournal) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const auto config = SnapshotRunnerConfig(RootString(), regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        ASSERT_TRUE(session->SaveWorldState());
+        const auto destination = session->GetWorldSaveDir();
+        if (!regions) {
+            ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(destination, [] { return true; }));
+        }
+        const auto baseline = DiskBytes(destination);
+        const auto path = WorldSaveService::plant_entities_path(destination);
+        ASSERT_FALSE(Read(path).empty());
+        const auto suffix = regions ? "enabled" : "disabled";
+        const auto displaced = root / (std::string("owned-plant-") + suffix);
+        const auto foreign = root / (std::string("foreign-plant-") + suffix);
+        SiblingWriteFailure substitution;
+        substitution.ArmPlantRemoval(destination, displaced);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::save_plant_entities({}, destination, &errors));
+        EXPECT_TRUE(substitution.reached());
+        substitution.Reset();
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(Read(path), "foreign plant occupant");
+        EXPECT_TRUE(Persistence::journal_pending(destination));
+        fs::rename(path, foreign);
+        fs::rename(displaced, path);
+        EXPECT_EQ(Persistence::recover_pending_journal(destination, nullptr),
+                  Persistence::RecoveryOutcome::RolledBack);
+        EXPECT_EQ(DiskBytes(destination), baseline);
+        EXPECT_EQ(Read(foreign), "foreign plant occupant");
+        EXPECT_FALSE(Persistence::journal_pending(destination));
+        runner.Shutdown();
+    }
+}
+
+TEST_F(WorldOpenRefusal, CanonicalSaveWithTrailingSeparatorAcknowledgesPendingEdits) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const auto config = SnapshotRunnerConfig(RootString(), regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        const auto destination = session->GetWorldSaveDir() / "";
+        ASSERT_TRUE(destination.filename().empty());
+        const PendingSnapshotState pending(*session);
+        world::WorldStateSaveReport report;
+        ASSERT_TRUE(session->SaveWorldStateTo(destination, &report));
+        EXPECT_TRUE(report.saved);
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs));
+        runner.Shutdown();
+    }
+}
 
 TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits) {
     for (const bool regions : {false, true}) {
@@ -2786,9 +3239,10 @@ TEST_F(WorldOpenRefusal, CleanOversizedRegionDoesNotBlockIndependentPayloadSaves
         std::shared_ptr<Chunk> chunk;
         ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
         chunk->clear_voxel_data_dirty();
-        // Each maximum finite float needs more than 20 encoded bytes, even
-        // before indentation. This one resident chunk exceeds the 64 MiB cap.
-        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 20 + 1,
+        // The compact array encoding stores each float in four bytes, and base64 grows that by a
+        // third, so a quarter of the cap in floats is enough for this one resident chunk to
+        // exceed the 64 MiB record cap.
+        chunk->heightmap_data.assign(Persistence::SavedInputLimits::kRegionRecordBytes / 4 + 1,
                                      std::numeric_limits<float>::max());
         const auto region = WorldSaveService::region_file_path(session->GetWorldSaveDir(), 0, 0);
         const auto region_before = Read(region);

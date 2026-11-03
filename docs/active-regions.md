@@ -8,8 +8,8 @@ behavior. Budgets remain unlimited in shipped configuration. No distant system
 consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
 
-Indexed authority durability/rehydration, durable completed work and ground-object
-continuation, durable regional fields/weather/scent/energy, regional foliage/water
+Indexed authority durability and rehydration are in preparation with native qualification pending.
+Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water
 continuation (issue #242), and strict distant policy and distant creatures (S8)
 are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
@@ -105,8 +105,24 @@ compatibility and frozen packaged-preset fallback. An anchor-only ledger is not 
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
-Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
-replacement primitive for the ledger, without claiming cross-file atomicity.
+Indexed saves use one compound transaction across chunk, plant, energy, ledger and metadata writers, including flag-off sessions writing an already indexed destination.
+Ordinary unindexed flag-off saves retain their existing bytes and partial-progress failure behavior.
+
+Indexed metadata uses `container_version: 3` and `snapshotFormat: 1`; every indexed save includes a `luminumbra.persistence.world_manifest.v2` manifest, even without chunks or metadata.
+Either envelope witness requires the snapshot index; malformed, unreadable, oversized or future control files refuse admission.
+Valid legacy metadata v2 and manifest v1 saves, including clock/ledger pairs, load read-only and upgrade on their first indexed save.
+LMR1 payload version 2 and the snapshot index schema remain unchanged; older readers refuse the new envelope.
+Previously stripped draft saves cannot be distinguished retroactively from valid legacy saves, and fingerprints do not authenticate history.
+
+Journal v4 binds undo, publication and quarantine identities before either POSIX move; the snapshot index publishes last as the durable commit point.
+Before that point, successful rollback restores the complete previous committed member tree and leaves dirty and revision acknowledgements pending.
+After that point, cleanup failure preserves the new commit and leaves recovery work.
+Failed rollback of any transaction with a previous commit retains the recovery journal and refuses further admission until recovery succeeds.
+Creation alone may retire its journal before artifact rollback, because no previous commit exists and the created-artifacts registry retains identities and failed-rollback evidence until cleanup succeeds.
+Rollback and journal retirement refuse foreign occupants and unknown contents; Windows checks the bound handle at deletion and POSIX verifies a quarantined entry before unlinking it.
+Journal control records are limited to 16 MiB and snapshot membership to 1,048,576 entries, with overflow-safe admission before allocation.
+Client periodic and pressure saves use the same entry, digest and capture-content refusal gate as exit saves.
+Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.
 
 Clock/ledger pair saves are synchronous and serialize with all persistence writers in
 the process. The client calls them during world creation, its main-thread pause-menu
@@ -253,7 +269,9 @@ edited records contribute in every serialized lifecycle state, including
 `Loading`. Durable pristine records are regenerable caches and never contribute.
 Residency and save history cannot change the result. The provider uses a dedicated
 `region_content_v2` projection in chunk-id order: identity,
-SDF, heightmap, materials, integer water depth/bed/flux, water initialization,
+authoritative terrain (SDF, heightmap and materials, distinguished from generated
+terrain by the persisted `terrain_authoritative` boolean in indexed `water_state`),
+integer water depth/bed/flux, water initialization,
 resolution and solver sleep/threshold state. Lifecycle state/state_value,
 collider flags, render meshes/bookkeeping, transient dirtiness, far render
 records, compression and container envelopes are excluded. Legacy hashing and

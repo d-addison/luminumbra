@@ -265,6 +265,7 @@ bool ServerWorldRunner::Boot() {
                 ? *m_config.systems_config_override
                 : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(m_config.root_path);
         m_session->ApplySystemConfig(sys_cfg);
+        m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
@@ -779,13 +780,39 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                                             world_system->debug_water_state_hash().hash);
         }
 
-        if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
-            (simulation_tick % m_config.autosave_interval_ticks) == 0) {
+        std::uint64_t autosave_interval = m_config.autosave_interval_ticks;
+        if (autosave_interval == 0 && m_config.autosave_default_when_unset &&
+            m_session->ActiveRegionsEnabled()) {
+            autosave_interval = kDefaultActiveRegionsAutosaveTicks;
+        }
+        bool autosave_due = autosave_interval > 0 && simulation_tick > 0 &&
+                            (simulation_tick % autosave_interval) == 0;
+        if (m_autosave_retry_countdown > 0) {
+            m_autosave_retry_countdown -= 1;
+            if (m_autosave_retry_countdown == 0)
+                autosave_due = autosave_interval > 0;
+        }
+        if (autosave_due) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
+                m_autosave_retry_countdown = 0;
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
+                    report.autosave_writes += 1;
+                }
+            } else {
+                m_autosave_retry_countdown = kAutosaveRetryTicks;
+            }
+        }
+
+        // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
+        if (m_session->PersistenceSaveRequested()) {
+            world::WorldStateSaveReport pressure_report;
+            if (m_session->SaveWorldState(&pressure_report)) {
+                m_autosave_retry_countdown = 0;
+                report.autosave_passes += 1;
+                if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
                 }
             }
@@ -959,7 +986,9 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     // Fold the cursor-bound chunk hash and the session's runtime sub-hashes
     // using the shared append-only order.
     return Persistence::ComposeWorldHash(
-        service.world_hash(state, world_system->GetWaterSimWindowCursor()),
+        m_session->ActiveRegionsEnabled()
+            ? m_session->ComputeChunkStateHash()
+            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -1045,7 +1074,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
     out_world_hash = Persistence::ComposeWorldHash(
-        service.world_hash(state, world_system->GetWaterSimWindowCursor()),
+        m_session->ActiveRegionsEnabled()
+            ? m_session->ComputeChunkStateHash()
+            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
         wind_hash,
         weather_hash,
         aether_hash,
