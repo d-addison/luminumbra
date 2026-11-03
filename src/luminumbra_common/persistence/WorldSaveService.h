@@ -474,6 +474,11 @@ public:
     static std::uint64_t region_fingerprint_count_for_testing();
     // Full-container reads, excluding fresh manifest/requested-record checks.
     static std::uint64_t region_read_count_for_testing();
+    // Validation decodes the calling thread's world-read scope currently holds for a later
+    // retaining read, and their accounted bytes. The byte bound applies process-wide.
+    static std::size_t pending_chunk_admission_count_for_testing();
+    static std::size_t pending_chunk_admission_bytes_for_testing();
+    static void set_pending_chunk_admission_byte_limit_for_testing(std::size_t bytes);
     // Compares the admitted-check entry of every lod-0 record in a region file with a fresh
     // decode of that record (which advances the decode counter). False when the file is
     // unreadable.

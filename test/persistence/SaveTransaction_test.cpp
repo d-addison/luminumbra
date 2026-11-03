@@ -717,6 +717,45 @@ TEST(SaveTransaction, AbsoluteTransactionProtectsEquivalentRelativeWriterPaths) 
     EXPECT_FALSE(journal_pending(save.path()));
 }
 
+TEST(SaveTransaction, FinishedTransactionReleasesTheActiveSlotForTheNextWriter) {
+    TempSave save;
+    ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));
+    for (const bool commit : {true, false}) {
+        SCOPED_TRACE(commit);
+        SaveTransaction first(save.path(), 2, {}, &RawDigest);
+        // Constructed while the first transaction owns the thread's slot.
+        SaveTransaction early(save.path(), 3, {}, &RawDigest);
+        ASSERT_TRUE(first.begin(nullptr));
+        std::vector<std::string> errors;
+        EXPECT_FALSE(early.begin(&errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(SaveTransaction::active_for(save.path()), &first);
+        ASSERT_TRUE(first.protect({"world_info.json"}, nullptr));
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "first"));
+        if (commit) {
+            ASSERT_TRUE(first.commit(nullptr));
+        } else {
+            first.abort(nullptr);
+        }
+        EXPECT_EQ(SaveTransaction::active_for(save.path()), nullptr);
+        // The finished transaction is still alive; a new writer must own the slot itself.
+        SaveTransaction next(save.path(), 3, {}, &RawDigest);
+        ASSERT_TRUE(next.begin(nullptr));
+        EXPECT_EQ(SaveTransaction::active_for(save.path()), &next);
+        ASSERT_TRUE(next.protect({}, nullptr));
+        const auto before = Tree(save.path());
+        EXPECT_FALSE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "new"));
+        EXPECT_EQ(Tree(save.path()), before);
+        next.abort(nullptr);
+        EXPECT_EQ(SaveTransaction::active_for(save.path()), nullptr);
+        // A transaction refused earlier may begin once the slot is free.
+        ASSERT_TRUE(early.begin(nullptr));
+        EXPECT_EQ(SaveTransaction::active_for(save.path()), &early);
+        early.abort(nullptr);
+        EXPECT_FALSE(journal_pending(save.path()));
+    }
+}
+
 TEST(SaveTransaction, UnprotectedMemberAndEscapingPublicationRefuseWithoutMutation) {
     TempSave save, outside;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "old"}}));

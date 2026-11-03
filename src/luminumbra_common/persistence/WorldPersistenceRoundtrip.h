@@ -81,6 +81,10 @@ const char* EntitySnapshotArtifactSchema();
 std::string ChunkSnapshotInputBytes(const Chunk& chunk);
 std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+// Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
+// (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
+// below accepts this form and the plain-JSON form.
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors);

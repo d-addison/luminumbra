@@ -6084,6 +6084,43 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
     EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 0u);
 }
 
+TEST(GameSessionHeadlessWorldTest, ValidatedStateAdoptionClearsTheDurableReadLatch) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    EnableSnapshotSession(owner, root, jobs);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Durable latch", "1337", "default"));
+    const Luminumbra::IVec3 distant(1280, 0, -1280);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(distant);
+    chunk->sdf_data.assign(17 * 17 * 17, -4.0f);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+    const auto directory = root.path() / "worlds/saves" / owner.GetMetadata().worldId;
+    const auto region = P::WorldSaveService::region_file_path(directory, 40, -40);
+    const auto aside = root.path() / "durable-latch-region";
+    std::error_code moved;
+    fs::rename(region, aside, moved);
+    ASSERT_FALSE(moved);
+    // A lost durable member latches both the session fault and the world's read latch.
+    EXPECT_TRUE(loaded.GetWorldSystem()->restore_authoritative_chunk(distant));
+    ASSERT_TRUE(loaded.GetRegionSchedulerFault().has_value());
+    EXPECT_FALSE(loaded.GetWorldSystem()->find_streamed_chunk(distant));
+    fs::rename(aside, region, moved);
+    ASSERT_FALSE(moved);
+    // Adopting validated saved state clears both; durable reads serve the member again.
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(directory));
+    EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+    ASSERT_TRUE(loaded.GetWorldSystem()->restore_authoritative_chunk(distant));
+    const auto restored = loaded.GetWorldSystem()->find_streamed_chunk(distant);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->sdf_data, chunk->sdf_data);
+    EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+}
+
 namespace {
 Luminumbra::Chunk*& ChunkRevisionDuringCommit() {
     static Luminumbra::Chunk* chunk = nullptr;

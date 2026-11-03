@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -348,23 +349,328 @@ std::vector<std::int32_t> WaterGridFromJson(const nlohmann::json& values) {
     return grid;
 }
 
-void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
+// Region chunk records (record_format 2) keep every chunk array as one encoded array object:
+// {"count":N,"data":"<base64>","enc":"le-b64","type":"<element type>"}. The bytes are the exact
+// little-endian element values (floats as IEEE-754 bit patterns), so the values round-trip
+// bit-exactly. The rest of the record is the ordinary chunk JSON, written without indentation.
+constexpr std::uint64_t kChunkRecordFormat = 2;
+constexpr const char* kChunkRecordFormatKey = "record_format";
+constexpr const char* kEncodedArrayEncoding = "le-b64";
+constexpr std::string_view kBase64Alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
+
+void AppendLe32(std::string& bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32u; shift += 8u)
+        bytes.push_back(static_cast<char>((value >> shift) & 0xffu));
+}
+
+std::uint32_t ReadLe32(const unsigned char* bytes) {
+    return std::uint32_t{bytes[0]} | (std::uint32_t{bytes[1]} << 8u) |
+           (std::uint32_t{bytes[2]} << 16u) | (std::uint32_t{bytes[3]} << 24u);
+}
+
+void AppendLeFloat(std::string& bytes, float value) {
+    AppendLe32(bytes, std::bit_cast<std::uint32_t>(value));
+}
+
+float ReadLeFloat(const unsigned char* bytes) {
+    return std::bit_cast<float>(ReadLe32(bytes));
+}
+
+bool FiniteVec3(const Vec3& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+template<typename T>
+struct EncodedArrayElement;
+
+template<>
+struct EncodedArrayElement<float> {
+    static constexpr std::string_view kType = "f32";
+    static constexpr std::size_t kBytes = 4;
+    static void put(std::string& bytes, float value) {
+        AppendLeFloat(bytes, value);
+    }
+    static float get(const unsigned char* bytes) {
+        return ReadLeFloat(bytes);
+    }
+    static bool finite(float value) {
+        return std::isfinite(value);
+    }
+};
+
+template<>
+struct EncodedArrayElement<u8> {
+    static constexpr std::string_view kType = "u8";
+    static constexpr std::size_t kBytes = 1;
+    static void put(std::string& bytes, u8 value) {
+        bytes.push_back(static_cast<char>(value));
+    }
+    static u8 get(const unsigned char* bytes) {
+        return bytes[0];
+    }
+    static bool finite(u8) {
+        return true;
+    }
+};
+
+template<>
+struct EncodedArrayElement<u32> {
+    static constexpr std::string_view kType = "u32";
+    static constexpr std::size_t kBytes = 4;
+    static void put(std::string& bytes, u32 value) {
+        AppendLe32(bytes, value);
+    }
+    static u32 get(const unsigned char* bytes) {
+        return ReadLe32(bytes);
+    }
+    static bool finite(u32) {
+        return true;
+    }
+};
+
+template<>
+struct EncodedArrayElement<std::int32_t> {
+    static constexpr std::string_view kType = "i32";
+    static constexpr std::size_t kBytes = 4;
+    static void put(std::string& bytes, std::int32_t value) {
+        AppendLe32(bytes, std::bit_cast<std::uint32_t>(value));
+    }
+    static std::int32_t get(const unsigned char* bytes) {
+        return std::bit_cast<std::int32_t>(ReadLe32(bytes));
+    }
+    static bool finite(std::int32_t) {
+        return true;
+    }
+};
+
+// position xyz, normal xyz (f32 each), then material_id (u32).
+template<>
+struct EncodedArrayElement<VoxelVertex> {
+    static constexpr std::string_view kType = "vertex";
+    static constexpr std::size_t kBytes = 28;
+    static void put(std::string& bytes, const VoxelVertex& value) {
+        for (const Vec3* vector : {&value.position, &value.normal}) {
+            AppendLeFloat(bytes, vector->x);
+            AppendLeFloat(bytes, vector->y);
+            AppendLeFloat(bytes, vector->z);
+        }
+        AppendLe32(bytes, value.material_id);
+    }
+    static VoxelVertex get(const unsigned char* bytes) {
+        return VoxelVertex{
+            Vec3(ReadLeFloat(bytes), ReadLeFloat(bytes + 4), ReadLeFloat(bytes + 8)),
+            Vec3(ReadLeFloat(bytes + 12), ReadLeFloat(bytes + 16), ReadLeFloat(bytes + 20)),
+            ReadLe32(bytes + 24)};
+    }
+    static bool finite(const VoxelVertex& value) {
+        return FiniteVec3(value.position) && FiniteVec3(value.normal);
+    }
+};
+
+// x then y (f32 each).
+template<>
+struct EncodedArrayElement<Vec2> {
+    static constexpr std::string_view kType = "f32x2";
+    static constexpr std::size_t kBytes = 8;
+    static void put(std::string& bytes, const Vec2& value) {
+        AppendLeFloat(bytes, value.x);
+        AppendLeFloat(bytes, value.y);
+    }
+    static Vec2 get(const unsigned char* bytes) {
+        return Vec2(ReadLeFloat(bytes), ReadLeFloat(bytes + 4));
+    }
+    static bool finite(const Vec2& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y);
+    }
+};
+
+std::string Base64Encode(std::string_view bytes) {
+    std::string text;
+    text.reserve((bytes.size() + 2u) / 3u * 4u);
+    for (std::size_t offset = 0; offset < bytes.size(); offset += 3u) {
+        const std::size_t available = std::min<std::size_t>(3u, bytes.size() - offset);
+        std::uint32_t group = std::uint32_t{static_cast<unsigned char>(bytes[offset])} << 16u;
+        if (available > 1u)
+            group |= std::uint32_t{static_cast<unsigned char>(bytes[offset + 1u])} << 8u;
+        if (available > 2u)
+            group |= std::uint32_t{static_cast<unsigned char>(bytes[offset + 2u])};
+        text.push_back(kBase64Alphabet[(group >> 18u) & 63u]);
+        text.push_back(kBase64Alphabet[(group >> 12u) & 63u]);
+        text.push_back(available > 1u ? kBase64Alphabet[(group >> 6u) & 63u] : '=');
+        text.push_back(available > 2u ? kBase64Alphabet[group & 63u] : '=');
+    }
+    return text;
+}
+
+// Canonical base64 only: the caller has already matched the text length to byte_count, so
+// padding must sit exactly where byte_count puts it and unused trailing bits must be zero.
+std::string Base64Decode(std::string_view text, std::size_t byte_count) {
+    static constexpr auto kSextets = [] {
+        std::array<std::int8_t, 256> table{};
+        table.fill(-1);
+        for (std::size_t index = 0; index < kBase64Alphabet.size(); ++index)
+            table[static_cast<unsigned char>(kBase64Alphabet[index])] =
+                static_cast<std::int8_t>(index);
+        return table;
+    }();
+    const std::size_t padding = (3u - byte_count % 3u) % 3u;
+    std::string bytes;
+    bytes.reserve(byte_count);
+    for (std::size_t offset = 0; offset < text.size(); offset += 4u) {
+        const std::size_t pad = offset + 4u == text.size() ? padding : 0u;
+        std::uint32_t group = 0;
+        for (std::size_t index = 0; index < 4u; ++index) {
+            const char character = text[offset + index];
+            group <<= 6u;
+            if (index >= 4u - pad) {
+                if (character != '=')
+                    throw std::invalid_argument("encoded array padding is malformed");
+                continue;
+            }
+            const std::int8_t sextet = kSextets[static_cast<unsigned char>(character)];
+            if (sextet < 0)
+                throw std::invalid_argument("encoded array data is not base64");
+            group |= static_cast<std::uint32_t>(sextet);
+        }
+        if ((group & ((std::uint32_t{1} << (8u * pad)) - 1u)) != 0u)
+            throw std::invalid_argument("encoded array padding bits are not zero");
+        bytes.push_back(static_cast<char>((group >> 16u) & 0xffu));
+        if (pad < 2u)
+            bytes.push_back(static_cast<char>((group >> 8u) & 0xffu));
+        if (pad < 1u)
+            bytes.push_back(static_cast<char>(group & 0xffu));
+    }
+    return bytes;
+}
+
+// Non-finite values have no JSON number form; they stay null, which loading refuses.
+template<typename T>
+nlohmann::json EncodedArrayToJson(const std::vector<T>& values) {
+    using Element = EncodedArrayElement<T>;
+    std::string bytes;
+    bytes.reserve(values.size() * Element::kBytes);
+    for (const T& value : values) {
+        if (!Element::finite(value))
+            return nullptr;
+        Element::put(bytes, value);
+    }
+    return nlohmann::json{{"enc", kEncodedArrayEncoding},
+                          {"type", std::string(Element::kType)},
+                          {"count", values.size()},
+                          {"data", Base64Encode(bytes)}};
+}
+
+template<typename T>
+std::vector<T> EncodedArrayFromJson(const nlohmann::json& array, const char* field) {
+    using Element = EncodedArrayElement<T>;
+    const auto refuse = [field](const char* reason) {
+        return std::invalid_argument(std::string("chunk array ") + field + " " + reason);
+    };
+    if (!array.is_object() || array.size() != 4u || !array.contains("enc") ||
+        !array.contains("type") || !array.contains("count") || !array.contains("data"))
+        throw refuse("must be an encoded array object");
+    const nlohmann::json& encoding = array.at("enc");
+    if (!encoding.is_string() ||
+        encoding.get_ref<const std::string&>() != std::string_view(kEncodedArrayEncoding))
+        throw refuse("has an unsupported encoding");
+    const nlohmann::json& type = array.at("type");
+    if (!type.is_string() || type.get_ref<const std::string&>() != Element::kType)
+        throw refuse("has the wrong element type");
+    const nlohmann::json& count_json = array.at("count");
+    if (!count_json.is_number_unsigned())
+        throw refuse("count must be an unsigned integer");
+    const nlohmann::json& data = array.at("data");
+    if (!data.is_string())
+        throw refuse("data must be a string");
+    const std::string& text = data.get_ref<const std::string&>();
+    // Every element is at least one byte and base64 never shrinks, so a count above the text
+    // length is already wrong; below it the byte arithmetic cannot overflow.
+    const std::uint64_t count = count_json.get<std::uint64_t>();
+    if (count > text.size() ||
+        (static_cast<std::size_t>(count) * Element::kBytes + 2u) / 3u * 4u != text.size())
+        throw refuse("count does not match its data length");
+    const std::string bytes = Base64Decode(text, static_cast<std::size_t>(count) * Element::kBytes);
+    const auto* cursor = reinterpret_cast<const unsigned char*>(bytes.data());
+    std::vector<T> values;
+    values.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t index = 0; index < count; ++index, cursor += Element::kBytes) {
+        values.push_back(Element::get(cursor));
+        if (!Element::finite(values.back()))
+            throw refuse("holds a non-finite value");
+    }
+    return values;
+}
+
+// Plain JSON arrays keep every legacy tolerance for older saves.
+struct JsonChunkArrays {
+    const nlohmann::json& value;
+    std::vector<float> floats(const char* key) const {
+        return value.at(key).get<std::vector<float>>();
+    }
+    std::vector<u8> materials() const {
+        // tolerant read (default empty) so old saves without the field still
+        // load and the single-missing-field negative fixture is unaffected.
+        return value.value("material_data", std::vector<u8>{});
+    }
+    std::vector<VoxelVertex> vertices(const char* key) const {
+        return MeshVerticesFromJson(value.at(key));
+    }
+    std::vector<u32> indices(const char* key) const {
+        return value.at(key).get<std::vector<u32>>();
+    }
+    std::vector<Vec2> flow() const {
+        return Vec2ArrayFromJson(value.at("water_flow_data"));
+    }
+    bool has(const char* key) const {
+        return value.contains(key);
+    }
+    std::vector<std::int32_t> grid(const char* key) const {
+        return WaterGridFromJson(value.at(key));
+    }
+};
+
+// The encoded format always writes every array, so every array is required.
+struct EncodedChunkArrays {
+    const nlohmann::json& value;
+    std::vector<float> floats(const char* key) const {
+        return EncodedArrayFromJson<float>(value.at(key), key);
+    }
+    std::vector<u8> materials() const {
+        return EncodedArrayFromJson<u8>(value.at("material_data"), "material_data");
+    }
+    std::vector<VoxelVertex> vertices(const char* key) const {
+        return EncodedArrayFromJson<VoxelVertex>(value.at(key), key);
+    }
+    std::vector<u32> indices(const char* key) const {
+        return EncodedArrayFromJson<u32>(value.at(key), key);
+    }
+    std::vector<Vec2> flow() const {
+        return EncodedArrayFromJson<Vec2>(value.at("water_flow_data"), "water_flow_data");
+    }
+    bool has(const char*) const {
+        return true;
+    }
+    std::vector<std::int32_t> grid(const char* key) const {
+        return EncodedArrayFromJson<std::int32_t>(value.at(key), key);
+    }
+};
+
+template<typename Arrays>
+void ApplyChunkFields(const nlohmann::json& value, const Arrays& arrays, Chunk& chunk) {
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
-    chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
-    chunk.heightmap_data = value.at("heightmap_data").get<std::vector<float>>();
-    // tolerant read (default empty) so old saves without the field still
-    // load and the single-missing-field negative fixture is unaffected.
-    chunk.material_data = value.value("material_data", std::vector<u8>{});
-    chunk.mesh_vertices = MeshVerticesFromJson(value.at("mesh_vertices"));
-    chunk.mesh_indices = value.at("mesh_indices").get<std::vector<u32>>();
-    chunk.water_mesh_vertices = MeshVerticesFromJson(value.at("water_mesh_vertices"));
-    chunk.water_mesh_indices = value.at("water_mesh_indices").get<std::vector<u32>>();
-    chunk.pending_mesh_vertices = MeshVerticesFromJson(value.at("pending_mesh_vertices"));
-    chunk.pending_mesh_indices = value.at("pending_mesh_indices").get<std::vector<u32>>();
-    chunk.pending_water_mesh_vertices =
-        MeshVerticesFromJson(value.at("pending_water_mesh_vertices"));
-    chunk.pending_water_mesh_indices =
-        value.at("pending_water_mesh_indices").get<std::vector<u32>>();
+    chunk.sdf_data = arrays.floats("sdf_data");
+    chunk.heightmap_data = arrays.floats("heightmap_data");
+    chunk.material_data = arrays.materials();
+    chunk.mesh_vertices = arrays.vertices("mesh_vertices");
+    chunk.mesh_indices = arrays.indices("mesh_indices");
+    chunk.water_mesh_vertices = arrays.vertices("water_mesh_vertices");
+    chunk.water_mesh_indices = arrays.indices("water_mesh_indices");
+    chunk.pending_mesh_vertices = arrays.vertices("pending_mesh_vertices");
+    chunk.pending_mesh_indices = arrays.indices("pending_mesh_indices");
+    chunk.pending_water_mesh_vertices = arrays.vertices("pending_water_mesh_vertices");
+    chunk.pending_water_mesh_indices = arrays.indices("pending_water_mesh_indices");
     chunk.has_collision.store(value.at("has_collision").get<bool>(), std::memory_order_release);
     chunk.current_lod.store(value.at("current_lod").get<int>(), std::memory_order_release);
     chunk.pending_lod.store(value.at("pending_lod").get<int>(), std::memory_order_release);
@@ -375,22 +681,20 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.mesh_version.store(value.at("mesh_version").get<u32>(), std::memory_order_release);
     chunk.water_mesh_version.store(value.at("water_mesh_version").get<u32>(),
                                    std::memory_order_release);
-    chunk.water_level_data = value.at("water_level_data").get<std::vector<float>>();
-    chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
-    chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
+    chunk.water_level_data = arrays.floats("water_level_data");
+    chunk.water_flow_data = arrays.flow();
+    chunk.water_sim_terrain_height = arrays.floats("water_sim_terrain_height");
     // restore the authoritative fixed-point water state (absent in pre saves -> empty,
     // the sim re-seeds on the next tick).
-    chunk.water_depth_mm = value.contains("water_depth_mm")
-                               ? WaterGridFromJson(value.at("water_depth_mm"))
-                               : std::vector<std::int32_t>{};
-    chunk.water_bed_mm = value.contains("water_bed_mm")
-                             ? WaterGridFromJson(value.at("water_bed_mm"))
-                             : std::vector<std::int32_t>{};
+    chunk.water_depth_mm =
+        arrays.has("water_depth_mm") ? arrays.grid("water_depth_mm") : std::vector<std::int32_t>{};
+    chunk.water_bed_mm =
+        arrays.has("water_bed_mm") ? arrays.grid("water_bed_mm") : std::vector<std::int32_t>{};
     // / (authoritative-state change): flow momentum round-trips (see ChunkToJson). Saves
     // that predate the field restore as zeros — the old cleared-on-load behaviour
     // (momentum re-seeds from surface differences on the next tick).
-    if (value.contains("water_edge_flux")) {
-        chunk.water_edge_flux = WaterGridFromJson(value.at("water_edge_flux"));
+    if (arrays.has("water_edge_flux")) {
+        chunk.water_edge_flux = arrays.grid("water_edge_flux");
     } else {
         if (chunk.water_depth_mm.size() > chunk.water_edge_flux.max_size() / 2u)
             throw std::length_error("Water flux grid exceeds capacity");
@@ -421,6 +725,10 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
             chunk.clear_voxel_data_dirty();
         }
     }
+}
+
+void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
+    ApplyChunkFields(value, JsonChunkArrays{value}, chunk);
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -1031,6 +1339,36 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk) {
                                      {"chunks", std::move(chunks)}});
 }
 
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
+    nlohmann::json object = ChunkToJson(chunk, false, true);
+    object["sdf_data"] = EncodedArrayToJson(chunk.sdf_data);
+    object["heightmap_data"] = EncodedArrayToJson(chunk.heightmap_data);
+    object["material_data"] = EncodedArrayToJson(chunk.material_data);
+    object["mesh_vertices"] = EncodedArrayToJson(chunk.mesh_vertices);
+    object["mesh_indices"] = EncodedArrayToJson(chunk.mesh_indices);
+    object["water_mesh_vertices"] = EncodedArrayToJson(chunk.water_mesh_vertices);
+    object["water_mesh_indices"] = EncodedArrayToJson(chunk.water_mesh_indices);
+    object["pending_mesh_vertices"] = EncodedArrayToJson(chunk.pending_mesh_vertices);
+    object["pending_mesh_indices"] = EncodedArrayToJson(chunk.pending_mesh_indices);
+    object["pending_water_mesh_vertices"] = EncodedArrayToJson(chunk.pending_water_mesh_vertices);
+    object["pending_water_mesh_indices"] = EncodedArrayToJson(chunk.pending_water_mesh_indices);
+    object["water_level_data"] = EncodedArrayToJson(chunk.water_level_data);
+    object["water_flow_data"] = EncodedArrayToJson(chunk.water_flow_data);
+    object["water_sim_terrain_height"] = EncodedArrayToJson(chunk.water_sim_terrain_height);
+    object["water_depth_mm"] = EncodedArrayToJson(chunk.water_depth_mm);
+    object["water_bed_mm"] = EncodedArrayToJson(chunk.water_bed_mm);
+    object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
+    nlohmann::json chunks = nlohmann::json::array();
+    chunks.push_back(std::move(object));
+    return nlohmann::json{{"schema", kSnapshotSchema},
+                          {"order_contract", kOrderContract},
+                          {"chunk_count", chunks.size()},
+                          {"persisted_fields", PersistedFields()},
+                          {kChunkRecordFormatKey, kChunkRecordFormat},
+                          {"chunks", std::move(chunks)}}
+        .dump();
+}
+
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::erase(chunks, nullptr);
@@ -1072,6 +1410,19 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         }
 
+        // Region chunk records name their array encoding; snapshots without the field are
+        // the original plain-JSON form.
+        bool encoded_arrays = false;
+        if (const auto format = snapshot.find(kChunkRecordFormatKey); format != snapshot.end()) {
+            if (!format->is_number_unsigned() ||
+                format->get<std::uint64_t>() != kChunkRecordFormat) {
+                errors.push_back("unsupported world snapshot record format");
+                out_state.clear();
+                return false;
+            }
+            encoded_arrays = true;
+        }
+
         out_state.clear();
         // A malformed/torn snapshot that fails partway through the chunk array (bad
         // chunk id, duplicate, or a parse error mid-stream) must not leave the caller
@@ -1084,7 +1435,10 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
-            ApplyChunkJson(chunk_json, *chunk);
+            if (encoded_arrays)
+                ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk);
+            else
+                ApplyChunkJson(chunk_json, *chunk);
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();

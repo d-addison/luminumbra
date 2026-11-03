@@ -19,6 +19,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -2042,6 +2043,93 @@ TEST(WorldSaveRegionFormat, ColdValidationTransfersRetainedDecodesOnlyForExactRe
     EXPECT_EQ(loaded.size(), 0u);
 }
 
+TEST(WorldSaveRegionFormat, ColdValidationRetainsOnlyBoundedDecodesForTheAdoptingRead) {
+    namespace P = Luminumbra::Persistence;
+    struct RestoreLimit {
+        ~RestoreLimit() {
+            WorldSaveService::set_pending_chunk_admission_byte_limit_for_testing(std::size_t{256} *
+                                                                                 1024 * 1024);
+        }
+    } const restore_limit;
+    TempSaveDir save("bounded_validation_transfer");
+    const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> originals;
+    std::unordered_set<Luminumbra::ChunkID> wanted;
+    // Fresh record bytes each round, so every validation below starts cold.
+    const auto write_records = [&](float base) {
+        std::vector<WorldSaveService::ContainerRecord> records;
+        originals.clear();
+        wanted.clear();
+        for (int x = 1; x <= 3; ++x) {
+            WorldStreamingState source;
+            const auto chunk = source.get_or_create_chunk({x, 0, 1});
+            chunk->sdf_data.assign(17 * 17 * 17, base - static_cast<float>(x));
+            WorldSaveService::ContainerRecord record;
+            record.id = chunk->get_id();
+            record.flags = 1;
+            record.payload = P::SerializeWorldStreamingStateSnapshotJson(source);
+            records.push_back(std::move(record));
+            originals.push_back(chunk);
+            wanted.insert(chunk->get_id());
+        }
+        return WorldSaveService::upsert_container_records(path, records);
+    };
+    const auto expect_loaded = [&](const WorldStreamingState& loaded) {
+        ASSERT_EQ(loaded.size(), originals.size());
+        for (const auto& original : originals) {
+            const auto chunk = loaded.find_chunk(original->get_id());
+            ASSERT_NE(chunk, nullptr);
+            EXPECT_EQ(chunk->sdf_data, original->sdf_data);
+        }
+    };
+    std::vector<std::string> errors;
+
+    ASSERT_TRUE(write_records(-1.0f));
+    std::size_t retained_bytes = 0;
+    {
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        const WorldSaveService::WorldReadScope scope;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+        EXPECT_EQ(WorldSaveService::pending_chunk_admission_count_for_testing(), 3u);
+        retained_bytes = WorldSaveService::pending_chunk_admission_bytes_for_testing();
+        EXPECT_GT(retained_bytes, 0u);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+        expect_loaded(loaded);
+        EXPECT_EQ(WorldSaveService::pending_chunk_admission_count_for_testing(), 0u);
+        EXPECT_EQ(WorldSaveService::pending_chunk_admission_bytes_for_testing(), 0u);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 3);
+    }
+
+    // Below the retained total, validation holds fewer decodes and stays within the bound.
+    const std::size_t limit = retained_bytes * 2 / 3;
+    WorldSaveService::set_pending_chunk_admission_byte_limit_for_testing(limit);
+    ASSERT_TRUE(write_records(-11.0f));
+    {
+        const WorldSaveService::WorldReadScope scope;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+        EXPECT_LT(WorldSaveService::pending_chunk_admission_count_for_testing(), 3u);
+        EXPECT_LE(WorldSaveService::pending_chunk_admission_bytes_for_testing(), limit);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+        expect_loaded(loaded);
+    }
+
+    // With no room, a validation-only pass holds nothing; the adopting read is still exact.
+    WorldSaveService::set_pending_chunk_admission_byte_limit_for_testing(0);
+    ASSERT_TRUE(write_records(-21.0f));
+    {
+        const WorldSaveService::WorldReadScope scope;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+        EXPECT_EQ(WorldSaveService::pending_chunk_admission_count_for_testing(), 0u);
+        EXPECT_EQ(WorldSaveService::pending_chunk_admission_bytes_for_testing(), 0u);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+        expect_loaded(loaded);
+    }
+    EXPECT_TRUE(errors.empty());
+}
+
 TEST(WorldSaveRegionFormat, ColdUnretainedDecodeTransfersFromPreparationToActivation) {
     namespace P = Luminumbra::Persistence;
     TempSaveDir save("activation_transfer");
@@ -2129,7 +2217,8 @@ TEST(WorldSaveRegionFormat, UnchangedSnapshotReusesSerializationAndPreservesPubl
     };
     for (const auto& edit : edits) {
         edit();
-        const auto expected = P::SerializeWorldStreamingStateSnapshotJson(state);
+        // Region records store the compact encoded form; the canonical snapshot is unchanged.
+        const auto expected = P::SerializeChunkRecordPayloadJson(*chunk);
         const auto count = WorldSaveService::record_compression_count_for_testing();
         ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
         EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), count + 1);
@@ -2343,6 +2432,334 @@ TEST(WorldSaveRegionFormat, StreamingSnapshotArraysMatchCanonicalJsonBytes) {
     expected["chunks"] = nlohmann::json::array();
     expected["chunk_count"] = 0;
     EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(state), expected.dump(4) + "\n");
+}
+
+namespace {
+
+// Every encoded array of a region chunk record, holding the float and integer edge values.
+std::shared_ptr<Chunk> EdgeValueChunk(WorldStreamingState& state) {
+    using Limits = std::numeric_limits<float>;
+    const auto chunk = state.get_or_create_chunk({3, -1, 5});
+    std::vector<float> floats{0.0f,
+                              -0.0f,
+                              0.1f,
+                              -17.125f,
+                              Limits::denorm_min(),
+                              -Limits::denorm_min(),
+                              Limits::min(),
+                              Limits::max(),
+                              Limits::lowest(),
+                              Limits::epsilon()};
+    while (floats.size() < 17u * 17u * 17u)
+        floats.push_back(static_cast<float>(floats.size() % 97u) * 0.173f - 8.0f);
+    chunk->sdf_data = floats;
+    chunk->heightmap_data.assign(floats.begin(), floats.begin() + 289);
+    chunk->water_level_data.assign(floats.begin(), floats.begin() + 256);
+    chunk->water_sim_terrain_height.assign(floats.rbegin(), floats.rbegin() + 256);
+    chunk->material_data = {0, 1, 127, 128, 255};
+    chunk->water_depth_mm = {0,
+                             1,
+                             -1,
+                             std::numeric_limits<std::int32_t>::min(),
+                             std::numeric_limits<std::int32_t>::max()};
+    chunk->water_bed_mm = {std::numeric_limits<std::int32_t>::min(), 0, 7};
+    chunk->water_edge_flux = {-4, 3, std::numeric_limits<std::int32_t>::max(), 0};
+    chunk->mesh_vertices = {{Vec3(-0.0f, Limits::denorm_min(), Limits::max()), Vec3(0, 1, 0), 0},
+                            {Vec3(Limits::lowest(), 0.1f, -17.125f),
+                             Vec3(0.25f, -0.5f, 1),
+                             std::numeric_limits<std::uint32_t>::max()}};
+    chunk->water_mesh_vertices = {chunk->mesh_vertices.back()};
+    chunk->pending_mesh_vertices = chunk->mesh_vertices;
+    chunk->mesh_indices = {0, 1, std::numeric_limits<std::uint32_t>::max()};
+    chunk->water_mesh_indices = {2};
+    chunk->pending_mesh_indices = chunk->mesh_indices;
+    chunk->water_flow_data = {Vec2(-0.0f, -Limits::denorm_min()), Vec2(3, -4)};
+    chunk->max_water_delta_last_tick = -0.0f;
+    chunk->ticks_below_threshold = 7;
+    chunk->water_mesh_dirty_ticks = -3;
+    chunk->mesh_version.store(9);
+    chunk->set_state(ChunkState::Ready);
+    // A decoded record is loaded authority; match it so the raw inputs compare whole.
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+
+} // namespace
+
+TEST(WorldSaveRegionFormat, ChunkRecordPayloadRoundTripsEveryArrayBitExactly) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    const auto chunk = EdgeValueChunk(state);
+    const auto terrain_hash = P::ComputeWorldStreamingStateHash(state);
+    const std::string payload = P::SerializeChunkRecordPayloadJson(*chunk);
+    EXPECT_EQ(payload.find('\n'), std::string::npos);
+    const auto document = nlohmann::json::parse(payload);
+    EXPECT_EQ(document.at("record_format"), 2);
+    const auto& stored = document.at("chunks").at(0);
+    const std::vector<std::pair<const char*, const char*>> types{
+        {"sdf_data", "f32"},
+        {"heightmap_data", "f32"},
+        {"material_data", "u8"},
+        {"mesh_vertices", "vertex"},
+        {"mesh_indices", "u32"},
+        {"water_mesh_vertices", "vertex"},
+        {"water_mesh_indices", "u32"},
+        {"pending_mesh_vertices", "vertex"},
+        {"pending_mesh_indices", "u32"},
+        {"pending_water_mesh_vertices", "vertex"},
+        {"pending_water_mesh_indices", "u32"},
+        {"water_level_data", "f32"},
+        {"water_flow_data", "f32x2"},
+        {"water_sim_terrain_height", "f32"},
+        {"water_depth_mm", "i32"},
+        {"water_bed_mm", "i32"},
+        {"water_edge_flux", "i32"}};
+    for (const auto& [field, type] : types) {
+        SCOPED_TRACE(field);
+        ASSERT_TRUE(stored.at(field).is_object());
+        EXPECT_EQ(stored.at(field).at("enc"), "le-b64");
+        EXPECT_EQ(stored.at(field).at("type"), type);
+    }
+    EXPECT_EQ(stored.at("sdf_data").at("count"), chunk->sdf_data.size());
+    EXPECT_EQ(stored.at("mesh_vertices").at("count"), 2u);
+    // Explicit little-endian bytes: -0.0f is 00 00 00 80, the negative denormal 01 00 00 80.
+    EXPECT_EQ(stored.at("water_flow_data").at("data"), "AAAAgAEAAIAAAEBAAACAwA==");
+
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(payload, loaded, errors))
+        << (errors.empty() ? std::string{} : errors.front());
+    const auto restored = loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(restored, nullptr);
+    // The raw bytes of every array and scalar, so signed zeros and denormals compare by bits.
+    EXPECT_EQ(P::ChunkSnapshotInputBytes(*restored), P::ChunkSnapshotInputBytes(*chunk));
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->sdf_data[1]), 0x80000000u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->sdf_data[5]), 0x80000001u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->mesh_vertices[0].position.x), 0x80000000u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->max_water_delta_last_tick), 0x80000000u);
+
+    // Hashes and checksums read the canonical serializers, so the stored form cannot move them.
+    EXPECT_EQ(P::ComputeWorldStreamingStateHash(state), terrain_hash);
+    EXPECT_EQ(P::ComputeWorldStreamingStateHash(loaded), terrain_hash);
+    EXPECT_EQ(P::ComputeRegionContentHash(loaded), P::ComputeRegionContentHash(state));
+    EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(loaded),
+              P::SerializeWorldStreamingStateSnapshotJson(state));
+    EXPECT_EQ(P::SerializeChunkSnapshotJson(*restored), P::SerializeChunkSnapshotJson(*chunk));
+    const auto sub_hashes = P::ComputeWorldStreamingStateSubHashes(state);
+    const auto loaded_sub_hashes = P::ComputeWorldStreamingStateSubHashes(loaded);
+    EXPECT_EQ(loaded_sub_hashes.terrain, sub_hashes.terrain);
+    EXPECT_EQ(loaded_sub_hashes.mesh, sub_hashes.mesh);
+    EXPECT_EQ(loaded_sub_hashes.water, sub_hashes.water);
+
+    // The indented plain-array record of earlier saves still loads to the same values.
+    const std::string legacy = P::SerializeWorldStreamingStateSnapshotJson(state);
+    EXPECT_EQ(nlohmann::json::parse(legacy).count("record_format"), 0u);
+    WorldStreamingState legacy_loaded;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(legacy, legacy_loaded, errors));
+    const auto legacy_chunk = legacy_loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(legacy_chunk, nullptr);
+    EXPECT_EQ(P::ChunkSnapshotInputBytes(*legacy_chunk), P::ChunkSnapshotInputBytes(*chunk));
+    EXPECT_EQ(P::ComputeWorldStreamingStateHash(legacy_loaded), terrain_hash);
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(WorldSaveRegionFormat, ChunkRecordPayloadRefusesMalformedEncodedArrays) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    const auto chunk = EdgeValueChunk(state);
+    const auto valid = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
+    const auto refused = [&](const char* expected,
+                             const std::function<void(nlohmann::json&)>& damage) {
+        SCOPED_TRACE(expected);
+        auto document = valid;
+        damage(document);
+        WorldStreamingState loaded;
+        loaded.get_or_create_chunk({0, 0, 0});
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(document.dump(), loaded, errors));
+        EXPECT_EQ(loaded.size(), 0u);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find(expected), std::string::npos) << errors.front();
+    };
+    const auto field = [](nlohmann::json& document, const char* name) -> nlohmann::json& {
+        return document["chunks"][0][name];
+    };
+    const auto data = [&field](nlohmann::json& document, const char* name) -> std::string& {
+        return field(document, name)["data"].get_ref<std::string&>();
+    };
+    refused("not base64", [&](nlohmann::json& d) { data(d, "sdf_data")[5] = '*'; });
+    refused("not base64", [&](nlohmann::json& d) { data(d, "sdf_data")[4] = '='; });
+    refused("count does not match", [&](nlohmann::json& d) {
+        auto& count = field(d, "sdf_data")["count"];
+        count = count.get<std::uint64_t>() + 1u;
+    });
+    refused("count does not match", [&](nlohmann::json& d) {
+        field(d, "heightmap_data")["count"] = std::numeric_limits<std::uint64_t>::max();
+    });
+    refused("count must be an unsigned integer",
+            [&](nlohmann::json& d) { field(d, "mesh_indices")["count"] = -1; });
+    refused("count does not match", [&](nlohmann::json& d) {
+        auto& text = data(d, "water_depth_mm");
+        text.resize(text.size() - 4u);
+    });
+    refused("count does not match", [&](nlohmann::json& d) { data(d, "mesh_vertices").clear(); });
+    refused("wrong element type",
+            [&](nlohmann::json& d) { field(d, "water_bed_mm")["type"] = "u32"; });
+    refused("wrong element type",
+            [&](nlohmann::json& d) { field(d, "mesh_vertices")["type"] = "f32"; });
+    refused("unsupported encoding",
+            [&](nlohmann::json& d) { field(d, "material_data")["enc"] = "be-b64"; });
+    refused("encoded array object",
+            [&](nlohmann::json& d) { field(d, "water_flow_data")["extra"] = 0; });
+    refused("encoded array object",
+            [&](nlohmann::json& d) { field(d, "sdf_data") = chunk->sdf_data; });
+    refused("encoded array object", [&](nlohmann::json& d) { field(d, "sdf_data") = nullptr; });
+    refused("water_edge_flux", [&](nlohmann::json& d) { d["chunks"][0].erase("water_edge_flux"); });
+    // One byte is "AA==": a set spare bit or a misplaced pad is not canonical base64.
+    refused("padding bits are not zero", [&](nlohmann::json& d) {
+        field(d, "material_data") = {
+            {"enc", "le-b64"}, {"type", "u8"}, {"count", 1}, {"data", "AB=="}};
+    });
+    refused("padding is malformed", [&](nlohmann::json& d) {
+        field(d, "material_data") = {
+            {"enc", "le-b64"}, {"type", "u8"}, {"count", 1}, {"data", "AAA="}};
+    });
+    // A quiet NaN (00 00 c0 7f) and +infinity (00 00 80 7f) have no plain-JSON form either.
+    refused("non-finite", [&](nlohmann::json& d) {
+        field(d, "sdf_data") = {
+            {"enc", "le-b64"}, {"type", "f32"}, {"count", 1}, {"data", "AADAfw=="}};
+    });
+    refused("non-finite", [&](nlohmann::json& d) {
+        field(d, "water_flow_data") = {
+            {"enc", "le-b64"}, {"type", "f32x2"}, {"count", 1}, {"data", "AACAfwAAAAA="}};
+    });
+    refused("record format", [](nlohmann::json& d) { d["record_format"] = 3; });
+    refused("record format", [](nlohmann::json& d) { d["record_format"] = "2"; });
+
+    // Non-finite values are written as null, which loading refuses as before.
+    chunk->sdf_data[3] = std::numeric_limits<float>::quiet_NaN();
+    chunk->water_flow_data[1].y = std::numeric_limits<float>::infinity();
+    chunk->mesh_vertices[0].normal.z = -std::numeric_limits<float>::infinity();
+    const std::string non_finite = P::SerializeChunkRecordPayloadJson(*chunk);
+    for (const char* name :
+         {"\"sdf_data\":null", "\"water_flow_data\":null", "\"mesh_vertices\":null"})
+        EXPECT_NE(non_finite.find(name), std::string::npos) << name;
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(non_finite, loaded, errors));
+    EXPECT_FALSE(errors.empty());
+
+    // The region decoder reports the refusal for a stored record as well.
+    TempSaveDir directory("encoded_array_refusal");
+    const auto path = directory.path / "container.lmr";
+    auto damaged = valid;
+    data(damaged, "sdf_data")[0] = '-';
+    WorldSaveService::ContainerRecord record;
+    record.id = chunk->get_id();
+    record.flags = 1;
+    record.payload = damaged.dump();
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(path, chunks, &errors));
+    EXPECT_TRUE(chunks.empty());
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.back().find("failed to decode chunk record payload"), std::string::npos);
+}
+
+TEST(WorldSaveRegionFormat, ChunkRecordPayloadIsSubstantiallySmallerThanTheIndentedSnapshot) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    const auto value = [](std::size_t index) {
+        return static_cast<float>(index % 97u) * 0.173f - 8.0f;
+    };
+    for (std::size_t i = 0; i < 17u * 17u * 17u; ++i)
+        chunk->sdf_data.push_back(value(i));
+    for (std::size_t i = 0; i < 17u * 17u; ++i) {
+        chunk->heightmap_data.push_back(value(i + 3u));
+        chunk->water_depth_mm.push_back(static_cast<std::int32_t>(i * 37u));
+        chunk->water_bed_mm.push_back(static_cast<std::int32_t>(i * 1009u) - 5000);
+    }
+    chunk->water_edge_flux.assign(chunk->water_depth_mm.size() * 2u, -3);
+    for (std::size_t i = 0; i < 1200u; ++i) {
+        chunk->mesh_vertices.push_back(
+            {Vec3(value(i), value(i + 1u), value(i + 2u)), Vec3(0.6f, 0.8f, 0.0f), 2u});
+        chunk->mesh_indices.push_back(static_cast<std::uint32_t>(i));
+    }
+    chunk->mark_voxel_data_dirty();
+    const std::string indented = P::SerializeChunkSnapshotJson(*chunk);
+    const std::string encoded = P::SerializeChunkRecordPayloadJson(*chunk);
+    // The indented record spends 20+ bytes per number; four bytes become 5.33 base64 bytes.
+    EXPECT_LT(encoded.size() * 4u, indented.size()) << encoded.size() << " vs " << indented.size();
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(encoded, loaded, errors));
+    EXPECT_EQ(P::ChunkSnapshotInputBytes(*loaded.find_chunk(chunk->get_id())),
+              P::ChunkSnapshotInputBytes(*chunk));
+}
+
+TEST(WorldSaveRegionFormat, LoadThenSaveRewritesNoUnchangedRecord) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("load_then_save");
+    const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+    // Plain-array records, as earlier builds stored them.
+    std::vector<WorldSaveService::ContainerRecord> records;
+    std::unordered_set<Luminumbra::ChunkID> wanted;
+    for (int x = 1; x <= 3; ++x) {
+        WorldStreamingState source;
+        const auto chunk = source.get_or_create_chunk({x, 0, 2});
+        chunk->sdf_data.assign(17 * 17 * 17, -2.5f - static_cast<float>(x));
+        WorldSaveService::ContainerRecord record;
+        record.id = chunk->get_id();
+        record.flags = 1;
+        record.payload = P::SerializeWorldStreamingStateSnapshotJson(source);
+        records.push_back(std::move(record));
+        wanted.insert(chunk->get_id());
+    }
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, records));
+    std::vector<std::string> errors;
+    WorldStreamingState loaded;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors, {}, &wanted));
+    ASSERT_EQ(loaded.size(), 3u);
+
+    // Unchanged adopted chunks keep their stored records: nothing is encoded or rewritten.
+    const auto compressions = WorldSaveService::record_compression_count_for_testing();
+    ASSERT_TRUE(WorldSaveService{}.save_world(loaded, save.path, &errors))
+        << (errors.empty() ? std::string{} : errors.front());
+    EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions);
+    std::vector<WorldSaveService::ContainerRecord> kept;
+    ASSERT_TRUE(WorldSaveService::read_container_records(path, kept));
+    ASSERT_EQ(kept.size(), records.size());
+    for (std::size_t index = 0; index < kept.size(); ++index) {
+        EXPECT_EQ(kept[index].id, records[index].id);
+        EXPECT_EQ(kept[index].flags, records[index].flags);
+        EXPECT_EQ(kept[index].payload, records[index].payload);
+    }
+
+    // A changed chunk is encoded again, in the current format; the others stay as stored.
+    const auto edited = loaded.find_chunk(Chunk::calculate_id({2, 0, 2}));
+    ASSERT_NE(edited, nullptr);
+    edited->sdf_data.front() = 4.0f;
+    ASSERT_TRUE(WorldSaveService{}.save_world(loaded, save.path, &errors));
+    EXPECT_EQ(WorldSaveService::record_compression_count_for_testing(), compressions + 1);
+    std::vector<WorldSaveService::ContainerRecord> stored;
+    ASSERT_TRUE(WorldSaveService::read_container_records(path, stored));
+    ASSERT_EQ(stored.size(), 3u);
+    for (const auto& record : stored) {
+        EXPECT_EQ(nlohmann::json::parse(record.payload).contains("record_format"),
+                  record.id == edited->get_id());
+    }
+
+    // Kept and rewritten records both load to the chunks that were saved.
+    WorldStreamingState reloaded;
+    ASSERT_TRUE(WorldSaveService{}.load_world(reloaded, save.path, errors, {}, &wanted));
+    for (const auto& chunk : loaded.snapshot_chunks()) {
+        const auto restored = reloaded.find_chunk(chunk->get_id());
+        ASSERT_NE(restored, nullptr);
+        EXPECT_EQ(P::ChunkSnapshotInputBytes(*restored), P::ChunkSnapshotInputBytes(*chunk));
+    }
+    EXPECT_TRUE(errors.empty());
 }
 
 TEST(WorldSaveRegionFormat, WrittenRegionDigestIsReusedOnlyWhileItsFileVersionMatches) {

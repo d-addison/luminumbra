@@ -6933,6 +6933,9 @@ void SHIELD_WorldSystem::replace_durable_chunks(const std::vector<IVec3>& coords
     }
     m_durable_chunks.clear();
     remember_durable_chunks(coords);
+    // The inventory now comes from a validated snapshot; a read fault against the
+    // replaced inventory no longer blocks reads, edits or generation.
+    m_durable_read_failed = false;
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::durable_chunk_inventory() const {

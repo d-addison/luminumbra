@@ -2590,15 +2590,6 @@ bool WriteRegionFile(const std::filesystem::path& path,
     return true;
 }
 
-// Full snapshots retain the streaming formatter; incremental records use one dump.
-std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk, bool dirty_only) {
-    if (dirty_only)
-        return SerializeChunkSnapshotJson(*chunk);
-    WorldStreamingState single;
-    single.insert_chunk(chunk);
-    return SerializeWorldStreamingStateSnapshotJson(single);
-}
-
 std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
     static std::atomic<std::uint64_t> counter{0};
     return counter;
@@ -2733,14 +2724,69 @@ bool AdmitFarLodRecord(const RegionRecord& record,
     return true;
 }
 
-struct PendingChunkAdmission {
-    RegionRecord record;
-    ChunkRecordFacts facts;
-    std::shared_ptr<Chunk> chunk;
+std::atomic<std::size_t>& PendingChunkAdmissionByteLimit() {
+    static std::atomic<std::size_t> limit{std::size_t{256} * 1024 * 1024};
+    return limit;
+}
+
+// Validation decodes held for the retaining read of the same world-read scope. Bounded in
+// records and bytes, so a validation that ends in a refusal never holds every decoded chunk
+// of a large save; a record past the bound is decoded again if a later read retains it.
+class PendingChunkAdmissionMap {
+public:
+    struct Admission {
+        RegionRecord record;
+        ChunkRecordFacts facts;
+        std::shared_ptr<Chunk> chunk;
+        std::size_t bytes = 0;
+    };
+    const Admission* find(const ChunkRecordKey& key) const {
+        const auto found = m_admissions.find(key.id);
+        return found != m_admissions.end() && ChunkRecordKeyOf(found->second.record) == key
+                   ? &found->second
+                   : nullptr;
+    }
+    std::shared_ptr<Chunk> take(ChunkID id) {
+        const auto found = m_admissions.find(id);
+        if (found == m_admissions.end())
+            return {};
+        m_bytes -= found->second.bytes;
+        auto chunk = std::move(found->second.chunk);
+        m_admissions.erase(found);
+        return chunk;
+    }
+    // Moves the chunk in only when it fits; otherwise the caller keeps it.
+    bool retain(const RegionRecord& record,
+                const ChunkRecordFacts& facts,
+                std::shared_ptr<Chunk>& chunk) {
+        take(record.id);
+        const std::size_t limit = PendingChunkAdmissionByteLimit().load(std::memory_order_relaxed);
+        const std::size_t bytes =
+            record.compressed_payload.size() + sizeof(Chunk) + chunk->estimated_heap_bytes();
+        if (m_admissions.size() >= kMaxRecords || bytes > limit || m_bytes > limit - bytes)
+            return false;
+        m_bytes += bytes;
+        m_admissions.emplace(record.id, Admission{record, facts, std::move(chunk), bytes});
+        return true;
+    }
+    [[nodiscard]] std::size_t size() const {
+        return m_admissions.size();
+    }
+    [[nodiscard]] std::size_t bytes() const {
+        return m_bytes;
+    }
+    [[nodiscard]] const std::unordered_map<ChunkID, Admission>& admissions() const {
+        return m_admissions;
+    }
+
+private:
+    static constexpr std::size_t kMaxRecords = 65536;
+    std::unordered_map<ChunkID, Admission> m_admissions;
+    std::size_t m_bytes = 0;
 };
 
-std::optional<std::unordered_map<ChunkID, PendingChunkAdmission>>& PendingChunkAdmissions() {
-    static thread_local std::optional<std::unordered_map<ChunkID, PendingChunkAdmission>> pending;
+std::optional<PendingChunkAdmissionMap>& PendingChunkAdmissions() {
+    static thread_local std::optional<PendingChunkAdmissionMap> pending;
     return pending;
 }
 
@@ -2795,7 +2841,8 @@ public:
         if (bytes > kMaxBytes)
             return;
         if (const auto previous = m_facts.find(key.id); previous != m_facts.end()) {
-            if (ChunkRecordKeyOf(previous->second.record) == key && inputs.empty()) {
+            if (ChunkRecordKeyOf(previous->second.record) == key &&
+                (inputs.empty() || previous->second.serialization_inputs == inputs)) {
                 previous->second.facts = facts;
                 return;
             }
@@ -2873,13 +2920,10 @@ bool AdmitChunkRecord(const RegionRecord& record,
     const ChunkRecordKey key = ChunkRecordKeyOf(record);
     auto& pending = PendingChunkAdmissions();
     if (pending) {
-        const auto found = pending->find(record.id);
-        if (found != pending->end() && ChunkRecordKeyOf(found->second.record) == key) {
-            facts = found->second.facts;
-            if (decoded) {
-                *decoded = std::move(found->second.chunk);
-                pending->erase(found);
-            }
+        if (const auto* found = pending->find(key)) {
+            facts = found->facts;
+            if (decoded)
+                *decoded = pending->take(record.id);
             return true;
         }
     }
@@ -2899,12 +2943,13 @@ bool AdmitChunkRecord(const RegionRecord& record,
     if (!chunk)
         return false;
     facts = DecodedChunkRecordFacts(*chunk);
-    AdmittedChunkRecordCache().remember(key, facts);
+    // The decode is a pure function of these bytes, so a chunk whose canonical inputs still
+    // equal the decoded ones is already stored by this record and needs no new encoding.
+    AdmittedChunkRecordCache().remember(key, facts, ChunkSnapshotInputBytes(*chunk));
     if (decoded)
         *decoded = std::move(chunk);
-    else if (pending && validation_only)
-        pending->insert_or_assign(record.id,
-                                  PendingChunkAdmission{record, facts, std::move(chunk)});
+    else if (pending && validation_only && pending->retain(record, facts, chunk))
+        return true;
     else if (cache_unretained)
         // Cold admission also visits chunks outside the initial retain set. Transfer those
         // decodes to later activation reads, including reads on the adopting owner thread.
@@ -4674,7 +4719,7 @@ WorldSaveService::WorldReadScope::~WorldReadScope() {
     if (m_owner) {
         auto& pending = PendingChunkAdmissions();
         if (pending) {
-            for (const auto& [id, admission] : *pending) {
+            for (const auto& [id, admission] : pending->admissions()) {
                 (void)id;
                 AdmittedChunkRecordCache().remember_decoded(ChunkRecordKeyOf(admission.record),
                                                             admission.chunk);
@@ -5002,6 +5047,20 @@ std::uint64_t WorldSaveService::region_fingerprint_count_for_testing() {
 
 std::uint64_t WorldSaveService::region_read_count_for_testing() {
     return RegionReadCounter().load(std::memory_order_relaxed);
+}
+
+std::size_t WorldSaveService::pending_chunk_admission_count_for_testing() {
+    const auto& pending = PendingChunkAdmissions();
+    return pending ? pending->size() : 0;
+}
+
+std::size_t WorldSaveService::pending_chunk_admission_bytes_for_testing() {
+    const auto& pending = PendingChunkAdmissions();
+    return pending ? pending->bytes() : 0;
+}
+
+void WorldSaveService::set_pending_chunk_admission_byte_limit_for_testing(std::size_t bytes) {
+    PendingChunkAdmissionByteLimit().store(bytes, std::memory_order_relaxed);
 }
 
 bool WorldSaveService::audit_admitted_chunk_records_for_testing(
@@ -6588,14 +6647,17 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                         ChunkRecordKeyOf(records[existing->second]), inputs))
                     continue;
                 const bool water_authority = chunk->has_water_authority();
-                const std::string payload = SerializeSingleChunkSnapshot(chunk, dirty_only);
+                const std::string payload = SerializeChunkRecordPayloadJson(*chunk);
                 if (!CompressPayload(payload, record, errors)) {
                     return false;
                 }
                 // Non-finite values serialize as null, which decoding rejects; a concurrent
                 // authority change leaves the encoded field unknown. Both stay with a real decode.
-                if (water_authority == chunk->has_water_authority() &&
-                    payload.find("null") == std::string::npos) {
+                // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
+                const bool has_null = payload.find(":null") != std::string::npos ||
+                                      payload.find("[null") != std::string::npos ||
+                                      payload.find(",null") != std::string::npos;
+                if (water_authority == chunk->has_water_authority() && !has_null) {
                     encoded.push_back(
                         {existing != record_index.end() ? existing->second : records.size(),
                          ChunkRecordFacts{chunk->get_coords(),

@@ -1449,9 +1449,13 @@ SaveTransaction::~SaveTransaction() {
             abort(nullptr);
         } catch (...) {}
     }
-    if (m_registered) {
+    release_registration();
+}
+
+void SaveTransaction::release_registration() noexcept {
+    if (m_registered && ActiveTransaction() == this)
         ActiveTransaction() = nullptr;
-    }
+    m_registered = false;
 }
 
 SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
@@ -1467,17 +1471,30 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         AddError(errors, "save transaction already begun");
         return false;
     }
+    // Publication hooks consult the thread's active slot; a transaction that does not
+    // own it would journal nothing while another transaction's journal is consulted.
+    if (!m_registered && ActiveTransaction() == nullptr) {
+        ActiveTransaction() = this;
+        m_registered = true;
+    }
+    if (!m_registered) {
+        AddError(errors, "another save transaction is active on this thread");
+        return false;
+    }
     try {
         auto ownership = std::make_unique<TransactionOwnership>();
         if (recover_pending_journal(m_save_dir, errors) == RecoveryOutcome::Failed) {
+            release_registration();
             return false;
         }
         if (!read_snapshot_index(m_save_dir, m_previous, errors)) {
+            release_registration();
             return false;
         }
         if (m_previous.generation == std::numeric_limits<std::uint64_t>::max() ||
             m_previous.txn_id == std::numeric_limits<std::uint64_t>::max()) {
             AddError(errors, "snapshot generation identity exhausted");
+            release_registration();
             return false;
         }
         m_new_generation = m_previous.generation + 1;
@@ -1544,6 +1561,7 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
     } catch (const std::exception& ex) {
         AddError(errors, std::string("cannot begin snapshot transaction: ") + ex.what());
         abort(errors);
+        release_registration();
         return false;
     }
 }
@@ -2084,6 +2102,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
         m_state = State::Committed;
+        release_registration();
         m_rollback_handles = {};
         auto actions = std::move(m_committed_actions);
         for (auto& action : actions) {
@@ -2124,6 +2143,7 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
                     m_state = State::RolledBack;
                     m_committed_actions.clear();
                     m_ownership.reset();
+                    release_registration();
                     return;
                 }
             }
@@ -2176,6 +2196,7 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     m_state = State::RolledBack;
     m_committed_actions.clear();
     m_ownership.reset();
+    release_registration();
 }
 
 } // namespace Luminumbra::Persistence

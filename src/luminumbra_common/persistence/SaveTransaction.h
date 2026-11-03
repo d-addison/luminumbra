@@ -248,6 +248,8 @@ private:
     };
     bool check_member_version(const Entry& entry, std::vector<std::string>* errors) const;
     bool write_journal(std::vector<std::string>* errors);
+    // Hands the thread's active slot back once this transaction can no longer publish.
+    void release_registration() noexcept;
 
     std::unique_ptr<TransactionOwnership> m_ownership;
     std::filesystem::path m_save_dir;
