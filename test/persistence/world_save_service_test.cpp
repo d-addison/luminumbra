@@ -38,6 +38,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <span>
 #include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
@@ -3055,10 +3056,13 @@ TEST(WorldSaveService, NeverWrittenGroundObjectsStayUnlistedAcrossEmptySaves) {
         SCOPED_TRACE(joined);
         {
             WorldSaveService::SaveFactsScope facts(save_dir.path());
-            Luminumbra::Persistence::SaveTransaction transaction(
-                save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
+            std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
             if (joined) {
-                ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+                transaction.emplace(save_dir.path(),
+                                    clock.tick(),
+                                    std::vector<std::array<float, 3>>{},
+                                    WorldSaveService::member_digest);
+                ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
             }
             ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors))
                 << JoinErrors(errors);
@@ -3066,7 +3070,7 @@ TEST(WorldSaveService, NeverWrittenGroundObjectsStayUnlistedAcrossEmptySaves) {
                 metadata.dump(), ledger, save_dir.path(), &errors))
                 << JoinErrors(errors);
             if (joined) {
-                ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+                ASSERT_TRUE(transaction->commit(&errors)) << JoinErrors(errors);
             }
         }
         EXPECT_FALSE(
