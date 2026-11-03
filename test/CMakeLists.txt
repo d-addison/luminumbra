@@ -290,6 +290,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
     common/FieldPageState_test.cpp
+    common/FoliageFieldPages_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -1578,6 +1579,7 @@ add_executable(frontier_gates_test
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
     ai/scent_field_test.cpp
+    ai/scent_field_gates_test.cpp
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp
