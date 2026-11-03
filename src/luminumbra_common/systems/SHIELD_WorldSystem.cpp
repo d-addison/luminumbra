@@ -7000,6 +7000,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
 void SHIELD_WorldSystem::release_clean_parked_chunks() {
     if (!m_durable_residency || !m_durable_chunk_loader)
         return;
+    const auto parked_count = m_parked.size();
     for (auto it = m_parked.begin(); it != m_parked.end();) {
         const auto& chunk = it->second.chunk;
         if (chunk && m_durable_chunks.contains(it->first) && !chunk->is_voxel_data_dirty() &&
@@ -7011,7 +7012,9 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
             ++it;
         }
     }
-    ++m_dirty_generation; // retry any save-pressure-blocked activation/eviction
+    if (m_parked.size() != parked_count) {
+        ++m_dirty_generation; // freed capacity can unblock deferred evictions
+    }
 }
 
 bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
