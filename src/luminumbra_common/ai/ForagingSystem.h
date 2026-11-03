@@ -82,6 +82,8 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         });
         for (auto e : fe) {
             const auto& f = reg.get<Comp::FoodSourceComponent>(e);
+            if (!field.SimulationCellAllowed(f.cell_x, f.cell_z))
+                continue;
             foods.push_back({e, f.cell_x, f.cell_z});
         }
     }
@@ -90,8 +92,10 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
     static const int kDZ[4] = {0, 0, 1, -1};
 
     for (auto e : ants) {
-        ++stats.foragers;
         auto& a = reg.get<Comp::ForagerComponent>(e);
+        if (!field.SimulationCellAllowed(a.cell_x, a.cell_z))
+            continue;
+        ++stats.foragers;
 
         // 1. Deposit-on-both-trips: lay the trail leading back toward where we came from.
         const int layCh = a.carrying_food ? kFoodTrailChannel : kHomeTrailChannel;
@@ -126,6 +130,8 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         for (int d = 0; d < 4; ++d) {
             const int nx = a.cell_x + kDX[d];
             const int nz = a.cell_z + kDZ[d];
+            if (!field.SimulationCellAllowed(nx, nz))
+                continue;
             const double trail = field.Sample(followCh, nx, nz);
             const std::int64_t gd = std::llabs(static_cast<long long>(goalX) - nx) +
                                     std::llabs(static_cast<long long>(goalZ) - nz);
