@@ -661,10 +661,41 @@ void FoliagePass::destroy_compute() {
 }
 
 bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
+    const auto fail = [this]() {
+        m_archetypes.clear();
+        m_palette_dirty = true;
+        m_palette_uploaded = false;
+        m_instances.clear();
+        m_draw_instance_limit = 0;
+        m_gpu_active = false;
+        m_gpu_generated_count.reset();
+        m_gpu_count_generation = 0;
+        m_candidate_slots = 0;
+        m_candidate_count = 0;
+        m_scatter_built = false;
+        m_chunk_cache.clear();
+        m_foliage_build_backlog = false;
+        m_uploaded_input_hash.reset();
+        m_uploaded_chunk_count = 0;
+        // Retire pending readbacks without deleting GL resources: loading a
+        // palette does not require a context. Normal teardown owns those objects.
+        ++m_build_generation;
+        m_instance_generation = 0;
+        m_instances_from_gpu_readback = false;
+        m_readback_submitted_generation = 0;
+        m_build_frame = 0;
+        m_instance_available_frame = 0;
+        m_build_phase = 0;
+        m_qualification = {};
+        m_phase_query_counts = {};
+        m_vertex_selection_ready = false;
+        m_rebuild_reference.clear();
+        return false;
+    };
     Filesystem::ContentInput in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("FoliagePass: scatter set not found '{}'.", json_path.string());
-        return false;
+        return fail();
     }
     m_archetypes.clear();
     m_palette_dirty = true;
@@ -674,7 +705,7 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
         if (!doc.contains("archetypes") || !doc["archetypes"].is_array()) {
             LUMINUMBRA_CORE_WARN("FoliagePass: scatter set '{}' missing 'archetypes' array.",
                                  json_path.string());
-            return false;
+            return fail();
         }
         for (const auto& node : doc["archetypes"]) {
             ArchetypeData a;
@@ -694,11 +725,10 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
     } catch (const std::exception& e) {
         LUMINUMBRA_CORE_WARN(
             "FoliagePass: failed to parse scatter set '{}': {}", json_path.string(), e.what());
-        m_archetypes.clear();
-        return false;
+        return fail();
     }
     if (m_archetypes.empty()) {
-        return false;
+        return fail();
     }
     m_enabled = true;
     m_scatter_built = false;

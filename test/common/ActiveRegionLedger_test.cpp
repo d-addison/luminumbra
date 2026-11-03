@@ -1064,17 +1064,35 @@ TEST(ActiveRegionLedgerTest, EnergyAgePreservesLegacyFrozenProjectionUntilRefres
     EXPECT_EQ(Reload(restored).encode(), refreshed);
 }
 
-TEST(ActiveRegionLedgerTest, EnergyAgeEncodingRefusesBeyondExistingFileCap) {
+namespace {
+RegionKey CapacityKey(std::uint32_t index) {
+    return {static_cast<std::int32_t>(index % 1024u), static_cast<std::int32_t>(index / 1024u)};
+}
+} // namespace
+
+TEST(ActiveRegionLedgerTest, EnergyAgesThePersistedFileCannotHoldAreRefused) {
     EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes, 109051979u);
     ActiveRegionLedger ledger;
-    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index) {
-        const RegionKey key{static_cast<std::int32_t>(index % 1024u),
-                            static_cast<std::int32_t>(index / 1024u)};
-        ledger.mark_edited(key, WorldClock{});
-    }
+    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
     ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
-    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
     // 56 + 104 * 2^20 + 4 + (6 + 4 + 16) + 8 = 109051998 > 109051979.
+    EXPECT_FALSE(ledger.set_energy_age({0, 0}, 0));
+    EXPECT_FALSE(ledger.set_energy_ages({{{0, 0}, 0}}));
+    EXPECT_TRUE(ledger.energy_ages().empty());
+    EXPECT_NO_THROW({
+        const auto bytes = ledger.encode();
+        (void)bytes;
+    });
+}
+
+TEST(ActiveRegionLedgerTest, EncodingRefusesWhenLaterRecordsOutgrowStoredEnergyAges) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
+    ledger.mark_edited(CapacityKey(ActiveRegionLedger::kMaxRegions - 1), WorldClock{});
+    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
     EXPECT_THROW(
         {
             const auto bytes = ledger.encode();
@@ -1083,6 +1101,69 @@ TEST(ActiveRegionLedgerTest, EnergyAgeEncodingRefusesBeyondExistingFileCap) {
         std::length_error);
     EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{{0, 0}, 0}}));
     EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+}
+
+TEST(ActiveRegionLedgerTest, ScheduleCarriesEnergyAgesThroughRefusalAndSuccess) {
+    auto ledger = Distant();
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    const auto before = ledger.encode();
+    EXPECT_THROW(Step(ledger, 1, 0), std::invalid_argument);
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{kFar, 7}}));
+    EXPECT_EQ(ledger.encode(), before);
+    Step(ledger, 2, 0);
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{kFar, 7}}));
+}
+
+TEST(ActiveRegionLedgerTest, FreezeDigestReadsOriginalEnergyAgesBeforeScheduleCommits) {
+    auto ledger = Distant({0, 1, 1});
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    const auto before = ledger;
+    const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+    unsigned digest_calls = 0;
+    const auto digest = [&](RegionKey key) {
+        ++digest_calls;
+        EXPECT_EQ(key, kFar);
+        const auto age = ledger.energy_ages().at(key);
+        EXPECT_EQ(age, 7u);
+        EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+        EXPECT_EQ(ledger.records(), before.records());
+        EXPECT_EQ(ledger.canonical_bytes(), before.canonical_bytes());
+        return age;
+    };
+    RegionSchedule schedule;
+    ASSERT_NO_THROW(schedule = ledger.schedule(WorldClock(3), {}, work, digest));
+    EXPECT_EQ(digest_calls, 1u);
+    ASSERT_EQ(schedule.transitions.size(), 1u);
+    EXPECT_EQ(schedule.transitions.front().key, kFar);
+    EXPECT_EQ(schedule.transitions.front().from, RegionState::Reduced);
+    EXPECT_EQ(schedule.transitions.front().to, RegionState::Frozen);
+    EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
+    EXPECT_EQ(ledger.records().at(kFar).frozen_at, 3u);
+    EXPECT_EQ(ledger.records().at(kFar).frozen_digest, 7u);
+    EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+}
+
+TEST(ActiveRegionLedgerTest, ThrowingFreezeDigestPreservesRecordsEnergyAgesAndCanonicalBytes) {
+    auto ledger = Distant({0, 1, 1});
+    ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    const auto before = ledger;
+    const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+    bool read_age = false;
+    const auto digest = [&](RegionKey key) -> std::uint64_t {
+        EXPECT_EQ(ledger.energy_ages().at(key), 7u);
+        read_age = true;
+        throw std::runtime_error("IO failure");
+    };
+    EXPECT_THROW(ledger.schedule(WorldClock(3), {}, work, digest), std::runtime_error);
+    EXPECT_TRUE(read_age);
+    EXPECT_EQ(ledger.records(), before.records());
+    EXPECT_EQ(ledger.energy_ages(), before.energy_ages());
+    EXPECT_EQ(ledger.canonical_bytes(), before.canonical_bytes());
+    EXPECT_EQ(ledger.encode(), before.encode());
 }
 
 TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysPreserveSurvivorOrderAndTrace) {

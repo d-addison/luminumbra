@@ -116,15 +116,15 @@ def check_windows_spelling(path: str, long_name: str) -> None:
 
 def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str] | None = None,
               *, live_git: bool = False) -> dict[str, os.stat_result]:
-    """Allow transient link counts below .git and entries that vanish mid-scan in an owned command.
+    """Allow transient .git link counts and vanished or unlinked files in an owned command.
 
     All admission, verification and post-exit inventories keep sole-link checks.
 
-    Git replaces working-tree files itself (checkout creates them, apply unlinks and
-    recreates the patched ones), so during a live scan any entry below the root can
-    vanish between scandir and lstat. Skipping a vanished entry only drops a path that no
-    longer exists; every surviving entry is still checked, and the strict post-exit
-    inventory validates the final tree.
+    Git apply and checkout unlink and recreate working-tree files, so during a live
+    scan an entry can vanish between scandir and lstat, or a lookup racing the unlink
+    can observe zero links. Skip these unlinked ordinary files like vanished entries;
+    every surviving entry is still checked, and the strict post-exit inventory
+    validates the final tree.
     """
     result = {}
     pending = [root]
@@ -161,8 +161,11 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                     require(allowed_directories is None or name in allowed_directories, "extra source directory")
                     pending.append(Path(entry.path))
                 else:
-                    # Git links objects before unlinking temporary names. A lookup
-                    # racing the last unlink can also observe zero remaining links.
+                    # Apply/checkout unlinks working-tree files; a racing lookup can
+                    # observe zero links. The strict post-exit scan checks the final tree.
+                    if live_git and not transient_git and ordinary(info) and info.st_nlink == 0:
+                        continue
+                    # Git links objects before unlinking temporary names.
                     links_ok = (info.st_nlink == 1 or
                                 (transient_git and info.st_nlink >= 0))
                     require(ordinary(info) and links_ok,

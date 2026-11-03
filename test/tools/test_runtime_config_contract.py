@@ -956,9 +956,10 @@ class RegionalEnergySourceContract(unittest.TestCase):
                              .read_text(encoding="utf-8"))
         header = compact_cpp((ROOT / "src/luminumbra_common/fields/ScalarFieldDiffusion.h")
                              .read_text(encoding="utf-8"))
-        self.assertIn("constEdgeGate&gate={}", header)
-        self.assertIn("if(!can_exchange(lhs,rhs)||"
-                      "(gate&&!gate(lhs%width_,lhs/width_,rhs%width_,rhs/width_)))", source)
+        self.assertIn("constEdgeGate&gate);", header)
+        self.assertNotIn("constEdgeGate&gate={}", header)
+        self.assertIn("if(!can_exchange(lhs,rhs)||(admits&&!admits(lhs,rhs)))", source)
+        self.assertIn("gate(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", source)
 
 
 if __name__ == "__main__":

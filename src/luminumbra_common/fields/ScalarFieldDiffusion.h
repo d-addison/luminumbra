@@ -51,9 +51,20 @@ public:
     void set_permeability(std::size_t x, std::size_t y, double permeability);
     void seal(std::size_t x, std::size_t y, bool sealed = true);
 
+    [[nodiscard]] ScalarDiffusionReport diffuse(std::size_t iterations, double diffusion_rate);
+    // Same solver, but an edge also needs `admits(lhs, rhs)` (row-major cell
+    // indices) to exchange. Intermediate cells are stored exactly as in diffuse.
+    using EdgeFilter = std::function<bool(std::size_t lhs, std::size_t rhs)>;
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, const EdgeFilter& admits);
+
+    // Coordinate gates use the same edge order and admission rules as index filters.
     using EdgeGate = std::function<bool(std::size_t, std::size_t, std::size_t, std::size_t)>;
     [[nodiscard]] ScalarDiffusionReport
-    diffuse(std::size_t iterations, double diffusion_rate, const EdgeGate& gate = {});
+    diffuse(std::size_t iterations, double diffusion_rate, const EdgeGate& gate);
+    // An explicit empty argument selects the unfiltered solver unambiguously.
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, std::nullptr_t);
 
 private:
     [[nodiscard]] std::size_t index(std::size_t x, std::size_t y) const;
