@@ -707,7 +707,7 @@ TEST(RegionalEnergy, FrozenOwnerCellsAndAgeStayExactOnAMixedOwnerPage) {
     EXPECT_EQ(field.at_cell(21, 0), 12345u);
 }
 
-TEST(RegionalEnergy, CommonBorderRunsOutsideUnequalInteriorPhasesAndConservesRaw) {
+TEST(RegionalEnergy, CommonBorderRunsOnSharedScheduledPhaseAndConservesRaw) {
     EnergyFieldState field;
     ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:16000\n"));
     auto records = TwoEnergyOwners();
@@ -716,15 +716,15 @@ TEST(RegionalEnergy, CommonBorderRunsOutsideUnequalInteriorPhasesAndConservesRaw
     records.at({0, 0}).cadence_phase = 1;
     records.at({1, 0}).state = RegionState::Reduced;
     records.at({1, 0}).cadence_shift = 2;
-    records.at({1, 0}).cadence_phase = 2;
+    records.at({1, 0}).cadence_phase = 3;
     const EnergyAges ages{{{0, 0}, 3}, {{1, 0}, 5}};
     const auto initial = field.CanonicalRegionalBytes();
-    auto result = RegionalStep(field, 3, records, {}, ages);
+    auto result = RegionalStep(field, 2, records, {}, ages);
     EXPECT_EQ(field.CanonicalRegionalBytes(), initial);
     EXPECT_EQ(result.ages, ages);
     EXPECT_TRUE(result.work.empty());
-    // Neither owner's interior phase is due at tick 4. The border still runs.
-    result = RegionalStep(field, 4, records, {}, ages);
+    // Both owners are scheduled at tick 3, without an intrinsic energy firing.
+    result = RegionalStep(field, 3, records, {}, ages);
     EXPECT_EQ(result.ages, ages);
     EXPECT_EQ(field.total_raw(), 16000u);
     EXPECT_GT(field.at_cell(21, 0), 0u);
@@ -735,8 +735,43 @@ TEST(RegionalEnergy, CommonBorderRunsOutsideUnequalInteriorPhasesAndConservesRaw
     EXPECT_EQ(result.work[0].page_updates, 1u);
     EXPECT_EQ(result.work[1].page_updates, 1u);
     const auto after_border = field.CanonicalRegionalBytes();
-    result = RegionalStep(field, 5, records, {}, ages);
+    result = RegionalStep(field, 4, records, {}, ages);
     EXPECT_EQ(field.CanonicalRegionalBytes(), after_border);
+}
+
+TEST(RegionalEnergy, UnequalCadencesExchangeExactlyWhenBothNonzeroPhasesAreScheduled) {
+    for (const bool separate_pages : {false, true}) {
+        const RegionKey left{separate_pages ? 2 : 0, 0};
+        const RegionKey right{left.x + 1, 0};
+        const int border_cell = separate_pages ? 64 : 21;
+        const std::string initial = separate_pages ? "EFS1 1 0\nP 3 0 15:16000\nP 4 0 255:1\n"
+                                                   : "EFS1 1 0\nP 1 0 4:16000\n";
+        for (const std::uint32_t right_phase : {1u, 2u, 3u}) {
+            EnergyRecords records{{left, ActiveRegionRecord{}}, {right, ActiveRegionRecord{}}};
+            records.at(left).state = records.at(right).state = RegionState::Reduced;
+            records.at(left).cadence_shift = 1;
+            records.at(left).cadence_phase = 1;
+            records.at(right).cadence_shift = 2;
+            records.at(right).cadence_phase = right_phase;
+            const EnergyAges ages{{left, 3}, {right, 5}};
+            for (std::uint64_t tick = 0; tick < 16; ++tick) {
+                SCOPED_TRACE(::testing::Message()
+                             << separate_pages << ':' << right_phase << ':' << tick);
+                EnergyFieldState field;
+                ASSERT_TRUE(field.DeserializeRegionalRecord(initial));
+                const auto result = RegionalStep(field, tick, records, {}, ages);
+                const bool common = tick % 2 == 1 && tick % 4 == right_phase;
+                EXPECT_EQ(field.at_cell(border_cell, 0), common ? 3310u : 0u);
+                EXPECT_EQ(field.total_raw(), separate_pages ? 16001u : 16000u);
+                EXPECT_EQ(result.ages, ages);
+                EXPECT_EQ(result.work.size(), common ? 2u : 0u);
+                EXPECT_EQ(result.diffusion_pages, common ? (separate_pages ? 2u : 1u) : 0u);
+                if (!common) {
+                    EXPECT_EQ(field.SerializeRegionalRecord(), initial);
+                }
+            }
+        }
+    }
 }
 
 TEST(RegionalEnergy, AbsentOwnersAndAbsentPagesHaveSealedEdges) {
@@ -1087,7 +1122,7 @@ TEST(RegionalEnergy, IdleAndBorderTicksExcludeDormantPagesFromBuffers) {
 
     // A common border fires even with an empty due set. Its four exact sweeps are
     // 16000/0 -> 15000/1000 -> 14125/1875 -> 13360/2640 -> 12690/3310.
-    result = RegionalStep(field, 4, records, {}, ages);
+    result = RegionalStep(field, 5, records, {}, ages);
     EXPECT_EQ(result.staged_pages, 1u);
     EXPECT_EQ(result.diffusion_pages, 1u);
     EXPECT_EQ(result.ages, ages);
@@ -1099,13 +1134,13 @@ TEST(RegionalEnergy, IdleAndBorderTicksExcludeDormantPagesFromBuffers) {
     EXPECT_EQ(field.SerializeRegionalRecord(),
               "EFS1 1 0\nP 1 0 4:12690 5:3310\n" + initial.substr(dormant_at));
     EXPECT_EQ(field.total_raw(), 16000u + 256u * 777u);
-    result = RegionalStep(field, 5, records, {}, ages);
+    result = RegionalStep(field, 6, records, {}, ages);
     EXPECT_EQ(result.staged_pages, 0u);
     EXPECT_EQ(result.diffusion_pages, 0u);
     const auto right = field.RegionBytes({1, 0});
     ages[{0, 0}] = 7;
     const std::array due{RegionKey{0, 0}};
-    result = RegionalStep(field, 9, records, due, ages);
+    result = RegionalStep(field, 10, records, due, ages);
     EXPECT_EQ(result.staged_pages, 1u);
     EXPECT_EQ(result.diffusion_pages, 1u);
     EXPECT_EQ(result.ages.at({0, 0}), 8u);
@@ -1127,6 +1162,59 @@ TEST(RegionalEnergy, CommonBorderStagesBothExistingPhysicalPagesAndSkipsAbsentPa
     EXPECT_EQ(sealed.staged_pages, 0u);
     EXPECT_EQ(sealed.diffusion_pages, 0u);
     EXPECT_EQ(field.SerializeRegionalRecord(), "EFS1 1 0\nP 3 0 15:16000\n");
+}
+
+TEST(RegionalEnergy, LegacyEmptyNeighborMatchesReopenedStateAndStagedDepositsOpenTheEdge) {
+    for (const bool ledger_path : {false, true}) {
+        for (const bool populate : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << ledger_path << ':' << populate);
+            ActiveRegionLedger ledger;
+            ledger.pin({2, 0}, true, WorldClock{});
+            ledger.pin({3, 0}, true, WorldClock{});
+            EnergyFieldState live, reopened;
+            ASSERT_TRUE(live.DeserializeRecord("EFS1 1 8\nP 3 0 15:16000\nP 4 0\n", 0));
+            const auto saved = live.SerializeRegionalRecord();
+            ASSERT_EQ(saved, "EFS1 1 0\nP 3 0 15:16000\n");
+            ASSERT_TRUE(reopened.DeserializeRegionalRecord(saved));
+            ASSERT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
+            const EnergyAges ages{{{2, 0}, 3}, {{3, 0}, 5}};
+            std::vector<RegionKey> due;
+            if (populate) {
+                ASSERT_TRUE(live.QueueRegionalDeposit(1, 64, 0, 0, 1));
+                ASSERT_TRUE(reopened.QueueRegionalDeposit(1, 64, 0, 0, 1));
+                due.push_back({3, 0});
+            }
+            EnergyResult actual, expected;
+            if (ledger_path) {
+                ASSERT_TRUE(live.TickRegional(1, ledger, due, ages, actual));
+                ASSERT_TRUE(reopened.TickRegional(1, ledger, due, ages, expected));
+            } else {
+                ASSERT_TRUE(live.TickRegional(1, ledger.records(), due, ages, actual));
+                ASSERT_TRUE(reopened.TickRegional(1, ledger.records(), due, ages, expected));
+            }
+            EXPECT_EQ(live.at_cell(64, 0), populate ? 3311u : 0u);
+            EXPECT_EQ(live.total_raw(), populate ? 16001u : 16000u);
+            EXPECT_EQ(live.page_count(), populate ? 2u : 1u);
+            EXPECT_EQ(actual.staged_pages, populate ? 2u : 0u);
+            EXPECT_EQ(actual.diffusion_pages, populate ? 2u : 0u);
+            EXPECT_EQ(actual.ages, expected.ages);
+            EXPECT_EQ(actual.staged_pages, expected.staged_pages);
+            EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
+            ASSERT_EQ(actual.work.size(), expected.work.size());
+            for (std::size_t i = 0; i < actual.work.size(); ++i) {
+                EXPECT_EQ(actual.work[i].key, expected.work[i].key);
+                EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
+            }
+            EXPECT_EQ(live.SerializeRegionalRecord(), reopened.SerializeRegionalRecord());
+            EXPECT_EQ(live.CanonicalRegionalBytes(), reopened.CanonicalRegionalBytes());
+            EXPECT_EQ(live.CanonicalBytes(), reopened.CanonicalBytes());
+            if (!populate) {
+                EXPECT_EQ(live.SerializeRegionalRecord(), saved);
+                EXPECT_EQ(actual.ages, ages);
+                EXPECT_TRUE(actual.work.empty());
+            }
+        }
+    }
 }
 
 TEST(RegionalEnergy, DepositOnlyTickStagesOnlyItsTargetAndRetainsLegacyEpochs) {
@@ -1232,11 +1320,13 @@ TEST(RegionalEnergy, ScalarEdgeGateSealsExchangeAndEmptyGateKeepsLegacyResults) 
 }
 
 namespace {
-std::string RegionalRecordAtByteLimit(EnergyRecords& records, EnergyAges& ages) {
-    constexpr std::size_t channel_count = 64;
-    constexpr std::size_t values_per_page = 256 * channel_count;
-    constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
-    std::string record = "EFS1 64 0\n";
+std::string
+RegionalRecordAtByteLimit(EnergyRecords& records,
+                          EnergyAges& ages,
+                          std::size_t byte_limit = EnergyFieldState::kMaxRegionalRecordBytes,
+                          std::size_t channel_count = 64) {
+    const std::size_t values_per_page = 256 * channel_count;
+    std::string record = "EFS1 " + std::to_string(channel_count) + " 0\n";
     bool complete = false;
     for (int px = 0; !complete; ++px) {
         std::string row = "P " + std::to_string(px) + " 0";
@@ -1272,6 +1362,50 @@ std::string RegionalRecordAtByteLimit(EnergyRecords& records, EnergyAges& ages) 
     return record;
 }
 } // namespace
+
+TEST(RegionalEnergy, WriterDecoderAndCachedTickAgreeAtExactByteBoundaries) {
+    constexpr auto limit = EnergyFieldState::kMaxRegionalRecordBytes;
+    for (const auto size : {limit - 1, limit, limit + 1}) {
+        SCOPED_TRACE(size);
+        EnergyRecords records;
+        EnergyAges ages;
+        const auto record = RegionalRecordAtByteLimit(records, ages, size, 16);
+        ASSERT_EQ(record.size(), size);
+        const bool fits = size <= limit;
+        EnergyFieldState decoded;
+        EXPECT_EQ(decoded.DeserializeRegionalRecord(record), fits);
+
+        // Legacy admission can construct all three canonical page sets, including
+        // the one whose regional encoding is one byte above the regional cap.
+        auto legacy = record;
+        const auto phase = legacy.find(" 0\n");
+        ASSERT_NE(phase, std::string::npos);
+        legacy[phase + 1] = '8';
+        EnergyFieldState field;
+        ASSERT_TRUE(field.DeserializeRecord(legacy, 0));
+        const auto canonical = field.CanonicalRegionalBytes();
+        if (fits) {
+            const auto serialized = field.SerializeRegionalRecord();
+            EXPECT_EQ(serialized, record);
+            ASSERT_TRUE(decoded.DeserializeRegionalRecord(serialized));
+            EXPECT_EQ(decoded.CanonicalRegionalBytes(), canonical);
+        } else {
+            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
+        }
+        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+        EnergyResult result;
+        result.clipped_raw = 91;
+        EXPECT_EQ(field.TickRegional(1, records, {}, ages, result), fits);
+        EXPECT_EQ(field.CanonicalRegionalBytes(), canonical);
+        if (fits) {
+            EXPECT_EQ(field.SerializeRegionalRecord(), record);
+            EXPECT_EQ(result.ages, ages);
+        } else {
+            EXPECT_EQ(result.clipped_raw, 91u);
+            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
+        }
+    }
+}
 
 TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingInput) {
     constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
@@ -1471,6 +1605,60 @@ TEST(RegionalEnergy, LedgerLookupsMatchForcedFullScansWithThousandsOfRecordsAndF
         ages = actual.ages;
     }
     EXPECT_TRUE(border_without_due);
+}
+
+TEST(RegionalEnergy, PhasedLedgerBorderCandidatesMatchReopenedFullScanReference) {
+    ActiveRegionLedger ledger({0, 1, 2});
+    ledger.pin({0, 0}, true, WorldClock{});
+    ledger.pin({1, 0}, true, WorldClock{});
+    const std::array<Luminumbra::world::RegionWork, 1> work{{{{0, 0}, 1, 0, 0, 0}}};
+    ledger.schedule(WorldClock(1), {}, work);
+    ledger.pin({0, 0}, false, WorldClock(1));
+    ledger.schedule(WorldClock(2), {}, work);
+    ASSERT_EQ(ledger.records().at({0, 0}).state, RegionState::Reduced);
+    ASSERT_EQ(ledger.records().at({0, 0}).cadence_shift, 2);
+    ASSERT_EQ(ledger.records().at({0, 0}).cadence_phase, 1u);
+    ASSERT_EQ(ledger.records().at({1, 0}).cadence_shift, 0);
+    const EnergyAges ages{{{0, 0}, 3}, {{1, 0}, 5}};
+    ASSERT_TRUE(ledger.set_energy_ages(ages));
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:16000\n"));
+    ASSERT_TRUE(field.ValidateRegionalOwners(ledger.records(), ages));
+    for (std::uint64_t tick = 3; tick <= 18; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto before = field.SerializeRegionalRecord();
+        EnergyFieldState reference;
+        ASSERT_TRUE(reference.DeserializeRegionalRecord(before));
+        ASSERT_TRUE(reference.ValidateRegionalOwners(restored.records(), restored.energy_ages()));
+        EnergyFieldStateTestAccess::Invalidate(reference);
+        EnergyResult actual, expected;
+        ASSERT_TRUE(field.TickRegional(tick, ledger, {}, ages, actual));
+        ASSERT_TRUE(
+            reference.TickRegional(tick, restored.records(), {}, restored.energy_ages(), expected));
+        EXPECT_EQ(actual.ages, expected.ages);
+        EXPECT_EQ(actual.clipped_raw, expected.clipped_raw);
+        EXPECT_EQ(actual.staged_pages, expected.staged_pages);
+        EXPECT_EQ(actual.diffusion_pages, expected.diffusion_pages);
+        ASSERT_EQ(actual.work.size(), expected.work.size());
+        for (std::size_t i = 0; i < actual.work.size(); ++i) {
+            EXPECT_EQ(actual.work[i].key, expected.work[i].key);
+            EXPECT_EQ(actual.work[i].region_ticks, expected.work[i].region_ticks);
+            EXPECT_EQ(actual.work[i].entity_updates, expected.work[i].entity_updates);
+            EXPECT_EQ(actual.work[i].water_cells, expected.work[i].water_cells);
+            EXPECT_EQ(actual.work[i].page_updates, expected.work[i].page_updates);
+        }
+        EXPECT_EQ(actual.diffusion_pages, tick % 4 == 1 ? 1u : 0u);
+        EXPECT_EQ(field.SerializeRegionalRecord(), reference.SerializeRegionalRecord());
+        EXPECT_EQ(field.CanonicalRegionalBytes(), reference.CanonicalRegionalBytes());
+        EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
+        EXPECT_EQ(field.total_raw(), 16000u);
+        if (tick % 4 != 1) {
+            EXPECT_EQ(field.SerializeRegionalRecord(), before);
+        }
+    }
 }
 
 TEST(RegionalEnergy, FullValidationRejectsTamperedRecordMetadataDespiteCachedValidation) {

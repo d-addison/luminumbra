@@ -661,6 +661,16 @@ bool ValidRegionalRecords(const EnergyFieldState::RegionRecords& records) {
             return false;
     return true;
 }
+bool RegionalOwnerScheduled(std::uint64_t tick,
+                            const Luminumbra::world::ActiveRegionRecord& record) noexcept {
+    return record.state != Luminumbra::world::RegionState::Frozen &&
+           (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase;
+}
+bool RegionalBorderScheduled(std::uint64_t tick,
+                             const Luminumbra::world::ActiveRegionRecord& a,
+                             const Luminumbra::world::ActiveRegionRecord& b) noexcept {
+    return RegionalOwnerScheduled(tick, a) && RegionalOwnerScheduled(tick, b);
+}
 std::pair<int, int> RegionalCellRange(std::int32_t region) noexcept {
     const auto start = std::int64_t{region} * 512 - 12;
     return {static_cast<int>(-RegionalFloorDiv(-start, 24)),
@@ -762,12 +772,12 @@ EnergyFieldState::Page::regional_facts(std::int64_t key, int channels) const {
         }
         return digits;
     };
-    const auto header_bytes = 4 + std::to_string(px).size() + std::to_string(pz).size();
+    const auto header_bytes = 3 + std::to_string(px).size() + std::to_string(pz).size();
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (values[i] == 0)
             continue;
         if (!facts.any)
-            facts.record_bytes = header_bytes;
+            facts.record_bytes = header_bytes + 1; // trailing newline of a nonempty page
         facts.any = true;
         // Saturate the diagnostic at refusal, so even an incompatible legacy page
         // cannot overflow the length calculation. No emitted record changes.
@@ -1163,14 +1173,29 @@ bool CountOwnedRegionalAges(const EnergyFieldState::RegionRecords& records,
 } // namespace
 
 std::set<EnergyFieldState::RegionKey>
-EnergyFieldState::RegionalBorderCandidates(std::span<const RegionKey> due,
+EnergyFieldState::RegionalBorderCandidates(std::uint64_t tick,
+                                           const RegionRecords& records,
+                                           std::span<const RegionKey> due,
                                            const EnergyFieldState& staged) const {
     std::set<RegionKey> border_candidates;
+    const auto add_candidate = [&](RegionKey owner) {
+        const auto record = records.find(owner);
+        if (record == records.end() || !RegionalOwnerScheduled(tick, record->second))
+            return;
+        for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+            const auto neighbor = records.find({owner.x + dx, owner.z + dz});
+            if (neighbor != records.end() &&
+                RegionalBorderScheduled(tick, record->second, neighbor->second)) {
+                border_candidates.insert(owner);
+                return;
+            }
+        }
+    };
     const auto add_owner = [&](RegionKey owner) {
-        border_candidates.insert(owner);
+        add_candidate(owner);
         for (const auto& [dx, dz] :
              {std::pair{-1, 0}, std::pair{1, 0}, std::pair{0, -1}, std::pair{0, 1}})
-            border_candidates.insert({owner.x + dx, owner.z + dz});
+            add_candidate({owner.x + dx, owner.z + dz});
     };
     for (const auto owner : due)
         add_owner(owner);
@@ -1182,14 +1207,11 @@ EnergyFieldState::RegionalBorderCandidates(std::span<const RegionKey> due,
         add_owner(owner);
     }
     for (const auto& [key, page] : staged.m_pages) {
-        (void)page;
+        if (!page.regional_facts(key, m_channels).any)
+            continue;
         for (const auto owner : RegionalPageOwners(key))
             add_owner(owner);
     }
-    // Legacy empty pages still participate until the successful tick removes them.
-    for (const auto key : m_regional_validation->empty_pages)
-        for (const auto owner : RegionalPageOwners(key))
-            add_owner(owner);
     return border_candidates;
 }
 
@@ -1294,7 +1316,11 @@ bool EnergyFieldState::TickRegionalImpl(std::uint64_t tick,
     std::set<std::int64_t> diffusion_pages;
     const auto present = [&](int px, int pz) {
         const auto key = PackPageKey(px, pz);
-        return m_pages.contains(key) || staged.m_pages.contains(key);
+        const auto staged_page = staged.m_pages.find(key);
+        if (staged_page != staged.m_pages.end())
+            return staged_page->second.regional_facts(key, m_channels).any;
+        const auto original = m_pages.find(key);
+        return original != m_pages.end() && original->second.regional_facts(key, m_channels).any;
     };
     const auto include = [&](int px, int pz) {
         if (present(px, pz)) {
@@ -1317,20 +1343,17 @@ bool EnergyFieldState::TickRegionalImpl(std::uint64_t tick,
     }
     std::set<RegionKey> border_candidates;
     if (ledger_validated)
-        border_candidates = RegionalBorderCandidates(due, staged);
+        border_candidates = RegionalBorderCandidates(tick, records, due, staged);
     const auto include_borders = [&](RegionKey owner,
                                      const Luminumbra::world::ActiveRegionRecord& record) {
-        if (record.state == RegionState::Frozen ||
-            (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) != 0)
+        if (!RegionalOwnerScheduled(tick, record))
             return;
         const auto [min_x, end_x] = RegionalCellRange(owner.x);
         const auto [min_z, end_z] = RegionalCellRange(owner.z);
         for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
             const auto neighbor = records.find({owner.x + dx, owner.z + dz});
-            if (neighbor == records.end() || neighbor->second.state == RegionState::Frozen)
-                continue;
-            const auto shift = (std::max)(record.cadence_shift, neighbor->second.cadence_shift);
-            if ((tick & ((std::uint64_t{1} << shift) - 1)) != 0)
+            if (neighbor == records.end() ||
+                !RegionalBorderScheduled(tick, record, neighbor->second))
                 continue;
             const auto lo = dx != 0 ? min_z : min_x;
             const auto end = dx != 0 ? end_z : end_x;
@@ -1420,9 +1443,7 @@ bool EnergyFieldState::TickRegionalImpl(std::uint64_t tick,
                             if (!firing.contains(owner_a))
                                 continue;
                         } else {
-                            const auto shift =
-                                (std::max)(a->second.cadence_shift, b->second.cadence_shift);
-                            if ((tick & ((std::uint64_t{1} << shift) - 1)) != 0)
+                            if (!RegionalBorderScheduled(tick, a->second, b->second))
                                 continue;
                         }
                         const int npx = FloorDiv(nx, kEnergyPageCells);

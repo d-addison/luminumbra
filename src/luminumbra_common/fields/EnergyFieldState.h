@@ -281,7 +281,10 @@ private:
     static void UnpackCellKey(std::int64_t key, int& cx, int& cz) noexcept;
     [[nodiscard]] static std::array<RegionKey, 4> RegionalPageOwners(std::int64_t key) noexcept;
     [[nodiscard]] std::set<RegionKey>
-    RegionalBorderCandidates(std::span<const RegionKey> due, const EnergyFieldState& staged) const;
+    RegionalBorderCandidates(std::uint64_t tick,
+                             const RegionRecords& records,
+                             std::span<const RegionKey> due,
+                             const EnergyFieldState& staged) const;
 
     [[nodiscard]] bool InWindow(int cx, int cz) const noexcept;
 
