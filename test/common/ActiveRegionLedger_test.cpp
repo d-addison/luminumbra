@@ -1086,6 +1086,19 @@ TEST(ActiveRegionLedgerTest, EnergyAgesThePersistedFileCannotHoldAreRefused) {
     });
 }
 
+TEST(ActiveRegionLedgerTest, WaterDebtsThePersistedFileCannotHoldAreRefused) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    EXPECT_FALSE(ledger.set_water_debts({{{0, 0}, 1}}));
+    EXPECT_TRUE(ledger.water_debts().empty());
+    EXPECT_NO_THROW({
+        const auto bytes = ledger.encode();
+        (void)bytes;
+    });
+}
+
 TEST(ActiveRegionLedgerTest, EncodingRefusesWhenLaterRecordsOutgrowStoredEnergyAges) {
     ActiveRegionLedger ledger;
     for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)

@@ -252,13 +252,17 @@ TEST(WaterShare, FixedTotalBoundAndPerOwnerServiceBoundHoldUnderFixedShares) {
 }
 
 TEST(WaterShare, BorderReservationChargesBothOrNeither) {
-    std::map<RegionKey, std::uint64_t> remaining{{{0, 0}, 1}, {{1, 0}, 2}};
+    std::map<RegionKey, std::uint64_t> remaining{
+        {{0, 0}, 1}, {{1, 0}, 2}, {{2, 0}, 1}, {{1, 1}, 1}, {{0, 1}, 1}};
     const auto before = remaining;
     EXPECT_FALSE(
         W::reserve_border(remaining, {0, 0}, RegionState::Active, {1, 0}, RegionState::Frozen));
     EXPECT_EQ(remaining, before);
     EXPECT_FALSE(
         W::reserve_border(remaining, {0, 0}, RegionState::Active, {2, 0}, RegionState::Active));
+    EXPECT_EQ(remaining, before);
+    EXPECT_FALSE(
+        W::reserve_border(remaining, {0, 0}, RegionState::Active, {1, 1}, RegionState::Active));
     EXPECT_EQ(remaining, before);
     EXPECT_TRUE(
         W::reserve_border(remaining, {0, 0}, RegionState::Active, {1, 0}, RegionState::Reduced));

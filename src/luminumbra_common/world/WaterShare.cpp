@@ -1,6 +1,8 @@
 #include "WaterShare.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -162,6 +164,9 @@ bool reserve_border(std::map<RegionKey, std::uint64_t>& remaining,
     if (a == b)
         throw std::invalid_argument("Water border requires two distinct owners.");
     if (border_mode(state_a, state_b) == BorderMode::Sealed)
+        return false;
+    const std::int64_t dx = std::int64_t{a.x} - b.x, dz = std::int64_t{a.z} - b.z;
+    if (std::abs(dx) + std::abs(dz) != 1)
         return false;
     const auto first = remaining.find(a), second = remaining.find(b);
     if (first == remaining.end() || second == remaining.end() || first->second == 0 ||

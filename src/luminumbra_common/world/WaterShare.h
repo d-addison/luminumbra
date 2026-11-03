@@ -52,8 +52,8 @@ enum class BorderMode : std::uint8_t {
     Sealed
 };
 [[nodiscard]] BorderMode border_mode(RegionState a, RegionState b);
-// Open reservations charge both owners or neither. Sealed/missing/empty owners
-// return false unchanged; equal owners throw invalid_argument.
+// Open reservations charge both owners or neither. Sealed, non-adjacent (edge
+// neighbours only), missing and empty owners return false unchanged; equal owners throw invalid_argument.
 [[nodiscard]] bool reserve_border(std::map<RegionKey, std::uint64_t>& remaining,
                                   const RegionKey& a,
                                   RegionState state_a,

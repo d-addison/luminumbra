@@ -124,6 +124,8 @@ bool ActiveRegionLedger::set_water_debts(const WaterDebts& debts) {
     for (const auto& [key, debt] : debts)
         if (!m_records.contains(key) || debt == 0 || debt > kMaxWaterDebt)
             return false;
+    if (!encodable_with_counts(m_energyAges.size(), debts.size()))
+        return false;
     auto next = debts;
     m_waterDebts.swap(next);
     return true;
@@ -168,7 +170,8 @@ bool ActiveRegionLedger::energy_age(const RegionKey& key, std::uint64_t& age) co
 bool ActiveRegionLedger::set_energy_age(const RegionKey& key, std::uint64_t age) {
     if (!m_records.contains(key) || age >= WorldClock::kTickLimit)
         return false;
-    if (!m_energyAges.contains(key) && !encodable_with_energy_owners(m_energyAges.size() + 1))
+    if (!m_energyAges.contains(key) &&
+        !encodable_with_counts(m_energyAges.size() + 1, m_waterDebts.size()))
         return false;
     m_energyAges.insert_or_assign(key, age);
     return true;
@@ -177,7 +180,7 @@ bool ActiveRegionLedger::set_energy_ages(const EnergyAges& ages) {
     for (const auto& [key, age] : ages)
         if (!m_records.contains(key) || age >= WorldClock::kTickLimit)
             return false;
-    if (!encodable_with_energy_owners(ages.size()))
+    if (!encodable_with_counts(ages.size(), m_waterDebts.size()))
         return false;
     auto next = ages;
     m_energyAges.swap(next);
@@ -494,17 +497,16 @@ bool ActiveRegionLedger::any_frozen_history() const {
     }
     return false;
 }
-bool ActiveRegionLedger::encodable_with_energy_owners(std::size_t owners) const {
+bool ActiveRegionLedger::encodable_with_counts(std::size_t owners, std::size_t debts) const {
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
     const std::size_t base = kHeaderBytes + m_records.size() * kRecordBytes + 8;
     const std::size_t extension_payload =
-        (owners == 0 ? 0u : 10u + 16u * owners) +
-        (m_waterDebts.empty() ? 0u : 10u + 16u * m_waterDebts.size());
+        (owners == 0 ? 0u : 10u + 16u * owners) + (debts == 0 ? 0u : 10u + 16u * debts);
     if (base + 4u + 7u + extension_payload <= kMaxFileBytes)
         return true;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
-    const bool extension = declare_projection || owners != 0 || !m_waterDebts.empty();
+    const bool extension = declare_projection || owners != 0 || debts != 0;
     return base + (extension ? 4u : 0u) + (declare_projection ? 7u : 0u) + extension_payload <=
            kMaxFileBytes;
 }
@@ -512,7 +514,7 @@ std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool extension = declare_projection || !m_energyAges.empty() || !m_waterDebts.empty();
-    if (!encodable_with_energy_owners(m_energyAges.size()))
+    if (!encodable_with_counts(m_energyAges.size(), m_waterDebts.size()))
         throw std::length_error("Active-region ledger file capacity reached");
     std::string bytes = "ARL1";
     Append(bytes, extension ? 2 : 1, 2);

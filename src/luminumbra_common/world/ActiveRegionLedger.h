@@ -214,8 +214,9 @@ private:
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
-    // Whether this ledger would still encode within kMaxFileBytes with that many energy owners.
-    bool encodable_with_energy_owners(std::size_t owners) const;
+    // Whether this ledger would still encode within kMaxFileBytes with that many energy owners and
+    // water debts.
+    bool encodable_with_counts(std::size_t energy_owners, std::size_t water_debts) const;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
