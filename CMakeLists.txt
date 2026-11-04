@@ -318,6 +318,10 @@ luminumbra_pin_fp_determinism(asset_processor)
 # `coverage` preset set LUMINUMBRA_ENABLE_COVERAGE.
 luminumbra_enable_coverage(luminumbra_client)
 luminumbra_enable_frame_pointers(luminumbra_client)
+# Avoid unoptimized upload-queue scans in the GCC ASan test lane.
+if(LUMINUMBRA_ENABLE_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(luminumbra_client PRIVATE $<$<CONFIG:Debug>:-O1>)
+endif()
 # The QA harness library carries the RuntimeScenarioHarness TU that used to
 # compile inside luminumbra_client, so it keeps the same coverage-only
 # treatment (same pre-existing-warnings rationale as above).
