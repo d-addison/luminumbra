@@ -24,6 +24,13 @@ void PollSessionFault(world::GameSession& session, RequestQuit request_quit) {
     }
 }
 
+// Periodic and pressure saves share the same admission/capture refusal gate as exit saves.
+inline bool SaveSessionWhenDue(world::GameSession* session, bool persistence_allowed) {
+    return persistence_allowed && session &&
+           (session->PersistenceSaveRequested() || session->PersistenceAutosaveDue()) &&
+           session->SaveWorldState();
+}
+
 // The client drains world readers before calling this and clears the world
 // afterwards. Capture the spawn anchor before the complete save.
 // A refused capture must leave durable authority untouched, even if an older

@@ -508,6 +508,30 @@ class OfflineDependenciesTests(unittest.TestCase):
         for name in lock["dependencies"]:
             self.assertIn(f"FETCHCONTENT_SOURCE_DIR_{name.upper()} ", text)
 
+    def test_build_local_stage_verifies_sources_and_keeps_rmlui_delivery_local(self):
+        for compiler in ("gcc", "clang"):
+            dest = self.root / f"scratch/{compiler}-sources"
+            init = self.root / f"scratch/{compiler}-init.cmake"
+            deps.stage(self.root, self.cache, self.lock, dest, init, build_local=True)
+            text = init.read_text()
+            self.assertIn("FETCHCONTENT_SOURCE_DIR_SAMPLE", text)
+            self.assertIn(str(dest / "sample"), text)
+            self.assertIn("GLAD_REPRODUCIBLE ON", text)
+            self.assertNotIn("FETCHCONTENT_BASE_DIR", text)
+            self.assertNotIn("FETCHCONTENT_FULLY_DISCONNECTED", text)
+            self.assertNotIn("FETCHCONTENT_SOURCE_DIR_RMLUI", text)
+            self.assertFalse((dest / "sample/.git").exists())
+        copied = self.root / "scratch/gcc-sources/sample/input with spaces.h"
+        copied.write_text("private configure output")
+        self.assertEqual((self.root / "scratch/clang-sources/sample" / copied.name).read_text(),
+                         "source content\n")
+        self.verify()
+        (self.source / copied.name).write_text("tampered cache")
+        with self.assertRaisesRegex(deps.DependencyError, "source digest mismatch"):
+            deps.stage(self.root, self.cache, self.lock, self.root / "scratch/bad-sources",
+                       self.root / "scratch/bad-init.cmake", build_local=True)
+        self.assertFalse((self.root / "scratch/bad-init.cmake").exists())
+
     def test_path_traversal_and_symlink_escape_refused(self):
         outside = self.base / "outside"
         outside.mkdir()

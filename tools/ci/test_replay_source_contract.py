@@ -608,6 +608,33 @@ class ReplaySourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def test_serialization_reuse_covers_every_canonical_chunk_input(self):
+        source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        serialized = (self.function(source, "ChunkToJson", "") +
+                      self.function(source, "WaterStateToJson", ""))
+        captured = self.function(source, "ChunkSnapshotInputBytes", "")
+        fields = set(re.findall(r"\bchunk\.([A-Za-z_][A-Za-z_0-9]*)", serialized))
+        self.assertTrue(fields)
+        self.assertLessEqual(fields,
+                             set(re.findall(r"\bchunk\.([A-Za-z_][A-Za-z_0-9]*)", captured)))
+        service = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        reuse = self.function(service, "matches_serialized", "")
+        self.assertIn("ChunkRecordKeyOf(found->second.record) == key", reuse)
+        self.assertIn("found->second.serialization_inputs == inputs", reuse)
+
+    def test_activation_handoff_requires_exact_record_bytes_and_consumes_the_chunk(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        handoff = self.function(source, "take_decoded", "")
+        self.assertIn("ChunkRecordKeyOf(found->second.record) != key", handoff)
+        self.assertIn("return std::move(found->second.decoded)", handoff)
+        activation = self.function(source, "read_chunk", "WorldSaveService::")
+        self.assertIn("CurrentRecordMatches(path, *region, id)", activation)
+        self.assertIn("AdmitChunkRecord(record, path, &errors, facts, &result.chunk)", activation)
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for name in ("PrepareWorldLoad", "ReadPreparedWorldState"):
+            self.assertIn("const Persistence::WorldSaveService::WorldReadScope chunk_reads;",
+                          self.function(session, name))
+
     @staticmethod
     def function(source, name, prefix="GameSession::"):
         signature = re.escape(prefix).replace(r"\ ", r"\s+") + re.escape(name) + r"\("
@@ -703,9 +730,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         tile.index("upsert_container_records("))
         self.assertRegex(tile, r"upsert_container_records\(\s*ownership, region_file,")
         persistence = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
-        owned = persistence.split(
-            "bool WorldSaveService::upsert_container_records(const SaveOwnership&", 1)[1].split(
-                "void WorldSaveService::set_interrupt_before_region_replace_for_testing", 1)[0]
+        signature = "bool WorldSaveService::upsert_container_records(const SaveOwnership&"
+        owned = self.function(persistence[persistence.index(signature):],
+                              "upsert_container_records", "WorldSaveService::")
         for recursive_guard in ("SaveGuard ", "SaveOwnership ", "RegionFileWriteGuard "):
             self.assertNotIn(recursive_guard, owned)
         self.assertIn("WriteRegionFile(region_file, raw_records, errors)", owned)
@@ -936,7 +963,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertLess(metadata_failure.index("m_worldUsable = false;"),
                         metadata_failure.index("return false;"))
         prepare = self.function(source, "PrepareWorldLoad")
-        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+        self.assertIn("ReadPreparedWorldState(worldPath, state_options, loaded, prepared->error, true, stop)",
                       prepare)
         self.assertLess(prepare.index("ReadPreparedWorldState("),
                         prepare.index("prepared->ready = true;"))
@@ -947,8 +974,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             self.assertNotIn("clear_world(", body)
             self.assertIn("!IsSimulationTickBoundary()", body)
         self.assertIn("options.save_root = save_root;", self.function(source, "LoadWorldFrom"))
-        self.assertRegex(prepare, r"Persistence::InspectSavedWorld\(\s*options.save_root, "
-                         r"RuntimeRoot\(options.root_path\), worldId, stop\)")
+        self.assertRegex(prepare, r"Persistence::InspectSavedWorld\(\s*options.save_root,\s*"
+                         r"RuntimeRoot\(options.root_path\),\s*worldId,\s*stop,\s*"
+                         r"Persistence::SavedWorldValidation::DeferredToPreparation\)")
         adoption = self.function(source, "AdoptLoadedWorld")
         self.assertLess(adoption.index("AdoptWorldStateFrom(worldPath, loaded);"),
                         adoption.index("m_worldUsable = true;"))

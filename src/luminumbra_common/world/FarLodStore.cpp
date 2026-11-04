@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -118,7 +119,14 @@ u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
     return crc.Value();
 }
 
+std::atomic<u64>& BrickValidationCounter() {
+    static std::atomic<u64> counter{0};
+    return counter;
+}
+
 bool ValidateTileStreams(const FarLodTile& tile, std::string* error) {
+    if (!tile.sdf_bricks.empty())
+        BrickValidationCounter().fetch_add(1, std::memory_order_relaxed);
     if (!IsValidFarLodTier(tile.tier)) {
         if (error)
             *error = "far-LOD tile has an invalid tier";
@@ -395,8 +403,12 @@ FarLodTile BuildPristineFarLodTile(const Systems::SHIELD_WorldSystem& world_syst
     return tile;
 }
 
-FarLodSdfReduceResult
-ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, std::string* error) {
+namespace {
+
+FarLodSdfReduceResult ReduceChunkSdfIntoTile(FarLodTile& tile,
+                                             const FarLodSdfSnapshot& snapshot,
+                                             std::string* error,
+                                             bool validate_tile) {
     const std::size_t source_side_x = static_cast<std::size_t>(CHUNK_SIZE_X) + 1u;
     const std::size_t source_side_y = static_cast<std::size_t>(CHUNK_SIZE_Y) + 1u;
     const std::size_t source_side_z = static_cast<std::size_t>(CHUNK_SIZE_Z) + 1u;
@@ -425,7 +437,7 @@ ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, s
         return FarLodSdfReduceResult::Error;
     }
     std::string tile_error;
-    if (!ValidateTileStreams(tile, &tile_error)) {
+    if (validate_tile && !ValidateTileStreams(tile, &tile_error)) {
         if (error)
             *error = tile_error;
         return FarLodSdfReduceResult::Error;
@@ -522,8 +534,25 @@ ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, s
     return FarLodSdfReduceResult::Inserted;
 }
 
+} // namespace
+
+FarLodSdfReduceResult
+ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, std::string* error) {
+    return ReduceChunkSdfIntoTile(tile, snapshot, error, true);
+}
+
+FarLodSdfReduceResult ReduceChunkSdfIntoValidatedFarTile(FarLodTile& tile,
+                                                         const FarLodSdfSnapshot& snapshot,
+                                                         std::string* error) {
+    return ReduceChunkSdfIntoTile(tile, snapshot, error, false);
+}
+
 FarLodStore::FarLodStore(std::filesystem::path save_dir)
     : m_save_dir(std::move(save_dir)) {}
+
+u64 FarLodStore::brick_validation_count_for_testing() {
+    return BrickValidationCounter().load(std::memory_order_relaxed);
+}
 
 u64 FarLodStore::tile_record_id(FarLodTier tier, i32 rx, i32 rz) {
     // Region-unique and collision-free against chunk record ids by

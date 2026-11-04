@@ -17,6 +17,7 @@
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entity/registry.hpp"
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
@@ -83,6 +84,16 @@ struct WorldStateSaveReport {
     bool saved = false;
 };
 
+struct PersistenceStatus {
+    std::size_t parked_count = 0;
+    std::size_t parked_bytes = 0;
+    std::int64_t oldest_parked_tick = -1;
+    std::int64_t last_save_tick = -1;
+    double last_save_ms = 0.0;
+    std::uint32_t failures = 0;
+    bool save_requested = false;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -142,6 +153,8 @@ public:
         std::filesystem::path save_root;
         std::filesystem::path configured_save_root;
         std::vector<std::filesystem::path> required_assets;
+        // Owner-thread snapshot for state-only loads; candidate opens derive their own set.
+        std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
         std::uint64_t simulation_tick = 0;
@@ -184,7 +197,6 @@ public:
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
-
     // Read-only destination preset/identity check, before any save writes or acknowledgements.
     [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
 
@@ -206,6 +218,21 @@ public:
                           WorldStateSaveReport* report = nullptr,
                           bool full_snapshot = false);
 
+    // Durable residency (sim.active_regions only). All zero/false when the flag is off.
+    [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
+    // True when the world asked for a save (a dirty authoritative chunk hit the parked byte
+    // limit) and the retry back-off after a failed save has elapsed.
+    [[nodiscard]] bool PersistenceSaveRequested() const;
+    void ClearPersistenceSaveRequest();
+    // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
+    void SetParkedBytesLimit(std::size_t bytes);
+    static constexpr std::uint64_t kSaveRetryTicks = 300;
+    static constexpr std::uint64_t kAutosaveTicks = 9000;
+    // Periodic autosave for hosts without their own interval (the client). True once kAutosaveTicks
+    // have elapsed since the last successful save (or since first observed), outside the failure
+    // back-off. Always false unless sim.active_regions is on.
+    [[nodiscard]] bool PersistenceAutosaveDue();
+
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
     // generates fresh state: loaded chunks are adopted into the streaming map,
@@ -225,6 +252,7 @@ public:
         return m_lastLoadedChunkCount;
     }
     std::filesystem::path GetWorldSaveDir() const;
+    std::vector<IVec3> TakeInitialChunkLoadList();
 
     // --- Asset-manifest split ---
     // The engine validates SIMULATION requirements only: a safe world type
@@ -256,6 +284,7 @@ public:
     // Update spawn point (useful for debugging)
     void SetSpawnPoint(const Vec3& new_spawn) {
         m_metadata.spawnPoint = new_spawn;
+        m_preparedInitialChunks.reset();
     }
 
     // Get the world system for chunk generation
@@ -514,6 +543,9 @@ public:
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    // Enabled chunk slot hashes authoritative truth across residency/save history. The default
+    // path retains the existing streamed-state projection and wire/checkpoint slots.
+    [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -610,6 +642,12 @@ private:
     // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
     std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
+    void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
+    std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    std::int64_t m_lastSaveTick = -1;
+    double m_lastSaveMs = 0.0;
+    std::uint32_t m_saveFailures = 0;
+    std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
     std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;
     ActiveRegionLedger m_activeRegionLedger;
@@ -622,6 +660,7 @@ private:
     void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
+    bool m_regionRequiresIndex = false;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
@@ -678,10 +717,11 @@ private:
     // diagnostics alone never change this; only coherent adoption enables it.
     bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
+    std::optional<std::vector<IVec3>> m_preparedInitialChunks;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
     // Convert string seed to numeric seed
-    uint32_t StringToSeed(const std::string& seedStr) const;
+    static uint32_t StringToSeed(const std::string& seedStr);
     void InitializeScentField(const Vec3& anchor);
     // Construct the stateful energy layer iff
     // m_aetherStateEnabled (called at CreateWorld/LoadWorld after the

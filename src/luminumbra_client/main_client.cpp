@@ -1684,7 +1684,8 @@ int main(int argc, char* argv[]) {
             throw std::invalid_argument("schema v4 requires a workload traversal");
         if (benchmark_v4) {
             benchmark_content = capture_content();
-            Luminumbra::Client::presentation_clock.set_capture_tick(0, traversal->tickRate);
+            Luminumbra::Client::presentation_clock.set_capture_tick(
+                0, static_cast<std::uint32_t>(traversal->tickRate));
         }
     } catch (const std::exception& error) {
         LUMINUMBRA_CORE_ERROR("Render benchmark: {}", error.what());
@@ -2723,13 +2724,10 @@ int main(int argc, char* argv[]) {
             SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
 
         // 3. Get the list of chunks to generate and start the visualizer
-        auto* world_system = gameSession->GetWorldSystem();
-        // Use the actual spawn position for initial chunk loading
-        Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
         if (runtime_boot_recorder.enabled()) {
             g_app.loading.initial_chunks_to_load.clear();
         } else {
-            g_app.loading.initial_chunks_to_load = world_system->GetInitialChunkLoadList(spawn_pos);
+            g_app.loading.initial_chunks_to_load = gameSession->TakeInitialChunkLoadList();
         }
 
         g_app.loading.generation_dispatch_index = 0;
@@ -4513,10 +4511,10 @@ int main(int argc, char* argv[]) {
             static_cast<std::uint32_t>(g_app.benchmark.measuredFrames),
             static_cast<std::uint32_t>(g_app.capture.render_benchmark_warmup),
             traversal ? static_cast<std::uint32_t>(traversal->expectedTicks) : 0u,
-            traversal ? traversal->tickRate : 30u);
+            traversal ? static_cast<std::uint32_t>(traversal->tickRate) : 30u);
         if (frame_presentation.tick)
-            Luminumbra::Client::presentation_clock.set_capture_tick(*frame_presentation.tick,
-                                                                    traversal->tickRate);
+            Luminumbra::Client::presentation_clock.set_capture_tick(
+                *frame_presentation.tick, static_cast<std::uint32_t>(traversal->tickRate));
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
@@ -5290,6 +5288,8 @@ int main(int argc, char* argv[]) {
                     } // Paused captures still render and stream without simulation steps.
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                    Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
+                                                           session_persistence_allowed());
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //

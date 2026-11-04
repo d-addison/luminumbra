@@ -99,11 +99,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         publish = service[service.index("classNewFilePublication{"):]
         publish = publish[:publish.index("boolCompressPayload(")]
-        self.assertIn("::link(m_temp.c_str(),m_destination.c_str())", publish)
-        self.assertIn("::syscall(SYS_renameat2,AT_FDCWD,m_temp.c_str(),AT_FDCWD,"
-                      "m_destination.c_str(),RENAME_NOREPLACE)", publish)
-        self.assertIn("::renamex_np(m_temp.c_str(),m_destination.c_str(),RENAME_EXCL)", publish)
-        self.assertIn("errno==ENOSYS||errno==EINVAL||errno==EOPNOTSUPP", publish)
+        self.assertIn("CreatedWorldArtifacts::publish_bound_file(m_temp,m_destination,m_descriptor)", publish)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_destination,m_descriptor,false)", publish)
         self.assertIn("Detail::WindowsPublishWithoutReplacement(std::exchange(m_handle,INVALID_HANDLE_VALUE),"
                       "m_temp,m_destination,GENERIC_WRITE|DELETE|FILE_READ_ATTRIBUTES)", publish)
         self.assertIn("::FlushFileBuffers(m_handle)", publish)
@@ -119,9 +116,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("::MoveFileExW(", publish)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
         self.assertNotIn("std::rename(", publish)
-        self.assertIn("::fstat(m_descriptor,&published)==0", publish)
-        self.assertIn("::lstat(m_destination.c_str(),&named)==0", publish)
-        self.assertIn("published.st_dev==named.st_dev&&published.st_ino==named.st_ino", publish)
+        publication = journal[journal.index("voidpublish_posix("):journal.index("voidcreate_owned_directory(")]
+        self.assertIn("::fstatat(quarantine.directory(),quarantine.entry(),&info,AT_SYMLINK_NOFOLLOW)", publication)
+        self.assertIn("moved!=source.identity", publication)
+        self.assertIn("quarantine.directory(),quarantine.entry(),target_parent.get(),target_name.c_str()", publication)
+        self.assertIn("Detail::RenameWithoutReplacement(", publication)
         self.assertIn("m_published&&!m_committed", publish)
         self.assertIn("::SetFileInformationByHandle(m_handle,FileDispositionInfo,", publish)
         self.assertIn("returnFlushRemovalDirectory(m_destination,errors);", publish)
@@ -255,8 +254,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         interrupt = "InterruptBeforeRegionReplaceForTesting().exchange(false,std::memory_order_acq_rel)"
         self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors,artifacts)"),
                         write.index(interrupt))
-        self.assertLess(write.index(interrupt), write.index("ReplaceRegionFileAtomically("))
-        interrupted = write[write.index(interrupt):write.index("ReplaceRegionFileAtomically(")]
+        self.assertLess(write.index(interrupt), write.index("ReplaceMember("))
+        interrupted = write[write.index(interrupt):write.index("ReplaceMember(")]
         self.assertIn("RemoveTemporaryFile(temp_path,artifacts);", interrupted)
         self.assertIn("returnfalse;", interrupted)
         fixture = compact_cpp((ROOT / "test/common/GraphicsPresets_test.cpp")
@@ -283,7 +282,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn('if(StagingNameEquals(destination.filename(),"active-regions.arl"))', cleanup)
         self.assertIn('elseif(ReclaimOwnedLedgerStaging(entry.path()))', cleanup)
         self.assertLess(cleanup.index('StagingNameEquals(destination.filename(),"active-regions.arl")'),
-                        cleanup.index('entry.is_regular_file(kind_error)'))
+                        cleanup.index('StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)'))
+        self.assertIn("abandoned.identity(identity)&&abandoned.remove_bound()", cleanup)
         owned = service[service.index("boolReclaimOwnedLedgerStaging("):service.index("std::filesystem::pathNextLedgerTempPath(")]
         self.assertLess(owned.index("ValidStagingOwnership(staging,payload,record)"),
                         owned.index("payload.remove()"))
@@ -303,10 +303,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         native = service[service.index("classStagingFile{"):service.index("std::filesystem::pathOwnershipPath(")]
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
-                         "FILE_DISPOSITION_INFO", "::lstat(m_path.c_str(),&named)",
+                         "Detail::WindowsDisposeLink(retiring)", "ReadFileIdentity(path,named)",
                          "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
         self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+        identity = service[service.index("boolReadFileIdentity("):service.index("boolSameFileIdentity(")]
+        self.assertIn("::lstat(path.c_str(),&information)", identity)
 
     def test_ledger_orphan_cleanup_validates_proof_and_absence_before_verified_removal(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -413,7 +415,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                    "LedgerStagingtemporary(staging)", "temporary.available(errors)", "temporary.prepare(bytes,errors)",
                    "BeforeActiveRegionsReplaceForTesting()", "temporary.valid(errors)",
                    "temporary.record_payload(*artifacts)",
-                   "ReplaceRegionFileAtomically(temporary.path(),path,errors,artifacts,&temporary.payload())",
+                   "ReplaceMember(temporary.path(),path,errors,artifacts,&temporary.payload())",
                    "if(temporary.installed_at(path))temporary.published(errors)", "ledger=std::move(saved)")
         positions = [writer.index(value) for value in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -462,17 +464,25 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         retention.index("constboolretired=close()"))
         self.assertIn("m_handle=retained;if(!retired)throwstd::runtime_error(", retention)
         record = service[service.index("voidrecord_artifact(CreatedWorldArtifacts&artifacts)"):
-                         service.index("boolremove(unsignedlinks=1)")]
+                         service.index("boolremove(unsignedlinks=1,constBoundPublicationStage*stage=nullptr)")]
         self.assertLess(record.index("retain_publication_identity()"),
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
         publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
         ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
-                   "::ReplaceFileW(", "constDWORDattributes_error=::GetLastError()",
+                   "::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)", "constDWORDattributes_error=::GetLastError()",
                    "if(retained_payload)retained_payload->retain_publication_identity();",
                    "autofile=::CreateFileW(temp.c_str(),",
                    "Detail::WindowsPublishWithoutReplacement(")
-        positions = [publication.index(value) for value in ordered]
+        positions = []
+        offset = 0
+        for value in ordered:
+            position = publication.index(value, offset)
+            positions.append(position)
+            offset = position + len(value)
+        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)")
+        self.assertIn("if(retained_payload)retained_payload->retain_publication_identity();",
+                      publication[:replacement])
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("retain_file_identity", finish)
         prepare = service[service.index("boolprepare(conststd::string&bytes,"):
@@ -558,7 +568,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                          service.index("std::filesystem::pathOwnershipPath(")]
         self.assertIn("O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", native)
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", native)
-        self.assertIn("::lstat(m_path.c_str(),&named)", native)
+        self.assertIn("ReadFileIdentity(path,named)", native)
+        self.assertIn("CreatedWorldArtifacts::remove_bound_entry(m_path,m_descriptor,false,stage)", native)
         self.assertIn("info.nNumberOfLinks>links", native)
         self.assertIn("info.st_nlink>links", native)
 
@@ -620,7 +631,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for call in ('StagingNameHasPrefix(entry.path().filename(),prefix)',
                      'StagingNameEquals(destination.filename(),"active-regions.arl")',
                      'StagingNameEquals(entry.path().extension(),".owner")'):
-            self.assertLess(cleanup.index(call), cleanup.index("entry.is_regular_file(kind_error)"))
+            self.assertLess(cleanup.index(call),
+                            cleanup.index("StagingFileabandoned(entry.path(),StagingFile::Mode::Inspect)"))
 
     def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -731,8 +743,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           "SavedPresetCompatible(save_dir)", "prepared_chunks.prepare(",
                           "prepared_chunks.publish(", "prepared_plants.publish(", "write_file_durably(energy_path,energy_bytes)",
                           "SaveWorldMetadataTo(", "ReconcileWorldStateMetadataTo(",
-                          "m_activeRegionLedger.mark_saved(",
-                          "chunk->clear_voxel_data_dirty()"):
+                          "saved_ledger.mark_saved(",
+                          "transaction->defer_until_commit(acknowledge)"):
             self.assertLess(ownership, sequence.index(operation))
 
     def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
@@ -793,7 +805,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         ledger = service[service.index("boolWorldSaveService::save_active_regions("):]
         self.assertLess(ledger.index("ReclaimAbandonedStaging(staging);"),
-                        ledger.index("if(ledger.records().empty()"))
+                        ledger.index("if(!has_ledger)"))
         remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
         self.assertLess(remove.index("ReclaimAbandonedStaging(destination);"),
                         remove.index("std::filesystem::remove(destination,error);"))
@@ -819,14 +831,147 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
         start = service.index("if(m_empty){")
-        end = service.index("returnFlushRemovalDirectory(path,errors);", start)
+        end = service.index("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", start)
         empty_roster = service[start:end]
         self.assertIn("std::filesystem::remove(path,ec);}if(ec){", empty_roster)
         self.assertLess(empty_roster.index("LockPublication(path)"),
                         empty_roster.index("std::filesystem::remove(path,ec)"))
         self.assertIn("if(!AllowPublication(path,true,errors)){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
-        self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
+        self.assertIn("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", service[end:])
+
+
+class RegionalEnergySourceContract(unittest.TestCase):
+    def test_energy_ownership_reads_only_overlapping_pages_without_serialization(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        owns = source[source.index("boolEnergyFieldState::OwnsRegion("):
+                      source.index("std::stringEnergyFieldState::RegionBytes(")]
+        for forbidden in ("RegionBytes(", "CanonicalBytes(", "ostringstream", ":m_pages)"):
+            self.assertNotIn(forbidden, owns)
+        for required in ("OwnerOfCell(cx,cz)==owner", "cell_range(owner.x)",
+                         "cell_range(owner.z)", "if(x0>=x1||z0>=z1)returnfalse;",
+                         "RegionalFloorDiv(z0,kEnergyPageCells)",
+                         "RegionalFloorDiv(z1-1,kEnergyPageCells)",
+                         "RegionalFloorDiv(x0,kEnergyPageCells)",
+                         "RegionalFloorDiv(x1-1,kEnergyPageCells)",
+                         "m_pages.find(PackPageKey(",
+                         "static_cast<std::uint64_t>(offset+end_x)*"
+                         "static_cast<std::uint64_t>(m_channels)",
+                         "static_cast<std::uint64_t>(page->second.values.size())",
+                         "page->second.values[static_cast<std::size_t>(i)]!=0"):
+            self.assertIn(required, owns)
+
+    def test_regional_energy_stages_participating_pages_and_reuses_diffusion_values(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        self.assertIn("EnergyFieldStatestaged(m_channels);", tick)
+        self.assertNotIn("staged=*this", tick)
+        self.assertIn("for(constautoowner:firing)", tick)
+        self.assertIn("RegionalCellRange(owner.x)", tick)
+        self.assertIn("if(present(px,pz)&&present(npx,npz))", tick)
+        allocation = tick.index("next.emplace(key,std::vector<std::int32_t>(")
+        sweep = tick.index("for(intiteration=0;!next.empty()&&iteration<kEnergyDiffuseIterations;")
+        self.assertLess(allocation, sweep)
+        self.assertIn("constauto&snapshot=staged.m_pages;", tick[sweep:])
+        self.assertNotIn("constautosnapshot=staged.m_pages;", tick)
+        self.assertNotIn("next.emplace(", tick[sweep:])
+        self.assertIn("RegionalRecordFits(&staged)", tick)
+        self.assertIn("m_pages.insert(std::move(node))", tick)
+
+    def test_energy_admission_reuses_immutable_page_facts_and_invalidates_every_writer(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        facts = source[source.index("EnergyFieldState::Page::regional_facts("):
+                       source.index("std::stringEnergyFieldState::RegionBytes(")]
+        self.assertLess(facts.index("if(regional_summary)return*regional_summary;"),
+                        facts.index("i<values.size()"))
+        for guard in ("channels>=1&&channels<=64", "px>=-43691&&px<=43690",
+                      "pz>=-43691&&pz<=43690", "if(!ValidEnergyOwner(owner))",
+                      "facts.owner_count==facts.owners.size()", "facts.record_bytes>kMaxRegionalRecordBytes",
+                      "token_bytes>kMaxRegionalRecordBytes-facts.record_bytes"):
+            self.assertIn(guard, facts)
+        self.assertIn("regional_summary=facts;return*regional_summary;", facts)
+        for begin, end in (("EnergyFieldState::Page&EnergyFieldState::EnsurePage(",
+                            "voidEnergyFieldState::CatchUpWindowPages()"),
+                           ("voidEnergyFieldState::CatchUpWindowPages()",
+                            "std::uint64_tEnergyFieldState::ApplyDeposits()"),
+                           ("voidEnergyFieldState::DecayAndDiffuseWindow()",
+                            "voidEnergyFieldState::StampWindowPages()"),
+                           ("voidEnergyFieldState::NormalizeAllPages()",
+                            "std::stringEnergyFieldState::SerializeRecord(")):
+            self.assertIn("regional_summary.reset();", source[source.index(begin):source.index(end)])
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        stage = tick[tick.index("constautostage_page="):tick.index("std::set<std::pair<RegionKey,std::int64_t>>touched;")]
+        self.assertIn("existing->second.regional_summary.reset();", stage)
+        self.assertIn("page.regional_summary.reset();", stage)
+        owners = source[source.index("boolEnergyFieldState::ValidateRegionalOwners("):
+                        source.index("boolEnergyFieldState::TickRegional(")]
+        self.assertIn("page.regional_facts(key,m_channels)", owners)
+        self.assertIn("if(!facts.valid)returnfalse;", owners)
+        self.assertIn("!records.contains(facts.owners[i])||!ages.contains(facts.owners[i])", owners)
+        self.assertNotIn("page.values", owners)
+        capacity = source[source.index("boolEnergyFieldState::RegionalRecordFits("):
+                          source.index("boolEnergyFieldState::DeserializeRegionalRecord(")]
+        self.assertIn("constauto&facts=page.regional_facts(key,m_channels);", capacity)
+        self.assertIn("if(!facts.valid)returnfalse;", capacity)
+        self.assertIn("constautocount=facts.record_bytes;", capacity)
+        self.assertIn("count>kMaxRegionalRecordBytes-bytes", capacity)
+        self.assertNotIn("page.values", capacity)
+
+    def test_energy_region_hash_projects_at_most_nine_pages_in_canonical_order(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        region = source[source.index("std::stringEnergyFieldState::RegionBytes("):
+                        source.index("std::stringEnergyFieldState::CanonicalRegionalBytes()")]
+        for required in ("if(!ValidEnergyOwner(owner))return{};", "std::array<std::int64_t,9>keys{};",
+                         "RegionalCellRange(owner.x)", "RegionalCellRange(owner.z)",
+                         "FloorDiv(end_x-1,kEnergyPageCells)", "FloorDiv(end_z-1,kEnergyPageCells)",
+                         "constautosorted_count=(std::min)(key_count,keys.size());",
+                         "for(std::size_ti=1;i<sorted_count;++i)",
+                         "constautokey=keys[i];autoposition=i;",
+                         "while(position>0&&key<keys[position-1])",
+                         "keys[position]=keys[position-1];--position;",
+                         "keys[position]=key;",
+                         "page_index<sorted_count",
+                         "constautofound=m_pages.find(key);", "if(found==m_pages.end())continue;",
+                         "OwnerOfCell(static_cast<int>(cx),static_cast<int>(cz))!=owner"):
+            self.assertIn(required, region)
+        self.assertNotIn(":m_pages)", region)
+        self.assertNotIn("std::sort(", region)
+
+
+    def test_regional_codec_keeps_legacy_phase_and_admission_separate(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        legacy = source[source.index("std::stringEnergyFieldState::SerializeRecord("):
+                        source.index("voidEnergyFieldState::ResetEmptyAtTick(")]
+        for required in ("m_channels>kEnergyRecordChannels", "autonormalized=*this;",
+                         "normalized.NormalizeAllPages();", "normalized.m_pages.size()>kEnergyWritePages",
+                         "bytes.size()>kEnergyWriteRecordBytes", "remaining>kEnergyCadenceTicks"):
+            self.assertIn(required, legacy)
+        self.assertLess(legacy.index("bytes.size()>kEnergyWriteRecordBytes"),
+                        legacy.index("m_pages=std::move(normalized.m_pages)"))
+        regional = source[source.index("std::stringEnergyFieldState::SerializeRegionalRecord()const"):
+                          source.index("boolEnergyFieldState::RegionalRecordFits(")]
+        self.assertIn('out<<"EFS1"<<m_channels<<"0\\n";', regional)
+        self.assertNotIn("NormalizeAllPages", regional)
+        decode = source[source.index("boolEnergyFieldState::DeserializeRegionalRecord("):
+                        source.index("boolEnergyFieldState::ValidateRegionalOwners(")]
+        self.assertIn("phase!=0", decode)
+        self.assertLess(decode.index("staged.SerializeRegionalRecord()!=record"),
+                        decode.index("m_pages.swap(staged.m_pages)"))
+
+    def test_scalar_diffusion_empty_gate_preserves_the_existing_exchange(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/ScalarFieldDiffusion.cpp")
+                             .read_text(encoding="utf-8"))
+        header = compact_cpp((ROOT / "src/luminumbra_common/fields/ScalarFieldDiffusion.h")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("constEdgeGate&gate);", header)
+        self.assertNotIn("constEdgeGate&gate={}", header)
+        self.assertIn("if(!can_exchange(lhs,rhs)||(admits&&!admits(lhs,rhs)))", source)
+        self.assertIn("gate(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", source)
 
 
 if __name__ == "__main__":
