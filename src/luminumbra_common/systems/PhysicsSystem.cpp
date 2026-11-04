@@ -28,11 +28,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <limits>
-#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
 
 using namespace JPH;
 
@@ -447,16 +445,6 @@ void PhysicsSystem::remove_chunk_collision(ChunkID id) {
     m_body_interface->RemoveBody(it->second.body_id);
     m_body_interface->DestroyBody(it->second.body_id);
     m_chunk_bodies.erase(it);
-}
-
-void PhysicsSystem::retain_chunk_collisions(
-    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& simulation_chunks) {
-    for (auto it = m_chunk_bodies.begin(); it != m_chunk_bodies.end();) {
-        const auto id = it->first;
-        ++it;
-        if (!simulation_chunks.contains(id))
-            remove_chunk_collision(id);
-    }
 }
 
 void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
