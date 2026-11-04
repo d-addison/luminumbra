@@ -41,7 +41,8 @@ std::string event_key(const SimulationEvent& event) {
 
 std::size_t quoted_size(const std::string& text) {
     std::size_t bytes = text.size() + 2;
-    for (const unsigned char byte : text) {
+    for (const char character : text) {
+        const auto byte = static_cast<unsigned char>(character);
         if (byte == '"' || byte == '\\' || byte == '\b' || byte == '\t' || byte == '\n' ||
             byte == '\f' || byte == '\r') {
             ++bytes;
