@@ -470,19 +470,6 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
-    // Owner-thread preparation reads missing committed terrain in the requested columns without
-    // generating chunks or changing residency. Keep the returned chunks only for this probe batch.
-    std::vector<std::shared_ptr<Chunk>>
-    AcquireTerrainProbeChunks(const std::vector<Vec3>& requests) const;
-    // Owner-thread downward probe over resident, parked and prepared truth. Never generates or
-    // performs IO. Missing terrain bands refuse; verified generated heightmaps permit fallback.
-    std::optional<float>
-    ProbeTerrainBelow(const Vec3& requested,
-                      const std::vector<std::shared_ptr<Chunk>>& prepared = {}) const;
-    // Shares column indexing and exact-position results within this owner-thread call.
-    std::vector<std::optional<float>>
-    ProbeTerrainBelowBatch(const std::vector<Vec3>& requests,
-                           const std::vector<std::shared_ptr<Chunk>>& prepared = {}) const;
 
     // Owner-thread capture for bounded boot input jobs. No streamed chunks,
     // callbacks or live-world pointers escape; exact immutable noise nodes,

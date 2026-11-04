@@ -2047,10 +2047,23 @@ std::string GroundEventPayload(const GroundObject& object) {
            std::to_string(object.z_mm);
 }
 
-Vec3 GroundProbePosition(const GroundObject& object) {
+Vec3 GroundPosition(const GroundObject& object) {
     return {static_cast<float>(object.x_mm) / 1000.0f,
             static_cast<float>(object.y_mm) / 1000.0f,
             static_cast<float>(object.z_mm) / 1000.0f};
+}
+
+std::optional<float> ProceduralGroundHeight(const Systems::SHIELD_WorldSystem& world,
+                                            const GroundObject& object) {
+    const auto position = GroundPosition(object);
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        std::abs(position.x) >= 16777216.0f || std::abs(position.z) >= 16777216.0f ||
+        std::abs(position.y) >= 1048576.0f)
+        return std::nullopt;
+    const float height = world.GetTerrainHeightAt(position.x, position.z);
+    if (!std::isfinite(height) || std::abs(height) >= 1048576.0f || height > position.y)
+        return std::nullopt;
+    return height;
 }
 
 bool SettleGroundObjectOnTerrain(GroundObject& object, const std::optional<float>& height) {
@@ -2114,11 +2127,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         ++m_regionInputRejections.ground_spawns;
         return 0;
     }
-    const auto position = GroundProbePosition(candidate);
-    const auto terrain = m_worldSystem->AcquireTerrainProbeChunks({position});
-    if (m_regionFault)
-        return 0;
-    SettleGroundObjectOnTerrain(candidate, m_worldSystem->ProbeTerrainBelow(position, terrain));
+    SettleGroundObjectOnTerrain(candidate, ProceduralGroundHeight(*m_worldSystem, candidate));
     const luminumbra::simulation::SimulationEvent notification{tick,
                                                                0,
                                                                m_simulationEventBus.next_sequence(),
@@ -2177,25 +2186,16 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     std::vector<RegionKey> due = m_regionSchedule.due;
     std::sort(due.begin(), due.end());
     due.erase(std::unique(due.begin(), due.end()), due.end());
-    std::vector<Vec3> positions;
-    std::map<std::uint64_t, std::size_t> probe_indices;
+    std::map<std::uint64_t, std::optional<float>> heights;
     for (const RegionKey key : due) {
         for (const auto& object : m_groundObjects.in_region(key)) {
             if (!object.settled()) {
-                probe_indices.emplace(object.id, positions.size());
-                positions.push_back(GroundProbePosition(object));
+                heights.emplace(object.id, ProceduralGroundHeight(*m_worldSystem, object));
             }
         }
     }
-    std::vector<std::optional<float>> heights;
-    if (!positions.empty()) {
-        const auto terrain = m_worldSystem->AcquireTerrainProbeChunks(positions);
-        if (m_regionFault)
-            return;
-        heights = m_worldSystem->ProbeTerrainBelowBatch(positions, terrain);
-    }
-    const auto settle = [&probe_indices, &heights](GroundObject& object) {
-        return SettleGroundObjectOnTerrain(object, heights.at(probe_indices.at(object.id)));
+    const auto settle = [&heights](GroundObject& object) {
+        return SettleGroundObjectOnTerrain(object, heights.at(object.id));
     };
     for (const RegionKey key : due) {
         if (!m_groundObjects.owns_region(key))

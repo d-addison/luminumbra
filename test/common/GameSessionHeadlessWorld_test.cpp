@@ -6924,9 +6924,11 @@ void CreateGroundWorld(GameSession& session,
     ASSERT_TRUE(session.CreateWorld(name, "1337", "default"));
 }
 
-std::shared_ptr<Luminumbra::Chunk> GroundProbeChunk(const Luminumbra::IVec3& coords, float height) {
+std::shared_ptr<Luminumbra::Chunk> GroundSurfaceChunk(const Luminumbra::IVec3& coords,
+                                                      float height) {
     auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
     chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->current_lod.store(0);
     constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
     constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
     constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
@@ -6941,6 +6943,20 @@ std::shared_ptr<Luminumbra::Chunk> GroundProbeChunk(const Luminumbra::IVec3& coo
     }
     chunk->mark_voxel_data_dirty();
     return chunk;
+}
+
+void RestoreUnsettledGroundObjects(GameSession& session) {
+    Luminumbra::world::GroundObjectStore unsettled;
+    for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+        auto waiting = object;
+        waiting.flags = 0;
+        waiting.y_mm += 10000;
+        ASSERT_TRUE(unsettled.insert(waiting));
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(P::WorldSaveService::save_ground_objects(
+        unsettled, session.GetWorldSaveDir(), nullptr, session.CaptureGroundNotifications()));
+    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
 }
 
 // Spawns a ground object at (x_mm, 0, z_mm) with the fixed test type and payload.
@@ -7685,95 +7701,90 @@ TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThro
     EXPECT_EQ(loaded.GetGroundObjects().size(), 2u);
 }
 
-TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBeforePublishing) {
+TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndUsesProceduralHeightBeforePublishing) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    CreateGroundWorld(session, root, jobs, "Edited ground probe");
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
-    chunk->set_state(Luminumbra::ChunkState::Ready);
-    constexpr int side = Luminumbra::CHUNK_SIZE_X + 1;
-    chunk->sdf_data.resize(side * (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1));
-    for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z)
-        for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y)
-            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x)
-                chunk->sdf_data[static_cast<std::size_t>(
-                    x + side * (y + (Luminumbra::CHUNK_SIZE_Y + 1) * z))] =
-                    static_cast<float>(y) - 4.0f;
-    chunk->mark_voxel_data_dirty();
-    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    const auto id = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, 12, 8}, 0, 0);
+    CreateGroundWorld(session, root, jobs, "Procedural ground height");
+    auto* world = session.GetWorldSystem();
+    const float height = world->GetTerrainHeightAt(8, 8);
+    const auto expected = std::llround(static_cast<double>(height) * 1000.0);
+    ASSERT_TRUE(world->adopt_streamed_chunk(GroundSurfaceChunk({0, 0, 0}, 4.0f)));
+    GroundEvents seen;
+    CollectGroundEvents(session, seen);
+    const auto id =
+        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, height + 8, 8}, 0, 0);
     ASSERT_NE(id, 0u);
     const auto* landed = session.GetGroundObjects().find(id);
     ASSERT_NE(landed, nullptr);
     EXPECT_TRUE(landed->settled());
-    EXPECT_EQ(landed->y_mm, 4000);
-    const auto contact = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, 4, 8}, 0, 0);
+    EXPECT_EQ(landed->y_mm, expected);
+    TickOnce(session);
+    EXPECT_EQ(FirstPayload(seen, "ground.spawned"),
+              std::to_string(id) + ",7,8000," + std::to_string(expected) + ",8000");
+    const auto contact =
+        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, height + 1, 8}, 0, 0);
     ASSERT_NE(contact, 0u);
-    const auto* touching = session.GetGroundObjects().find(contact);
-    ASSERT_NE(touching, nullptr);
-    EXPECT_TRUE(touching->settled());
-    EXPECT_EQ(touching->y_mm, 4000);
-    // The owner-thread query neither loads another column nor substitutes procedural terrain.
+    EXPECT_EQ(session.GetGroundObjects().objects().at(contact).y_mm, expected);
+    const auto absent_height = world->GetTerrainHeightAt(320, 320);
     const auto absent =
-        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320, 12, 320}, 0, 0);
+        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320, absent_height + 8, 320}, 0, 0);
     ASSERT_NE(absent, 0u);
-    const auto* waiting = session.GetGroundObjects().find(absent);
-    ASSERT_NE(waiting, nullptr);
-    EXPECT_FALSE(waiting->settled());
-    EXPECT_EQ(waiting->y_mm, 12000);
+    EXPECT_TRUE(session.GetGroundObjects().objects().at(absent).settled());
+    EXPECT_EQ(session.GetGroundObjects().objects().at(absent).y_mm,
+              std::llround(static_cast<double>(absent_height) * 1000.0));
+    ASSERT_GT(absent_height, 0);
     const auto rounded =
         session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320.0005f, -0.0015f, 320}, 0, 0);
     ASSERT_NE(rounded, 0u);
-    const auto* quantized = session.GetGroundObjects().find(rounded);
-    ASSERT_NE(quantized, nullptr);
+    const auto& quantized = session.GetGroundObjects().objects().at(rounded);
     // -0.0015f is slightly below the half-millimetre tie in binary32.
-    EXPECT_EQ(quantized->y_mm, -2);
-    EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{16777216, 0, 0}, 0, 0), 0u);
-    EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{0, -1048576, 0}, 0, 0), 0u);
+    EXPECT_EQ(quantized.x_mm, 320000);
+    EXPECT_EQ(quantized.y_mm, -2);
+    EXPECT_FALSE(quantized.settled());
+    for (const auto position : {Luminumbra::Vec3{16777216, 0, 0},
+                                Luminumbra::Vec3{0, -1048576, 0},
+                                Luminumbra::Vec3{0, 0, -16777216},
+                                Luminumbra::Vec3{std::numeric_limits<float>::quiet_NaN(), 0, 0},
+                                Luminumbra::Vec3{0, std::numeric_limits<float>::infinity(), 0}}) {
+        EXPECT_EQ(session.SpawnGroundObject(kGroundType, position, 0, 0), 0u);
+    }
 }
 
-TEST(GameSessionHeadlessWorldTest, GroundSpawnProbesGeneratedCaveFloorsAndStructures) {
+TEST(GameSessionHeadlessWorldTest, GroundSpawnIgnoresGeneratedCaveFloorsAndStructures) {
     for (const bool cave : {false, true}) {
         SCOPED_TRACE(cave);
         const HeadlessRoot root;
         JobSystem jobs;
         jobs.startup(1);
         GameSession session;
-        CreateGroundWorld(session, root, jobs, "Generated ground probe");
-        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
-        chunk->set_state(Luminumbra::ChunkState::Ready);
-        constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
-        constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
-        constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
-        chunk->sdf_data.resize(nx * ny * nz);
-        const float floor = cave ? 2.5f : 12.5f;
-        for (int z = 0; z < nz; ++z) {
-            for (int y = 0; y < ny; ++y) {
-                for (int x = 0; x < nx; ++x) {
-                    const float above_floor = static_cast<float>(y) - floor;
-                    chunk->sdf_data[static_cast<std::size_t>(x + nx * (y + ny * z))] =
-                        cave ? std::min(above_floor, 7.5f - static_cast<float>(y)) : above_floor;
+        CreateGroundWorld(session, root, jobs, "Generated ground height");
+        auto chunk = GroundSurfaceChunk({0, 0, 0}, cave ? 2.5f : 12.5f);
+        if (cave) {
+            constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
+            constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
+            constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
+            for (int z = 0; z < nz; ++z) {
+                for (int y = 0; y < ny; ++y) {
+                    for (int x = 0; x < nx; ++x) {
+                        auto& density =
+                            chunk->sdf_data[static_cast<std::size_t>(x + nx * (y + ny * z))];
+                        density = std::min(density, 7.5f - static_cast<float>(y));
+                    }
                 }
             }
         }
         chunk->mark_sdf_generated_current_params();
         ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
         ASSERT_EQ(chunk->sdf_provenance(), Luminumbra::ChunkSdfProvenance::GeneratedCurrentParams);
-        const float start = cave ? 4.0f : 15.0f;
         const float procedural = session.GetWorldSystem()->GetTerrainHeightAt(8, 8);
-        if (cave) {
-            ASSERT_GT(procedural, start);
-        } else {
-            ASSERT_LT(procedural, floor);
-        }
+        const float start = std::max(procedural, 12.5f) + 2;
         const auto id = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, start, 8}, 0, 0);
         ASSERT_NE(id, 0u);
-        const auto* landed = session.GetGroundObjects().find(id);
-        ASSERT_NE(landed, nullptr);
-        EXPECT_TRUE(landed->settled());
-        EXPECT_EQ(landed->y_mm, cave ? 2500 : 12500);
+        const auto& landed = session.GetGroundObjects().objects().at(id);
+        EXPECT_TRUE(landed.settled());
+        EXPECT_EQ(landed.y_mm, std::llround(static_cast<double>(procedural) * 1000.0));
     }
 }
 
@@ -7829,147 +7840,85 @@ TEST(GameSessionHeadlessWorldTest, CompletedWorkFaultAfterStormEpochRestoresEver
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, GroundProbeWaitsForMissingEditedSurfaceBand) {
+TEST(GameSessionHeadlessWorldTest,
+     GroundHeightIsIdenticalWithoutResidencyWithFullCoarseAndEditedTerrain) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    CreateGroundWorld(session, root, jobs, "Missing surface authority");
+    CreateGroundWorld(session, root, jobs, "Ground residency independence");
     auto* world = session.GetWorldSystem();
-    constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
-    constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
-    constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
-    constexpr float x = 328, z = 328;
-    const float procedural = world->GetTerrainHeightAt(x, z);
-    const int cy = static_cast<int>(std::floor(procedural / Luminumbra::CHUNK_SIZE_Y));
-    const float bottom = static_cast<float>(cy * Luminumbra::CHUNK_SIZE_Y);
-    const float start = bottom + Luminumbra::CHUNK_SIZE_Y + 8.0f;
-    auto upper = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{20, cy + 1, 20});
-    upper->set_state(Luminumbra::ChunkState::Ready);
-    upper->sdf_data.assign(nx * ny * nz, 1.0f);
-    upper->mark_sdf_generated_current_params();
-    ASSERT_TRUE(world->adopt_streamed_chunk(upper));
-    EXPECT_FALSE(world->ProbeTerrainBelow({x, start, z}).has_value());
-    const auto id = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{x, start, z}, 0, 0);
-    ASSERT_NE(id, 0u);
-    ASSERT_FALSE(session.GetGroundObjects().find(id)->settled());
-    // An edited floor replaces the unavailable band; the waiting object can now settle.
-    auto surface = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{20, cy, 20});
-    surface->set_state(Luminumbra::ChunkState::Ready);
-    surface->sdf_data.resize(nx * ny * nz);
-    for (int iz = 0; iz < nz; ++iz) {
-        for (int iy = 0; iy < ny; ++iy) {
-            for (int ix = 0; ix < nx; ++ix)
-                surface->sdf_data[static_cast<std::size_t>(ix + nx * (iy + ny * iz))] =
-                    static_cast<float>(iy) - 4.0f;
+    constexpr float x = 328.25f, z = 328.5f;
+    const float height = world->GetTerrainHeightAt(x, z);
+    const auto expected = std::llround(static_cast<double>(height) * 1000.0);
+    const Luminumbra::IVec3 coords{
+        20, static_cast<int>(std::floor(height / Luminumbra::CHUNK_SIZE_Y)), 20};
+    ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
+    auto chunk = GroundSurfaceChunk(coords, height - 2);
+    for (int state = 0; state < 4; ++state) {
+        SCOPED_TRACE(state);
+        if (state == 1) {
+            chunk->mark_sdf_generated_current_params();
+            ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+        } else if (state == 2) {
+            chunk->current_lod.store(2);
+            chunk->sdf_data.clear();
+            chunk->heightmap_data.assign(
+                (Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1), height - 3);
+            chunk->mark_sdf_generated_current_params();
+        } else if (state == 3) {
+            chunk->current_lod.store(0);
+            chunk->sdf_data = GroundSurfaceChunk(coords, height + 2)->sdf_data;
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(world->adopt_streamed_chunk(
+                GroundSurfaceChunk({coords.x + 1, coords.y, coords.z}, height + 4)));
         }
+        const auto id =
+            session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{x, height + 8, z}, 0, 0);
+        ASSERT_NE(id, 0u);
+        const auto& object = session.GetGroundObjects().objects().at(id);
+        EXPECT_TRUE(object.settled());
+        EXPECT_EQ(object.y_mm, expected);
     }
-    surface->mark_voxel_data_dirty();
-    ASSERT_TRUE(world->adopt_streamed_chunk(surface));
-    const auto hit = world->ProbeTerrainBelow({x, start, z});
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit.value_or(0.0f), bottom + 4.0f);
-    TickOnce(session);
-    const auto* object = session.GetGroundObjects().find(id);
-    ASSERT_NE(object, nullptr);
-    EXPECT_TRUE(object->settled());
-    EXPECT_EQ(object->y_mm, std::llround(static_cast<double>(hit.value_or(0.0f)) * 1000.0));
-
-    // Height-only generation permits fallback only with complete, current terrain data.
-    surface->sdf_data.clear();
-    surface->heightmap_data.assign(nx * nz, procedural);
-    surface->mark_sdf_generated_current_params();
-    EXPECT_EQ(world->ProbeTerrainBelow({x, start, z}), std::optional<float>{procedural});
-    surface->mark_voxel_data_dirty();
-    EXPECT_FALSE(world->ProbeTerrainBelow({x, start, z}).has_value());
-    surface->mark_sdf_generated_current_params();
-    surface->heightmap_data.pop_back();
-    EXPECT_FALSE(world->ProbeTerrainBelow({x, start, z}).has_value());
-}
-
-TEST(GameSessionHeadlessWorldTest, BatchedTerrainProbesMatchIndividualQueriesAndRefreshEachTick) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession session;
-    CreateGroundWorld(session, root, jobs, "Batched ground probes");
-    auto* world = session.GetWorldSystem();
-    constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
-    constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
-    constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
-    std::vector<Luminumbra::Vec3> requests;
-    std::vector<std::uint64_t> ids;
-    for (int i = 0; i < 128; ++i) {
-        const Luminumbra::Vec3 position{328.25f, i % 2 == 0 ? 4.0f : 15.0f, 328.5f};
-        requests.push_back(position);
-        ids.push_back(session.SpawnGroundObject(kGroundType, position, 0, 0));
-        ASSERT_NE(ids.back(), 0u);
-        ASSERT_FALSE(session.GetGroundObjects().find(ids.back())->settled());
-    }
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{20, 0, 20});
-    chunk->set_state(Luminumbra::ChunkState::Ready);
-    chunk->sdf_data.resize(nx * ny * nz);
-    for (int z = 0; z < nz; ++z) {
-        for (int y = 0; y < ny; ++y) {
-            for (int x = 0; x < nx; ++x) {
-                const float height = static_cast<float>(y);
-                chunk->sdf_data[static_cast<std::size_t>(x + nx * (y + ny * z))] =
-                    std::max(std::min(height - 2.5f, 7.5f - height), height - 12.5f);
-            }
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(session));
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, expected);
+            EXPECT_EQ(object.active_age, static_cast<std::uint64_t>(i + 1));
         }
-    }
-    chunk->mark_sdf_generated_current_params();
-    ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
-    requests.push_back({328.25f, 10, 328.5f});
-    requests.push_back({-328, 15, -328});
-    requests.push_back({328.25f, 20, 328.5f});
-    requests.push_back({std::numeric_limits<float>::quiet_NaN(), 15, 328});
-    const auto batched = world->ProbeTerrainBelowBatch(requests);
-    ASSERT_EQ(batched.size(), requests.size());
-    for (std::size_t i = 0; i < requests.size(); ++i) {
-        EXPECT_EQ(batched[i], world->ProbeTerrainBelow(requests[i])) << i;
-    }
-    ASSERT_TRUE(batched[0].has_value());
-    ASSERT_TRUE(batched[1].has_value());
-    EXPECT_EQ(batched[0].value_or(0.0f), 2.5f);
-    EXPECT_EQ(batched[1].value_or(0.0f), 12.5f);
-    TickOnce(session);
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-        const auto* object = session.GetGroundObjects().find(ids[i]);
-        ASSERT_NE(object, nullptr);
-        EXPECT_TRUE(object->settled());
-        EXPECT_EQ(object->y_mm,
-                  std::llround(static_cast<double>(batched[i].value_or(0.0f)) * 1000.0));
-    }
-    // No result survives a call, so a terrain edit cannot reuse the previous height.
-    for (auto& density : chunk->sdf_data)
-        density = 1.0f;
-    chunk->mark_voxel_data_dirty();
-    const auto changed = world->ProbeTerrainBelowBatch(requests);
-    EXPECT_FALSE(changed[0].has_value());
-    EXPECT_FALSE(changed[1].has_value());
-    for (std::size_t i = 0; i < requests.size(); ++i) {
-        EXPECT_EQ(changed[i], world->ProbeTerrainBelow(requests[i])) << i;
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, UnsettledDistantGroundMatchesResidentAndDurableContinuation) {
+TEST(GameSessionHeadlessWorldTest,
+     UnsettledDistantGroundMatchesPristineResidentAndReopenedContinuation) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession original, reopened;
     CreateGroundWorld(original, root, jobs, "Distant ground continuation");
-    const Luminumbra::IVec3 coords{325, 0, -96};
-    const Luminumbra::Vec3 position{5208, 12, -1528};
     auto* world = original.GetWorldSystem();
+    const float height = world->GetTerrainHeightAt(5208.25f, -1527.5f);
+    const auto expected = std::llround(static_cast<double>(height) * 1000.0);
+    const Luminumbra::IVec3 coords{
+        325, static_cast<int>(std::floor(height / Luminumbra::CHUNK_SIZE_Y)), -96};
+    const Luminumbra::Vec3 position{5208.25f, height + 8, -1527.5f};
     ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
     const auto id = original.SpawnGroundObject(kGroundType, position, 0, 0);
     ASSERT_NE(id, 0u);
-    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    const float short_height = world->GetTerrainHeightAt(5212.25f, -1527.5f);
+    const auto short_lived = original.SpawnGroundObject(
+        kGroundType, Luminumbra::Vec3{5212.25f, short_height + 8, -1527.5f}, 1, 0);
+    ASSERT_NE(short_lived, 0u);
     original.PinActiveRegion(Luminumbra::world::GroundObjectStore::region_of(
                                  original.GetGroundObjects().objects().at(id)),
                              true);
-    ASSERT_TRUE(world->adopt_streamed_chunk(GroundProbeChunk(coords, 4.0f)));
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(original));
+    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    auto pristine = GroundSurfaceChunk(coords, height - 2);
+    pristine->mark_sdf_generated_current_params();
+    ASSERT_TRUE(world->adopt_streamed_chunk(pristine));
     ASSERT_TRUE(original.SaveWorldState());
     ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
     ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
@@ -7983,12 +7932,12 @@ TEST(GameSessionHeadlessWorldTest, UnsettledDistantGroundMatchesResidentAndDurab
         return chunk->get_coords() == coords;
     }));
     const auto durable = restored->durable_chunk_inventory();
-    ASSERT_NE(std::find(durable.begin(), durable.end(), coords), durable.end());
+    ASSERT_EQ(std::find(durable.begin(), durable.end(), coords), durable.end());
     EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
     EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
-    // The ordinary query remains an in-memory probe, even with committed terrain available.
-    EXPECT_FALSE(restored->ProbeTerrainBelow(position).has_value());
-
+    GroundEvents original_events, reopened_events;
+    CollectGroundEvents(original, original_events);
+    CollectGroundEvents(reopened, reopened_events);
     for (int i = 0; i < 5; ++i) {
         TickOnce(original);
         TickOnce(reopened);
@@ -7997,15 +7946,20 @@ TEST(GameSessionHeadlessWorldTest, UnsettledDistantGroundMatchesResidentAndDurab
         EXPECT_EQ(reopened.GetRegionSchedule(), original.GetRegionSchedule());
         EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
         EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+        EXPECT_EQ(reopened_events, original_events);
         for (const auto* session : {&original, &reopened}) {
             const auto& object = session->GetGroundObjects().objects().at(id);
             EXPECT_TRUE(object.settled());
-            EXPECT_EQ(object.y_mm, 4000);
+            EXPECT_EQ(object.y_mm, expected);
             EXPECT_EQ(object.active_age, static_cast<std::uint64_t>(i + 1));
+            EXPECT_EQ(session->GetGroundObjects().find(short_lived), nullptr);
         }
         EXPECT_EQ(restored->find_streamed_chunk(coords), nullptr);
     }
-    // Spawn-time settling uses the same committed authority as due-object settling.
+    EXPECT_EQ(FirstPayload(original_events, "ground.despawned"),
+              std::to_string(short_lived) + ",7,5212250," +
+                  std::to_string(std::llround(static_cast<double>(short_height) * 1000.0)) +
+                  ",-1527500");
     const auto original_spawn = original.SpawnGroundObject(kGroundType, position, 0, 0);
     const auto reopened_spawn = reopened.SpawnGroundObject(kGroundType, position, 0, 0);
     ASSERT_NE(original_spawn, 0u);
@@ -8022,60 +7976,40 @@ TEST(GameSessionHeadlessWorldTest, UnsettledDistantGroundMatchesResidentAndDurab
         ground_bytes);
 }
 
-TEST(GameSessionHeadlessWorldTest, TerrainProbePreparationPreservesMissingBandsAndReadRefusals) {
+TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    CreateGroundWorld(session, root, jobs, "Prepared terrain refusals");
+    CreateGroundWorld(session, root, jobs, "Ground without terrain reads");
     auto* world = session.GetWorldSystem();
-    const Luminumbra::IVec3 lower{325, 0, -96};
-    const Luminumbra::IVec3 upper{325, 1, -96};
-    const Luminumbra::Vec3 position{5208, 20, -1528};
+    const float height = world->GetTerrainHeightAt(5208, -1528);
+    const Luminumbra::Vec3 position{5208, height + 8, -1528};
+    const auto id = session.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(id, 0u);
+    session.PinActiveRegion(Luminumbra::world::GroundObjectStore::region_of(
+                                session.GetGroundObjects().objects().at(id)),
+                            true);
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(session));
     std::size_t reads = 0;
     std::string fault;
-    world->set_durable_chunk_loader(
-        [&reads](const auto& coords) {
-            ++reads;
-            return GroundProbeChunk(coords, 4.0f);
-        },
-        [&fault](const auto& error) { fault = error; });
-    world->remember_durable_chunks({lower, {400, 0, 400}});
-    EXPECT_FALSE(world->ProbeTerrainBelow(position).has_value());
-    EXPECT_EQ(reads, 0u);
-    auto terrain = world->AcquireTerrainProbeChunks({position, position});
-    EXPECT_EQ(reads, 1u);
-    EXPECT_FALSE(world->ProbeTerrainBelow(position, terrain).has_value());
-    EXPECT_EQ(reads, 1u);
-    EXPECT_TRUE(fault.empty());
-
-    world->remember_durable_chunks({upper});
-    terrain = world->AcquireTerrainProbeChunks({position, position});
-    EXPECT_EQ(reads, 3u);
-    EXPECT_EQ(world->ProbeTerrainBelow(position, terrain), std::optional<float>{4.0f});
-    EXPECT_EQ(world->ProbeTerrainBelowBatch({position, position}, terrain),
-              (std::vector<std::optional<float>>{4.0f, 4.0f}));
-    EXPECT_EQ(reads, 3u);
-    EXPECT_EQ(world->find_streamed_chunk(lower), nullptr);
-    EXPECT_EQ(world->find_streamed_chunk(upper), nullptr);
-
-    // Current in-memory edits supersede the older committed record.
-    ASSERT_TRUE(world->adopt_streamed_chunk(GroundProbeChunk(lower, 7.5f)));
-    terrain = world->AcquireTerrainProbeChunks({position});
-    EXPECT_EQ(reads, 4u);
-    EXPECT_EQ(world->ProbeTerrainBelow(position, terrain), std::optional<float>{7.5f});
-    EXPECT_EQ(reads, 4u);
-
+    world->remember_durable_chunks({{325, 0, -96}, {325, 1, -96}});
     world->set_durable_chunk_loader(
         [&reads](const auto&) -> std::shared_ptr<Luminumbra::Chunk> {
             ++reads;
             throw std::runtime_error("committed terrain unavailable");
         },
         [&fault](const auto& error) { fault = error; });
-    EXPECT_TRUE(world->AcquireTerrainProbeChunks({position}).empty());
-    EXPECT_EQ(fault, "committed terrain unavailable");
-    EXPECT_EQ(reads, 5u);
-    EXPECT_FALSE(world->ProbeTerrainBelow(position, terrain).has_value());
-    EXPECT_TRUE(world->AcquireTerrainProbeChunks({position}).empty());
-    EXPECT_EQ(reads, 5u);
+    const auto spawned = session.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(spawned, 0u);
+    TickOnce(session);
+    for (const auto object_id : {id, spawned}) {
+        const auto& object = session.GetGroundObjects().objects().at(object_id);
+        EXPECT_TRUE(object.settled());
+        EXPECT_EQ(object.y_mm, std::llround(static_cast<double>(height) * 1000.0));
+        EXPECT_EQ(object.active_age, 1u);
+    }
+    EXPECT_EQ(reads, 0u);
+    EXPECT_TRUE(fault.empty());
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
 }

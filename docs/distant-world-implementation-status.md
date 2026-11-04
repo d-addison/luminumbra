@@ -300,56 +300,72 @@ The complete engine-linked headless/save tests, including the new integration
 cases and original flaky test, and pinned engine hash tests remain unexecuted.
 Acceptance contract documents and fixture bytes are unchanged.
 
-### Ground terrain authority across reload
+### Ground settling uses procedural height only
 
-Ground settling previously indexed only published streaming residents. A save could
-retain an unsettled object and its distant terrain authority while reopening kept
-that terrain only in the durable inventory. The next due tick then settled the
-original object but left the reopened object waiting, changing ground bytes and
-the world hash.
+Ground settling is a function of the persisted object state, the due tick and the
+seed-derived procedural heightfield. Both spawn-time and due-tick settling use
+`SHIELD_WorldSystem::GetTerrainHeightAt`; neither path reads chunks, parked data,
+the durable inventory or files. The world-system terrain preparation and probe
+APIs have been removed. Resident and reloaded terrain can contain different
+columns, and full SDF and coarse heightmap chunks can represent different surfaces;
+none of those representations chooses a ground object's permanent height.
 
-Both spawn-time and due-tick settling now prepare missing committed chunks for
-the requested columns before probing. Preparation uses the existing exact-identity
-durable reader and fault latch, deduplicates columns and does not generate terrain
-or change residency. These temporary inputs supplement resident and parked truth
-inside the probe; current in-memory authority takes precedence. This keeps the
-change local to terrain acquisition without adding simulation chunks to the render
-or water active set. The probe itself still performs no I/O or generation. Missing,
-incomplete or edited height-only bands still wait, and a committed-read fault stops
-the consumer before object aging or publication.
+The existing finite position and horizontal/vertical bounds still apply. A finite,
+in-range procedural surface at or below the requested position settles the object
+in millimetres. A surface above it leaves the object unsettled. Due-region heights
+remain keyed by object id; the store still settles first, ages next and despawns
+last in ascending id order.
 
-Two headless regressions cover the change:
+Terrain-edit-aware settling is a documented limitation: terrain edits, caves and
+structures do not affect settling. An object can therefore settle somewhere that
+differs from the visible or edited surface. Supporting those surfaces requires a
+separate deterministic simulation terrain contract.
 
-- A distant unsettled object has resident edited terrain at save time and only
-  durable terrain after reopening. Five identical pinned-region ticks compare
-  serialized ground stores and world hashes, require the expected settled position
-  and age, and retain nonresidency in the reopened session. Subsequent spawns use
-  the same authority; final saves compare exact ground-file bytes.
-- Explicit preparation counts committed reads, shares duplicate requests, excludes
-  unrelated columns, preserves missing-band refusal, gives current edits priority,
-  and retains fail-stop refusal after a committed read fails. Individual and batch
-  probes perform no additional reads.
+Headless regressions cover:
 
-The sibling sweep found these remaining residency-dependent water paths, left
-unchanged here: `SHIELD_WorldSystem::update` passes only streaming chunks to
-`WaterSystem::update`, whose initialization, simulation window and seam work use
-that set. Water level/flow queries, water injection and terraform bed coupling also
-use the water system's active map. These paths can omit parked or durable-only
-water and need separate simulation-activation qualification. `live_water_surface_at`
-and water debug probes also read live residency; their current callers are
-presentation or diagnostics.
+- A persisted unsettled object outside the boot area has pristine resident terrain
+  in the original session and no resident, parked or durable column after reopening.
+  Five identical pinned-region ticks compare exact serialized ground stores, world
+  hashes, schedules and notifications. A second object despawns on its first tick
+  with the settled height in its notification. Subsequent spawns and final saved
+  ground-file bytes also match.
+- Fractional positions settle to the same procedural height with an absent column,
+  full generated SDF, a coarse heightmap, an edited column and a nearby edit.
+  Restored unsettled objects settle to that height on their next due tick.
+- Spawn publication uses the procedural height; quantization, position refusal and
+  generated cave/structure independence remain covered. An unavailable committed
+  terrain loader receives zero calls during spawn and due-tick settling.
 
-Regional scheduling/digests and enabled chunk hashing already use the combined
-live, parked and durable membership index. Water authority synchronization checks
-both live and parked changes. Terrain editing and synchronous surface preparation
-restore expected saved authority before mutation. Procedural height/density queries
-do not consult streaming residency. No sibling simulation behavior was changed.
+Tests solely for missing-band probing, batch probing and committed terrain
+acquisition were removed with those APIs. The completed-work, despawn/reopen,
+consumer-fault and storm-epoch regressions remain.
+
+The sibling sweep found these residency-dependent water paths, left unchanged:
+`SHIELD_WorldSystem::update` passes its streaming map to `WaterSystem::update`.
+Initialization, simulation-window selection, neighbor/seam exchange and source
+injection use that map. `WaterSystem::get_water_level_at`, `get_water_flow_at`,
+`apply_displacement` and `EditTerrainBed` use the active map; terrain edits delegate
+water-bed coupling to the last of these. `MigrateWaterSimResolution` also operates
+on streamed chunks. Parked or durable-only water can be absent from these decisions
+and needs separate simulation-activation qualification. `IsUnderwater`,
+`live_water_surface_at` and water debug queries also inspect live residency; their
+current callers are presentation or diagnostics.
+
+Regional scheduling/digests and enabled chunk hashing use combined live, parked
+and durable membership. Water authority synchronization checks live and parked
+changes. Terrain editing and synchronous surface preparation restore expected
+saved authority before mutation. Procedural height/density and plant-environment
+sampling do not consult streaming residency. No sibling behavior was changed.
 
 Verification: `clang++-18 -fsyntax-only` passes for GameSession, SHIELD_WorldSystem,
 the headless tests, WorldSaveService and LuaState. The three changed C++ translation
-units pass clang-tidy's cognitive-complexity check at 250. Formatting and
-`git diff --check` pass. This clone has only a compilation database, with no
-configured CMake build or engine libraries; no engine-linked target was built or
-run. Both new headless tests, the existing ground/probe integration tests and
-pinned engine hash tests remain runtime-unverified. Contract documents, existing
-test bodies and fixture bytes are unchanged.
+units pass clang-tidy's cognitive-complexity check at 250. Changed-line formatting
+and `git diff --check` pass. A fresh standalone GCC build at `-j2` passes all 25
+GroundObjectStore tests and the event-order gate.
+
+This clone has a compilation database but no configured CMake engine build. The
+external build referenced by that database has no engine libraries. No engine-linked
+target was built or run: the updated/new headless settling, reload, edited/coarse
+terrain and zero-read cases, retained headless regressions and pinned engine hash
+tests remain runtime-unverified. Acceptance contract documents and fixture files
+are unchanged.

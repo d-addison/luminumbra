@@ -26,14 +26,12 @@
 #include <filesystem>
 #include <glm/common.hpp>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
 #include <span>
 #include <stdexcept>
 #include <thread> // opt-in job-wedge watchdog monitor thread
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -4683,157 +4681,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
     // delegates to the one shared height implementation.
     return ComputeShapedHeightSample(world_x, world_z).final_height;
-}
-
-namespace {
-
-bool ValidTerrainProbePosition(const Vec3& requested) {
-    return std::isfinite(requested.x) && std::isfinite(requested.y) && std::isfinite(requested.z) &&
-           std::abs(requested.x) < 16777216.0f && std::abs(requested.z) < 16777216.0f &&
-           std::abs(requested.y) < 1048576.0f;
-}
-
-} // namespace
-
-std::vector<std::shared_ptr<Chunk>>
-SHIELD_WorldSystem::AcquireTerrainProbeChunks(const std::vector<Vec3>& requests) const {
-    std::map<std::pair<int, int>, int> columns;
-    for (const auto& requested : requests) {
-        if (!ValidTerrainProbePosition(requested))
-            continue;
-        const auto coords = world_to_chunk_coords(requested);
-        auto [column, inserted] = columns.try_emplace({coords.x, coords.z}, coords.y);
-        if (!inserted)
-            column->second = std::max(column->second, coords.y);
-    }
-    std::vector<std::shared_ptr<Chunk>> chunks;
-    if (columns.empty() || !m_durable_residency || m_durable_read_failed)
-        return chunks;
-    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
-    for (const auto& [id, coords] : m_durable_chunks) {
-        const auto column = columns.find({coords.x, coords.z});
-        if (column == columns.end() || coords.y > column->second)
-            continue;
-        const auto resident = find_streamed_chunk(coords);
-        if ((resident && resident->get_state() != ChunkState::Loading) || m_parked.contains(id))
-            continue;
-        const auto chunk = read_committed_chunk(coords);
-        if (m_durable_read_failed)
-            return {};
-        if (chunk)
-            chunks.push_back(chunk);
-    }
-    return chunks;
-}
-
-std::optional<float>
-SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested,
-                                      const std::vector<std::shared_ptr<Chunk>>& prepared) const {
-    return ProbeTerrainBelowBatch({requested}, prepared).front();
-}
-
-std::vector<std::optional<float>> SHIELD_WorldSystem::ProbeTerrainBelowBatch(
-    const std::vector<Vec3>& requests, const std::vector<std::shared_ptr<Chunk>>& prepared) const {
-    if (requests.empty())
-        return {};
-    // Index in-memory truth once; each distinct position samples only its own vertical column.
-    using Column = std::map<int, std::shared_ptr<Chunk>>;
-    std::map<std::pair<int, int>, Column> columns;
-    const auto index = [&columns](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->get_state() == ChunkState::Loading)
-            return;
-        const auto coords = chunk->get_coords();
-        columns[{coords.x, coords.z}].emplace(coords.y, chunk);
-    };
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        (void)id;
-        index(chunk);
-    }
-    for (const auto& [id, parked] : m_parked) {
-        (void)id;
-        index(parked.chunk);
-    }
-    for (const auto& chunk : prepared)
-        index(chunk);
-    const auto probe = [this, &columns](const Vec3& requested) -> std::optional<float> {
-        const auto column = world_to_chunk_coords(requested);
-        const auto found = columns.find({column.x, column.z});
-        if (found == columns.end())
-            return std::nullopt;
-        const float procedural = GetTerrainHeightAt(requested.x, requested.z);
-        constexpr int nx = CHUNK_SIZE_X + 1, ny = CHUNK_SIZE_Y + 1, nz = CHUNK_SIZE_Z + 1;
-        // A missing band can hide an edited surface above every lower candidate.
-        for (int cy = column.y;; --cy) {
-            const auto available = found->second.find(cy);
-            if (available == found->second.end())
-                return std::nullopt;
-            const auto& chunk = available->second;
-            const auto coords = chunk->get_coords();
-            const float bottom = static_cast<float>(static_cast<double>(cy) * CHUNK_SIZE_Y);
-            if (chunk->sdf_data.size() != static_cast<std::size_t>(nx * ny * nz)) {
-                // Only a verified generated heightmap in the surface's own band permits
-                // the procedural fallback. Edited or incomplete authority must wait.
-                if (chunk->sdf_data.empty() &&
-                    chunk->sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
-                    chunk->heightmap_data.size() == static_cast<std::size_t>(nx * nz) &&
-                    std::isfinite(procedural) && procedural >= bottom &&
-                    procedural < bottom + CHUNK_SIZE_Y && procedural <= requested.y)
-                    return procedural;
-                return std::nullopt;
-            }
-            const float lx = std::clamp(
-                requested.x - static_cast<float>(static_cast<double>(coords.x) * CHUNK_SIZE_X),
-                0.0f,
-                static_cast<float>(CHUNK_SIZE_X));
-            const float lz = std::clamp(
-                requested.z - static_cast<float>(static_cast<double>(coords.z) * CHUNK_SIZE_Z),
-                0.0f,
-                static_cast<float>(CHUNK_SIZE_Z));
-            const int ix = std::min(static_cast<int>(lx), CHUNK_SIZE_X - 1);
-            const int iz = std::min(static_cast<int>(lz), CHUNK_SIZE_Z - 1);
-            const float fx = lx - static_cast<float>(ix), fz = lz - static_cast<float>(iz);
-            const auto plane = [ix, iz, fx, fz, sdf = chunk->sdf_data.data()](int y) {
-                const auto at = [sdf, y](int x, int z) {
-                    return sdf[static_cast<std::size_t>(x + nx * (y + ny * z))];
-                };
-                return (at(ix, iz) * (1.0f - fx) + at(ix + 1, iz) * fx) * (1.0f - fz) +
-                       (at(ix, iz + 1) * (1.0f - fx) + at(ix + 1, iz + 1) * fx) * fz;
-            };
-            float previous_y = std::min(requested.y - bottom, static_cast<float>(CHUNK_SIZE_Y));
-            const int lower = std::min(static_cast<int>(previous_y), CHUNK_SIZE_Y - 1);
-            const float fraction = previous_y - static_cast<float>(lower);
-            float previous = plane(lower) * (1.0f - fraction) + plane(lower + 1) * fraction;
-            if (!std::isfinite(previous))
-                return std::nullopt;
-            if (previous == 0.0f)
-                return bottom + previous_y;
-            for (int y = lower; y >= 0; --y) {
-                const float density = plane(y);
-                if (!std::isfinite(density))
-                    return std::nullopt;
-                if (previous > 0 && density <= 0)
-                    return bottom + static_cast<float>(y) +
-                           (previous_y - static_cast<float>(y)) * (-density) / (previous - density);
-                previous = density;
-                previous_y = static_cast<float>(y);
-            }
-        }
-    };
-    std::map<std::tuple<float, float, float>, std::optional<float>> cache;
-    std::vector<std::optional<float>> results;
-    results.reserve(requests.size());
-    for (const auto& requested : requests) {
-        if (m_durable_read_failed || !ValidTerrainProbePosition(requested)) {
-            results.push_back(std::nullopt);
-            continue;
-        }
-        const auto key = std::make_tuple(requested.x, requested.y, requested.z);
-        auto [entry, inserted] = cache.try_emplace(key);
-        if (inserted)
-            entry->second = probe(requested);
-        results.push_back(entry->second);
-    }
-    return results;
 }
 
 SHIELD_WorldSystem::WaterStateHash SHIELD_WorldSystem::debug_water_state_hash() const {
