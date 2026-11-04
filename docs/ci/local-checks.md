@@ -436,6 +436,39 @@ declaration across Windows, Apple and Linux link branches and exercise its
 compile and both tidy plans. Native database generation remains CI qualification.
 Configuration generates engine/stb headers; the only build target is `glad`
 for its generated headers. It does not link engine/test targets or run CTest.
+
+The two configurations restore an exact `fast-deps-v1` source snapshot keyed by
+the vendor declarations, dependency lock template, verifier and Jolt overlay
+inputs. There is no prefix fallback. A miss fetches the 17 generic dependencies
+once with `offline_deps.py snapshot`; the committed lock remains unchanged.
+The resolved lock travels with the cache. Each `stage --build-local` verifies
+declarations, resolved Git revisions, submodules and SHA-256 source digests,
+then copies sources into separate GCC and Clang scratch directories. No build
+tree, generated headers, Git administration for staged sources or compiler
+objects are restored. FetchContent builds remain local to each build root.
+`GLAD_REPRODUCIBLE=ON` uses the verified bundled registry and platform header
+instead of downloading `gl.xml`. RmlUi retains its fresh owned delivery and
+complete manifest/patch verification in each build root; it is excluded from
+this generic source cache. Fully disconnected mode is not enabled by this stage.
+
+Only main/devel pushes save the verified snapshot, before configure can modify
+any sources. The uncompressed bundle, including Git metadata and resolved lock,
+must fit a 500,000,000-byte save cap; an oversized bundle remains runner-local.
+PRs and manual runs only restore. The existing cleanup policy retains the newest
+source generation per branch within its unchanged 9.5 GB repository budget,
+with its existing head and six-hour recency protections. Compiler cache caps
+remain unchanged. Misses still work, and invalid restored sources fail verification.
+
+The fast job has no `needs` consumers. Required GCC, full tidy, ASan, preview
+and performance jobs do not depend on it. ASan's separate `fast-lane` job runs
+Python contracts before admitting ASan shards; that fail-fast dependency remains.
+A Fast compile job timeout therefore cannot retroactively cancel those jobs via
+the workflow graph. A newer PR run can cancel an older run through workflow
+concurrency. Cross-workflow tier cancellation would require an external caller;
+the campaign gate's cancellation behavior cannot be established from this repo.
+The supplied log's roughly 12 minutes of dependency fetching before replay
+matches the previously cold, duplicate FetchContent populations. It does not
+distinguish ordinary transfer cost from runner network contention or retries.
 The `ci` command shares the local dependency selector, scans ordinary and
 analyzer contexts and unions both compiler selections. Within the replay budget
 it replays all variants of every selected file. Each compiler's dependency scan
@@ -469,6 +502,29 @@ occupied worker batches: a nonempty union requires at least one variant in each
 compiler database. This leaves roughly five minutes for other work in a
 12-minute target; the job timeout stays 20 minutes. These are estimates, not
 completed per-variant measurements; hosted duration qualification is pending.
+There is no recorded hosted percentile distribution in the workflow or these
+docs. The reported observations are one similar-head success at 15.5 minutes
+and three cap cancellations at 20 minutes during concurrent PR validation;
+the cancellations are censored observations, not completed durations. Keep the
+20-minute cap while collecting cold/warm source-cache hits, configure and replay
+times, and completed job durations. Those measurements should determine whether
+a different cap is justified; the current evidence supports no replacement value.
+
+Campaign gate proposal (outside this repository): recognize a distinct
+`Fast compile cap reached (20 minutes)` outcome only from the exact workflow/job
+identity and an explicit timeout conclusion or runner timeout diagnostic.
+Cancellation or elapsed time alone is insufficient. Record a durable retry claim
+keyed by run ID and job ID, verify that the candidate SHA is still current and
+the run has completed, then request one job-specific rerun with its dependents.
+Fast compile has no dependents, so successful heavy jobs need no replay.
+Do not cancel active heavy workflows for this advisory timeout. Follow the new
+attempt in the same gate process, checking its workflow/SHA identity and latest
+result. The retry request does not resolve the cap or satisfy required checks;
+only verified rerun results can resolve the original outcome under the existing
+audit policy. Preserve all failure/freeze audits, fail closed on ambiguous
+identity or missing timeout evidence, and leave a second cap or ordinary failure
+for explicit resolution. This proposal does not apply to superseded runs, manual
+cancellation or qualification captures. No gate script changes are made here.
 
 GCC compiles use isolated scratch object paths. The first-party CMake helper
 adds the private `LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1` definition for every
@@ -502,15 +558,14 @@ orchestrator allows at most four workers and uses two; each per-variant shell
 gate uses one worker. Temporary databases, manifests and objects are removed
 on success and failure. The existing full-scope tidy invocation is unchanged.
 
-There are no new Actions cache restores, saves or remote cache prefixes.
 Runner-local ccache has a separate directory and a 250 MB maximum. Its namespace
 includes compiler version/path identity, Release configuration, resolved ordered
 arguments and working directories, the fatal warning profile, build/dependency
 CMake content, the dependency lock and selector/tidy policy content. ccache's
 own keys additionally cover compiler content and preprocessed dependencies.
-No result cache can omit selection scans or tidy. This adds zero remote storage
-to the existing at-most-10-GB Actions policy and requires no retention-prefix
-registration. Selected files, every command variant (working directory and
+No result cache can omit selection scans or tidy. Compiler objects remain local;
+the separate source cache described above shares the existing Actions storage
+budget and cleanup policy. Selected files, every command variant (working directory and
 command digest; full arguments in the log), unsupported configurations,
 scan/compile/tidy timings and local cache statistics appear in the job summary,
 including failure diagnostics when validation fails. A combined command
