@@ -1,6 +1,7 @@
 #include "SimulationEventBus.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -110,7 +111,8 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
         std::vector<PendingEvent> due;
         auto first_future = pending_events_.begin();
         const auto batch_end =
-            resuming ? pending_events_.begin() + pending_batch_size_ : pending_events_.end();
+            resuming ? pending_events_.begin() + static_cast<std::ptrdiff_t>(pending_batch_size_)
+                     : pending_events_.end();
         while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
             const auto& event = first_future->event;
             const auto bytes = pending_bytes_.find(event.topic);
@@ -131,9 +133,10 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
                 pending_bytes_[event.topic] += event.canonical_size() + 1;
             }
             // Preserve this batch's order and handler cutoffs before forming the next batch.
-            pending_events_.insert(pending_events_.begin(),
-                                   std::make_move_iterator(due.begin() + current),
-                                   std::make_move_iterator(due.end()));
+            pending_events_.insert(
+                pending_events_.begin(),
+                std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
+                std::make_move_iterator(due.end()));
             pending_batch_size_ += due.size() - current;
         };
         try {
