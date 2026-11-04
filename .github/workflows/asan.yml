@@ -217,7 +217,7 @@ jobs:
           ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json
           ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json
           # Balance fixture and required-suite groups using recorded costs.
-          python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
+          python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --timings tools/ci/asan_timings.json --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
           # Recheck the ordered roster in the same context immediately before CTest.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan
