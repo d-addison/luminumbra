@@ -841,5 +841,138 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", service[end:])
 
 
+class RegionalEnergySourceContract(unittest.TestCase):
+    def test_energy_ownership_reads_only_overlapping_pages_without_serialization(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        owns = source[source.index("boolEnergyFieldState::OwnsRegion("):
+                      source.index("std::stringEnergyFieldState::RegionBytes(")]
+        for forbidden in ("RegionBytes(", "CanonicalBytes(", "ostringstream", ":m_pages)"):
+            self.assertNotIn(forbidden, owns)
+        for required in ("OwnerOfCell(cx,cz)==owner", "cell_range(owner.x)",
+                         "cell_range(owner.z)", "if(x0>=x1||z0>=z1)returnfalse;",
+                         "RegionalFloorDiv(z0,kEnergyPageCells)",
+                         "RegionalFloorDiv(z1-1,kEnergyPageCells)",
+                         "RegionalFloorDiv(x0,kEnergyPageCells)",
+                         "RegionalFloorDiv(x1-1,kEnergyPageCells)",
+                         "m_pages.find(PackPageKey(",
+                         "static_cast<std::uint64_t>(offset+end_x)*"
+                         "static_cast<std::uint64_t>(m_channels)",
+                         "static_cast<std::uint64_t>(page->second.values.size())",
+                         "page->second.values[static_cast<std::size_t>(i)]!=0"):
+            self.assertIn(required, owns)
+
+    def test_regional_energy_stages_participating_pages_and_reuses_diffusion_values(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        self.assertIn("EnergyFieldStatestaged(m_channels);", tick)
+        self.assertNotIn("staged=*this", tick)
+        self.assertIn("for(constautoowner:firing)", tick)
+        self.assertIn("RegionalCellRange(owner.x)", tick)
+        self.assertIn("if(present(px,pz)&&present(npx,npz))", tick)
+        allocation = tick.index("next.emplace(key,std::vector<std::int32_t>(")
+        sweep = tick.index("for(intiteration=0;!next.empty()&&iteration<kEnergyDiffuseIterations;")
+        self.assertLess(allocation, sweep)
+        self.assertIn("constauto&snapshot=staged.m_pages;", tick[sweep:])
+        self.assertNotIn("constautosnapshot=staged.m_pages;", tick)
+        self.assertNotIn("next.emplace(", tick[sweep:])
+        self.assertIn("RegionalRecordFits(&staged)", tick)
+        self.assertIn("m_pages.insert(std::move(node))", tick)
+
+    def test_energy_admission_reuses_immutable_page_facts_and_invalidates_every_writer(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        facts = source[source.index("EnergyFieldState::Page::regional_facts("):
+                       source.index("std::stringEnergyFieldState::RegionBytes(")]
+        self.assertLess(facts.index("if(regional_summary)return*regional_summary;"),
+                        facts.index("i<values.size()"))
+        for guard in ("channels>=1&&channels<=64", "px>=-43691&&px<=43690",
+                      "pz>=-43691&&pz<=43690", "if(!ValidEnergyOwner(owner))",
+                      "facts.owner_count==facts.owners.size()", "facts.record_bytes>kMaxRegionalRecordBytes",
+                      "token_bytes>kMaxRegionalRecordBytes-facts.record_bytes"):
+            self.assertIn(guard, facts)
+        self.assertIn("regional_summary=facts;return*regional_summary;", facts)
+        for begin, end in (("EnergyFieldState::Page&EnergyFieldState::EnsurePage(",
+                            "voidEnergyFieldState::CatchUpWindowPages()"),
+                           ("voidEnergyFieldState::CatchUpWindowPages()",
+                            "std::uint64_tEnergyFieldState::ApplyDeposits()"),
+                           ("voidEnergyFieldState::DecayAndDiffuseWindow()",
+                            "voidEnergyFieldState::StampWindowPages()"),
+                           ("voidEnergyFieldState::NormalizeAllPages()",
+                            "std::stringEnergyFieldState::SerializeRecord(")):
+            self.assertIn("regional_summary.reset();", source[source.index(begin):source.index(end)])
+        tick = source[source.index("boolEnergyFieldState::TickRegional("):]
+        stage = tick[tick.index("constautostage_page="):tick.index("std::set<std::pair<RegionKey,std::int64_t>>touched;")]
+        self.assertIn("existing->second.regional_summary.reset();", stage)
+        self.assertIn("page.regional_summary.reset();", stage)
+        owners = source[source.index("boolEnergyFieldState::ValidateRegionalOwners("):
+                        source.index("boolEnergyFieldState::TickRegional(")]
+        self.assertIn("page.regional_facts(key,m_channels)", owners)
+        self.assertIn("if(!facts.valid)returnfalse;", owners)
+        self.assertIn("!records.contains(facts.owners[i])||!ages.contains(facts.owners[i])", owners)
+        self.assertNotIn("page.values", owners)
+        capacity = source[source.index("boolEnergyFieldState::RegionalRecordFits("):
+                          source.index("boolEnergyFieldState::DeserializeRegionalRecord(")]
+        self.assertIn("constauto&facts=page.regional_facts(key,m_channels);", capacity)
+        self.assertIn("if(!facts.valid)returnfalse;", capacity)
+        self.assertIn("constautocount=facts.record_bytes;", capacity)
+        self.assertIn("count>kMaxRegionalRecordBytes-bytes", capacity)
+        self.assertNotIn("page.values", capacity)
+
+    def test_energy_region_hash_projects_at_most_nine_pages_in_canonical_order(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        region = source[source.index("std::stringEnergyFieldState::RegionBytes("):
+                        source.index("std::stringEnergyFieldState::CanonicalRegionalBytes()")]
+        for required in ("if(!ValidEnergyOwner(owner))return{};", "std::array<std::int64_t,9>keys{};",
+                         "RegionalCellRange(owner.x)", "RegionalCellRange(owner.z)",
+                         "FloorDiv(end_x-1,kEnergyPageCells)", "FloorDiv(end_z-1,kEnergyPageCells)",
+                         "constautosorted_count=(std::min)(key_count,keys.size());",
+                         "for(std::size_ti=1;i<sorted_count;++i)",
+                         "constautokey=keys[i];autoposition=i;",
+                         "while(position>0&&key<keys[position-1])",
+                         "keys[position]=keys[position-1];--position;",
+                         "keys[position]=key;",
+                         "page_index<sorted_count",
+                         "constautofound=m_pages.find(key);", "if(found==m_pages.end())continue;",
+                         "OwnerOfCell(static_cast<int>(cx),static_cast<int>(cz))!=owner"):
+            self.assertIn(required, region)
+        self.assertNotIn(":m_pages)", region)
+        self.assertNotIn("std::sort(", region)
+
+
+    def test_regional_codec_keeps_legacy_phase_and_admission_separate(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
+                             .read_text(encoding="utf-8"))
+        legacy = source[source.index("std::stringEnergyFieldState::SerializeRecord("):
+                        source.index("voidEnergyFieldState::ResetEmptyAtTick(")]
+        for required in ("m_channels>kEnergyRecordChannels", "autonormalized=*this;",
+                         "normalized.NormalizeAllPages();", "normalized.m_pages.size()>kEnergyWritePages",
+                         "bytes.size()>kEnergyWriteRecordBytes", "remaining>kEnergyCadenceTicks"):
+            self.assertIn(required, legacy)
+        self.assertLess(legacy.index("bytes.size()>kEnergyWriteRecordBytes"),
+                        legacy.index("m_pages=std::move(normalized.m_pages)"))
+        regional = source[source.index("std::stringEnergyFieldState::SerializeRegionalRecord()const"):
+                          source.index("boolEnergyFieldState::RegionalRecordFits(")]
+        self.assertIn('out<<"EFS1"<<m_channels<<"0\\n";', regional)
+        self.assertNotIn("NormalizeAllPages", regional)
+        decode = source[source.index("boolEnergyFieldState::DeserializeRegionalRecord("):
+                        source.index("boolEnergyFieldState::ValidateRegionalOwners(")]
+        self.assertIn("phase!=0", decode)
+        self.assertLess(decode.index("staged.SerializeRegionalRecord()!=record"),
+                        decode.index("m_pages.swap(staged.m_pages)"))
+
+    def test_scalar_diffusion_empty_gate_preserves_the_existing_exchange(self):
+        source = compact_cpp((ROOT / "src/luminumbra_common/fields/ScalarFieldDiffusion.cpp")
+                             .read_text(encoding="utf-8"))
+        header = compact_cpp((ROOT / "src/luminumbra_common/fields/ScalarFieldDiffusion.h")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("constEdgeGate&gate);", header)
+        self.assertNotIn("constEdgeGate&gate={}", header)
+        self.assertIn("if(!can_exchange(lhs,rhs)||(admits&&!admits(lhs,rhs)))", source)
+        self.assertIn("gate(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", source)
+
+
 if __name__ == "__main__":
     unittest.main()
