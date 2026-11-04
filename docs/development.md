@@ -30,6 +30,8 @@ both Visual C++ and MSYS2 UCRT64 through `.github/workflows/windows-build.yml`.
 | `coverage` | GCC/Clang coverage instrumentation |
 | `debug-simo0` | Simulation optimization-parity investigation |
 
+In GNU Debug ASan builds, `luminumbra_client` uses `-O1` while retaining Debug assertions.
+
 Configure, build, and test a preset with matching names:
 
 ```sh
