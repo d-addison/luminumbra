@@ -101,7 +101,9 @@ UCRT_ROUTE = (
     "github.event_name == 'workflow_dispatch'"
 )
 SERVER_ROUTE = (
-    "((github.event_name == 'pull_request' && github.base_ref == 'main') || "
+    "((github.event_name == 'pull_request' && (github.base_ref == 'main' || "
+    "(github.base_ref == 'devel' && (needs.changes.result != 'success' || "
+    "needs.changes.outputs.needs_server_perf != 'false')))) || "
     "(github.event_name == 'push' && "
     "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && "
     "github.event.before != '0000000000000000000000000000000000000000'))"
@@ -1614,7 +1616,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(ci["tidy"], "if", 4), ci_event_condition("(!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ")"))
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ (" + WINDOWS_GUARD + ") && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + ") }}")
         perf = jobs(self.workflows["performance.yml"])
-        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
+        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
             value(perf["qualification-capture"], "if", 4),
             "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && "
@@ -3304,6 +3306,9 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
     def test_side_lanes_reuse_the_trusted_classifier_and_required_skip_pattern(self):
         performance = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
         reference = jobs(performance)["changes"]
+        reference = reference.split("      - name: Classify server performance paths\n", 1)[0]
+        reference = reference.replace(
+            "      needs_server_perf: ${{ steps.server-paths.outputs.needs_server_perf }}\n", "", 1)
         for filename in ("ci.yml", "asan.yml", "ucrt-attribution.yml"):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             classifier = jobs(workflow)["changes"]

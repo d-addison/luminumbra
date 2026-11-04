@@ -82,6 +82,169 @@ class PathGateTests(unittest.TestCase):
                 self.assertEqual(gate.main(), 0)
             self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=non_pr_event\n")
 
+    def test_server_performance_routes_sensitive_and_mixed_changes(self):
+        sensitive = (
+            "src/luminumbra_common/world/World.cpp",
+            "src/luminumbra_common/persistence/WorldPersistence.cpp",
+            "src/luminumbra_common/simulation/SimBudgetTelemetry.cpp",
+            "src/luminumbra_common/systems/WaterSystem.cpp",
+            "src/luminumbra_server/ServerStreamingBudget.h", "src/startup/RuntimeEntry.cpp",
+            "src/luminumbra_client/world/WorldgenOverride.cpp", "include/shared.h",
+            "data/common/systems.json", "worlds/atlas/presets/default.json", "config/default.json",
+            "test/fixtures/world.json", "res/world.json", "vendor/new.cpp",
+            "CMakeLists.txt", "CMakePresets.json", "cmake/Options.cmake",
+            "src/luminumbra_client/sources.cmake", "src/luminumbra_client/CMakeLists.txt",
+            "vcpkg.json", ".gitattributes",
+            "tools/perf/capture_sim_budget.py", "tools/perf/check_sim_budgets.py",
+            "tools/perf/baselines/sim-budgets.json", "tools/persistence/save_receipt.py",
+            "tools/ci/ci_paths.py", ".github/workflows/performance.yml", "scripts/check.py",
+            "unknown", "tools/new.py",
+        )
+        unrelated = (
+            "README.md", "docs/performance.md", "docs/new.md",
+            "src/luminumbra_client/ui/components/common/Button.cpp",
+            "src/luminumbra_client/rendering/WorldRenderer.cpp",
+        )
+        for path in (*sensitive, *unrelated):
+            for paths in ([path], ["docs/development.md", path], [path, "README.md"]):
+                with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
+                    self.assertEqual(gate.classify_performance(
+                        ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel"),
+                        path in sensitive)
+
+    def test_server_performance_preserves_full_routes_and_fails_open(self):
+        for event, base_ref, repo, head_repo, base, head in (
+                ("push", "devel", "owner/repo", "owner/repo", "base", "head"),
+                ("schedule", "devel", "owner/repo", "owner/repo", "base", "head"),
+                ("workflow_dispatch", "devel", "owner/repo", "owner/repo", "base", "head"),
+                ("pull_request", "main", "owner/repo", "owner/repo", "base", "head"),
+                ("pull_request", "", "owner/repo", "owner/repo", "base", "head"),
+                ("pull_request", "devel", "owner/repo", "fork/repo", "base", "head"),
+                ("pull_request", "devel", "", "", "base", "head"),
+                ("pull_request", "devel", "owner/repo", "owner/repo", "", "head"),
+                ("pull_request", "devel", "owner/repo", "owner/repo", "base", "")):
+            with self.subTest(event=event, base_ref=base_ref, repo=repo), patch.object(gate, "changed_paths") as diff:
+                self.assertTrue(gate.classify_performance(ROOT, event, base, head, repo, head_repo, base_ref))
+                diff.assert_not_called()
+        for outcome in ([], OSError("missing git"), subprocess.CalledProcessError(1, "git")):
+            with self.subTest(outcome=outcome), patch.object(gate, "changed_paths") as diff:
+                if isinstance(outcome, Exception):
+                    diff.side_effect = outcome
+                else:
+                    diff.return_value = outcome
+                self.assertTrue(gate.classify_performance(
+                    ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel"))
+        for shallow in ("true\n", "", "unknown\n"):
+            self.history.return_value = shallow
+            self.assertTrue(gate.classify_performance(
+                ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel"))
+
+    def test_server_performance_cli_emits_one_boolean_without_changing_shared_outputs(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(gate, "changed_paths", return_value=["README.md"]):
+            output = Path(directory) / "output"
+            with patch.object(sys, "argv", [
+                "ci_paths.py", "classify-performance", "--event", "pull_request", "--base-ref", "devel",
+                "--base", "base", "--head", "head", "--repository", "owner/repo",
+                "--head-repository", "owner/repo", "--output", str(output),
+            ]):
+                self.assertEqual(gate.main(), 0)
+            self.assertEqual(output.read_text(), "needs_server_perf=false\n")
+
+    def test_server_performance_moves_and_deletions_keep_measurements_enabled(self):
+        for paths in (["docs/new.md", "src/luminumbra_common/world/deleted.cpp"],
+                      ["src/luminumbra_common/world/deleted.cpp", "docs/new.md"],
+                      ["tools/perf/baselines/deleted.json"]):
+            with self.subTest(paths=paths), patch.object(gate.subprocess, "check_output", side_effect=[
+                "false\n", "ancestor\n", b"\0".join(path.encode() for path in paths) + b"\0",
+            ]):
+                self.assertTrue(gate.classify_performance(
+                    ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel"))
+
+    def test_server_performance_workflow_bootstrap_uses_base_and_validates_outputs(self):
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text()
+        script = run_block(workflow, "Classify server performance paths")
+        for content, failed, missing, sensitive, expected in (
+                ("needs_server_perf=false\n", False, False, False, "false"),
+                ("needs_server_perf=true\n", False, False, False, "true"),
+                ("needs_server_perf=false\n", True, False, False, "true"),
+                ("needs_server_perf=false\n", False, True, False, "true"),
+                ("needs_server_perf=false\n", False, False, True, "true"),
+                ("", False, False, False, "true"),
+                ("needs_cpp=false\n", False, False, False, "true"),
+                ("needs_server_perf=FALSE\n", False, False, False, "true"),
+                ("needs_server_perf=false\nneeds_server_perf=false\n", False, False, False, "true")):
+            with self.subTest(content=content, failed=failed, missing=missing, sensitive=sensitive), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                base = root / "base.py"
+                base.write_text(
+                    "import os, sys\nfrom pathlib import Path\n"
+                    "assert sys.argv[1:] == ['classify-performance', '--root', os.environ['GITHUB_WORKSPACE']]\n"
+                    + ("raise SystemExit(1)\n" if failed else
+                       "Path(os.environ['GITHUB_OUTPUT']).write_text(" + repr(content) + ")\n"))
+                head = root / "tools/ci/ci_paths.py"
+                head.parent.mkdir(parents=True)
+                marker = root / "head-executed"
+                head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+                (root / "classified-perf-paths.txt").write_text("needs_server_perf=false\n")
+                output = root / "output"
+                fixtures = (
+                    'git() { case "$1" in\n'
+                    'diff) test "$FAKE_SENSITIVE" = false;;\n'
+                    'show) test "$FAKE_MISSING" = false || return 1; cat "$FAKE_BASE_SCRIPT";;\n'
+                    '*) return 1;;\nesac; }\n'
+                    'python3() { "$FAKE_PYTHON" "$@"; }\n'
+                )
+                env = dict(os.environ, CI_EVENT="pull_request", CI_BASE_REF="devel", CI_BASE_SHA="base",
+                           CI_HEAD_SHA="head", CI_REPOSITORY="owner/repo", CI_HEAD_REPOSITORY="owner/repo",
+                           GITHUB_WORKSPACE=root.as_posix(), GITHUB_OUTPUT=output.as_posix(),
+                           RUNNER_TEMP=root.as_posix(), FAKE_BASE_SCRIPT=base.as_posix(),
+                           FAKE_PYTHON=Path(sys.executable).as_posix(),
+                           FAKE_MISSING=str(missing).lower(), FAKE_SENSITIVE=str(sensitive).lower())
+                result = subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script],
+                                        env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(marker.exists())
+                self.assertEqual(output.read_text(), f"needs_server_perf={expected}\n")
+
+    def test_paired_performance_job_routes_prs_and_preserves_pushes_and_caps(self):
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text()
+        job = workflow.split("  server-smoke-comparison:\n", 1)[1].split("\n  qualification-capture:", 1)[0]
+        expression = " ".join(job.split("    if: >-\n", 1)[1].split("    runs-on:", 1)[0].split())
+        self.assertIn("name: Server smoke observation / base versus head\n", job)
+        self.assertIn("runs-on: ubuntu-24.04\n    timeout-minutes: 90\n", job)
+        self.assertNotIn("continue-on-error: true", job.split("      - name: Clean compiler cache", 1)[0])
+        for event, base, draft, classification, perf, cancelled, before in product(
+                ("pull_request", "push", "schedule", "workflow_dispatch"), ("main", "devel", "other"),
+                (False, True, None), ("success", "failure", "skipped", "cancelled"),
+                ("true", "false", "", "unknown"), (False, True), ("a" * 40, "0" * 40)):
+            context = {
+                "github.event_name": event, "github.base_ref": base, "github.ref": f"refs/heads/{base}",
+                "github.event.pull_request.draft": draft, "github.event.before": before,
+                "needs.changes.result": classification, "needs.changes.outputs.needs_server_perf": perf,
+            }
+            rendered = re.sub(r"\b(?:github|needs)\.[\w.-]+", lambda match: repr(context[match[0]]), expression)
+            rendered = rendered.replace("!cancelled()", repr(not cancelled)).replace("== false", "== False")
+            rendered = rendered.replace("&&", "and").replace("||", "or")
+            expected = not cancelled and (
+                (event == "pull_request" and draft is False and
+                 (base == "main" or (base == "devel" and (classification != "success" or perf != "false"))))
+                or (event == "push" and base in ("main", "devel") and before != "0" * 40))
+            with self.subTest(context=context, cancelled=cancelled):
+                self.assertEqual(eval(rendered, {"__builtins__": {}}), expected)
+        capture = run_block(workflow, "Capture simulation budget evidence")
+        for command in (
+                "head/tools/perf/capture_sim_budget.py", "--binary build/head/bin/luminumbra_server_app",
+                "--ticks 600 --seed 1337 --radius 1 --collision-radius 1",
+                "head/tools/perf/propose_sim_budgets.py", "head/tools/perf/check_sim_budgets.py",
+                "head/tools/perf/baselines/sim-budgets.json --require-complete", "exit $check_rc"):
+            self.assertIn(command, capture)
+        self.assertIn("name: Capture simulation budget evidence\n        timeout-minutes: 20\n", job)
+        for name in ("Upload paired evidence", "Upload simulation budget evidence", "Upload water paired evidence"):
+            self.assertIn(f"name: {name}\n        if: always()\n", job)
+        water = run_block(workflow, "Compare water base and candidate observation")
+        self.assertIn("--limit 5 --min-samples 20", water)
+        self.assertIn("--evidence-metric water_phase_p95_ms", job)
+
     def test_python_runner_executes_plan_and_propagates_failures(self):
         commands = [("tools/ci/test_check_docs.py",)]
         with patch.object(sys, "argv", ["ci_paths.py", "python-tests"]), patch.object(
