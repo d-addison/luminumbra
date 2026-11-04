@@ -299,3 +299,57 @@ There is no configured CMake build in this clone, only a compilation database.
 The complete engine-linked headless/save tests, including the new integration
 cases and original flaky test, and pinned engine hash tests remain unexecuted.
 Acceptance contract documents and fixture bytes are unchanged.
+
+### Ground terrain authority across reload
+
+Ground settling previously indexed only published streaming residents. A save could
+retain an unsettled object and its distant terrain authority while reopening kept
+that terrain only in the durable inventory. The next due tick then settled the
+original object but left the reopened object waiting, changing ground bytes and
+the world hash.
+
+Both spawn-time and due-tick settling now prepare missing committed chunks for
+the requested columns before probing. Preparation uses the existing exact-identity
+durable reader and fault latch, deduplicates columns and does not generate terrain
+or change residency. These temporary inputs supplement resident and parked truth
+inside the probe; current in-memory authority takes precedence. This keeps the
+change local to terrain acquisition without adding simulation chunks to the render
+or water active set. The probe itself still performs no I/O or generation. Missing,
+incomplete or edited height-only bands still wait, and a committed-read fault stops
+the consumer before object aging or publication.
+
+Two headless regressions cover the change:
+
+- A distant unsettled object has resident edited terrain at save time and only
+  durable terrain after reopening. Five identical pinned-region ticks compare
+  serialized ground stores and world hashes, require the expected settled position
+  and age, and retain nonresidency in the reopened session. Subsequent spawns use
+  the same authority; final saves compare exact ground-file bytes.
+- Explicit preparation counts committed reads, shares duplicate requests, excludes
+  unrelated columns, preserves missing-band refusal, gives current edits priority,
+  and retains fail-stop refusal after a committed read fails. Individual and batch
+  probes perform no additional reads.
+
+The sibling sweep found these remaining residency-dependent water paths, left
+unchanged here: `SHIELD_WorldSystem::update` passes only streaming chunks to
+`WaterSystem::update`, whose initialization, simulation window and seam work use
+that set. Water level/flow queries, water injection and terraform bed coupling also
+use the water system's active map. These paths can omit parked or durable-only
+water and need separate simulation-activation qualification. `live_water_surface_at`
+and water debug probes also read live residency; their current callers are
+presentation or diagnostics.
+
+Regional scheduling/digests and enabled chunk hashing already use the combined
+live, parked and durable membership index. Water authority synchronization checks
+both live and parked changes. Terrain editing and synchronous surface preparation
+restore expected saved authority before mutation. Procedural height/density queries
+do not consult streaming residency. No sibling simulation behavior was changed.
+
+Verification: `clang++-18 -fsyntax-only` passes for GameSession, SHIELD_WorldSystem,
+the headless tests, WorldSaveService and LuaState. The three changed C++ translation
+units pass clang-tidy's cognitive-complexity check at 250. Formatting and
+`git diff --check` pass. This clone has only a compilation database, with no
+configured CMake build or engine libraries; no engine-linked target was built or
+run. Both new headless tests, the existing ground/probe integration tests and
+pinned engine hash tests remain runtime-unverified. Contract documents, existing
+test bodies and fixture bytes are unchanged.

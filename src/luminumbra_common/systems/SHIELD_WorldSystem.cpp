@@ -4685,24 +4685,76 @@ float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const
     return ComputeShapedHeightSample(world_x, world_z).final_height;
 }
 
-std::optional<float> SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested) const {
-    return ProbeTerrainBelowBatch({requested}).front();
+namespace {
+
+bool ValidTerrainProbePosition(const Vec3& requested) {
+    return std::isfinite(requested.x) && std::isfinite(requested.y) && std::isfinite(requested.z) &&
+           std::abs(requested.x) < 16777216.0f && std::abs(requested.z) < 16777216.0f &&
+           std::abs(requested.y) < 1048576.0f;
 }
 
-std::vector<std::optional<float>>
-SHIELD_WorldSystem::ProbeTerrainBelowBatch(const std::vector<Vec3>& requests) const {
+} // namespace
+
+std::vector<std::shared_ptr<Chunk>>
+SHIELD_WorldSystem::AcquireTerrainProbeChunks(const std::vector<Vec3>& requests) const {
+    std::map<std::pair<int, int>, int> columns;
+    for (const auto& requested : requests) {
+        if (!ValidTerrainProbePosition(requested))
+            continue;
+        const auto coords = world_to_chunk_coords(requested);
+        auto [column, inserted] = columns.try_emplace({coords.x, coords.z}, coords.y);
+        if (!inserted)
+            column->second = std::max(column->second, coords.y);
+    }
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    if (columns.empty() || !m_durable_residency || m_durable_read_failed)
+        return chunks;
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
+    for (const auto& [id, coords] : m_durable_chunks) {
+        const auto column = columns.find({coords.x, coords.z});
+        if (column == columns.end() || coords.y > column->second)
+            continue;
+        const auto resident = find_streamed_chunk(coords);
+        if ((resident && resident->get_state() != ChunkState::Loading) || m_parked.contains(id))
+            continue;
+        const auto chunk = read_committed_chunk(coords);
+        if (m_durable_read_failed)
+            return {};
+        if (chunk)
+            chunks.push_back(chunk);
+    }
+    return chunks;
+}
+
+std::optional<float>
+SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested,
+                                      const std::vector<std::shared_ptr<Chunk>>& prepared) const {
+    return ProbeTerrainBelowBatch({requested}, prepared).front();
+}
+
+std::vector<std::optional<float>> SHIELD_WorldSystem::ProbeTerrainBelowBatch(
+    const std::vector<Vec3>& requests, const std::vector<std::shared_ptr<Chunk>>& prepared) const {
     if (requests.empty())
         return {};
-    // Index residency once; each distinct position samples only its own vertical column.
+    // Index in-memory truth once; each distinct position samples only its own vertical column.
     using Column = std::map<int, std::shared_ptr<Chunk>>;
     std::map<std::pair<int, int>, Column> columns;
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        (void)id;
+    const auto index = [&columns](const std::shared_ptr<Chunk>& chunk) {
         if (!chunk || chunk->get_state() == ChunkState::Loading)
-            continue;
+            return;
         const auto coords = chunk->get_coords();
         columns[{coords.x, coords.z}].emplace(coords.y, chunk);
+    };
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        index(chunk);
     }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        index(parked.chunk);
+    }
+    for (const auto& chunk : prepared)
+        index(chunk);
     const auto probe = [this, &columns](const Vec3& requested) -> std::optional<float> {
         const auto column = world_to_chunk_coords(requested);
         const auto found = columns.find({column.x, column.z});
@@ -4771,9 +4823,7 @@ SHIELD_WorldSystem::ProbeTerrainBelowBatch(const std::vector<Vec3>& requests) co
     std::vector<std::optional<float>> results;
     results.reserve(requests.size());
     for (const auto& requested : requests) {
-        if (m_durable_read_failed || !std::isfinite(requested.x) || !std::isfinite(requested.y) ||
-            !std::isfinite(requested.z) || std::abs(requested.x) >= 16777216.0f ||
-            std::abs(requested.z) >= 16777216.0f || std::abs(requested.y) >= 1048576.0f) {
+        if (m_durable_read_failed || !ValidTerrainProbePosition(requested)) {
             results.push_back(std::nullopt);
             continue;
         }

@@ -2114,8 +2114,11 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         ++m_regionInputRejections.ground_spawns;
         return 0;
     }
-    SettleGroundObjectOnTerrain(candidate,
-                                m_worldSystem->ProbeTerrainBelow(GroundProbePosition(candidate)));
+    const auto position = GroundProbePosition(candidate);
+    const auto terrain = m_worldSystem->AcquireTerrainProbeChunks({position});
+    if (m_regionFault)
+        return 0;
+    SettleGroundObjectOnTerrain(candidate, m_worldSystem->ProbeTerrainBelow(position, terrain));
     const luminumbra::simulation::SimulationEvent notification{tick,
                                                                0,
                                                                m_simulationEventBus.next_sequence(),
@@ -2184,8 +2187,13 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
             }
         }
     }
-    const auto heights = positions.empty() ? std::vector<std::optional<float>>{}
-                                           : m_worldSystem->ProbeTerrainBelowBatch(positions);
+    std::vector<std::optional<float>> heights;
+    if (!positions.empty()) {
+        const auto terrain = m_worldSystem->AcquireTerrainProbeChunks(positions);
+        if (m_regionFault)
+            return;
+        heights = m_worldSystem->ProbeTerrainBelowBatch(positions, terrain);
+    }
     const auto settle = [&probe_indices, &heights](GroundObject& object) {
         return SettleGroundObjectOnTerrain(object, heights.at(probe_indices.at(object.id)));
     };

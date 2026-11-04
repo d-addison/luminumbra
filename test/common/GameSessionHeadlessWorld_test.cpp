@@ -6924,6 +6924,25 @@ void CreateGroundWorld(GameSession& session,
     ASSERT_TRUE(session.CreateWorld(name, "1337", "default"));
 }
 
+std::shared_ptr<Luminumbra::Chunk> GroundProbeChunk(const Luminumbra::IVec3& coords, float height) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    constexpr int nx = Luminumbra::CHUNK_SIZE_X + 1;
+    constexpr int ny = Luminumbra::CHUNK_SIZE_Y + 1;
+    constexpr int nz = Luminumbra::CHUNK_SIZE_Z + 1;
+    chunk->sdf_data.resize(nx * ny * nz);
+    for (int z = 0; z < nz; ++z) {
+        for (int y = 0; y < ny; ++y) {
+            for (int x = 0; x < nx; ++x) {
+                chunk->sdf_data[static_cast<std::size_t>(x + nx * (y + ny * z))] =
+                    static_cast<float>(coords.y * Luminumbra::CHUNK_SIZE_Y + y) - height;
+            }
+        }
+    }
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+
 // Spawns a ground object at (x_mm, 0, z_mm) with the fixed test type and payload.
 std::uint64_t SpawnGround(GameSession& session,
                           std::int64_t x_mm,
@@ -7932,4 +7951,131 @@ TEST(GameSessionHeadlessWorldTest, BatchedTerrainProbesMatchIndividualQueriesAnd
     for (std::size_t i = 0; i < requests.size(); ++i) {
         EXPECT_EQ(changed[i], world->ProbeTerrainBelow(requests[i])) << i;
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, UnsettledDistantGroundMatchesResidentAndDurableContinuation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, reopened;
+    CreateGroundWorld(original, root, jobs, "Distant ground continuation");
+    const Luminumbra::IVec3 coords{325, 0, -96};
+    const Luminumbra::Vec3 position{5208, 12, -1528};
+    auto* world = original.GetWorldSystem();
+    ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
+    const auto id = original.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(id, 0u);
+    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    original.PinActiveRegion(Luminumbra::world::GroundObjectStore::region_of(
+                                 original.GetGroundObjects().objects().at(id)),
+                             true);
+    ASSERT_TRUE(world->adopt_streamed_chunk(GroundProbeChunk(coords, 4.0f)));
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
+
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(original.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    auto* restored = reopened.GetWorldSystem();
+    ASSERT_EQ(restored->find_streamed_chunk(coords), nullptr);
+    const auto parked = restored->snapshot_parked_chunks();
+    ASSERT_TRUE(std::none_of(parked.begin(), parked.end(), [&coords](const auto& chunk) {
+        return chunk->get_coords() == coords;
+    }));
+    const auto durable = restored->durable_chunk_inventory();
+    ASSERT_NE(std::find(durable.begin(), durable.end(), coords), durable.end());
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+    // The ordinary query remains an in-memory probe, even with committed terrain available.
+    EXPECT_FALSE(restored->ProbeTerrainBelow(position).has_value());
+
+    for (int i = 0; i < 5; ++i) {
+        TickOnce(original);
+        TickOnce(reopened);
+        ASSERT_FALSE(original.GetRegionSchedulerFault().has_value());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(reopened.GetRegionSchedule(), original.GetRegionSchedule());
+        EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+        for (const auto* session : {&original, &reopened}) {
+            const auto& object = session->GetGroundObjects().objects().at(id);
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, 4000);
+            EXPECT_EQ(object.active_age, static_cast<std::uint64_t>(i + 1));
+        }
+        EXPECT_EQ(restored->find_streamed_chunk(coords), nullptr);
+    }
+    // Spawn-time settling uses the same committed authority as due-object settling.
+    const auto original_spawn = original.SpawnGroundObject(kGroundType, position, 0, 0);
+    const auto reopened_spawn = reopened.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(original_spawn, 0u);
+    ASSERT_EQ(reopened_spawn, original_spawn);
+    EXPECT_TRUE(reopened.GetGroundObjects().objects().at(reopened_spawn).settled());
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto ground_bytes =
+        ReadClockTestFile(P::WorldSaveService::ground_objects_path(original.GetWorldSaveDir()));
+    ASSERT_TRUE(reopened.SaveWorldState());
+    EXPECT_EQ(
+        ReadClockTestFile(P::WorldSaveService::ground_objects_path(reopened.GetWorldSaveDir())),
+        ground_bytes);
+}
+
+TEST(GameSessionHeadlessWorldTest, TerrainProbePreparationPreservesMissingBandsAndReadRefusals) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Prepared terrain refusals");
+    auto* world = session.GetWorldSystem();
+    const Luminumbra::IVec3 lower{325, 0, -96};
+    const Luminumbra::IVec3 upper{325, 1, -96};
+    const Luminumbra::Vec3 position{5208, 20, -1528};
+    std::size_t reads = 0;
+    std::string fault;
+    world->set_durable_chunk_loader(
+        [&reads](const auto& coords) {
+            ++reads;
+            return GroundProbeChunk(coords, 4.0f);
+        },
+        [&fault](const auto& error) { fault = error; });
+    world->remember_durable_chunks({lower, {400, 0, 400}});
+    EXPECT_FALSE(world->ProbeTerrainBelow(position).has_value());
+    EXPECT_EQ(reads, 0u);
+    auto terrain = world->AcquireTerrainProbeChunks({position, position});
+    EXPECT_EQ(reads, 1u);
+    EXPECT_FALSE(world->ProbeTerrainBelow(position, terrain).has_value());
+    EXPECT_EQ(reads, 1u);
+    EXPECT_TRUE(fault.empty());
+
+    world->remember_durable_chunks({upper});
+    terrain = world->AcquireTerrainProbeChunks({position, position});
+    EXPECT_EQ(reads, 3u);
+    EXPECT_EQ(world->ProbeTerrainBelow(position, terrain), std::optional<float>{4.0f});
+    EXPECT_EQ(world->ProbeTerrainBelowBatch({position, position}, terrain),
+              (std::vector<std::optional<float>>{4.0f, 4.0f}));
+    EXPECT_EQ(reads, 3u);
+    EXPECT_EQ(world->find_streamed_chunk(lower), nullptr);
+    EXPECT_EQ(world->find_streamed_chunk(upper), nullptr);
+
+    // Current in-memory edits supersede the older committed record.
+    ASSERT_TRUE(world->adopt_streamed_chunk(GroundProbeChunk(lower, 7.5f)));
+    terrain = world->AcquireTerrainProbeChunks({position});
+    EXPECT_EQ(reads, 4u);
+    EXPECT_EQ(world->ProbeTerrainBelow(position, terrain), std::optional<float>{7.5f});
+    EXPECT_EQ(reads, 4u);
+
+    world->set_durable_chunk_loader(
+        [&reads](const auto&) -> std::shared_ptr<Luminumbra::Chunk> {
+            ++reads;
+            throw std::runtime_error("committed terrain unavailable");
+        },
+        [&fault](const auto& error) { fault = error; });
+    EXPECT_TRUE(world->AcquireTerrainProbeChunks({position}).empty());
+    EXPECT_EQ(fault, "committed terrain unavailable");
+    EXPECT_EQ(reads, 5u);
+    EXPECT_FALSE(world->ProbeTerrainBelow(position, terrain).has_value());
+    EXPECT_TRUE(world->AcquireTerrainProbeChunks({position}).empty());
+    EXPECT_EQ(reads, 5u);
 }
