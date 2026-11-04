@@ -7401,6 +7401,53 @@ TEST(GameSessionHeadlessWorldTest, MetadataOnlySaveAfterSpawnWritesObjectFileAnd
     EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(save)));
 }
 
+namespace Luminumbra::world {
+
+TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Empty ground metadata"));
+    const auto save = session.GetWorldSaveDir();
+    const auto ground_path = P::WorldSaveService::ground_objects_path(save);
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    ASSERT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    EXPECT_FALSE(fs::exists(ground_path));
+
+    GroundEvents saved_seen;
+    CollectGroundEvents(session, saved_seen);
+    session.GetSimulationEventBus().publish(0, "ground.spawned", "first", 1);
+    session.GetSimulationEventBus().publish(0, "ground.despawned", "second", -1);
+    session.GetSimulationEventBus().publish(0, "ground.spawned", "third", 1);
+    const auto notifications = session.CaptureGroundNotifications().canonical_bytes();
+    ASSERT_FALSE(notifications.empty());
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    EXPECT_TRUE(fs::exists(ground_path));
+    EXPECT_TRUE(saved_seen.empty());
+    EXPECT_EQ(session.CaptureGroundNotifications().canonical_bytes(), notifications);
+
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_TRUE(loaded.GetGroundObjects().empty());
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    GroundEvents seen;
+    CollectGroundEvents(loaded, seen);
+    const GroundEvents expected{
+        {"ground.despawned", "second"}, {"ground.spawned", "first"}, {"ground.spawned", "third"}};
+    ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    EXPECT_EQ(seen, expected);
+    EXPECT_TRUE(loaded.CaptureGroundNotifications().events.empty());
+    ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    EXPECT_EQ(seen, expected);
+}
+
+} // namespace Luminumbra::world
+
 TEST(GameSessionHeadlessWorldTest, ReloadedSessionRestoresGroundObjectsAndContinuesIds) {
     const HeadlessRoot root;
     JobSystem jobs;

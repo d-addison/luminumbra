@@ -93,6 +93,10 @@ The whole file remains limited to 4 MiB, with nesting admitted by the shared
 empty queue and zero cursor, preserving older files. Empty delivery state keeps
 the existing object-file bytes; empty objects with delivery state retain the file.
 
+Metadata reconciliation outside a save transaction persists queued ground notifications and
+their sequence cursor even when no ground objects remain, while a store with no objects or
+notification state still creates no ground-object file.
+
 A missing ground-object file has two valid snapshot representations. A file
 that has never been written is omitted from the index; protecting it during an
 empty save does not add a member. Removing a previously indexed file retains

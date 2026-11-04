@@ -2580,8 +2580,9 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
         return false;
     if (m_activeRegionsEnabled) {
         const auto notifications = CaptureGroundNotifications();
-        // Creation has an empty store; later saves join the enclosing snapshot transaction.
-        if ((Persistence::SaveTransaction::active_for(save_dir) || !m_groundObjects.empty()) &&
+        // Empty stores still persist delivery state; snapshot transactions also reconcile removals.
+        if ((Persistence::SaveTransaction::active_for(save_dir) || !m_groundObjects.empty() ||
+             notifications.next_sequence != 0 || !notifications.events.empty()) &&
             !Persistence::WorldSaveService::save_ground_objects(
                 m_groundObjects, save_dir, nullptr, notifications))
             return false;
