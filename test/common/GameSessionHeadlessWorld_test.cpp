@@ -7510,7 +7510,14 @@ TEST(GameSessionHeadlessWorldTest, InvalidGroundNotificationsRefuseSaveWithoutCh
 
 namespace Luminumbra::world {
 
-TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
+class GameSessionGroundMetadataTest : public testing::Test {
+protected:
+    static bool ReconcileMetadata(GameSession& session, const fs::path& save_dir) {
+        return session.ReconcileWorldStateMetadataTo(save_dir);
+    }
+};
+
+TEST_F(GameSessionGroundMetadataTest, GroundMetadataSaveCommitsOneGeneration) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -7519,7 +7526,7 @@ TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
     const auto save = session.GetWorldSaveDir();
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
-    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(ReconcileMetadata(session, save));
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     const auto old_objects = session.GetGroundObjects().objects();
     const auto old_notifications = session.CaptureGroundNotifications().canonical_bytes();
@@ -7541,7 +7548,7 @@ TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
         ledger_replacement_attempted = true;
         return false;
     });
-    const bool saved = session.ReconcileWorldStateMetadataTo(save);
+    const bool saved = ReconcileMetadata(session, save);
     P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
     EXPECT_FALSE(saved);
     EXPECT_TRUE(ledger_replacement_attempted);
@@ -7561,7 +7568,7 @@ TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
     EXPECT_EQ(objects.objects(), old_objects);
     EXPECT_EQ(notifications.canonical_bytes(), old_notifications);
 
-    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(ReconcileMetadata(session, save));
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     P::SnapshotIndex committed;
     ASSERT_TRUE(P::read_snapshot_index(save, committed, nullptr));
@@ -7592,7 +7599,7 @@ TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
     EXPECT_FALSE(P::journal_pending(save));
 }
 
-TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications) {
+TEST_F(GameSessionGroundMetadataTest, EmptyGroundMetadataSavePreservesNotifications) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -7603,7 +7610,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications
     ASSERT_TRUE(session.GetGroundObjects().empty());
     ASSERT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
     ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
-    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(ReconcileMetadata(session, save));
     EXPECT_FALSE(fs::exists(ground_path));
 
     GroundEvents saved_seen;
@@ -7615,7 +7622,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications
     ASSERT_FALSE(notifications.empty());
     ASSERT_TRUE(session.GetGroundObjects().empty());
     ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
-    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(ReconcileMetadata(session, save));
     EXPECT_TRUE(fs::exists(ground_path));
     EXPECT_TRUE(saved_seen.empty());
     EXPECT_EQ(session.CaptureGroundNotifications().canonical_bytes(), notifications);
@@ -7633,6 +7640,39 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications
     EXPECT_TRUE(loaded.CaptureGroundNotifications().events.empty());
     ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
     EXPECT_EQ(seen, expected);
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSaveRemovesExistingFile) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata removal"));
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto ground_path = P::WorldSaveService::ground_objects_path(save);
+    ASSERT_TRUE(fs::exists(ground_path));
+    ASSERT_FALSE(session.GetGroundObjects().empty());
+    ASSERT_FALSE(session.CaptureGroundNotifications().events.empty());
+
+    const GroundObjectStore objects;
+    const GroundNotifications notifications;
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_active_regions_and_ground_objects(
+        ReadClockTestFile(save / "world_info.json"),
+        session.GetActiveRegionLedger(),
+        objects,
+        notifications,
+        save));
+    EXPECT_FALSE(fs::exists(ground_path));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_TRUE(loaded.GetGroundObjects().empty());
+    EXPECT_TRUE(loaded.CaptureGroundNotifications().events.empty());
+    EXPECT_EQ(loaded.CaptureGroundNotifications().next_sequence, 0u);
 }
 
 } // namespace Luminumbra::world

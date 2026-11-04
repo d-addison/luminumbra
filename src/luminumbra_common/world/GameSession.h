@@ -643,8 +643,7 @@ private:
     bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
                                 bool full_metadata,
                                 std::string& bytes) const;
-    friend class GameSessionHeadlessWorldTest_EmptyGroundMetadataSavePreservesNotifications_Test;
-    friend class GameSessionHeadlessWorldTest_GroundMetadataSaveCommitsOneGeneration_Test;
+    friend class GameSessionGroundMetadataTest;
     bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
     struct LoadedWorldState;
     bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
