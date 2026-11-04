@@ -771,6 +771,94 @@ class CTestShardTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(AssertionError):
                 self.assert_registration_inventory(rows, declarations)
 
+    def test_asan_distributes_isolated_gl_locks_without_mutating_inventory(self):
+        rows = [test(f"GL{index}", COST=180, RESOURCE_LOCK=["luminumbra_gl_context"])
+                for index in range(6)]
+        names = [row["name"] for row in rows]
+        before = copy.deepcopy(rows)
+        parts = shards.partition(rows, names, "asan")
+        self.assertEqual([len(part) for part in parts], [2, 2, 2])
+        self.assertEqual(rows, before)
+        shards.validate_union(names, parts)
+
+    def test_asan_isolated_gl_keeps_fixtures_dependencies_and_other_locks_together(self):
+        gl = ["luminumbra_gl_context"]
+        rows = [test("GL0", RESOURCE_LOCK=gl, FIXTURES_SETUP=["assets"]),
+                test("GL1", RESOURCE_LOCK=gl, FIXTURES_REQUIRED=["assets"]),
+                test("GL2", RESOURCE_LOCK=gl, DEPENDS=["GL3"]), test("GL3", RESOURCE_LOCK=gl),
+                test("GL4", RESOURCE_LOCK=[*gl, "other-context"]),
+                test("GL5", RESOURCE_LOCK=[*gl, "other-context"])]
+        names = [row["name"] for row in rows]
+        before = copy.deepcopy(rows)
+        parts = shards.partition(rows, names, "asan")
+        self.assertEqual([set(part) for part in parts], [{"GL0", "GL1"}, {"GL2", "GL3"}, {"GL4", "GL5"}])
+        self.assertEqual(rows, before)
+        shards.validate_union(names, parts)
+        with self.assertRaisesRegex(ValueError, "closure"):
+            shards.partition(rows, names[:-1], "asan")
+
+    def test_asan_observations_and_isolated_gl_reduce_synthetic_maximum_weight(self):
+        timings = shards.read_json(ROOT / "tools/ci/asan_timings.json") | {"SimBudgetAutosave": 361}
+        rows = [test(f"GL.Case{index}", RESOURCE_LOCK=["luminumbra_gl_context"]) for index in range(797)]
+        rows += [test(name, RESOURCE_LOCK=["luminumbra_gl_context"],
+                      FIXTURES_REQUIRED=["render_benchmark_assets"])
+                 for name in timings if name != "SimBudgetAutosave"]
+        rows += [test("RenderBenchmarkAssets", FIXTURES_SETUP=["render_benchmark_assets"]),
+                 test("SimBudgetAutosave")]
+        rows += [test(name, COST=cost, **({"RESOURCE_LOCK": ["luminumbra_gl_context"]}
+                                        if name.startswith("FarLodWorker.") else {}))
+                 for name, cost in sorted(COST_HINTS.items())]
+        names = [row["name"] for row in rows]
+        weights = {row["name"]: timings.get(row["name"], next(
+            (prop["value"] for prop in row["properties"] if prop["name"] == "COST"), 1)) for row in rows}
+        colocated = copy.deepcopy(rows)
+        for row in colocated:
+            for prop in row["properties"]:
+                if prop["name"] == "RESOURCE_LOCK":
+                    prop["value"] = ["shared-context" if value == "luminumbra_gl_context" else value
+                                     for value in prop["value"]]
+        previous = shards.partition(colocated, names, "asan")
+        parts = shards.partition(rows, names, "asan", timings)
+        previous_loads = [sum(weights[name] for name in part) for part in previous]
+        loads = [sum(weights[name] for name in part) for part in parts]
+        self.assertEqual(previous_loads, [1660, 2086, 606])
+        self.assertEqual(loads, [1660, 1346, 1346])
+        self.assertLess(max(loads), max(previous_loads))
+        shards.validate_union(names, previous)
+        shards.validate_union(names, parts)
+        for operation in (shards.partition, shards._partition_validated, shards._partition_projected):
+            with self.subTest(operation=operation.__name__):
+                self.assertEqual(operation(rows, names, "asan", timings), parts)
+                reversed_parts = operation(list(reversed(rows)), list(reversed(names)), "asan", timings)
+                self.assertEqual([set(part) for part in reversed_parts], [set(part) for part in parts])
+
+    def test_asan_workflow_timings_reach_cli_plans_and_evidence(self):
+        workflow = (ROOT / ".github/workflows/asan.yml").read_text(encoding="utf-8")
+        command = shlex.split(next(line.strip() for line in workflow.splitlines()
+                                  if line.strip().startswith("python3 tools/ci/ctest_shards.py plan ")))
+        timing_path = ROOT / command[command.index("--timings") + 1]
+        timings = shards.read_json(timing_path)
+        self.assertEqual(timings, {"RenderBenchmarkIsolationSubmission": 166,
+                                  "RenderBenchmarkOverrideCollection": 335,
+                                  "RenderTraversalEmbeddedPresetRefusal": 338,
+                                  "RenderTraversalIntegrated": 269})
+        rows = self.policy_roster("asan") + [test(name, RESOURCE_LOCK=["luminumbra_gl_context"])
+                                            for name in timings]
+        names = [row["name"] for row in rows]
+        self.write_plan(self.root, 1, tests=rows, profile="asan")
+        parts = shards.partition(rows, names, "asan", timings)
+        for shard in shards.shard_ids("asan"):
+            with self.subTest(shard=shard):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(ROOT / command[1]), "plan", "--profile", "asan",
+                     "--shard", str(shard), "--directory", str(self.root), "--timings", str(timing_path)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                manifest = shards.read_json(self.root / "ctest.partition.json")
+                self.assertEqual(manifest, {**shards.evidence_for(
+                    rows, parts, "asan", timings, shards.inventory_roots(self.root), "full"), "shard": shard})
+                shards.validate_union(names, manifest["partitions"])
+
     def shared_gl_inventory(self):
         locked = [test("RenderTraversalIntegrated", RESOURCE_LOCK=["luminumbra_gl_context"]),
                   test("RenderTraversalEmbeddedPresetRefusal", RESOURCE_LOCK=["luminumbra_gl_context"])]
@@ -796,7 +884,8 @@ class CTestShardTests(unittest.TestCase):
                     shards.validate_union(names, parts)
                     self.assertEqual(len(sum(parts, [])), len(names))
                     self.assertEqual(set(sum(parts, [])), set(names))
-                    self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
+                    if profile != "asan":
+                        self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
                     self.assertEqual(sum(bool({"OtherRender.First", "OtherRender.Second"} & set(part))
                                          for part in parts), 1)
                     self.assertTrue(all(part == [name for name in names if name in part] for part in parts))
@@ -861,7 +950,8 @@ class CTestShardTests(unittest.TestCase):
                     manifest = self.write_plan(directory, shard, selected, tests, profile)
                     parts = manifest["partitions"]
                     shards.validate_union(names, parts)
-                    self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
+                    if profile != "asan":
+                        self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
                     self.assertEqual(manifest["inventory_digest"],
                                      shards.evidence_for(selected, parts, profile,
                                                          roots=manifest["roots"])["inventory_digest"])
@@ -898,7 +988,8 @@ class CTestShardTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 manifest = shards.read_json(self.root / "ctest.partition.json")
                 shards.validate_union([row["name"] for row in selected], manifest["partitions"])
-                self.assertEqual(sum(bool(locked & set(part)) for part in manifest["partitions"]), 1)
+                if profile != "asan":
+                    self.assertEqual(sum(bool(locked & set(part)) for part in manifest["partitions"]), 1)
 
     def test_manual_fixture_and_dependency_edges_still_refuse_before_writing_every_plan(self):
         edges = ([test("selected", DEPENDS=["manual"]), test("manual", LABELS=["manual"])],
@@ -939,7 +1030,8 @@ class CTestShardTests(unittest.TestCase):
             names = [row["name"] for row in tests]
             parts = shards.partition(tests, names, profile)
             all_locked = locked | {"ShieldRtBasicGpu", "ShieldRtSpikeGpu"}
-            self.assertEqual(sum(bool(all_locked & set(part)) for part in parts), 1)
+            if profile != "asan":
+                self.assertEqual(sum(bool(all_locked & set(part)) for part in parts), 1)
             self.assertEqual(set(sum(parts, [])), set(names))
             names.remove("RenderTraversalIntegrated")
             with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "closure"):
@@ -2386,6 +2478,7 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
         import hashlib
         edges = {row["name"]: set() for row in rows}
         buckets = {}
+        isolated_gl = set()
         excluded_manual = {row["name"] for row in rows if any(
             prop["name"] == "LABELS" and any("manual" in label for label in prop["value"])
             for prop in row.get("properties", []))} - set(selected)
@@ -2399,11 +2492,16 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
                 if kind == "RESOURCE_LOCK" and name in excluded_manual:
                     continue
                 for value in prop["value"]:
+                    if profile == "asan" and kind == "RESOURCE_LOCK" and value == "luminumbra_gl_context":
+                        isolated_gl.add(name)
+                        continue
                     if kind == "DEPENDS":
                         edges[name].add(value)
                         edges[value].add(name)
                     else:
                         buckets.setdefault((kind.startswith("FIXTURES_"), value), []).append(name)
+        if isolated_gl & set(selected) and not isolated_gl <= set(selected):
+            raise ValueError("closure")
         if profile == "gcc":
             buckets["prefab"] = [name for name in selected
                                  if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
