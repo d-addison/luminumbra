@@ -61,7 +61,8 @@ std::shared_ptr<Chunk> MakeRampChunk(const IVec3& coords) {
     chunk->heightmap_data.resize(static_cast<std::size_t>(side) * static_cast<std::size_t>(side));
     for (int z = 0; z < side; ++z) {
         for (int x = 0; x < side; ++x) {
-            chunk->heightmap_data[static_cast<std::size_t>(z) * side + x] =
+            chunk->heightmap_data[static_cast<std::size_t>(z) * static_cast<std::size_t>(side) +
+                                  static_cast<std::size_t>(x)] =
                 4.0f + 0.5f * static_cast<float>(x);
         }
     }
@@ -93,6 +94,33 @@ TEST(SurfaceQuery, FlatFloorReportsUpwardNormal) {
     EXPECT_NEAR(result.surface_normal.y, 1.0f, 1e-3f);
     EXPECT_NEAR(result.surface_normal.z, 0.0f, 1e-3f);
 
+    physics.shutdown();
+}
+
+TEST(SurfaceQuery, AvatarFeetSettleAboveNewlyAdmittedFloor) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr float kFloorHeight = 256.0f;
+    for (const int column : {-5121, 0, 5120}) {
+        const IVec3 coords(column, 16, column);
+        const float centre = static_cast<float>(column * Luminumbra::CHUNK_SIZE_X) + 8.0f;
+        const glm::vec3 feet(centre, kFloorHeight + 0.25f, centre);
+        const auto avatar = physics.create_avatar_character(feet);
+        EXPECT_EQ(physics.get_avatar_position(avatar), feet);
+        auto floor = MakeFlatFloorChunk(coords, kFloorHeight);
+        physics.add_chunk_collision(*floor);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        physics.update_avatars(1.0f / 30.0f);
+        for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+            EXPECT_GT(physics.get_avatar_position(avatar).y, kFloorHeight - 0.25f);
+        }
+    }
+    for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+        EXPECT_NEAR(physics.get_avatar_position(avatar).y, kFloorHeight, 0.1f);
+        EXPECT_TRUE(physics.is_avatar_grounded(avatar));
+    }
     physics.shutdown();
 }
 
@@ -222,5 +250,22 @@ TEST(SurfaceQuery, TerrainMaterialMatchesSurfaceVertexMaterial) {
     EXPECT_FLOAT_EQ(result.material_absorption,
                     physics.get_material_audio_absorption(result.material_type));
 
+    physics.shutdown();
+}
+
+TEST(SurfaceQuery, IncompleteHeightmapsNeverCreateCollision) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr std::size_t side = Luminumbra::CHUNK_SIZE_X + 1;
+    for (const auto count : {std::size_t{0}, std::size_t{1}, side * side - 1, side * side + 1}) {
+        auto chunk = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+        chunk->heightmap_data.resize(count, 8.0f);
+        physics.add_chunk_collision(*chunk);
+        EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    }
+    auto complete = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    physics.add_chunk_collision(*complete);
+    EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
     physics.shutdown();
 }
