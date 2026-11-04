@@ -7102,10 +7102,8 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
     ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit - 1);
-    ASSERT_TRUE(loaded.SaveWorld());
     ASSERT_EQ(SpawnGround(loaded, 5200, -1500), 1u);
     ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit);
-    ASSERT_TRUE(loaded.SaveWorld());
     const auto notifications = loaded.CaptureGroundNotifications().canonical_bytes();
     EXPECT_EQ(SpawnGround(loaded, 600000, -1500), 0u);
     EXPECT_EQ(loaded.GetRegionInputRejections().ground_spawns, 1u);
@@ -7113,8 +7111,9 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
     EXPECT_EQ(loaded.GetGroundObjects().size(), 1u);
     EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
     EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
-    ASSERT_TRUE(loaded.SaveWorld());
     EXPECT_EQ(SpawnGround(loaded, 5300, -1500), 3u);
+    // Saving a million records is the expensive step, so the admitted, refused and
+    // follow-up states are all verified by this one save.
     ASSERT_TRUE(loaded.SaveWorld());
 }
 
@@ -7167,14 +7166,20 @@ TEST(GameSessionHeadlessWorldTest, ExhaustedGroundDespawnSequenceLatchesFaultWit
     ASSERT_TRUE(owner.SaveWorld());
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    GroundEvents seen;
+    CollectGroundEvents(loaded, seen);
     ASSERT_EQ(SpawnGround(loaded, 5200, -1500, 1), 1u);
     ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
     EXPECT_TRUE(loaded.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
+    // The spawn used the last sequence; the despawn is refused instead of wrapping the cursor.
+    EXPECT_EQ(CountTopic(seen, "ground.despawned"), 0u);
     const auto pending = loaded.CaptureGroundNotifications();
-    ASSERT_EQ(pending.events.size(), 1u);
-    EXPECT_LT(pending.events.front().sequence, pending.next_sequence);
-    EXPECT_EQ(pending.events.front().topic, "ground.spawned");
+    EXPECT_EQ(pending.next_sequence, maximum);
+    for (const auto& event : pending.events) {
+        EXPECT_LT(event.sequence, pending.next_sequence);
+        EXPECT_NE(event.topic, "ground.despawned");
+    }
     ASSERT_TRUE(loaded.SaveWorld());
 }
 

@@ -2693,7 +2693,7 @@ TEST(WorldSaveService, WaterCursorMetadataChecksTypeAndNativeSizeBeforeConversio
     EXPECT_FALSE(read_cursor(cursor));
 }
 
-TEST(WorldSaveService, LedgerPastTheFileCapIsASaveRefusalForBothWriters) {
+TEST(WorldSaveService, LedgerAdmissionStopsBeforeTheFileCapSoBothWritersStaySaveable) {
     using Luminumbra::world::ActiveRegionLedger;
     using Luminumbra::world::WorldClock;
     TempSaveDir save_dir("ledger_capacity");
@@ -2702,30 +2702,28 @@ TEST(WorldSaveService, LedgerPastTheFileCapIsASaveRefusalForBothWriters) {
         return Luminumbra::world::RegionKey{static_cast<std::int32_t>(index % 1024u),
                                             static_cast<std::int32_t>(index / 1024u)};
     };
-    // The age fits while one record is missing; the last record then outgrows the file cap.
+    // The age fits while one record is missing; the last record would outgrow the file cap.
     for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
         ledger.mark_edited(key(index), WorldClock{});
     ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
-    ledger.mark_edited(key(ActiveRegionLedger::kMaxRegions - 1), WorldClock{});
+    const auto last = key(ActiveRegionLedger::kMaxRegions - 1);
+    EXPECT_FALSE(ledger.can_activate(last));
+    EXPECT_THROW(ledger.mark_edited(last, WorldClock{}), std::length_error);
+    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions - 1);
 
     std::vector<std::string> errors;
-    bool saved = true;
-    EXPECT_NO_THROW(saved = WorldSaveService::save_active_regions(
-                        ledger, WorldClock{}, save_dir.path(), &errors));
-    EXPECT_FALSE(saved);
-    EXPECT_FALSE(errors.empty());
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::active_regions_path(save_dir.path())));
+    EXPECT_TRUE(
+        WorldSaveService::save_active_regions(ledger, WorldClock{}, save_dir.path(), &errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::active_regions_path(save_dir.path())));
 
     nlohmann::json metadata = {{"container_version", 2}};
     WorldClock{}.write_metadata(metadata);
     errors.clear();
-    saved = true;
-    EXPECT_NO_THROW(saved = WorldSaveService::save_metadata_and_active_regions(
-                        metadata.dump(), ledger, save_dir.path(), &errors));
-    EXPECT_FALSE(saved);
-    EXPECT_FALSE(errors.empty());
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "world_info.json"));
-    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    EXPECT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_TRUE(std::filesystem::exists(save_dir.path() / "world_info.json"));
 }
 
 TEST(WorldSaveService, BothCalendarKindsAreValidatedBeforeEveryWriter) {
