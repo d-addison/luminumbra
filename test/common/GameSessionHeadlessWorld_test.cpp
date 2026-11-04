@@ -7510,6 +7510,88 @@ TEST(GameSessionHeadlessWorldTest, InvalidGroundNotificationsRefuseSaveWithoutCh
 
 namespace Luminumbra::world {
 
+TEST(GameSessionHeadlessWorldTest, GroundMetadataSaveCommitsOneGeneration) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata transaction"));
+    const auto save = session.GetWorldSaveDir();
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    const auto old_objects = session.GetGroundObjects().objects();
+    const auto old_notifications = session.CaptureGroundNotifications().canonical_bytes();
+    const std::array<const char*, 3> members{
+        GroundObjectStore::kRelativePath, "world_info.json", "chunks/region/active-regions.arl"};
+    std::map<std::string, std::string> previous;
+    for (const auto* member : members)
+        previous.emplace(member, ReadClockTestFile(save / member));
+    const auto old_index = ReadClockTestFile(P::snapshot_index_path(save));
+    P::SnapshotIndex initial;
+    ASSERT_TRUE(P::read_snapshot_index(save, initial, nullptr));
+
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    static bool ledger_replacement_attempted;
+    ledger_replacement_attempted = false;
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] {
+        ledger_replacement_attempted = true;
+        return false;
+    });
+    const bool saved = session.ReconcileWorldStateMetadataTo(save);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_TRUE(ledger_replacement_attempted);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    for (const auto& [member, bytes] : previous) {
+        EXPECT_EQ(ReadClockTestFile(save / member), bytes) << member;
+    }
+    EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), old_index);
+    EXPECT_FALSE(P::journal_pending(save));
+    ActiveRegionLedger ledger;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(ledger, save));
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
+    GroundObjectStore objects;
+    GroundNotifications notifications;
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        objects, save, ledger.next_persistent_id(), nullptr, {}, &notifications));
+    EXPECT_EQ(objects.objects(), old_objects);
+    EXPECT_EQ(notifications.canonical_bytes(), old_notifications);
+
+    ASSERT_TRUE(session.ReconcileWorldStateMetadataTo(save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    P::SnapshotIndex committed;
+    ASSERT_TRUE(P::read_snapshot_index(save, committed, nullptr));
+    EXPECT_EQ(committed.generation, initial.generation + 1);
+    for (const auto* member : members) {
+        const auto found =
+            std::find_if(committed.members.begin(),
+                         committed.members.end(),
+                         [member](const auto& entry) { return entry.path == member; });
+        ASSERT_NE(found, committed.members.end()) << member;
+        EXPECT_TRUE(found->present) << member;
+        EXPECT_EQ(found->generation, committed.generation) << member;
+        EXPECT_NE(ReadClockTestFile(save / member), previous.at(member)) << member;
+    }
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(ledger, save));
+    EXPECT_EQ(ledger.next_persistent_id(), 3u);
+    EXPECT_EQ(ledger.header_tick(), session.GetSimulationTickCount());
+    WorldClock clock;
+    bool requires_active_regions = false;
+    ASSERT_TRUE(P::WorldSaveService::read_clock_metadata(save, clock, requires_active_regions));
+    EXPECT_TRUE(requires_active_regions);
+    EXPECT_EQ(clock.tick(), session.GetSimulationTickCount());
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        objects, save, ledger.next_persistent_id(), nullptr, {}, &notifications));
+    EXPECT_EQ(objects.objects(), session.GetGroundObjects().objects());
+    EXPECT_EQ(notifications.canonical_bytes(),
+              session.CaptureGroundNotifications().canonical_bytes());
+    EXPECT_FALSE(P::journal_pending(save));
+}
+
 TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSavePreservesNotifications) {
     const HeadlessRoot root;
     JobSystem jobs;

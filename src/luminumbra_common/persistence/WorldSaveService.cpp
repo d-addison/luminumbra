@@ -3983,6 +3983,33 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     return scope.commit(errors);
 }
 
+bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
+    const std::string& bytes,
+    const world::ActiveRegionLedger& ledger,
+    const world::GroundObjectStore& store,
+    const world::GroundNotifications& notifications,
+    const std::filesystem::path& save_dir,
+    std::vector<std::string>* errors,
+    CreatedWorldArtifacts* artifacts) {
+    const SaveGuard guard;
+    // Empty stores still persist delivery state; snapshot transactions also reconcile removals.
+    const bool write_ground = SaveTransaction::active_for(save_dir) || !store.empty() ||
+                              notifications.next_sequence != 0 || !notifications.events.empty();
+    TransactionScope scope(save_dir,
+                           {world::GroundObjectStore::kRelativePath,
+                            "world_info.json",
+                            "chunks/region/active-regions.arl"},
+                           errors,
+                           true,
+                           artifacts);
+    if (!scope.ok() ||
+        (write_ground && !save_ground_objects(store, save_dir, errors, notifications)))
+        return false;
+    auto saved_ledger = ledger;
+    return save_metadata_and_active_regions(bytes, saved_ledger, save_dir, errors, artifacts) &&
+           scope.commit(errors);
+}
+
 bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,

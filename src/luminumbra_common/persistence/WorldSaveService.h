@@ -238,6 +238,15 @@ public:
                                                  const std::filesystem::path& save_dir,
                                                  std::vector<std::string>* errors = nullptr,
                                                  CreatedWorldArtifacts* artifacts = nullptr);
+    // Publish the object store, metadata and ledger at one snapshot commit point.
+    static bool
+    save_metadata_active_regions_and_ground_objects(const std::string& bytes,
+                                                    const world::ActiveRegionLedger& ledger,
+                                                    const world::GroundObjectStore& store,
+                                                    const world::GroundNotifications& notifications,
+                                                    const std::filesystem::path& save_dir,
+                                                    std::vector<std::string>* errors = nullptr,
+                                                    CreatedWorldArtifacts* artifacts = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
     // Missing metadata is a legacy snapshot with a pinned legacy clock and zero water cursor.

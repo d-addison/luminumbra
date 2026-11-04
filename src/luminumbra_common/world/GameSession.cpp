@@ -2589,15 +2589,14 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
         return false;
     if (m_activeRegionsEnabled) {
         const auto notifications = CaptureGroundNotifications();
-        // Empty stores still persist delivery state; snapshot transactions also reconcile removals.
-        if ((Persistence::SaveTransaction::active_for(save_dir) || !m_groundObjects.empty() ||
-             notifications.next_sequence != 0 || !notifications.events.empty()) &&
-            !Persistence::WorldSaveService::save_ground_objects(
-                m_groundObjects, save_dir, nullptr, notifications))
-            return false;
-        auto ledger = m_activeRegionLedger;
-        return Persistence::WorldSaveService::save_metadata_and_active_regions(
-            bytes, ledger, save_dir, nullptr, artifacts);
+        return Persistence::WorldSaveService::save_metadata_active_regions_and_ground_objects(
+            bytes,
+            m_activeRegionLedger,
+            m_groundObjects,
+            notifications,
+            save_dir,
+            nullptr,
+            artifacts);
     }
     return Persistence::WorldSaveService::save_metadata(bytes, save_dir, nullptr, artifacts);
 }
