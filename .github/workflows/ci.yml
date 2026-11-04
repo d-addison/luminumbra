@@ -192,7 +192,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        if: ${{ matrix.shard != 2 && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         run: python3 -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
