@@ -26,12 +26,10 @@ struct RegionKey {
 
 // Regions near an anchor; the fixed proximity disc never touches more than a 4x4 block,
 // so the set lives inline and the per-tick scheduler path allocates nothing.
+class ActiveRegionLedger;
 class ActivationRegions {
 public:
     static constexpr std::size_t kCapacity = 16;
-    void push_back(RegionKey key) {
-        m_keys[m_size++] = key;
-    }
     [[nodiscard]] const RegionKey* begin() const {
         return m_keys.data();
     }
@@ -46,6 +44,10 @@ public:
     }
 
 private:
+    friend class ActiveRegionLedger;
+    void push_back(RegionKey key) {
+        m_keys[m_size++] = key;
+    }
     std::array<RegionKey, kCapacity> m_keys{};
     std::size_t m_size = 0;
 };
