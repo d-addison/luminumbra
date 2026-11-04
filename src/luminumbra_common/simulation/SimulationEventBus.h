@@ -32,6 +32,7 @@ class OrderedEventBus {
 public:
     using Handler = std::function<void(const SimulationEvent&)>;
 
+    // Throws std::overflow_error without mutation when the sequence cursor is exhausted.
     std::uint64_t
     publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
     // Aborted delivery retains per-event handler progress. A throwing handler counts as invoked;

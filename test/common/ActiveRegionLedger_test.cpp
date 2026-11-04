@@ -1104,21 +1104,49 @@ TEST(ActiveRegionLedgerTest, WaterDebtsThePersistedFileCannotHoldAreRefused) {
     });
 }
 
-TEST(ActiveRegionLedgerTest, EncodingRefusesWhenLaterRecordsOutgrowStoredEnergyAges) {
+TEST(ActiveRegionLedgerTest, ActivationRefusesBeforeRecordsOutgrowStoredEnergyAges) {
     ActiveRegionLedger ledger;
     for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
         ledger.mark_edited(CapacityKey(index), WorldClock{});
     ASSERT_TRUE(ledger.set_energy_age({0, 0}, 0));
-    ledger.mark_edited(CapacityKey(ActiveRegionLedger::kMaxRegions - 1), WorldClock{});
-    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
-    EXPECT_THROW(
-        {
-            const auto bytes = ledger.encode();
-            (void)bytes;
-        },
-        std::length_error);
+    const auto before = ledger.encode();
+    EXPECT_THROW(ledger.mark_edited(CapacityKey(ActiveRegionLedger::kMaxRegions - 1), WorldClock{}),
+                 std::length_error);
     EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{{0, 0}, 0}}));
-    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions - 1);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(ActiveRegionLedgerTest, RecordAdmissionCountsAllRetainedExtensionsAtBoundary) {
+    ActiveRegionLedger ledger;
+    const auto limit = ActiveRegionLedger::kMaxRegions - 1;
+    for (std::uint32_t index = 0; index + 1 < limit; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ASSERT_TRUE(ledger.set_energy_age(CapacityKey(0), 7));
+    ASSERT_TRUE(ledger.set_water_debts({{CapacityKey(0), 9}}));
+    const std::array completed{RegionWork{CapacityKey(0), 1, 2, 3, 4}};
+    ledger.publish_completed_work(completed);
+    ASSERT_EQ(ledger.records().size(), limit - 1);
+    EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
+    ledger.mark_edited(CapacityKey(limit - 1), WorldClock{});
+    ASSERT_EQ(ledger.records().size(), limit);
+    const auto before = ledger.encode();
+    EXPECT_LE(before.size(), ActiveRegionLedger::kMaxFileBytes);
+    EXPECT_FALSE(ledger.can_activate(CapacityKey(limit)));
+    EXPECT_THROW(ledger.mark_edited(CapacityKey(limit), WorldClock{}), std::length_error);
+    EXPECT_THROW(ledger.pin(CapacityKey(limit), true, WorldClock{}), std::length_error);
+    EXPECT_EQ(ledger.records().size(), limit);
+    EXPECT_EQ(ledger.encode(), before);
+    EXPECT_TRUE(ledger.can_activate(CapacityKey(0)));
+    EXPECT_NO_THROW(ledger.mark_edited(CapacityKey(0), WorldClock{}));
+    EXPECT_NO_THROW(ledger.pin(CapacityKey(0), true, WorldClock{}));
+    ledger.set_local_anchor({-5120, 0, -5120});
+    const auto scheduled = ledger.schedule(WorldClock(1));
+    EXPECT_GT(scheduled.rejected.capacity, 0u);
+    EXPECT_EQ(ledger.records().size(), limit);
+    EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
 }
 
 TEST(ActiveRegionLedgerTest, ScheduleCarriesEnergyAgesThroughRefusalAndSuccess) {

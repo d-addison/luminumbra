@@ -253,3 +253,49 @@ runtime headless/save integration and pinned engine hash tests remain unverified
 The standalone ledger executable omits only
 `AllocatorOnlyLedgerIsSavedAndReloads`, which needs engine persistence linkage;
 the repository test remains present and passes syntax checking.
+
+### Save comparison and admission boundaries
+
+The disabled ground-spawn save comparison now masks only the numeric
+`creationTime` value in `world_info.json`. Session creation uses wall time without
+a clock injection seam. All other metadata bytes, including formatting, and all
+other files retain exact byte comparisons. The helper has one save-tree caller;
+the other metadata comparisons preserve or reload an existing world's creation
+time and remain strict. A regression uses different creation seconds while also
+checking that changes to another field or formatting remain visible.
+
+New ledger records now share the existing envelope budget with the allocator,
+frozen projection, energy ages, water debts and completed work. Spawn admission
+checks the proposed region after allocation and counts a refusal without adding
+an object, region or event. The shared activation check also covers edits, pins
+and scheduler visits; visits retain their capacity rejection accounting. Tests
+exercise one below, at and one above the admissible record count, retained
+extensions, writes to existing records and continued saveability.
+
+The event bus now throws before publishing at an exhausted sequence cursor.
+Ground spawns reject that cursor before allocating an id; despawn publication
+uses the existing simulation fault latch. Loading still accepts the terminal
+cursor and can save it again. Tests cover loaded `UINT64_MAX` and
+`UINT64_MAX - 1`, the final publishable event, repeated refusal, pending byte
+accounting, draining, save/reload and despawn faults. The sibling counter sweep
+found the persistent allocator already stops at its limit, and restored ledger
+and world-clock ticks remain bounded below their tick limit.
+
+Verification in this clone:
+
+- Eleven translation units pass `clang++-18 -fsyntax-only`, including the changed
+  sources/tests and persistence, terrain-system and scripting callers.
+- GCC standalone builds at `-j2` pass 73 ledger tests, 25 ground-store tests, the
+  extracted metadata-masking regression and the event-bus gate. The standalone
+  ledger target omits only `AllocatorOnlyLedgerIsSavedAndReloads`, which requires
+  engine persistence linkage; the repository test is retained and syntax checked.
+- Temporary builds with the record-budget guard or sequence guard removed fail
+  the corresponding new regressions. The event-bus gate also fails without its
+  sequence guard.
+- Clang-tidy passes the cognitive-complexity check at 250 for all seven changed
+  C++ translation units. Formatting and `git diff --check` pass.
+
+There is no configured CMake build in this clone, only a compilation database.
+The complete engine-linked headless/save tests, including the new integration
+cases and original flaky test, and pinned engine hash tests remain unexecuted.
+Acceptance contract documents and fixture bytes are unchanged.

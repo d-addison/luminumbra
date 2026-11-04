@@ -2093,6 +2093,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     candidate.payload = payload;
     if (!m_worldSystem || m_regionFault.has_value() ||
         m_groundObjects.size() >= GroundObjectStore::kMaxObjects ||
+        m_simulationEventBus.next_sequence() == std::numeric_limits<std::uint64_t>::max() ||
         !GroundObjectStore::valid(candidate)) {
         ++m_regionInputRejections.ground_spawns;
         return 0;
@@ -2109,6 +2110,10 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     }
     // A failure from here on still consumes the id.
     candidate.id = id;
+    if (!m_activeRegionLedger.can_activate(GroundObjectStore::region_of(candidate))) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
     SettleGroundObjectOnTerrain(candidate,
                                 m_worldSystem->ProbeTerrainBelow(GroundProbePosition(candidate)));
     const luminumbra::simulation::SimulationEvent notification{tick,

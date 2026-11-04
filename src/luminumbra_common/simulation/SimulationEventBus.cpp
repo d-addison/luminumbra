@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 
 #include <nlohmann/json.hpp>
 
@@ -74,6 +76,8 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                        std::string topic,
                                        std::string payload,
                                        std::int32_t lane) {
+    if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Simulation event sequence exhausted");
     const std::uint64_t sequence = next_sequence_++;
     pending_events_.push_back({SimulationEvent{
                                    tick,

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -504,6 +505,32 @@ TEST(GroundObjectStoreTest, NotificationsRoundTripWithoutChangingLegacyBytesOrHa
         GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded));
     EXPECT_TRUE(restored.empty());
     EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
+}
+
+TEST(GroundObjectStoreTest, LoadedNotificationCursorExhaustionPreservesCanonicalState) {
+    for (const auto cursor : {kU64Max, kU64Max - 1}) {
+        SCOPED_TRACE(cursor);
+        GroundObjectStore store;
+        GroundNotifications loaded;
+        std::string error;
+        ASSERT_TRUE(GroundObjectStore::parse(
+            store.serialize(GroundNotifications{cursor, {}}), 1, store, error, &loaded))
+            << error;
+        luminumbra::simulation::OrderedEventBus bus;
+        bus.restore_pending(loaded.events, loaded.next_sequence);
+        if (cursor < kU64Max) {
+            EXPECT_EQ(bus.publish(0, "ground.spawned", "last"), kU64Max - 1);
+        }
+        const GroundNotifications before{bus.next_sequence(), bus.pending_events()};
+        const auto bytes = store.serialize(before);
+        EXPECT_THROW(bus.publish(0, "ground.despawned", "refused"), std::overflow_error);
+        EXPECT_EQ(bus.next_sequence(), kU64Max);
+        EXPECT_EQ(store.serialize(GroundNotifications{bus.next_sequence(), bus.pending_events()}),
+                  bytes);
+        ASSERT_TRUE(GroundObjectStore::parse(bytes, 1, store, error, &loaded)) << error;
+        EXPECT_EQ(loaded.next_sequence, kU64Max);
+        EXPECT_EQ(loaded.events.size(), cursor < kU64Max ? 1u : 0u);
+    }
 }
 
 TEST(GroundObjectStoreTest, ParseReservesObjectGrowthAlongsidePendingNotifications) {

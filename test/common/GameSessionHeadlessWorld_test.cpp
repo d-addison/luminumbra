@@ -6961,14 +6961,27 @@ std::size_t CountRegularFiles(const fs::path& dir) {
     return count;
 }
 
+std::string MaskMetadataCreationTime(std::string bytes) {
+    const auto creation_time = nlohmann::json::parse(bytes).at("creationTime").dump();
+    const auto key = bytes.find("\"creationTime\"");
+    const auto value = bytes.find_first_not_of(" \t\r\n", bytes.find(':', key) + 1);
+    bytes.replace(value, creation_time.size(), "0");
+    return bytes;
+}
+
 void ExpectSameSaveTree(const fs::path& actual, const fs::path& expected) {
     EXPECT_EQ(CountRegularFiles(actual), CountRegularFiles(expected));
     for (const auto& entry : fs::recursive_directory_iterator(actual)) {
         if (!entry.is_regular_file())
             continue;
         const auto relative = fs::relative(entry.path(), actual);
-        EXPECT_EQ(ReadClockTestFile(entry.path()), ReadClockTestFile(expected / relative))
-            << relative.string();
+        auto actual_bytes = ReadClockTestFile(entry.path());
+        auto expected_bytes = ReadClockTestFile(expected / relative);
+        if (relative == "world_info.json") {
+            actual_bytes = MaskMetadataCreationTime(std::move(actual_bytes));
+            expected_bytes = MaskMetadataCreationTime(std::move(expected_bytes));
+        }
+        EXPECT_EQ(actual_bytes, expected_bytes) << relative.string();
     }
 }
 
@@ -6991,6 +7004,19 @@ std::uint64_t GroundSpawnAdmissionLimit() {
 }
 
 } // namespace
+
+TEST(GameSessionHeadlessWorldTest, SaveComparisonMasksOnlyCreationTimeValue) {
+    const std::string first = "{\n  \"creationTime\": 1793756527, \"seed\": 1793756527\n}";
+    const std::string second = "{\n  \"creationTime\": 1793756528, \"seed\": 1793756527\n}";
+    const std::string masked = "{\n  \"creationTime\": 0, \"seed\": 1793756527\n}";
+    EXPECT_EQ(MaskMetadataCreationTime(first), masked);
+    EXPECT_EQ(MaskMetadataCreationTime(second), masked);
+    EXPECT_NE(MaskMetadataCreationTime("{\"creationTime\":1793756527,\"seed\":1793756527}"),
+              masked);
+    EXPECT_NE(
+        MaskMetadataCreationTime("{\n  \"creationTime\": 1793756527, \"seed\": 1793756528\n}"),
+        masked);
+}
 
 TEST(GameSessionHeadlessWorldTest, FlagOffSpawnIsInertAndLeavesSaveHashAndRejectionsUnchanged) {
     const HeadlessRoot root;
@@ -7055,6 +7081,101 @@ TEST(GameSessionHeadlessWorldTest, RefusedGroundSpawnsCountRejectionsAndConsumeN
     EXPECT_EQ(session.GetRegionInputRejections().ground_spawns, 2u);
     EXPECT_TRUE(session.GetGroundObjects().empty());
     EXPECT_EQ(SpawnGround(session, 5200, -1500), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedger) {
+    using Luminumbra::world::ActiveRegionLedger;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground region admission");
+    ActiveRegionLedger ledger;
+    const auto limit = ActiveRegionLedger::kMaxRegions - 1;
+    for (std::uint32_t index = 0; index + 1 < limit; ++index) {
+        ledger.mark_edited(
+            {static_cast<std::int32_t>(index % 1024u), static_cast<std::int32_t>(index / 1024u)},
+            owner.GetWorldClock());
+    }
+    ASSERT_TRUE(P::WorldSaveService::save_active_regions(
+        ledger, owner.GetWorldClock(), owner.GetWorldSaveDir()));
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit - 1);
+    ASSERT_TRUE(loaded.SaveWorld());
+    ASSERT_EQ(SpawnGround(loaded, 5200, -1500), 1u);
+    ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit);
+    ASSERT_TRUE(loaded.SaveWorld());
+    const auto notifications = loaded.CaptureGroundNotifications().canonical_bytes();
+    EXPECT_EQ(SpawnGround(loaded, 600000, -1500), 0u);
+    EXPECT_EQ(loaded.GetRegionInputRejections().ground_spawns, 1u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().records().size(), limit);
+    EXPECT_EQ(loaded.GetGroundObjects().size(), 1u);
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(SpawnGround(loaded, 5300, -1500), 3u);
+    ASSERT_TRUE(loaded.SaveWorld());
+}
+
+TEST(GameSessionHeadlessWorldTest, LoadedGroundNotificationCursorNeverWrapsOnSpawn) {
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    for (const auto cursor : {maximum, maximum - 1}) {
+        SCOPED_TRACE(cursor);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner, loaded, reloaded;
+        CreateGroundWorld(owner, root, jobs, "Ground sequence admission");
+        owner.GetSimulationEventBus().restore_pending({}, cursor);
+        ASSERT_TRUE(owner.SaveWorld());
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        ASSERT_EQ(loaded.GetSimulationEventBus().next_sequence(), cursor);
+        if (cursor < maximum) {
+            ASSERT_EQ(SpawnGround(loaded, 5200, -1500), 1u);
+            const auto pending = loaded.CaptureGroundNotifications();
+            ASSERT_EQ(pending.events.size(), 1u);
+            EXPECT_EQ(pending.events.front().sequence, maximum - 1);
+            EXPECT_EQ(pending.next_sequence, maximum);
+            ASSERT_TRUE(loaded.SaveWorld());
+        }
+        const auto next_id = loaded.GetActiveRegionLedger().next_persistent_id();
+        const auto notifications = loaded.CaptureGroundNotifications().canonical_bytes();
+        EXPECT_EQ(SpawnGround(loaded, 5300, -1500), 0u);
+        EXPECT_EQ(loaded.GetRegionInputRejections().ground_spawns, 1u);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().next_persistent_id(), next_id);
+        EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
+        EXPECT_EQ(loaded.GetGroundObjects().size(), cursor < maximum ? 1u : 0u);
+        EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+        ASSERT_TRUE(loaded.SaveWorld());
+        EnableSnapshotSession(reloaded, root, jobs);
+        ASSERT_TRUE(reloaded.LoadWorld(owner.GetMetadata().worldId))
+            << reloaded.GetWorldOpenError();
+        EXPECT_EQ(reloaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ExhaustedGroundDespawnSequenceLatchesFaultWithoutWrapping) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground despawn exhaustion");
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    owner.GetSimulationEventBus().restore_pending({}, maximum - 1);
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    ASSERT_EQ(SpawnGround(loaded, 5200, -1500, 1), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    EXPECT_TRUE(loaded.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
+    const auto pending = loaded.CaptureGroundNotifications();
+    ASSERT_EQ(pending.events.size(), 1u);
+    EXPECT_LT(pending.events.front().sequence, pending.next_sequence);
+    EXPECT_EQ(pending.events.front().topic, "ground.spawned");
+    ASSERT_TRUE(loaded.SaveWorld());
 }
 
 TEST(GameSessionHeadlessWorldTest, GroundSpawnBurstRemainsSaveableAtAdmissionLimit) {

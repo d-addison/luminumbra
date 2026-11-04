@@ -27,9 +27,38 @@ bool pending_bytes_match(const luminumbra::simulation::OrderedEventBus& bus) {
            bus.pending_bytes("ground.despawned") == expected["ground.despawned"];
 }
 
+bool sequence_exhaustion_is_atomic() {
+    using luminumbra::simulation::OrderedEventBus;
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    for (const auto* topic : {"ground.spawned", "ground.despawned", "script.trigger"}) {
+        OrderedEventBus bus;
+        bus.restore_pending({}, maximum - 1);
+        if (bus.publish(1, topic, "last") != maximum - 1 || bus.next_sequence() != maximum)
+            return false;
+        const auto pending = bus.pending_events().front().canonical_bytes();
+        const auto bytes = bus.pending_bytes(topic);
+        for (const bool drained : {false, true}) {
+            if (drained)
+                bus.drain(1);
+            try {
+                bus.publish(2, topic, "refused");
+                return false;
+            } catch (const std::overflow_error&) {}
+            if (bus.next_sequence() != maximum || bus.pending_count() != (drained ? 0u : 1u) ||
+                bus.pending_bytes(topic) != (drained ? 0u : bytes))
+                return false;
+            if (!drained && bus.pending_events().front().canonical_bytes() != pending)
+                return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
+    if (!sequence_exhaustion_is_atomic())
+        return fail("exhausted event sequence mutated pending state or wrapped the cursor");
     using luminumbra::simulation::describe_event_order;
     using luminumbra::simulation::OrderedEventBus;
     using luminumbra::simulation::replay_eventbus_order_fixture;

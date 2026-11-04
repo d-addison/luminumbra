@@ -179,6 +179,8 @@ public:
     // touches the canonical tick or any record). Used after a scheduler fault.
     void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
+    // Existing records remain writable; new records must fit with every retained extension.
+    [[nodiscard]] bool can_activate(RegionKey key) const;
     void mark_edited(RegionKey key, const WorldClock& clock);
     // Wakes an existing Frozen record whose authority changed; never creates or alters others.
     void wake_frozen(RegionKey key) noexcept;
@@ -239,7 +241,8 @@ private:
     bool encodable_with_counts(std::size_t energy_owners,
                                std::size_t water_debts,
                                std::optional<std::size_t> completed_owners = std::nullopt,
-                               bool allocator_advanced = false) const;
+                               bool allocator_advanced = false,
+                               std::optional<std::size_t> record_count = std::nullopt) const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;

@@ -87,10 +87,19 @@ bool ActiveRegionLedger::try_set_local_anchor(const Vec3& walking_feet) noexcept
     set_local_anchor(walking_feet);
     return true;
 }
+bool ActiveRegionLedger::can_activate(RegionKey key) const {
+    return ValidKey(key) &&
+           (m_records.contains(key) ||
+            (m_records.size() < kMaxRegions && encodable_with_counts(m_energyAges.size(),
+                                                                     m_waterDebts.size(),
+                                                                     std::nullopt,
+                                                                     false,
+                                                                     m_records.size() + 1)));
+}
 ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock& clock) {
     if (!ValidKey(key) || clock.tick() < m_headerTick)
         throw std::invalid_argument("Invalid region activation");
-    if (!m_records.contains(key) && m_records.size() == kMaxRegions)
+    if (!can_activate(key))
         throw std::length_error("Active-region ledger capacity reached");
     auto [it, added] = m_records.try_emplace(key);
     if (added)
@@ -235,7 +244,7 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
             const double dz = std::max({z * 512.0 - anchor.z, 0.0, anchor.z - (z + 1) * 512.0});
             if (dx * dx + dz * dz > 512.0 * 512.0)
                 continue;
-            if (!m_records.contains(key) && m_records.size() == kMaxRegions) {
+            if (!can_activate(key)) {
                 ++rejected.capacity;
                 continue;
             }
@@ -547,13 +556,15 @@ bool ActiveRegionLedger::any_frozen_history() const {
 bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
                                                std::size_t debts,
                                                std::optional<std::size_t> completed_owners,
-                                               bool allocator_advanced) const {
+                                               bool allocator_advanced,
+                                               std::optional<std::size_t> record_count) const {
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
     const std::size_t completed_count = completed_owners.value_or(m_completedWork.size());
     const std::size_t completed = completed_count == 0 ? 0u : 10u + 16u * completed_count;
     const std::size_t allocator = (allocator_advanced || m_nextPersistentId != 1) ? 14u : 0u;
-    const std::size_t base = kHeaderBytes + m_records.size() * kRecordBytes + 8;
+    const std::size_t base =
+        kHeaderBytes + record_count.value_or(m_records.size()) * kRecordBytes + 8;
     const std::size_t extension_payload = completed + allocator +
                                           (owners == 0 ? 0u : 10u + 16u * owners) +
                                           (debts == 0 ? 0u : 10u + 16u * debts);
