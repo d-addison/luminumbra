@@ -51,9 +51,27 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertLess(binding, identity)
         self.assertLess(identity, link)
         self.assertNotIn("FILE_SHARE_DELETE", publication[binding:identity])
-        self.assertIn("bound.release(), source.path, destination", publication[link:])
+        self.assertRegex(publication[link:], r"bound\.release\(\),\s*source\.path,\s*destination")
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
+
+    def test_windows_bound_publication_flushes_before_success(self):
+        publication = body(self.journal, "void publish_windows(")
+        link = publication.index("Detail::WindowsPublishWithoutReplacement(")
+        flush = publication.index("::FlushFileBuffers(published.get())")
+        self.assertIn("GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE", publication[:link])
+        self.assertIn("GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE", publication[link:flush])
+        self.assertLess(link, publication.index("target.identity = source.identity;"))
+        self.assertLess(publication.index("target.identity = source.identity;"), flush)
+        self.assertRegex(publication[flush:], r"throw std::system_error")
+        service = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
+        protected = body(service, "bool PublishProtectedMember(")
+        self.assertIn("source.publish_bound(destination, source_stage)", protected)
+        transaction = (PERSISTENCE / "SaveTransaction.cpp").read_text(encoding="utf-8")
+        commit = body(transaction, "bool SaveTransaction::commit(")
+        self.assertLess(commit.index("if (!published)"), commit.index("m_state = State::Committed"))
+        self.assertLess(commit.index("m_state = State::Committed"),
+                        commit.index("recover_pending_journal(m_save_dir, errors)"))
 
     def test_publication_checks_source_retirement_and_retains_verified_cleanup_ownership(self):
         publication = body(self.journal, "inline HANDLE WindowsPublishWithoutReplacement(")
@@ -106,11 +124,29 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
         self.assertEqual(writer.count("Detail::WindowsPublishWithoutReplacement("), 2)
         promotion = body(writer, "bool promote_seed(")
-        self.assertEqual(writer.count("::MoveFileExW("), 1)
+        self.assertEqual(writer.count("::MoveFileExW("), 2)
         self.assertIn("::MoveFileExW(m_path.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)",
                       promotion)
         self.assertNotIn("MOVEFILE_REPLACE_EXISTING", promotion)
-        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, ""))
+        replacing = body(writer, "bool ReplaceRegionFileAtomically(").split("#else", 1)[0]
+        removing = body(writer, "bool WorldSaveService::durable_remove(")
+        self.assertIn("MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH", replacing)
+        self.assertNotIn("::ReplaceFileW(", replacing)
+        self.assertIn("retained_payload->retain_publication_identity()", replacing)
+        self.assertIn("StagingFile retained(path, StagingFile::Mode::Inspect)", removing)
+        self.assertIn("SaveTransaction::check_publication_target(path, errors)", removing)
+        self.assertIn("retained.remove(1, stage)", removing)
+        self.assertIn("SaveTransaction::publication_stages(path, unused_stage, retired_stage)", removing)
+        bound_removal = body(self.journal, "void remove_owned(").split("#else", 1)[0]
+        self.assertLess(bound_removal.index("identity_from(owned.get())"),
+                        bound_removal.index("Detail::WindowsDisposeLink(owned.get())"))
+        disposal = body(self.journal, "inline bool WindowsDisposeLink(")
+        self.assertIn("FILE_INFO_BY_HANDLE_CLASS>(21)", disposal)
+        self.assertIn("0x1 | 0x2", disposal)
+        self.assertLess(disposal.index("FILE_INFO_BY_HANDLE_CLASS>(21)"),
+                        disposal.index("FileDispositionInfo,"))
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", removing)
+        self.assertNotIn("::MoveFileExW(", writer.replace(promotion, "").replace(replacing, "").replace(removing, ""))
         for marker in ("bool ReplaceRegionFileAtomically(", "bool Publish("):
             publishing = body(writer, marker).split("#else", 1)[0]
             linking = publishing.index("Detail::WindowsPublishWithoutReplacement(")
@@ -194,15 +230,35 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
 
     def test_posix_publication_verifies_the_quarantined_entry_before_descriptor_relative_move(self):
         self.assertIn("publish_posix(source, target);", body(self.journal, "void publish_file("))
-        publication = body(self.journal, "void publish_posix(")
+        publication = re.sub(r"\s+", " ", body(self.journal, "void publish_posix("))
         self.assertLess(publication.index("const Quarantine quarantine("),
                         publication.index("::fstatat("))
         self.assertLess(publication.index("moved != source.identity"),
-                        publication.index('container.get(), "artifact", target_parent.get()'))
-        self.assertIn('source_parent.get(), source_name.c_str(), container.get(), "artifact"',
+                        re.sub(r"\s+", " ", publication).index(
+                            'quarantine.directory(), quarantine.entry(), target_parent.get()'))
+        self.assertIn('source_parent.get(), source_name.c_str(), quarantine.directory(), quarantine.entry()',
                       re.sub(r"\s+", " ", publication))
-        self.assertIn("restore_quarantined(", publication)
+        self.assertIn('quarantine.entry(), source_parent.get(), source_name.c_str()',
+                      re.sub(r"\s+", " ", publication))
         self.assertNotIn("AT_FDCWD", publication)
+
+    def test_indexed_moves_bind_recorded_quarantine_slots_before_publication(self):
+        transaction = (PERSISTENCE / "SaveTransaction.cpp").read_text(encoding="utf-8")
+        quarantine = body(self.journal, "explicit Quarantine(")
+        self.assertIn("stage->directory_identity !=", quarantine)
+        self.assertIn("identity_from(m_container.get())", quarantine)
+        self.assertIn("O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC", quarantine)
+        prepare = body(transaction, "bool SaveTransaction::prepare_publication(")
+        self.assertLess(prepare.index("input.identity(entry->incoming_identity)"),
+                        prepare.index("transaction->write_journal(errors)"))
+        stages = body(transaction, "bool SaveTransaction::publication_stages(")
+        self.assertIn('"incoming", destination', stages)
+        self.assertIn('"retired", destination', stages)
+        self.assertIn('journal / "undo/cleanup.txn.json"', transaction)
+        native = (ROOT / "test/persistence/SaveTransaction_test.cpp").read_text(encoding="utf-8")
+        for regression in ("EveryJournaledPublicationMoveRecoversThePreviousCommit",
+                           "RecoveryRefusesUnknownAndSubstitutedPublicationSlots"):
+            self.assertIn(regression, native)
 
     def test_journal_and_durable_writer_never_convert_native_paths_through_the_code_page(self):
         writer = (PERSISTENCE / "WorldSaveService.cpp").read_text(encoding="utf-8")
@@ -235,7 +291,7 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
     def test_snapshot_refusals_keep_the_live_world_or_change_revision_when_it_is_torn_down(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
         preparation = body(session, "GameSession::PrepareWorldLoad(")
-        self.assertIn("ReadPreparedWorldState(worldPath, options, loaded, prepared->error, true, stop)",
+        self.assertIn("ReadPreparedWorldState(worldPath, state_options, loaded, prepared->error, true, stop)",
                       preparation)
         self.assertNotIn("ResetWorldSystems();", preparation)
         self.assertLess(preparation.index("ReadPreparedWorldState("),

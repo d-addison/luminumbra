@@ -204,12 +204,55 @@ speeds; the paired comparison above is the release performance gate.
 
 ## Automation model
 
-The hosted Linux pull-request lane builds base and candidate in the same job,
-runs deterministic server batches in ABBA order, and uploads the engine evidence,
-raw samples, and comparison. Missing or incomparable evidence fails the
-measurement, while an underpowered result is an explicit warning. The workflow
-enforces the reviewed relative policy. Windows and macOS currently exercise the portable runner contract
-only; engine measurement on those systems remains non-blocking expansion work.
+Before merge, `Performance observations` runs portable runner contracts and the
+path-routed software-OpenGL preview measurement. The contracts test synthetic
+evidence and command construction; the preview measures rendering. Neither checks
+populated shipping simulation budgets or the paired water timings.
+
+The existing `Server smoke observation / base versus head` check also runs on
+ready pull requests to `devel` when their merge-base diff can affect server
+measurements. Common and server sources (including world, streaming, persistence,
+water and simulation), client world sources, fixtures, runtime data/configuration,
+world presets, build/dependency inputs, CI scripts/workflows, `tools/perf/**`
+(including baselines), persistence tooling and unknown inputs run this check.
+Documentation and other client-only source changes skip it; mixed changes run it.
+Classification uses the base revision's policy, counts both sides of renames and
+deletions, and runs measurements on missing/invalid policy or history, fork PRs,
+and uncertain classification. A base revision predating the policy runs the lane
+until the policy lands. Draft PRs skip heavy measurement; marking ready reruns it.
+Ready `main` PRs retain the promotion check for all paths.
+
+That Linux job builds base and candidate together and runs the same steps before
+and after merge:
+
+- Server smoke (30 ticks) and water smoke (300 ticks), seed 1337, with ABBA
+  batches and 20 measured samples per revision. Both comparisons retain the 5%
+  relative policy; water compares `water_phase_p95_ms`.
+- Candidate shipping-default simulation capture on default, mountains and
+  archipelago, with replay, 600 ticks, seed 1337, surface/collision radii 1 and
+  autosave every 30 ticks. The existing capture and proposal scripts run, then
+  `check_sim_budgets.py --require-complete` enforces the committed stage work
+  limits. Proposal output is evidence; it never replaces the baseline.
+- Comparison and simulation evidence uploads, including failed-run evidence
+  where available. Capture, validation and budget failures fail the PR check.
+
+The check name is unchanged; branch-protection settings are not changed by the
+workflow. It uses standard `ubuntu-24.04`, four build workers, the existing
+90-minute job cap and 20-minute capture-step cap. Allow roughly 48 minutes for
+the paired lane plus up to 20 minutes for capture; cache misses and setup can
+increase elapsed time within the job cap. This is an estimate, not a newly
+measured hosted-run duration. Unrelated `devel` PRs allocate no paired runner.
+
+After merge, pushes to `main` and `devel` still run these steps for every tip
+with a nonzero predecessor, comparing the previous tip against the pushed SHA.
+PRs compare the PR base SHA against the head SHA. These differing revision pairs
+and runner timing noise mean pre-merge success cannot guarantee post-merge
+success. Scheduled runs do not run the paired comparison; manual simulation
+qualification remains opt-in. Missing or incomparable evidence fails measurement,
+while an underpowered relative result is an explicit warning. Historical bases
+without water-smoke or the compatible perf schema retain their recorded degraded
+observation behavior. Windows and macOS exercise the portable runner contract
+only; engine measurement on those systems remains expansion work.
 
 Hardware rendering requires a labeled, fixed Windows runner with a pinned driver,
 power profile, display mode, and background-service policy. That lane runs nightly
@@ -333,5 +376,5 @@ common workload with the existing 5% limit; a fixture transition alone is not a 
 Native candidate simulation-budget capture runs separately without that marker and
 requires effective active regions, High water, finite hydrology, weather rain/events
 and allocated stateful aether. Its repeated stage traces supply the existing budget
-proposal process. Null baseline identity/work ceilings require CI evidence before
-pinning; they must not be invented or treated as passing performance qualification.
+proposal process. CI enforces the committed work ceilings with `--require-complete`;
+changing them requires captured evidence and review, not automatic re-pinning.

@@ -5,6 +5,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -15,12 +16,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <ios>
 #include <iostream>
 #include <map>
-#include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace {
 namespace fs = std::filesystem;
@@ -166,18 +166,33 @@ protected:
         std::error_code ec;
         fs::remove_all(root, ec);
     }
-    static std::map<std::string, std::string> SavedBytes(const fs::path& directory) {
-        std::map<std::string, std::string> result;
+    static std::map<std::string, std::pair<std::uint64_t, std::uint64_t>>
+    SavedContentFingerprints(const fs::path& directory) {
+        namespace P = Luminumbra::Persistence;
+        std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> result;
         for (const auto& entry : fs::recursive_directory_iterator(directory)) {
             if (!entry.is_regular_file())
                 continue;
-            // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
-            std::ifstream input;
-            input.open(entry.path(), std::ios::binary);
-            std::ostringstream bytes;
-            bytes << input.rdbuf();
+            std::uint64_t bytes = 0, hash = 0;
+            if (entry.path() == P::snapshot_index_path(directory)) {
+                P::SnapshotIndex index;
+                EXPECT_TRUE(P::read_snapshot_index(directory, index, nullptr));
+                // design.md:55-60 permits a new transaction header for an identical save;
+                // unchanged member identities AND generations must remain identical (:57).
+                index.generation = 0;
+                index.txn_id = 0;
+                const auto canonical = P::encode_snapshot_index(index);
+                bytes = canonical.size();
+                hash = P::fnv1a64_bytes(canonical.data(), canonical.size());
+            } else {
+                bool exists = false;
+                EXPECT_TRUE(P::hash_file(entry.path(), bytes, hash, exists, nullptr));
+                EXPECT_TRUE(exists);
+            }
+            // Stream payloads: copying two whole saves alongside the live water-authoritative
+            // world can exhaust memory. The index uses this same size/FNV identity (design.md:55).
             result.emplace(entry.path().lexically_relative(directory).generic_string(),
-                           bytes.str());
+                           std::make_pair(bytes, hash));
         }
         return result;
     }
@@ -253,11 +268,11 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         // metadata, across the toggle at the same settled tick.
         ASSERT_TRUE(runner.Session()->SaveWorldState());
         ASSERT_TRUE(runner.Session()->SaveWorld());
-        const auto before = SavedBytes(runner.Session()->GetWorldSaveDir());
+        const auto before = SavedContentFingerprints(runner.Session()->GetWorldSaveDir());
         runner.Session()->SetSimBudgetTelemetryEnabled(!config.sim_budget);
         ASSERT_TRUE(runner.Session()->SaveWorldState());
         ASSERT_TRUE(runner.Session()->SaveWorld());
-        EXPECT_EQ(SavedBytes(runner.Session()->GetWorldSaveDir()), before);
+        EXPECT_EQ(SavedContentFingerprints(runner.Session()->GetWorldSaveDir()), before);
         runner.Shutdown();
     }
 }
@@ -266,5 +281,68 @@ INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          testing::Bool(),
                          [](const testing::TestParamInfo<bool>& parameter) {
                              return parameter.param ? "Enabled" : "Disabled";
+                         });
+
+class SimBudgetAutosave : public testing::TestWithParam<std::string> {
+protected:
+    fs::path root;
+
+    void SetUp() override {
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("sim_budget_autosave_");
+        fs::create_directories(root / "worlds/atlas/presets");
+        const auto preset = GetParam() + ".json";
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets" / preset,
+                      root / "worlds/atlas/presets" / preset);
+        fs::create_directories(root / "data");
+        fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data/common",
+                 root / "data/common",
+                 fs::copy_options::recursive);
+    }
+    void TearDown() override {
+        std::error_code ec;
+        fs::remove_all(root, ec);
+    }
+};
+
+TEST_P(SimBudgetAutosave, StationaryCaptureStaysSettledAcrossAutosaves) {
+    // Cross several capture autosaves while keeping the integration workload bounded.
+    constexpr std::uint64_t ticks = 120;
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = root.generic_string() + "/";
+    config.seed = "1337";
+    config.preset = GetParam();
+    config.surface_radius = 1;
+    config.collision_radius = 1;
+    config.avatar_count = 0;
+    config.moving_anchor = false;
+    config.ecology_roster = true;
+    config.planted_roster = true;
+    config.sim_budget = true;
+    config.autosave_interval_ticks = 30;
+    Luminumbra::Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot());
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    ASSERT_TRUE(runner.Session()->FiniteHydrologyEnabled());
+    const auto report = runner.RunFixedTicks(ticks);
+    ASSERT_EQ(report.ticks_executed, ticks);
+    EXPECT_FALSE(report.region_fault) << report.region_fault_message;
+    EXPECT_EQ(report.autosave_passes, ticks / config.autosave_interval_ticks);
+    EXPECT_EQ(runner.Session()->GetPersistenceStatus().failures, 0u);
+    const auto& samples =
+        runner.Session()
+            ->GetSimBudgetTelemetry()
+            .SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::ServerStreaming)];
+    ASSERT_EQ(samples.size(), ticks);
+    for (const auto& sample : samples) {
+        EXPECT_EQ(sample.work, 0u) << "tick=" << sample.tick;
+    }
+    runner.Shutdown();
+}
+
+INSTANTIATE_TEST_SUITE_P(CapturePresets,
+                         SimBudgetAutosave,
+                         testing::Values("default", "mountains", "archipelago"),
+                         [](const testing::TestParamInfo<std::string>& parameter) {
+                             return parameter.param;
                          });
 } // namespace

@@ -67,6 +67,13 @@ class CacheRetentionTests(unittest.TestCase):
             self.cache(2, "perf-linux-x64-gcc-ccache-config-sha"),
         ]), [1])
 
+    def test_fast_dependency_sources_retain_one_exact_key_generation_per_branch(self):
+        caches = [self.cache(1, "fast-deps-v1-Linux-old", size=500_000_000),
+                  self.cache(2, "fast-deps-v1-Linux-new", size=500_000_000),
+                  self.cache(3, "fast-deps-v1-Linux-main", "refs/heads/main", size=500_000_000)]
+        self.assertEqual(self.obsolete(caches), [1])
+        self.assertEqual(self.budget, 9_500_000_000)
+
     def test_each_tidy_shard_keeps_its_newest_generation_after_grace(self):
         caches = [
             self.cache(shard, f"tidy-cache-Linux-shard{shard}of3-old")

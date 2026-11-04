@@ -507,7 +507,8 @@ def publish_initial_cache(candidate: Path, init: Path) -> None:
     os.link(candidate, init)
 
 
-def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
+def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path,
+          *, build_local: bool = False) -> None:
     scratch = root / "scratch"
     if scratch.is_symlink():
         raise DependencyError("symlinked scratch root")
@@ -564,9 +565,10 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
                 raise DependencyError(f"source changed during copy: {name}")
             lines.append(f'set(FETCHCONTENT_SOURCE_DIR_{name.upper()} '
                          f'{cmake_string(str(target))} CACHE PATH "" FORCE)')
-        lines += [f'set(FETCHCONTENT_BASE_DIR {cmake_string(str(dest / "_deps"))} CACHE PATH "" FORCE)',
-                  'set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "" FORCE)',
-                  'set(GLAD_REPRODUCIBLE ON CACHE BOOL "" FORCE)']
+        if not build_local:
+            lines += [f'set(FETCHCONTENT_BASE_DIR {cmake_string(str(dest / "_deps"))} CACHE PATH "" FORCE)',
+                      'set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "" FORCE)']
+        lines.append('set(GLAD_REPRODUCIBLE ON CACHE BOOL "" FORCE)')
         init.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=init.parent,
                                          prefix=init.name + ".", suffix=".tmp", delete=False) as handle:
@@ -697,7 +699,11 @@ def main(argv=None) -> int:
     parser.add_argument("--lock", type=Path, default=Path("tools/ci/deps-lock.json"))
     parser.add_argument("--dest", type=Path, default=Path("scratch/offline-deps"))
     parser.add_argument("--init", type=Path, default=Path("scratch/offline-init.cmake"))
+    parser.add_argument("--build-local", action="store_true",
+                        help="stage sources while leaving population and build directories in each CMake build root")
     args = parser.parse_args(argv)
+    if args.build_local and args.command != "stage":
+        parser.error("--build-local requires stage")
     cache = args.cache
     try:
         if args.command == "prepare":
@@ -712,7 +718,8 @@ def main(argv=None) -> int:
         elif args.command == "verify":
             verify(root, cache, lock)
         else:
-            stage(root, cache, lock, root / args.dest, root / args.init)
+            stage(root, cache, lock, root / args.dest, root / args.init,
+                  build_local=args.build_local)
     except (DependencyError, OSError, ValueError, TypeError, KeyError,
             subprocess.SubprocessError) as error:
         print(f"offline dependencies: {error}", file=sys.stderr)

@@ -26,6 +26,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -575,6 +576,85 @@ TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
     EXPECT_EQ(ComputeFarLodTileHash(tile), before);
 }
 
+TEST(FarLodStoreTest, ValidatedTileReductionMatchesPerCallValidationAndValidatesOnce) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile seeded = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot seed = AuthoritativeSdfSnapshot(IVec3(0, 0, 0), 1u);
+    FillFlatSdf(seed);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(seeded, seed, &error), FarLodSdfReduceResult::Inserted)
+        << error;
+
+    std::vector<FarLodSdfSnapshot> overlays;
+    overlays.reserve(8);
+    for (int index = 0; index < 6; ++index) {
+        FarLodSdfSnapshot overlay = AuthoritativeSdfSnapshot(IVec3(1 + index, index % 2, 3), 1u);
+        FillFlatSdf(overlay, 4 + index);
+        overlays.push_back(std::move(overlay));
+    }
+    FarLodSdfSnapshot replacement = AuthoritativeSdfSnapshot(IVec3(0, 0, 0), 2u);
+    FillFlatSdf(replacement, 9);
+    overlays.push_back(replacement);
+    overlays.push_back(replacement);
+
+    FarLodTile per_call = seeded;
+    std::vector<FarLodSdfReduceResult> per_call_results;
+    per_call_results.reserve(overlays.size());
+    const u64 per_call_start = FarLodStore::brick_validation_count_for_testing();
+    for (const FarLodSdfSnapshot& overlay : overlays) {
+        per_call_results.push_back(ReduceChunkSdfIntoFarTile(per_call, overlay, &error));
+    }
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - per_call_start, overlays.size());
+
+    FarLodTile validated_once = seeded;
+    std::vector<FarLodSdfReduceResult> validated_once_results;
+    validated_once_results.reserve(overlays.size());
+    const u64 validated_once_start = FarLodStore::brick_validation_count_for_testing();
+    validated_once_results.push_back(
+        ReduceChunkSdfIntoFarTile(validated_once, overlays.front(), &error));
+    for (std::size_t index = 1; index < overlays.size(); ++index) {
+        validated_once_results.push_back(
+            ReduceChunkSdfIntoValidatedFarTile(validated_once, overlays[index], &error));
+    }
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - validated_once_start, 1u);
+
+    EXPECT_EQ(validated_once_results, per_call_results);
+    EXPECT_EQ(per_call_results.front(), FarLodSdfReduceResult::Inserted);
+    EXPECT_EQ(per_call_results[overlays.size() - 2], FarLodSdfReduceResult::Replaced);
+    EXPECT_EQ(per_call_results.back(), FarLodSdfReduceResult::Unchanged);
+    EXPECT_EQ(validated_once.sdf_density_q, per_call.sdf_density_q);
+    EXPECT_EQ(validated_once.sdf_material, per_call.sdf_material);
+    ASSERT_EQ(validated_once.sdf_bricks.size(), per_call.sdf_bricks.size());
+    EXPECT_EQ(per_call.sdf_bricks.size(), seeded.sdf_bricks.size() + 6u);
+    for (std::size_t index = 0; index < per_call.sdf_bricks.size(); ++index) {
+        const FarLodSdfBrickDescriptor& expected = per_call.sdf_bricks[index];
+        const FarLodSdfBrickDescriptor& actual = validated_once.sdf_bricks[index];
+        EXPECT_EQ(actual.local_chunk_x, expected.local_chunk_x);
+        EXPECT_EQ(actual.local_chunk_z, expected.local_chunk_z);
+        EXPECT_EQ(actual.source_kind, expected.source_kind);
+        EXPECT_EQ(actual.reserved, expected.reserved);
+        EXPECT_EQ(actual.chunk_y, expected.chunk_y);
+        EXPECT_EQ(actual.revision, expected.revision);
+        EXPECT_EQ(actual.payload_crc32, expected.payload_crc32);
+    }
+    EXPECT_EQ(ComputeFarLodTileHash(validated_once), ComputeFarLodTileHash(per_call));
+
+    // A tampered home tile is refused by the validating first reduction,
+    // before anything is merged into it.
+    FarLodTile tampered = seeded;
+    tampered.sdf_material[0] = static_cast<u8>(tampered.sdf_material[0] ^ 1u);
+    const u64 tampered_hash = ComputeFarLodTileHash(tampered);
+    const u64 tampered_start = FarLodStore::brick_validation_count_for_testing();
+    error.clear();
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tampered, overlays.front(), &error),
+              FarLodSdfReduceResult::Error);
+    EXPECT_NE(error.find("CRC"), std::string::npos) << error;
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing() - tampered_start, 1u);
+    EXPECT_EQ(ComputeFarLodTileHash(tampered), tampered_hash);
+}
+
 TEST(FarLodStoreTest, BrickUpsertsUseCanonicalOrderAndRejectDuplicateStreams) {
     const TerrainGenParams params = FixtureParams();
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
@@ -713,6 +793,75 @@ TEST(FarLodStoreTest, MalformedPristineAndAuthorityAreHardErrors) {
     EXPECT_FALSE(authoritative_store.load_tile(
         FarLodTier::F1, 0, 0, params_hash, authoritative_loaded, &errors));
     EXPECT_FALSE(errors.empty());
+}
+
+TEST(FarLodStoreTest, AdmissionReusesExactRecordsAndRejectsChangedBytes) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    auto tile = BuildPristineFarLodTile(world, FarLodTier::F1, 6, -5, params_hash);
+    std::string error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(
+                  tile, AuthoritativeSdfSnapshot(IVec3(192, 1, -160), 113u), &error),
+              FarLodSdfReduceResult::Inserted);
+    TempSaveDir save_dir("admitted_far_records");
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save_dir.path).save_tile(tile, &errors));
+    const auto path = WorldSaveService::region_file_path(save_dir.path, tile.rx, tile.rz);
+    const auto relative = std::filesystem::relative(path, save_dir.path).generic_string();
+    Luminumbra::Persistence::MemberDigest digest;
+    const auto before = FarLodStore::brick_validation_count_for_testing();
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error)) << error;
+    const auto admitted = FarLodStore::brick_validation_count_for_testing();
+    EXPECT_EQ(admitted, before + 1);
+    EXPECT_FALSE(digest.present); // Far-LOD validation does not create lod-0 membership.
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors));
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_EQ(FarLodStore::brick_validation_count_for_testing(), admitted);
+
+    const auto original = ReadTestFileBytes(path);
+    const auto original_time = std::filesystem::last_write_time(path);
+    const auto replace = [&](const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        ASSERT_TRUE(output);
+        std::filesystem::last_write_time(path, original_time);
+    };
+    // Same path, length and timestamp; change only one record header byte.
+    ASSERT_GT(original.size(), 26u);
+    for (const std::size_t offset : {8u, 16u, 17u, 18u}) {
+        auto changed = original;
+        changed[offset] = static_cast<char>(static_cast<unsigned char>(changed[offset]) ^ 1u);
+        replace(changed);
+        error.clear();
+        EXPECT_FALSE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+        EXPECT_FALSE(error.empty());
+        errors.clear();
+        EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path, &errors));
+        EXPECT_FALSE(errors.empty());
+        replace(original);
+    }
+
+    // LZ4 ends with literals: the last byte is the last SDF material. Retain
+    // the file size, timestamp and record header while leaving its CRC stale.
+    auto changed_payload = original;
+    changed_payload.back() ^= 1;
+    replace(changed_payload);
+    error.clear();
+    EXPECT_FALSE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_NE(error.find("CRC mismatch"), std::string::npos) << error;
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("CRC mismatch"), std::string::npos) << errors.front();
+
+    replace(original);
+    errors.clear();
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors));
+    error.clear();
+    ASSERT_TRUE(WorldSaveService::member_digest(save_dir.path, relative, digest, error));
+    EXPECT_TRUE(errors.empty());
 }
 
 TEST(FarLodStoreTest, Fsd2AuthorityRejectsEveryMalformedStreamClass) {

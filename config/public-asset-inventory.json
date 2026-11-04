@@ -1380,10 +1380,10 @@
       "source": "Luminumbra test fixtures"
     },
     {
-      "bytes": 995,
+      "bytes": 929,
       "license": "MIT",
       "path": "test/fixtures/active-regions/devel-off-plant-edit/r.0.0.lmr",
-      "sha256": "351f81e865582c139a5c8f56294f39eed4b35df7024c4d4bee4447a2dc81d675",
+      "sha256": "be83faddcb10be2dad186de415d074db0b6ff0352fdc5b95b81e92c904f3d65e",
       "source": "Luminumbra test fixtures"
     },
     {
@@ -1394,10 +1394,10 @@
       "source": "Luminumbra test fixtures"
     },
     {
-      "bytes": 995,
+      "bytes": 929,
       "license": "MIT",
       "path": "test/fixtures/active-regions/devel-off/r.0.0.lmr",
-      "sha256": "351f81e865582c139a5c8f56294f39eed4b35df7024c4d4bee4447a2dc81d675",
+      "sha256": "be83faddcb10be2dad186de415d074db0b6ff0352fdc5b95b81e92c904f3d65e",
       "source": "Luminumbra test fixtures"
     },
     {
