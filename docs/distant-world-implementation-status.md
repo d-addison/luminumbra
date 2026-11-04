@@ -183,3 +183,29 @@ source. Those results and the earlier native attempt do not qualify the new
 source on native hardware, the five-tier runtime, the world performance matrix,
 or any visual approval. Complete native qualification and the outstanding DW01–DW09 closure packets
 are deferred to v0.3.1. Implemented source does not approve a visual scenario.
+
+### Ground object authority and admission
+
+Pending ground spawn/despawn notifications and their sequence cursor now join the
+authoritative hash through the same capture used by saves and the heavy comparison
+oracle. Empty notification state contributes no bytes, preserving existing empty
+and disabled-world hash projections. Canonical delivery records retain their saved
+sequence order and all event fields.
+
+Spawn admission budgets queued notification bytes and the candidate's event within
+the existing 4 MiB file cap. Loading applies the same combined growth budget before
+replacing either output, and the save writer refuses the same over-budget state
+before publishing. The envelope reserves maximum cursor width; object
+reservations continue to cover settling, ageing and replacement by a despawn event.
+Event byte accounting follows delivery, interrupted delivery, restore and clear.
+Unknown-region work submitted by callbacks follows the scheduler's rejection path;
+valid completed work still publishes at the boundary.
+
+Regression coverage includes all notification fields, cursor-only state, canonical
+ordering and save/load; byte and spawn-count admission boundaries; callback input
+rejection and continued ticks; and comparison-oracle and event-byte accounting.
+Clang 18 syntax checks pass for the changed translation units, and GCC builds the
+standalone store/oracle suites and event-bus gate at two jobs. The 34 store/oracle
+tests and the event-bus gate pass. The clone has no configured CMake build or built
+engine libraries, so the headless session regressions, save-writer regression and
+pinned engine hash tests remain unexecuted here. Fixture files and their pinned values are unchanged.

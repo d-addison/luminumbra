@@ -55,7 +55,8 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   active_regions,
                                   clock_bytes,
                                   ledger_bytes,
-                                  ground_objects] = hashes;
+                                  ground_objects,
+                                  ground_notifications] = hashes;
     [[maybe_unused]] const auto& [terrain,
                                   mesh,
                                   water,
@@ -64,7 +65,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   weather,
                                   aether,
                                   aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 7;
+    constexpr std::size_t kTopLevelFields = 8;
     constexpr std::size_t kSubFields = 8;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
@@ -77,6 +78,7 @@ TEST(HeavyComparison, TableCoversEveryHashField) {
                                          "water",
                                          "entities",
                                          "ground_objects",
+                                         "ground_notifications",
                                          "active_regions",
                                          "clock",
                                          "ledger",
@@ -140,7 +142,8 @@ TEST(HeavyComparison, InactiveRegionsSkipsOptionalRows) {
 
 TEST(HeavyComparison, InactiveRegionsStillComparesAlwaysRows) {
     const HeavyHashes base = MakeBase(false);
-    for (const char* name : {"terrain", "water", "entities", "ground_objects"}) {
+    for (const char* name :
+         {"terrain", "water", "entities", "ground_objects", "ground_notifications"}) {
         SCOPED_TRACE(name);
         const HeavySubsystem* row = FindRow(HeavySubsystemTable(), name);
         ASSERT_NE(row, nullptr);
@@ -287,6 +290,28 @@ TEST(HeavyComparison, GroundObjectPresenceMutatesAndCompares) {
     EXPECT_FALSE(AuthoritativeStateEqual(populated, empty));
     EXPECT_EQ(GroundObjectDifference(empty, populated), "ground_objects.size");
     EXPECT_EQ(GroundObjectDifference(populated, empty), "ground_objects.size");
+}
+
+TEST(HeavyComparison, GroundNotificationsCompareIndependentlyOfObjectsAndComposite) {
+    const Luminumbra::world::GroundNotifications notifications{
+        2, {{4, -1, 0, "ground.spawned", "first"}, {3, 2, 1, "ground.despawned", "second"}}};
+    HeavyHashes base = MakeBase(true);
+    base.ground_notifications = notifications.canonical_bytes();
+    for (const bool cursor_only : {false, true}) {
+        auto changed = notifications;
+        if (cursor_only) {
+            ++changed.next_sequence;
+        } else {
+            changed.events.front().payload += "x";
+        }
+        HeavyHashes mutated = base;
+        mutated.ground_notifications = changed.canonical_bytes();
+        EXPECT_EQ(base.world_hash, mutated.world_hash);
+        EXPECT_EQ(base.ground_objects, mutated.ground_objects);
+        EXPECT_FALSE(AuthoritativeStateEqual(base, mutated));
+        EXPECT_FALSE(AuthoritativeStateEqual(mutated, base));
+    }
+    EXPECT_TRUE(AuthoritativeStateEqual(base, base));
 }
 
 TEST(HeavyComparison, MeshEqualTracksMeshOnly) {

@@ -2031,9 +2031,10 @@ void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
     if (m_activeRegionsEnabled && !m_regionFault) {
-        if (m_simulationBatchInProgress)
+        if (m_simulationBatchInProgress && m_activeRegionLedger.records().contains(work.key))
             m_regionCompletedWork.push_back(work);
         else
+            // Unknown records retain the scheduler's normal rejection accounting.
             m_regionWork.push_back(work);
     }
 }
@@ -2110,13 +2111,23 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     candidate.id = id;
     SettleGroundObjectOnTerrain(candidate,
                                 m_worldSystem->ProbeTerrainBelow(GroundProbePosition(candidate)));
-    if (!m_groundObjects.insert(candidate))
+    const luminumbra::simulation::SimulationEvent notification{tick,
+                                                               0,
+                                                               m_simulationEventBus.next_sequence(),
+                                                               "ground.spawned",
+                                                               GroundEventPayload(candidate)};
+    const auto notification_bytes = m_simulationEventBus.pending_bytes("ground.spawned") +
+                                    m_simulationEventBus.pending_bytes("ground.despawned") +
+                                    notification.canonical_bytes().size() + 1;
+    if (!m_groundObjects.insert(candidate, notification_bytes)) {
+        ++m_regionInputRejections.ground_spawns;
         return 0;
+    }
     if (!MarkGroundRegionEdited(candidate)) {
         m_groundObjects.erase(id);
         return 0;
     }
-    m_simulationEventBus.publish(tick, "ground.spawned", GroundEventPayload(candidate));
+    m_simulationEventBus.publish(tick, notification.topic, notification.payload);
     return id;
 }
 
@@ -2334,8 +2345,22 @@ std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_has
     return m_activeRegionsEnabled
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
                                              m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes())
+                                             m_groundObjects.canonical_bytes() +
+                                             CaptureGroundNotifications().canonical_bytes())
                : ecology_hash;
+}
+
+GroundNotifications GameSession::CaptureGroundNotifications() const {
+    GroundNotifications notifications;
+    // Fault recovery retires notifications without invoking consumers.
+    if (m_activeRegionsEnabled && !m_regionFault) {
+        notifications.next_sequence = m_simulationEventBus.next_sequence();
+        for (const auto& event : m_simulationEventBus.pending_events()) {
+            if (event.topic == "ground.spawned" || event.topic == "ground.despawned")
+                notifications.events.push_back(event);
+        }
+    }
+    return notifications;
 }
 
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
@@ -2535,15 +2560,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
     if (!PersistSavedPreset(save_dir, m_savedPresetJson, artifacts))
         return false;
     if (m_activeRegionsEnabled) {
-        GroundNotifications notifications;
-        // Fault recovery saves retire notifications without invoking consumers.
-        if (!m_regionFault) {
-            notifications.next_sequence = m_simulationEventBus.next_sequence();
-            for (const auto& event : m_simulationEventBus.pending_events()) {
-                if (event.topic == "ground.spawned" || event.topic == "ground.despawned")
-                    notifications.events.push_back(event);
-            }
-        }
+        const auto notifications = CaptureGroundNotifications();
         // Creation has an empty store; later saves join the enclosing snapshot transaction.
         if ((Persistence::SaveTransaction::active_for(save_dir) || !m_groundObjects.empty()) &&
             !Persistence::WorldSaveService::save_ground_objects(

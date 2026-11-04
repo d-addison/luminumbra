@@ -1,6 +1,8 @@
 #include "../../src/luminumbra_common/simulation/SimulationEventBus.h"
 
 #include <iostream>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -10,6 +12,19 @@ namespace {
 int fail(const char* message) {
     std::cerr << message << '\n';
     return 1;
+}
+
+bool pending_bytes_match(const luminumbra::simulation::OrderedEventBus& bus) {
+    std::map<std::string, std::size_t> expected;
+    for (const auto& event : bus.pending_events())
+        expected[event.topic] += event.canonical_bytes().size() + 1;
+    for (const auto& [topic, bytes] : expected) {
+        if (bus.pending_bytes(topic) != bytes)
+            return false;
+    }
+    return bus.pending_bytes("test") == expected["test"] &&
+           bus.pending_bytes("ground.spawned") == expected["ground.spawned"] &&
+           bus.pending_bytes("ground.despawned") == expected["ground.despawned"];
 }
 
 } // namespace
@@ -93,17 +108,41 @@ int main() {
         if (caught != throws || first != std::vector<std::string>{"one"} || middle != first ||
             !last.empty() || interrupted.pending_count() != 4)
             return fail("aborted delivery lost pending events or reached later handlers");
+        if (!pending_bytes_match(interrupted))
+            return fail("aborted delivery lost pending byte reservations");
         keep_delivering = true;
         const auto retried = interrupted.drain(2, [&] { return keep_delivering; });
         const std::vector<std::string> expected{"one", "two", "three"};
         if (retried.size() != 3 || first != expected || middle != expected || last != expected ||
             interrupted.pending_count() != 1)
             return fail("delivery retry skipped or duplicated a handler");
+        if (!pending_bytes_match(interrupted))
+            return fail("delivery retry retained the wrong pending byte reservations");
         interrupted.drain(3);
         const std::vector<std::string> complete{"one", "two", "three", "future"};
         if (first != complete || middle != complete || last != complete ||
             interrupted.pending_count() != 0)
             return fail("future events did not survive aborted delivery");
+        if (!pending_bytes_match(interrupted))
+            return fail("completed delivery retained pending byte reservations");
     }
+    OrderedEventBus restored;
+    restored.restore_pending({{std::numeric_limits<std::uint64_t>::max(),
+                               std::numeric_limits<std::int32_t>::min(),
+                               std::numeric_limits<std::uint64_t>::max() - 1,
+                               "ground.spawned",
+                               std::string("\0\b\f\n\r\t\"\\", 8) + "\xc3\xa9"},
+                              {4, 2, 2, "ground.despawned", "future"}},
+                             std::numeric_limits<std::uint64_t>::max());
+    if (!pending_bytes_match(restored))
+        return fail("restored events lost pending byte reservations");
+    restored.clear();
+    if (!pending_bytes_match(restored))
+        return fail("clearing events retained pending byte reservations");
+    const std::string opaque(1, static_cast<char>(0xff));
+    restored.publish(1, "test", opaque);
+    const auto delivered = restored.drain(1);
+    if (delivered.size() != 1 || delivered.front().payload != opaque)
+        return fail("byte reservations changed opaque payload delivery");
     return 0;
 }

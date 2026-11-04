@@ -29,8 +29,10 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
     }
-    if (runner.Session())
+    if (runner.Session()) {
         h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
+        h.ground_notifications = runner.Session()->CaptureGroundNotifications().canonical_bytes();
+    }
     runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
@@ -57,6 +59,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
     return nlohmann::json{
         {"world_hash", h.world_hash},
         {"ground_objects", std::move(ground_objects)},
+        {"ground_notifications", h.ground_notifications},
         {"sub_hashes",
          {
              {"terrain", h.sub.terrain},
@@ -280,7 +283,8 @@ int RunHeavy(const ServerCliOptions& options) {
         {"water_sim_cursor_at_save", cursor_at_save},
         {"water_sim_cursor_at_load", cursor_at_load},
         {"authoritative_sections",
-         nlohmann::json::array({"terrain", "water", "entities", "ground_objects"})},
+         nlohmann::json::array(
+             {"terrain", "water", "entities", "ground_objects", "ground_notifications"})},
         {"mesh_excluded_reason",
          "surface mesh is a deterministically-regenerated derived render artifact; async "
          "re-meshing across a save/load boundary reaches identical geometry via a different "

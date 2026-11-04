@@ -23,6 +23,19 @@ using RegionIndex = std::map<RegionKey, std::set<std::uint64_t>>;
 
 constexpr std::int64_t kRegionMm = GroundObjectStore::kRegionSizeMm;
 constexpr std::uint64_t kU64Max = std::numeric_limits<std::uint64_t>::max();
+constexpr std::size_t kEnvelopeBytes = 128;
+
+bool FitsFileBudget(std::size_t object_bytes, std::size_t notification_bytes) {
+    constexpr auto kAvailable = GroundObjectStore::kMaxFileBytes - kEnvelopeBytes;
+    return object_bytes <= kAvailable && notification_bytes <= kAvailable - object_bytes;
+}
+
+std::size_t NotificationBytes(const GroundNotifications& notifications) {
+    std::size_t bytes = 0;
+    for (const auto& event : notifications.events)
+        bytes += event.canonical_size() + 1;
+    return bytes;
+}
 
 constexpr const char* kObjectKeys[] = {"id",
                                        "type",
@@ -147,7 +160,7 @@ RegionKey GroundObjectStore::region_of(const GroundObject& object) {
     return RegionKey{FloorRegion(object.x_mm), FloorRegion(object.z_mm)};
 }
 
-bool GroundObjectStore::insert(const GroundObject& object) {
+bool GroundObjectStore::insert(const GroundObject& object, std::size_t notification_bytes) {
     if (!valid(object) || m_objects.size() >= kMaxObjects) {
         return false;
     }
@@ -155,8 +168,9 @@ bool GroundObjectStore::insert(const GroundObject& object) {
         return false;
     }
     const auto reserved = ReservedBytes(object);
-    constexpr std::size_t kEnvelopeBytes = 128;
-    if (reserved > kMaxFileBytes - kEnvelopeBytes - m_reserved_bytes)
+    // The envelope includes a notification cursor at its maximum width. Each object reservation
+    // also covers its eventual despawn event at maximum tick/sequence widths.
+    if (!FitsFileBudget(m_reserved_bytes + reserved, notification_bytes))
         return false;
     m_objects.emplace(object.id, object);
     m_byRegion[region_of(object)].insert(object.id);
@@ -308,16 +322,21 @@ std::string GroundObjectStore::serialize(const GroundNotifications& notification
             if (!first_event)
                 out += ',';
             first_event = false;
-            out += "{\"tick\":" + std::to_string(event.tick) +
-                   ",\"lane\":" + std::to_string(event.lane) +
-                   ",\"sequence\":" + std::to_string(event.sequence) +
-                   ",\"topic\":" + Json(event.topic).dump() +
-                   ",\"payload\":" + Json(event.payload).dump() + '}';
+            out += event.canonical_bytes();
         }
         out += "]}";
     }
     out += "}\n";
     return out;
+}
+
+std::string GroundNotifications::canonical_bytes() const {
+    const auto bytes = GroundObjectStore{}.serialize(*this);
+    return bytes.empty() ? std::string{} : "ground_notifications:v1:" + bytes;
+}
+
+bool GroundObjectStore::fits_file_budget(const GroundNotifications& notifications) const {
+    return FitsFileBudget(m_reserved_bytes, NotificationBytes(notifications));
 }
 
 bool GroundObjectStore::parse(std::string_view bytes,
@@ -456,6 +475,10 @@ bool GroundObjectStore::parse(std::string_view bytes,
                 }
                 pending.events.push_back(std::move(event));
             }
+        }
+        if (!temporary.fits_file_budget(pending)) {
+            error = "ground objects: notification capacity reached";
+            return false;
         }
         const std::string canonical = temporary.serialize(pending);
         if (std::string_view(canonical) != bytes) {

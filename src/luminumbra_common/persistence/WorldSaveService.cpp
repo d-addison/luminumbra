@@ -4355,7 +4355,8 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
                                            const world::GroundNotifications& notifications) {
     const SaveGuard guard;
     const std::string bytes = store.serialize(notifications);
-    if (bytes.size() > world::GroundObjectStore::kMaxFileBytes) {
+    if (bytes.size() > world::GroundObjectStore::kMaxFileBytes ||
+        !store.fits_file_budget(notifications)) {
         AddError(errors, "Ground objects exceed the file capacity.");
         return false;
     }

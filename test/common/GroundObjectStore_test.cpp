@@ -133,6 +133,47 @@ TEST(GroundObjectStoreTest, InsertRefusesInvalidDuplicateAndFullStore) {
     EXPECT_TRUE(full.insert(MakeObject(refused_id)));
 }
 
+TEST(GroundObjectStoreTest, NotificationAdmissionChecksLimitMinusOneLimitAndLimitPlusOne) {
+    GroundObject future = MakeObject(1);
+    future.active_age = std::numeric_limits<std::uint32_t>::max();
+    future.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
+    future.flags = GroundObject::kSettled;
+    GroundObjectStore reference;
+    ASSERT_TRUE(reference.insert(future));
+    const auto reserved = reference.serialize().size() - FileJson("").size() + 1;
+    const auto limit = GroundObjectStore::kMaxFileBytes - 128 - reserved;
+    for (const auto bytes : {limit - 1, limit, limit + 1}) {
+        SCOPED_TRACE(bytes);
+        GroundObjectStore store;
+        EXPECT_EQ(store.insert(MakeObject(1), bytes), bytes <= limit);
+        if (bytes > limit) {
+            EXPECT_TRUE(store.empty());
+            continue;
+        }
+        GroundNotifications notifications{kU64Max,
+                                          {{kU64Max, 0, kU64Max - 1, "ground.spawned", ""}}};
+        auto& event = notifications.events.front();
+        event.payload.assign(bytes - event.canonical_bytes().size() - 1, 'x');
+        const auto settle = [&future](GroundObject& object) {
+            object.y_mm = future.y_mm;
+            object.flags = future.flags;
+            return true;
+        };
+        store.age_region({0, 0}, settle);
+        EXPECT_TRUE(store.fits_file_budget(notifications));
+        const auto serialized = store.serialize(notifications);
+        EXPECT_LE(serialized.size(), GroundObjectStore::kMaxFileBytes);
+        GroundObjectStore restored;
+        GroundNotifications loaded;
+        std::string error;
+        ASSERT_TRUE(GroundObjectStore::parse(serialized, 2, restored, error, &loaded)) << error;
+        EXPECT_EQ(restored.serialize(loaded), serialized);
+    }
+    GroundObjectStore store;
+    EXPECT_FALSE(store.insert(MakeObject(1), std::numeric_limits<std::size_t>::max()));
+    EXPECT_TRUE(store.empty());
+}
+
 TEST(GroundObjectStoreTest, OwnsRegionInRegionAndRegionsAreOrdered) {
     GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeObject(5, 0, 0)));
@@ -463,6 +504,25 @@ TEST(GroundObjectStoreTest, NotificationsRoundTripWithoutChangingLegacyBytesOrHa
         GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded));
     EXPECT_TRUE(restored.empty());
     EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
+}
+
+TEST(GroundObjectStoreTest, ParseReservesObjectGrowthAlongsidePendingNotifications) {
+    GroundObjectStore source;
+    ASSERT_TRUE(source.insert(MakeObject(1)));
+    GroundNotifications notifications{kU64Max, {{kU64Max, 0, kU64Max - 1, "ground.spawned", ""}}};
+    notifications.events.front().payload.assign(
+        GroundObjectStore::kMaxFileBytes - source.serialize(notifications).size(), 'x');
+    const auto bytes = source.serialize(notifications);
+    ASSERT_EQ(bytes.size(), GroundObjectStore::kMaxFileBytes);
+    EXPECT_FALSE(source.fits_file_budget(notifications));
+    GroundObjectStore restored;
+    ASSERT_TRUE(restored.insert(MakeObject(99)));
+    GroundNotifications loaded{7, {{3, 0, 6, "ground.spawned", "kept"}}};
+    const auto before = restored.serialize(loaded);
+    std::string error;
+    EXPECT_FALSE(GroundObjectStore::parse(bytes, 100, restored, error, &loaded));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(restored.serialize(loaded), before);
 }
 
 TEST(GroundObjectStoreTest, InvalidNotificationsRefuseTransactionally) {

@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include <nlohmann/json.hpp>
+
 namespace luminumbra::simulation {
 namespace {
 
@@ -37,7 +39,35 @@ std::string event_key(const SimulationEvent& event) {
     return out.str();
 }
 
+std::size_t quoted_size(const std::string& text) {
+    std::size_t bytes = text.size() + 2;
+    for (const unsigned char byte : text) {
+        if (byte == '"' || byte == '\\' || byte == '\b' || byte == '\t' || byte == '\n' ||
+            byte == '\f' || byte == '\r') {
+            ++bytes;
+        } else if (byte < 0x20) {
+            bytes += 5;
+        }
+    }
+    return bytes;
+}
+
 } // namespace
+
+std::string SimulationEvent::canonical_bytes() const {
+    return "{\"tick\":" + std::to_string(tick) + ",\"lane\":" + std::to_string(lane) +
+           ",\"sequence\":" + std::to_string(sequence) +
+           ",\"topic\":" + nlohmann::json(topic).dump() +
+           ",\"payload\":" + nlohmann::json(payload).dump() + '}';
+}
+
+std::size_t SimulationEvent::canonical_size() const {
+    // Count escaping without parsing payload text: event delivery also permits opaque bytes.
+    constexpr std::string_view kFields =
+        "{\"tick\":,\"lane\":,\"sequence\":,\"topic\":,\"payload\":}";
+    return kFields.size() + std::to_string(tick).size() + std::to_string(lane).size() +
+           std::to_string(sequence).size() + quoted_size(topic) + quoted_size(payload);
+}
 
 std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                        std::string topic,
@@ -52,6 +82,8 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                    std::move(payload),
                                },
                                0});
+    const auto& event = pending_events_.back().event;
+    pending_bytes_[event.topic] += event.canonical_size() + 1;
     return sequence;
 }
 
@@ -67,6 +99,11 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
     std::vector<PendingEvent> due;
     auto first_future = pending_events_.begin();
     while (first_future != pending_events_.end() && first_future->event.tick <= inclusive_tick) {
+        const auto& event = first_future->event;
+        const auto bytes = pending_bytes_.find(event.topic);
+        bytes->second -= event.canonical_size() + 1;
+        if (bytes->second == 0)
+            pending_bytes_.erase(bytes);
         due.push_back(std::move(*first_future));
         ++first_future;
     }
@@ -74,8 +111,11 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
 
     std::size_t current = 0;
     const auto requeue = [&] {
-        for (std::size_t i = current; i < due.size(); ++i)
+        for (std::size_t i = current; i < due.size(); ++i) {
+            const auto& event = due[i].event;
+            pending_bytes_[event.topic] += event.canonical_size() + 1;
             pending_events_.push_back(std::move(due[i]));
+        }
     };
     try {
         for (; current < due.size(); ++current) {
@@ -106,12 +146,18 @@ void OrderedEventBus::subscribe(Handler handler) {
 
 void OrderedEventBus::clear() {
     pending_events_.clear();
+    pending_bytes_.clear();
     handlers_.clear();
     next_sequence_ = 0;
 }
 
 std::size_t OrderedEventBus::pending_count() const noexcept {
     return pending_events_.size();
+}
+
+std::size_t OrderedEventBus::pending_bytes(std::string_view topic) const {
+    const auto found = pending_bytes_.find(topic);
+    return found == pending_bytes_.end() ? 0 : found->second;
 }
 
 std::vector<SimulationEvent> OrderedEventBus::pending_events() const {
@@ -127,8 +173,11 @@ std::vector<SimulationEvent> OrderedEventBus::pending_events() const {
 void OrderedEventBus::restore_pending(std::vector<SimulationEvent> events,
                                       std::uint64_t next_sequence) {
     pending_events_.clear();
-    for (auto& event : events)
+    pending_bytes_.clear();
+    for (auto& event : events) {
+        pending_bytes_[event.topic] += event.canonical_size() + 1;
         pending_events_.push_back({std::move(event), 0});
+    }
     next_sequence_ = next_sequence;
 }
 

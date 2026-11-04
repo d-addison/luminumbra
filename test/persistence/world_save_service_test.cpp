@@ -3267,6 +3267,25 @@ TEST(WorldSaveService, GroundObjectsJoinedEmptySaveRemovesFileAndRetainsAbsentMe
     EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path(), &errors));
 }
 
+TEST(WorldSaveService, GroundNotificationGrowthBudgetRefusesBeforePublishing) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_notification_capacity");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors));
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
+    const auto before = ReadFileBytes(path);
+    Luminumbra::world::GroundNotifications notifications{1, {{0, 0, 0, "ground.spawned", ""}}};
+    notifications.events.front().payload.assign(
+        GroundObjectStore::kMaxFileBytes - store.serialize(notifications).size(), 'x');
+    ASSERT_EQ(store.serialize(notifications).size(), GroundObjectStore::kMaxFileBytes);
+    EXPECT_FALSE(
+        WorldSaveService::save_ground_objects(store, save_dir.path(), &errors, notifications));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(ReadFileBytes(path), before);
+}
+
 TEST(WorldSaveService, GroundObjectIdAtOrAboveNextIdIsRefused) {
     using Luminumbra::world::GroundObjectStore;
     TempSaveDir save_dir("ground_next_id");

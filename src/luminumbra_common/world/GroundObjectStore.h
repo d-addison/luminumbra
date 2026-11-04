@@ -14,10 +14,12 @@
 
 namespace Luminumbra::world {
 
-// Delivery state is persisted with objects, but does not enter their hash projection.
+// Delivery state is persisted with objects and hashed independently of their region projection.
 struct GroundNotifications {
     std::uint64_t next_sequence = 0;
     std::vector<luminumbra::simulation::SimulationEvent> events;
+
+    [[nodiscard]] std::string canonical_bytes() const;
 };
 
 // One persistent ground object (S5). Positions are integer millimetres; no floating point is ever
@@ -62,7 +64,8 @@ public:
     [[nodiscard]] static RegionKey region_of(const GroundObject& object);
 
     // Refuses (false, store unchanged) on an invalid object, a duplicate id or a full store.
-    bool insert(const GroundObject& object);
+    // notification_bytes includes queued events and the candidate's spawn event, with separators.
+    bool insert(const GroundObject& object, std::size_t notification_bytes = 0);
     // Removes by id. Returns false when absent.
     bool erase(std::uint64_t id);
     [[nodiscard]] const GroundObject* find(std::uint64_t id) const;
@@ -110,11 +113,14 @@ public:
     // the envelope. Events ascend by sequence and contain tick, lane, sequence, topic, payload.
     // With empty notification state, legacy bytes are unchanged.
     [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {}) const;
+    // Includes reserved future object growth and the notification envelope/cursor.
+    [[nodiscard]] bool fits_file_budget(const GroundNotifications& notifications = {}) const;
     // Strict transactional parse. Refuses (false, `error` set, `out` untouched) on: size >
     // kMaxFileBytes, excessive nesting, malformed JSON, wrong schema, unknown/missing/duplicate
     // keys, a non-integer number, any invalid object, ids not strictly ascending, more than
     // kMaxObjects, an id >= `next_id`, or bytes that differ from serialize() of the parsed result
-    // (rejects alternate encodings). An empty `bytes` is not valid input (callers handle absence
+    // (rejects alternate encodings), or object growth reservations plus notifications exceed the
+    // file budget. An empty `bytes` is not valid input (callers handle absence
     // themselves).
     static bool parse(std::string_view bytes,
                       std::uint64_t next_id,

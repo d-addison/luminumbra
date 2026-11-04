@@ -23,6 +23,7 @@ struct HeavyHashes {
     // All durable object fields, in ascending persistent-id order. Compare independently
     // of world_hash: the composite also includes derived mesh state and is exempt below.
     std::vector<world::GroundObject> ground_objects;
+    std::string ground_notifications;
 };
 
 inline std::vector<world::GroundObject>
@@ -92,7 +93,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 14> kTable{{
+    static const std::array<HeavySubsystem, 15> kTable{{
         {"terrain",
          true,
          false,
@@ -131,6 +132,13 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
          nullptr,
          [](HeavyHashes& h) {
              h.active_regions = !h.active_regions;
+         }},
+        {"ground_notifications",
+         true,
+         false,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.ground_notifications += "x";
          }},
         {"clock",
          true,
@@ -216,7 +224,8 @@ inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) 
     // The water checkpoint includes the nonzero scheduling cursor even when
     // active regions are disabled; it affects which awake chunks advance next.
     return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
-           a.sub.entities == b.sub.entities && a.ground_objects == b.ground_objects;
+           a.sub.entities == b.sub.entities && a.ground_objects == b.ground_objects &&
+           a.ground_notifications == b.ground_notifications;
 }
 
 inline bool MeshEqual(const HeavyHashes& a, const HeavyHashes& b) {

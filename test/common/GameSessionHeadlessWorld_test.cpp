@@ -6972,6 +6972,24 @@ void ExpectSameSaveTree(const fs::path& actual, const fs::path& expected) {
     }
 }
 
+std::uint64_t GroundSpawnAdmissionLimit() {
+    Luminumbra::world::GroundObjectStore store;
+    std::size_t notification_bytes = 0;
+    for (std::uint64_t id = 1; id <= Luminumbra::world::GroundObjectStore::kMaxObjects; ++id) {
+        Luminumbra::world::GroundObject object;
+        object.id = id;
+        object.type = kGroundType;
+        object.x_mm = 5200;
+        object.z_mm = -1500;
+        const luminumbra::simulation::SimulationEvent event{
+            0, 0, id - 1, "ground.spawned", std::to_string(id) + ",7,5200,0,-1500"};
+        notification_bytes += event.canonical_bytes().size() + 1;
+        if (!store.insert(object, notification_bytes))
+            return id - 1;
+    }
+    return store.size();
+}
+
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, FlagOffSpawnIsInertAndLeavesSaveHashAndRejectionsUnchanged) {
@@ -7037,6 +7055,68 @@ TEST(GameSessionHeadlessWorldTest, RefusedGroundSpawnsCountRejectionsAndConsumeN
     EXPECT_EQ(session.GetRegionInputRejections().ground_spawns, 2u);
     EXPECT_TRUE(session.GetGroundObjects().empty());
     EXPECT_EQ(SpawnGround(session, 5200, -1500), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, GroundSpawnBurstRemainsSaveableAtAdmissionLimit) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    CreateGroundWorld(session, root, jobs, "Ground admission");
+    const auto limit = GroundSpawnAdmissionLimit();
+    ASSERT_GT(limit, 1u);
+    ASSERT_LT(limit, Luminumbra::world::GroundObjectStore::kMaxObjects);
+    for (std::uint64_t id = 1; id < limit; ++id) {
+        ASSERT_EQ(SpawnGround(session, 5200, -1500), id);
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(session.GetGroundObjects().size(), limit - 1);
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), limit);
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto hash = SessionWorldHash(session);
+    const auto notifications = session.CaptureGroundNotifications().canonical_bytes();
+    EXPECT_EQ(SpawnGround(session, 5200, -1500), 0u);
+    EXPECT_EQ(session.GetRegionInputRejections().ground_spawns, 1u);
+    EXPECT_EQ(session.GetGroundObjects().size(), limit);
+    EXPECT_EQ(session.CaptureGroundNotifications().canonical_bytes(), notifications);
+    ASSERT_TRUE(session.SaveWorldState());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    // A refused spawn consumes an id, but does not enqueue an event or invalidate the save.
+    EXPECT_NE(SessionWorldHash(session), hash);
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_NE(SpawnGround(session, 5200, -1500), 0u);
+    EXPECT_TRUE(session.SaveWorldState());
+}
+
+TEST(GameSessionHeadlessWorldTest, UnknownRegionWorkFromEventCallbackIsRejectedAndKeepsRunning) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Unknown callback work");
+    const Luminumbra::world::RegionKey unknown{300, -300};
+    ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(unknown));
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        session.RecordActiveRegionWork({unknown, 1, 0, 0, 0});
+        session.RecordActiveRegionWork({kGroundRegion, 0, 2, 0, 0});
+    });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kGroundRegion), 3u);
+    TickOnce(session);
+    EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
+    EXPECT_EQ(session.GetRegionSchedule().work, 3u);
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unknown));
+    TickOnce(session);
+    EXPECT_EQ(session.GetRegionSchedule().rejected.work, 0u);
+    EXPECT_EQ(session.GetSimulationTickCount(), 3u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_TRUE(session.SaveWorldState());
 }
 
 TEST(GameSessionHeadlessWorldTest, SpawnMarksItsRegionEdited) {
@@ -7390,6 +7470,54 @@ TEST(GameSessionHeadlessWorldTest, GroundObjectsChangeTheWorldHash) {
     EXPECT_EQ(SessionWorldHash(bare), before);
     ASSERT_EQ(SpawnGround(with, 5200, -1500), 1u);
     EXPECT_NE(SessionWorldHash(with), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, GroundNotificationHashIncludesEveryDurableField) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground notification hash");
+    const auto empty_hash = SessionWorldHash(session);
+    EXPECT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
+    session.GetSimulationEventBus().publish(4, "ground.spawned", "first", -1);
+    session.GetSimulationEventBus().publish(3, "ground.despawned", "second", 2);
+    auto notifications = session.CaptureGroundNotifications();
+    notifications.next_sequence = 9;
+    session.GetSimulationEventBus().restore_pending(notifications.events,
+                                                    notifications.next_sequence);
+    const auto hash = SessionWorldHash(session);
+    ASSERT_NE(hash, empty_hash);
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    const std::array<void (*)(Luminumbra::world::GroundNotifications&), 8> mutations{{
+        [](auto& n) { ++n.next_sequence; },
+        [](auto& n) { ++n.events.front().tick; },
+        [](auto& n) { ++n.events.front().lane; },
+        [](auto& n) { ++n.events.back().sequence; },
+        [](auto& n) { n.events.front().topic = "ground.despawned"; },
+        [](auto& n) { n.events.front().payload += "x"; },
+        [](auto& n) { n.events.pop_back(); },
+        [](auto& n) { n.events.clear(); },
+    }};
+    for (const auto mutate : mutations) {
+        auto changed = notifications;
+        mutate(changed);
+        session.GetSimulationEventBus().restore_pending(changed.events, changed.next_sequence);
+        EXPECT_NE(SessionWorldHash(session), hash);
+    }
+    session.GetSimulationEventBus().restore_pending({}, notifications.next_sequence);
+    EXPECT_NE(SessionWorldHash(session), empty_hash);
+    auto reversed = notifications.events;
+    std::reverse(reversed.begin(), reversed.end());
+    session.GetSimulationEventBus().restore_pending(reversed, notifications.next_sequence);
+    EXPECT_EQ(SessionWorldHash(session), hash);
+    ASSERT_TRUE(session.SaveWorldState());
+    GameSession loaded;
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), hash);
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(),
+              notifications.canonical_bytes());
 }
 
 TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThroughSnapshot) {
