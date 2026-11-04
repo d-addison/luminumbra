@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1090,6 +1091,19 @@ TEST(ActiveRegionLedgerTest, EnergyAgesThePersistedFileCannotHoldAreRefused) {
     });
 }
 
+TEST(ActiveRegionLedgerTest, WaterDebtsThePersistedFileCannotHoldAreRefused) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    EXPECT_FALSE(ledger.set_water_debts({{{0, 0}, 1}}));
+    EXPECT_TRUE(ledger.water_debts().empty());
+    EXPECT_NO_THROW({
+        const auto bytes = ledger.encode();
+        (void)bytes;
+    });
+}
+
 TEST(ActiveRegionLedgerTest, EncodingRefusesWhenLaterRecordsOutgrowStoredEnergyAges) {
     ActiveRegionLedger ledger;
     for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
@@ -1449,23 +1463,33 @@ TEST(ActiveRegionLedgerTest, CompletedWorkCodecRefusesUnknownOwnerAndZeroTotalAt
     }
 }
 
-TEST(ActiveRegionLedgerTest, GroundAndEnergyExtensionsRoundTripInAscendingOrder) {
+TEST(ActiveRegionLedgerTest, GroundEnergyAndWaterExtensionsRoundTripInAscendingOrder) {
     auto ledger = FrozenLedger();
     std::uint64_t id = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(id));
     ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
+    ASSERT_TRUE(ledger.set_water_debts({{kFar, 9}}));
     const std::array completed{RegionWork{kFar, 1, 2, 3, 4}};
     ledger.publish_completed_work(completed);
     const auto extensions = Tlv(1, LittleEndian(2, 8)) + Tlv(2, std::string(1, '\x02')) +
                             Tlv(4, EnergyAgePayload(1, kFar, 7)) +
+                            Tlv(5, EnergyAgePayload(1, kFar, 9)) +
                             Tlv(6, EnergyAgePayload(1, kFar, 10));
     const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
     const auto encoded = ledger.encode();
     EXPECT_EQ(encoded.substr(offset, encoded.size() - offset - 8),
               LittleEndian(extensions.size(), 4) + extensions);
+    auto descending = encoded;
+    const auto reversed =
+        Tlv(6, EnergyAgePayload(1, kFar, 10)) + Tlv(5, EnergyAgePayload(1, kFar, 9));
+    descending.replace(offset + 4 + 14 + 7 + 26, reversed.size(), reversed);
+    Seal(descending);
+    ExpectRefused(descending, ActiveRegionLedger::kCorruptMessage);
     const auto loaded = Reload(ledger);
+    EXPECT_EQ(loaded.encode(), encoded);
     EXPECT_EQ(loaded.next_persistent_id(), 2u);
     EXPECT_EQ(loaded.energy_ages(), ledger.energy_ages());
+    EXPECT_EQ(loaded.water_debts(), ledger.water_debts());
     EXPECT_EQ(loaded.completed_work(), ledger.completed_work());
     EXPECT_EQ(loaded.canonical_bytes(), ledger.canonical_bytes());
 }
@@ -1482,6 +1506,314 @@ TEST(ActiveRegionLedgerTest, GroundSettersRefuseTheOriginalFileCapWithoutMutatio
     EXPECT_EQ(id, 42u);
     EXPECT_EQ(ledger.next_persistent_id(), 1u);
     EXPECT_TRUE(ledger.energy_ages().empty());
+    EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtAbsencePreservesExactEnergyAgeEnvelopes) {
+    const auto hexadecimal = [](const std::string& bytes) {
+        constexpr std::string_view digits = "0123456789abcdef";
+        std::string result;
+        for (const char character : bytes) {
+            const auto byte = static_cast<unsigned char>(character);
+            result.push_back(digits[byte >> 4]);
+            result.push_back(digits[byte & 15u]);
+        }
+        return result;
+    };
+    // Fixed complete envelopes, including the checksum, with only energy ages added.
+    auto active = Distant();
+    ASSERT_TRUE(active.set_energy_age(kFar, 0));
+    EXPECT_TRUE(active.water_debts().empty());
+    EXPECT_EQ(hexadecimal(active.encode()),
+              "41524c3102000000010000000000000001000000000000000a000000000000000200000002000000"
+              "000000000000000000000000010000000a000000fdffffff02000000000000000000000000000000"
+              "00000000000000000000000000000000010000000000000000000000000000000000000000000000"
+              "01000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              "1a000000040014000000010000000a000000fdffffff00000000000000001100dbdfc9731ef8");
+    auto frozen = FrozenLedger();
+    ASSERT_TRUE(frozen.set_energy_age(kFar, 6));
+    EXPECT_TRUE(frozen.water_debts().empty());
+    EXPECT_EQ(hexadecimal(frozen.encode()),
+              "41524c31020000000300000000000000030000000000000000000000000000000100000001000000"
+              "000000000000000000000000010000000a000000fdffffff02020100010000000000000000000000"
+              "00000000000000000000000000000000010000000000000003000000000000000000000000000000"
+              "0300000000000000010000000000000000000000000000000000000000000000f0debc9a78563412"
+              "2100000002000100000002040014000000010000000a000000fdffffff06000000000000002d9cb2"
+              "caaae7ecdc");
+}
+
+TEST(ActiveRegionLedgerTest, ClearingWaterDebtPreservesBytesDigestsAndScheduling) {
+    for (const bool with_ages : {false, true}) {
+        auto baseline = Distant({0, 1, 1});
+        if (with_ages) {
+            ASSERT_TRUE(baseline.set_energy_age(kFar, 0));
+        }
+        auto cleared = baseline;
+        ASSERT_TRUE(cleared.set_water_debts({{kFar, ActiveRegionLedger::kMaxWaterDebt}}));
+        cleared = Reload(cleared);
+        ASSERT_TRUE(cleared.set_water_debts({}));
+        EXPECT_EQ(cleared.encode(), baseline.encode());
+        EXPECT_EQ(cleared.canonical_bytes(), baseline.canonical_bytes());
+        for (std::uint64_t tick = 2; tick <= 8; ++tick) {
+            const auto units = tick < 4 ? 1u : 0u;
+            EXPECT_EQ(Step(cleared, tick, units), Step(baseline, tick, units));
+            EXPECT_EQ(cleared.encode(), baseline.encode());
+            EXPECT_EQ(cleared.canonical_bytes(), baseline.canonical_bytes());
+        }
+    }
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtEnvelopeIsSparseStrictAndAtomic) {
+    auto ledger = Distant();
+    ASSERT_TRUE(ledger.set_water_debts({{kFar, ActiveRegionLedger::kMaxWaterDebt}}));
+    const auto encoded = ledger.encode();
+    EXPECT_EQ(Reload(ledger).water_debts(), ledger.water_debts());
+    EXPECT_NE(Reload(ledger).canonical_bytes().find("|water_debt:"), std::string::npos);
+    EXPECT_FALSE(ledger.set_water_debts({{kFar, 0}}));
+    EXPECT_FALSE(ledger.set_water_debts({{kFar, ActiveRegionLedger::kMaxWaterDebt + 1}}));
+    EXPECT_FALSE(ledger.set_water_debts({{{9, 9}, 1}}));
+    EXPECT_EQ(ledger.encode(), encoded);
+    const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    const auto expected = Tlv(5, EnergyAgePayload(1, kFar, ActiveRegionLedger::kMaxWaterDebt));
+    EXPECT_EQ(encoded.substr(offset, encoded.size() - offset - 8),
+              LittleEndian(expected.size(), 4) + expected);
+    for (const auto debt : {std::uint64_t{0}, ActiveRegionLedger::kMaxWaterDebt + 1}) {
+        auto malformed = encoded;
+        malformed.replace(offset + 22, 8, LittleEndian(debt, 8));
+        Seal(malformed);
+        ExpectRefused(malformed, ActiveRegionLedger::kCorruptMessage);
+    }
+    auto unknown = encoded;
+    unknown.replace(offset + 14, 8, LittleEndian(9, 4) + LittleEndian(9, 4));
+    Seal(unknown);
+    ExpectRefused(unknown, ActiveRegionLedger::kCorruptMessage);
+    ASSERT_TRUE(ledger.set_water_debts({}));
+    EXPECT_EQ(ledger.encode(), Distant().encode());
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtMalformedCountsLengthsAndTypesRefuseAtomically) {
+    auto destination = Distant();
+    ASSERT_TRUE(destination.set_energy_age(kFar, 7));
+    ASSERT_TRUE(destination.set_water_debts({{kFar, 9}}));
+    const auto before = destination.encode();
+    const auto canonical = destination.canonical_bytes();
+    const auto refuse = [&](const std::string& malformed) {
+        std::string error;
+        EXPECT_FALSE(ActiveRegionLedger::decode(malformed, destination, error));
+        EXPECT_EQ(error, ActiveRegionLedger::kCorruptMessage);
+        EXPECT_EQ(destination.encode(), before);
+        EXPECT_EQ(destination.canonical_bytes(), canonical);
+    };
+    for (const auto count : {0u, 2u, ActiveRegionLedger::kMaxRegions + 1u, UINT32_MAX}) {
+        refuse(Version2With(Tlv(5, EnergyAgePayload(count, kFar, 1))));
+    }
+    const auto value = EnergyAgePayload(1, kFar, 1);
+    for (const auto length : {0u, 3u, 19u, 21u, UINT32_MAX}) {
+        refuse(Version2With(LittleEndian(5, 2) + LittleEndian(length, 4) + value));
+    }
+    refuse(Version2With(Tlv(5, std::string(3, '\0'))));
+    refuse(Version2With(Tlv(5, value.substr(0, 19))));
+    refuse(Version2With(Tlv(5, value + "x")));
+    refuse(Version2With(Tlv(5, LittleEndian(0, 4))));
+    refuse(Version2With(Tlv(5, value) + Tlv(5, value)));
+    refuse(Version2With(Tlv(3, value)));
+    refuse(Version2With(Tlv(7, value)));
+    refuse(Version2With(Tlv(5, EnergyAgePayload(1, kFar, UINT64_MAX))));
+    for (const auto length : {0u, 25u, 27u, UINT32_MAX}) {
+        auto malformed = Version2With(Tlv(5, value));
+        const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+        malformed.replace(offset, 4, LittleEndian(length, 4));
+        Seal(malformed);
+        refuse(malformed);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtDuplicateAndDescendingOwnersRefuse) {
+    auto ledger = Distant();
+    const RegionKey other{11, -3};
+    ledger.mark_edited(other, WorldClock(1));
+    ASSERT_TRUE(ledger.set_water_debts({{kFar, 1}, {other, ActiveRegionLedger::kMaxWaterDebt}}));
+    const auto good = ledger.encode();
+    EXPECT_EQ(Reload(ledger).encode(), good);
+    EXPECT_EQ(Reload(ledger).water_debts(), ledger.water_debts());
+    const auto offset = ActiveRegionLedger::kHeaderBytes + 2 * ActiveRegionLedger::kRecordBytes;
+    for (const bool duplicate : {true, false}) {
+        auto malformed = good;
+        const auto first = offset + 14;
+        const auto second = first + 16;
+        if (duplicate) {
+            malformed.replace(second, 8, malformed.substr(first, 8));
+        } else {
+            const auto first_entry = malformed.substr(first, 16);
+            const auto second_entry = malformed.substr(second, 16);
+            malformed.replace(first, 16, second_entry);
+            malformed.replace(second, 16, first_entry);
+        }
+        Seal(malformed);
+        ExpectRefused(malformed, ActiveRegionLedger::kCorruptMessage);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtOwnsIdleRecordAndCoexistsWithOtherExtensions) {
+    auto ledger = HomeVisit();
+    const auto owner = Keys(ledger).front();
+    ASSERT_TRUE(ledger.set_water_debts({{owner, 1}}));
+    ASSERT_TRUE(ledger.set_energy_age(owner, 0));
+    ledger = Reload(ledger);
+    EXPECT_EQ(ledger.water_debts(), (ActiveRegionLedger::WaterDebts{{owner, 1}}));
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{owner, 0}}));
+    ledger.reset_energy_ages();
+    Idle(ledger, 1 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().contains(owner));
+    ASSERT_EQ(ledger.records().size(), 1u);
+    ASSERT_TRUE(ledger.set_water_debts({}));
+    Idle(ledger, 2 + kIdle, kNobodyOwns);
+    EXPECT_FALSE(ledger.records().contains(owner));
+
+    auto frozen = FrozenLedger();
+    ASSERT_TRUE(frozen.set_energy_age(kFar, 6));
+    const auto without_debt = frozen.encode();
+    const auto canonical_without_debt = frozen.canonical_bytes();
+    ASSERT_TRUE(frozen.set_water_debts({{kFar, 1}}));
+    const auto encoded = frozen.encode();
+    const auto projection = Tlv(2, std::string(1, '\x02'));
+    const auto ages = Tlv(4, EnergyAgePayload(1, kFar, 6));
+    const auto debts = Tlv(5, EnergyAgePayload(1, kFar, 1));
+    const auto extensions = projection + ages + debts;
+    const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    EXPECT_EQ(encoded.substr(offset, encoded.size() - offset - 8),
+              LittleEndian(extensions.size(), 4) + extensions);
+    auto restored = Reload(frozen);
+    EXPECT_EQ(restored.encode(), encoded);
+    EXPECT_EQ(restored.canonical_bytes(), frozen.canonical_bytes());
+    EXPECT_EQ(restored.water_debts(), frozen.water_debts());
+    EXPECT_EQ(restored.energy_ages(), frozen.energy_ages());
+    auto descending = encoded.substr(0, offset) + LittleEndian(extensions.size(), 4) + projection +
+                      debts + ages + std::string(8, '\0');
+    Seal(descending);
+    ExpectRefused(descending, ActiveRegionLedger::kCorruptMessage);
+    ASSERT_TRUE(restored.set_water_debts({}));
+    EXPECT_EQ(restored.encode(), without_debt);
+    EXPECT_EQ(restored.canonical_bytes(), canonical_without_debt);
+}
+
+TEST(ActiveRegionLedgerTest, WaterDebtPreservesLegacyFrozenProjectionUntilRefresh) {
+    auto original = FrozenLedger();
+    const auto projected = original.encode();
+    const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    auto legacy = projected.substr(0, offset) + std::string(8, '\0');
+    legacy[4] = 1;
+    Seal(legacy);
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(legacy, restored, error)) << error;
+    ASSERT_TRUE(restored.set_water_debts({{kFar, 1}}));
+    const auto debts = Tlv(5, EnergyAgePayload(1, kFar, 1));
+    const auto encoded = restored.encode();
+    EXPECT_EQ(encoded.substr(offset, encoded.size() - offset - 8),
+              LittleEndian(debts.size(), 4) + debts);
+    restored = Reload(restored);
+    EXPECT_EQ(restored.encode(), encoded);
+    EXPECT_EQ(restored.records(), original.records());
+    ASSERT_TRUE(restored.set_water_debts({}));
+    EXPECT_EQ(restored.encode(), legacy);
+    EXPECT_EQ(restored.canonical_bytes(), original.canonical_bytes());
+
+    ASSERT_TRUE(restored.set_water_debts({{kFar, 1}}));
+    restored.mark_edited(kFar, WorldClock(3));
+    for (std::uint64_t tick = 4; tick <= 6; ++tick) {
+        Step(restored, tick, 1);
+    }
+    ASSERT_EQ(restored.records().at(kFar).frozen_at, 6u);
+    const auto refreshed = restored.encode();
+    const auto extensions = Tlv(2, std::string(1, '\x02')) + debts;
+    EXPECT_EQ(refreshed.substr(offset, refreshed.size() - offset - 8),
+              LittleEndian(extensions.size(), 4) + extensions);
+    EXPECT_EQ(Reload(restored).encode(), refreshed);
+}
+
+TEST(ActiveRegionLedgerTest, ResumeAcknowledgementClearsOnlyMatchingThawedStampOnce) {
+    auto ledger = FrozenLedger();
+    const auto frozen = ledger.records().at(kFar).frozen_at;
+    ASSERT_GT(frozen, 0u);
+    const auto still_frozen = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
+    EXPECT_EQ(ledger.encode(), still_frozen);
+    // pin advances the header ceiling; scheduling needs the next absolute tick.
+    ledger.pin(kFar, true, WorldClock(ledger.tick()));
+    Step(ledger, 4, 0);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Active);
+    const auto thawed = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, 0));
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen + 1));
+    EXPECT_EQ(ledger.encode(), thawed);
+    ASSERT_TRUE(ledger.acknowledge_resume(kFar, frozen));
+    EXPECT_EQ(Reload(ledger).records().at(kFar).frozen_at, 0u);
+    EXPECT_EQ(Reload(ledger).records().at(kFar).last_ticked, ledger.tick());
+    const auto committed = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
+    EXPECT_FALSE(ledger.acknowledge_resume({8, 8}, frozen));
+    EXPECT_EQ(ledger.encode(), committed);
+    auto restored = Reload(ledger);
+    EXPECT_FALSE(restored.acknowledge_resume(kFar, frozen));
+    EXPECT_EQ(restored.encode(), committed);
+}
+
+TEST(ActiveRegionLedgerTest, ResumeAcknowledgementCommitsWindowBetweenReducedDuePhases) {
+    auto ledger = FrozenLedger();
+    const auto frozen = ledger.records().at(kFar).frozen_at;
+    const auto thaw_tick = ActiveRegionLedger::phase(kFar, 1) == 0 ? 5u : 4u;
+    const auto schedule = Step(ledger, thaw_tick, 0);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    ASSERT_TRUE(schedule.due.empty());
+    ASSERT_LT(ledger.records().at(kFar).last_ticked, thaw_tick);
+    const auto before = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen + 1));
+    EXPECT_EQ(ledger.encode(), before);
+    ASSERT_TRUE(ledger.acknowledge_resume(kFar, frozen));
+    const auto restored = Reload(ledger);
+    EXPECT_EQ(restored.records().at(kFar).last_ticked, thaw_tick);
+    EXPECT_EQ(restored.records().at(kFar).frozen_at, 0u);
+    EXPECT_EQ(restored.tick(), thaw_tick);
+    const auto committed = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
+    EXPECT_EQ(ledger.encode(), committed);
+}
+
+TEST(ActiveRegionLedgerTest, CombinedExtensionsShareTheFileCapAndRefuseAtomically) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.mark_edited(CapacityKey(index), WorldClock{});
+    const auto first = CapacityKey(0), second = CapacityKey(1), third = CapacityKey(2);
+    const ActiveRegionLedger::EnergyAges ages{{first, 1}, {second, 2}, {third, 3}};
+    const ActiveRegionLedger::WaterDebts debts{{first, 4}, {second, 5}};
+    ASSERT_TRUE(ledger.set_energy_ages(ages));
+    ASSERT_TRUE(ledger.set_water_debts(debts));
+    std::uint64_t id = 42;
+    EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    EXPECT_EQ(id, 42u);
+    EXPECT_EQ(ledger.next_persistent_id(), 1u);
+    EXPECT_EQ(ledger.energy_ages(), ages);
+    EXPECT_EQ(ledger.water_debts(), debts);
+
+    ASSERT_TRUE(ledger.set_energy_ages({{first, 1}, {second, 2}}));
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    const std::array completed{RegionWork{first, 1, 0, 0, 0}};
+    EXPECT_THROW(ledger.publish_completed_work(completed), std::length_error);
+    EXPECT_TRUE(ledger.completed_work().empty());
+    EXPECT_EQ(ledger.water_debts(), debts);
+
+    ASSERT_TRUE(ledger.set_water_debts({}));
+    const std::array two_completed{RegionWork{first, 1, 0, 0, 0}, RegionWork{second, 2, 0, 0, 0}};
+    ledger.publish_completed_work(two_completed);
+    EXPECT_FALSE(ledger.set_water_debts({{first, 4}}));
+    EXPECT_TRUE(ledger.water_debts().empty());
+    EXPECT_FALSE(ledger.set_energy_age(third, 3));
+    EXPECT_FALSE(ledger.set_energy_ages(ages));
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{first, 1}, {second, 2}}));
+    EXPECT_EQ(ledger.completed_work(),
+              (std::map<RegionKey, std::uint64_t>{{first, 1}, {second, 2}}));
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
     EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
 }
 

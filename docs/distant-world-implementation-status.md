@@ -209,3 +209,47 @@ standalone store/oracle suites and event-bus gate at two jobs. The 34 store/orac
 tests and the event-bus gate pass. The clone has no configured CMake build or built
 engine libraries, so the headless session regressions, save-writer regression and
 pinned engine hash tests remain unexecuted here. Fixture files and their pinned values are unchanged.
+
+### Ground objects, water debts and regional energy integration
+
+The ledger retains persistent ids, completed consumer work, sparse water debts and
+energy ages together. Its optional version-2 TLVs encode in ascending order:
+allocator 1, frozen projection 2, energy ages 4, water debts 5 and completed work 6.
+The fixed record layout and original file cap are unchanged. Every admission path
+counts all retained extensions before mutation, preserving boolean refusals for
+energy/water setters and exceptions for allocator/completed-work capacity failures.
+Idle retention protects both debt and completed-work owners; resume acknowledgement
+and legacy frozen-projection validation remain intact. Empty ground registers add
+no digest or persistence bytes.
+
+Both CMake lists retain the independently added GroundObjectStore and WaterShare
+sources/tests; neither side removes a listed file. The ledger tests retain both
+sets of cases. The water malformed-envelope test now uses type 7 for its unknown
+type refusal because type 6 carries completed work. Combined coverage checks all
+five TLVs, descending water/completed types and atomic refusals when their combined
+extensions exceed the original file cap.
+
+Verification in this clone:
+
+- No conflict markers under `src` or `test`; `git diff --check` passes.
+- `clang-format-18` applied to the resolved C++ files; its dry-run check passes for
+  all 11 C++ files changed by the merge.
+- `clang++-18 -fsyntax-only` passes for 27 translation units covering direct header
+  consumers and affected callers, including ActiveRegionLedger and its tests,
+  GameSession, WorldSaveService, SHIELD_WorldSystem, EnergyFieldState, GroundObjectStore,
+  WaterShare, ScalarFieldDiffusion, persistence tests and headless-session tests.
+  Flags come from the existing compilation database with the available dependency
+  include paths and source-root definition supplied for extra test consumers.
+- Standalone builds at `-j2` pass 72 ledger, 6 water-share, 24 ground-store and
+  59 energy/diffusion tests (161 total), using the production ledger, clock,
+  persistence checksum, event bus and field implementations.
+- Independently compiled devel and resolved ledgers produce identical encoded
+  bytes, canonical bytes and schedule digests across 16 scenarios of 40 ticks,
+  with/without energy ages and water debts, plus empty, anchor, eviction and
+  restored-clock cases: 288,216 compared bytes match exactly.
+
+There is no configured CMake build in this clone. Full engine-linked focused tests,
+runtime headless/save integration and pinned engine hash tests remain unverified.
+The standalone ledger executable omits only
+`AllocatorOnlyLedgerIsSavedAndReloads`, which needs engine persistence linkage;
+the repository test remains present and passes syntax checking.
