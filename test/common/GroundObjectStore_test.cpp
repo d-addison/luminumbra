@@ -151,8 +151,8 @@ TEST(GroundObjectStoreTest, NotificationAdmissionChecksLimitMinusOneLimitAndLimi
             EXPECT_TRUE(store.empty());
             continue;
         }
-        GroundNotifications notifications{kU64Max,
-                                          {{kU64Max, 0, kU64Max - 1, "ground.spawned", ""}}};
+        GroundNotifications notifications{kU64Max - 1,
+                                          {{kU64Max, 0, kU64Max - 2, "ground.spawned", ""}}};
         auto& event = notifications.events.front();
         event.payload.assign(bytes - event.canonical_bytes().size() - 1, 'x');
         const auto settle = [&future](GroundObject& object) {
@@ -193,6 +193,22 @@ TEST(GroundObjectStoreTest, OwnsRegionInRegionAndRegionsAreOrdered) {
 
     const std::vector<RegionKey> expected{RegionKey{-1, 0}, RegionKey{0, 0}};
     EXPECT_EQ(store.regions(), expected);
+}
+
+TEST(GroundObjectStoreTest, RegionVisitorUsesStoredReferencesInIdOrder) {
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeObject(5)));
+    ASSERT_TRUE(store.insert(MakeObject(2)));
+    ASSERT_TRUE(store.insert(MakeObject(9, -1)));
+    std::vector<std::uint64_t> visited;
+    store.for_each_in_region({0, 0}, [&](const GroundObject& object) {
+        EXPECT_EQ(&object, store.find(object.id));
+        visited.push_back(object.id);
+    });
+    EXPECT_EQ(visited, (std::vector<std::uint64_t>{2, 5}));
+    store.for_each_in_region({3, 3}, [](const GroundObject&) {
+        ADD_FAILURE() << "Absent region must not invoke the visitor";
+    });
 }
 
 TEST(GroundObjectStoreTest, EraseRemovesFromBothIndexes) {
@@ -563,12 +579,20 @@ TEST(GroundObjectStoreTest, NotificationsRoundTripWithoutChangingLegacyBytesOrHa
     EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
 }
 
-TEST(GroundObjectStoreTest, LoadedNotificationCursorExhaustionPreservesCanonicalState) {
+TEST(GroundObjectStoreTest, LoadedNotificationCursorRefusesExhaustionWithoutChangingState) {
     for (const auto cursor : {kU64Max, kU64Max - 1}) {
         SCOPED_TRACE(cursor);
         GroundObjectStore store;
-        GroundNotifications loaded;
+        GroundNotifications loaded{7, {{3, 0, 6, "ground.spawned", "kept"}}};
         std::string error;
+        if (cursor == kU64Max) {
+            const auto before = store.serialize(loaded);
+            EXPECT_FALSE(GroundObjectStore::parse(
+                store.serialize(GroundNotifications{cursor, {}}), 1, store, error, &loaded));
+            EXPECT_FALSE(error.empty());
+            EXPECT_EQ(store.serialize(loaded), before);
+            continue;
+        }
         ASSERT_TRUE(GroundObjectStore::parse(
             store.serialize(GroundNotifications{cursor, {}}), 1, store, error, &loaded))
             << error;
@@ -583,16 +607,18 @@ TEST(GroundObjectStoreTest, LoadedNotificationCursorExhaustionPreservesCanonical
         EXPECT_EQ(bus.next_sequence(), kU64Max);
         EXPECT_EQ(store.serialize(GroundNotifications{bus.next_sequence(), bus.pending_events()}),
                   bytes);
-        ASSERT_TRUE(GroundObjectStore::parse(bytes, 1, store, error, &loaded)) << error;
-        EXPECT_EQ(loaded.next_sequence, kU64Max);
-        EXPECT_EQ(loaded.events.size(), cursor < kU64Max ? 1u : 0u);
+        EXPECT_FALSE(GroundObjectStore::parse(bytes, 1, store, error, &loaded));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(loaded.next_sequence, cursor);
+        EXPECT_TRUE(loaded.events.empty());
     }
 }
 
 TEST(GroundObjectStoreTest, ParseReservesObjectGrowthAlongsidePendingNotifications) {
     GroundObjectStore source;
     ASSERT_TRUE(source.insert(MakeObject(1)));
-    GroundNotifications notifications{kU64Max, {{kU64Max, 0, kU64Max - 1, "ground.spawned", ""}}};
+    GroundNotifications notifications{kU64Max - 1,
+                                      {{kU64Max, 0, kU64Max - 2, "ground.spawned", ""}}};
     notifications.events.front().payload.assign(
         GroundObjectStore::kMaxFileBytes - source.serialize(notifications).size(), 'x');
     const auto bytes = source.serialize(notifications);

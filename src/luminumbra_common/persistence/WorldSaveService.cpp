@@ -4355,10 +4355,14 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
                                            const world::GroundNotifications& notifications) {
     const SaveGuard guard;
     const std::string bytes = store.serialize(notifications);
-    if (bytes.size() > world::GroundObjectStore::kMaxFileBytes ||
-        !store.fits_file_budget(notifications)) {
-        AddError(errors, "Ground objects exceed the file capacity.");
-        return false;
+    if (!bytes.empty()) {
+        world::GroundObjectStore parsed;
+        std::string error;
+        if (!world::GroundObjectStore::parse(
+                bytes, std::numeric_limits<std::uint64_t>::max(), parsed, error)) {
+            AddError(errors, "Ground objects save failed: " + error);
+            return false;
+        }
     }
     TransactionScope scope(save_dir, {world::GroundObjectStore::kRelativePath}, errors, true);
     if (!scope.ok() || !validate_save(save_dir, errors))

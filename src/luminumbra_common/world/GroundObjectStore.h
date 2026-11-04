@@ -85,6 +85,17 @@ public:
     [[nodiscard]] std::size_t region_size(RegionKey key) const;
     // Objects of the region in ascending id order.
     [[nodiscard]] std::vector<GroundObject> in_region(RegionKey key) const;
+    // Visits indexed objects by const reference in ascending id order. Do not mutate the store.
+    template<typename Visitor>
+    void for_each_in_region(RegionKey key, const Visitor& visit) const {
+        const auto it = m_byRegion.find(key);
+        if (it == m_byRegion.end()) {
+            return;
+        }
+        for (const std::uint64_t id : it->second) {
+            visit(m_objects.at(id));
+        }
+    }
     // The set of regions that currently hold at least one object, ascending.
     [[nodiscard]] std::vector<RegionKey> regions() const;
 

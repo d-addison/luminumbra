@@ -444,7 +444,7 @@ bool GroundObjectStore::parse(std::string_view bytes,
             const auto& state = document.at("notifications");
             if (!state.is_object() || state.size() != 2 || !state.contains("next_sequence") ||
                 !state.contains("events") ||
-                !ReadUnsigned(state, "next_sequence", kU64Max, pending.next_sequence) ||
+                !ReadUnsigned(state, "next_sequence", kU64Max - 1, pending.next_sequence) ||
                 !state.at("events").is_array()) {
                 error = "ground objects: malformed notifications";
                 return false;

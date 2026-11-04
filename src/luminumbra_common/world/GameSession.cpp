@@ -2192,16 +2192,25 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     // the schedule's rank/proximity order stays intact and needs no copy, sort or deduplication.
     std::map<RegionKey, std::uint64_t> due;
     std::map<std::uint64_t, std::optional<float>> heights;
+    std::uint64_t despawn_count = 0;
     for (const RegionKey key : m_regionSchedule.due) {
         const auto processed = static_cast<std::uint64_t>(m_groundObjects.region_size(key));
         if (processed == 0)
             continue;
         due.emplace(key, processed);
-        for (const auto& object : m_groundObjects.in_region(key)) {
+        m_groundObjects.for_each_in_region(key, [&](const GroundObject& object) {
+            if (object.despawn_after != 0 && object.active_age == object.despawn_after - 1) {
+                ++despawn_count;
+            }
             if (!object.settled()) {
                 heights.emplace(object.id, ProceduralGroundHeight(*m_worldSystem, object));
             }
-        }
+        });
+    }
+    if (despawn_count >
+        std::numeric_limits<std::uint64_t>::max() - m_simulationEventBus.next_sequence()) {
+        LatchRegionFault(tick, "Simulation event sequence exhausted");
+        return;
     }
     const auto settle = [&heights](GroundObject& object) {
         return SettleGroundObjectOnTerrain(object, heights.at(object.id));
