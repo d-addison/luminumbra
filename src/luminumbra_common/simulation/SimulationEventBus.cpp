@@ -86,7 +86,8 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                    std::move(topic),
                                    std::move(payload),
                                },
-                               0});
+                               0,
+                               std::nullopt});
     const auto& event = pending_events_.back().event;
     pending_bytes_[event.topic] += event.canonical_size() + 1;
     return sequence;
@@ -125,12 +126,14 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
     try {
         for (; current < due.size(); ++current) {
             auto& pending = due[current];
-            while (pending.next_handler < handlers_.size()) {
+            if (!pending.handler_count)
+                pending.handler_count = handlers_.size();
+            while (pending.next_handler < pending.handler_count.value_or(0)) {
                 if (continue_delivery && !continue_delivery()) {
                     requeue();
                     return delivered;
                 }
-                // Appending subscribers preserves references to existing handlers.
+                // std::deque appends keep references to existing handler elements valid.
                 const Handler& handler = handlers_[pending.next_handler];
                 ++pending.next_handler;
                 handler(pending.event);
@@ -181,7 +184,7 @@ void OrderedEventBus::restore_pending(std::vector<SimulationEvent> events,
     pending_bytes_.clear();
     for (auto& event : events) {
         pending_bytes_[event.topic] += event.canonical_size() + 1;
-        pending_events_.push_back({std::move(event), 0});
+        pending_events_.push_back({std::move(event), 0, std::nullopt});
     }
     next_sequence_ = next_sequence;
 }

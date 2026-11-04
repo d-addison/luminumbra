@@ -108,6 +108,9 @@ ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock
     m_headerTick = std::max(m_headerTick, clock.tick());
     return it->second;
 }
+void ActiveRegionLedger::activate_owned(RegionKey key, const WorldClock& clock) {
+    activate(key, clock).wake_pending = true;
+}
 void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
     auto& record = activate(key, clock);
     record.edited = true;

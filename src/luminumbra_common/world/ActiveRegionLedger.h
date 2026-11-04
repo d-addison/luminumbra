@@ -210,6 +210,9 @@ public:
     void set_local_anchor(const Vec3& walking_feet);
     // Existing records remain writable; new records must fit with every retained extension.
     [[nodiscard]] bool can_activate(RegionKey key) const;
+    // Activate and wake a consumer-owned region without a persistent terrain edit.
+    // The consumer must retain it through the scheduler's ownership probe.
+    void activate_owned(RegionKey key, const WorldClock& clock);
     void mark_edited(RegionKey key, const WorldClock& clock);
     // Wakes an existing Frozen record whose authority changed; never creates or alters others.
     void wake_frozen(RegionKey key) noexcept;

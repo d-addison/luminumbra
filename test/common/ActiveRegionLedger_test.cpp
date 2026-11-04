@@ -103,6 +103,30 @@ TEST(ActiveRegionLedgerTest, RegionAddressingAndFixedDiscIgnoreHeight) {
     EXPECT_EQ(a.records().at({0, 0}).first_active, 1u);
 }
 
+TEST(ActiveRegionLedgerTest, OwnedActivationWakesWithoutPersistentEdit) {
+    ActiveRegionLedger ledger;
+    ledger.activate_owned(kFar, WorldClock(5));
+    const auto& record = ledger.records().at(kFar);
+    EXPECT_FALSE(record.edited);
+    EXPECT_EQ(record.last_edit, 0u);
+    EXPECT_EQ(record.first_active, 5u);
+    EXPECT_TRUE(record.wake_pending);
+    EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+    const auto before = ledger.encode();
+    EXPECT_THROW(ledger.activate_owned({32768, 0}, WorldClock(5)), std::invalid_argument);
+    EXPECT_THROW(ledger.activate_owned(kFar, WorldClock(4)), std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), before);
+
+    auto frozen = FrozenLedger();
+    const auto last_edit = frozen.records().at(kFar).last_edit;
+    frozen.activate_owned(kFar, WorldClock(3));
+    EXPECT_TRUE(frozen.records().at(kFar).edited);
+    EXPECT_EQ(frozen.records().at(kFar).last_edit, last_edit);
+    Step(frozen, 4, 1);
+    EXPECT_EQ(frozen.records().at(kFar).state, RegionState::Active);
+    EXPECT_FALSE(frozen.records().at(kFar).wake_pending);
+}
+
 TEST(ActiveRegionLedgerTest, SharedActivationRegionsPreserveClosedDiscAndPackedEdges) {
     const std::vector<std::pair<Vec3, std::vector<RegionKey>>> cases{
         {Vec3(256, 0, 256),
@@ -1236,11 +1260,13 @@ TEST(ActiveRegionLedgerTest, RecordAdmissionCountsAllRetainedExtensionsAtBoundar
     const auto before = ledger.encode();
     EXPECT_LE(before.size(), ActiveRegionLedger::kMaxFileBytes);
     EXPECT_FALSE(ledger.can_activate(CapacityKey(limit)));
+    EXPECT_THROW(ledger.activate_owned(CapacityKey(limit), WorldClock{}), std::length_error);
     EXPECT_THROW(ledger.mark_edited(CapacityKey(limit), WorldClock{}), std::length_error);
     EXPECT_THROW(ledger.pin(CapacityKey(limit), true, WorldClock{}), std::length_error);
     EXPECT_EQ(ledger.records().size(), limit);
     EXPECT_EQ(ledger.encode(), before);
     EXPECT_TRUE(ledger.can_activate(CapacityKey(0)));
+    EXPECT_NO_THROW(ledger.activate_owned(CapacityKey(0), WorldClock{}));
     EXPECT_NO_THROW(ledger.mark_edited(CapacityKey(0), WorldClock{}));
     EXPECT_NO_THROW(ledger.pin(CapacityKey(0), true, WorldClock{}));
     ledger.set_local_anchor({-5120, 0, -5120});

@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,6 +40,7 @@ public:
     // retry resumes with the next handler, then proceeds through the remaining events in order.
     std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
                                        const std::function<bool()>& continue_delivery = {});
+    // A subscription added during delivery starts with the next event, in subscription order.
     void subscribe(Handler handler);
     void clear();
     [[nodiscard]] std::size_t pending_count() const noexcept;
@@ -56,6 +58,7 @@ private:
         SimulationEvent event;
         // A handler that throws has been invoked and must not be invoked again on retry.
         std::size_t next_handler = 0;
+        std::optional<std::size_t> handler_count;
     };
     std::uint64_t next_sequence_ = 0;
     std::vector<PendingEvent> pending_events_;

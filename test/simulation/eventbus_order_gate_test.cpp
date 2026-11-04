@@ -54,11 +54,61 @@ bool sequence_exhaustion_is_atomic() {
     return true;
 }
 
+bool subscriptions_during_delivery_start_with_later_events() {
+    using luminumbra::simulation::OrderedEventBus;
+    for (const bool interrupted : {false, true}) {
+        OrderedEventBus bus;
+        bool keep_delivering = true;
+        std::vector<std::string> observed;
+        bus.subscribe([&](const auto& event) {
+            observed.push_back("first:" + event.payload);
+            if (event.payload == "one") {
+                bus.subscribe(
+                    [&](const auto& later) { observed.push_back("new:" + later.payload); });
+                // Continue using this handler's captures after the deque append.
+                observed.push_back("subscribed:" + event.payload);
+                keep_delivering = !interrupted;
+            }
+        });
+        bus.subscribe([&](const auto& event) { observed.push_back("second:" + event.payload); });
+        bus.publish(2, "test", "four");
+        bus.publish(1, "test", "three");
+        bus.publish(1, "test", "one", -1);
+        bus.publish(1, "test", "two", -1);
+        bus.drain(1, [&] { return keep_delivering; });
+        if (interrupted) {
+            if (observed != std::vector<std::string>{"first:one", "subscribed:one"})
+                return false;
+            keep_delivering = true;
+            bus.drain(1);
+        }
+        const std::vector<std::string> expected{"first:one",
+                                                "subscribed:one",
+                                                "second:one",
+                                                "first:two",
+                                                "second:two",
+                                                "new:two",
+                                                "first:three",
+                                                "second:three",
+                                                "new:three"};
+        if (observed != expected || bus.pending_count() != 1)
+            return false;
+        bus.drain(2);
+        auto complete = expected;
+        complete.insert(complete.end(), {"first:four", "second:four", "new:four"});
+        if (observed != complete || bus.pending_count() != 0 || !pending_bytes_match(bus))
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
     if (!sequence_exhaustion_is_atomic())
         return fail("exhausted event sequence mutated pending state or wrapped the cursor");
+    if (!subscriptions_during_delivery_start_with_later_events())
+        return fail("subscription during delivery changed handler lifetime or event order");
     using luminumbra::simulation::describe_event_order;
     using luminumbra::simulation::OrderedEventBus;
     using luminumbra::simulation::replay_eventbus_order_fixture;

@@ -212,6 +212,62 @@ TEST(GroundObjectStoreTest, EraseRemovesFromBothIndexes) {
     EXPECT_TRUE(store.empty());
 }
 
+TEST(GroundObjectStoreTest, DespawnedRegionsStayEvictableBeyondLedgerCapacity) {
+    constexpr std::uint32_t kBatch = 4096;
+    constexpr auto kTotal = ActiveRegionLedger::kMaxRegions + kBatch;
+    ActiveRegionLedger ledger;
+    GroundObjectStore store;
+    std::uint64_t live_id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(live_id));
+    const auto live = MakeObject(live_id, -kRegion + 1, -kRegion + 1);
+    const auto live_key = GroundObjectStore::region_of(live);
+    ASSERT_TRUE(store.insert(live));
+    ledger.activate_owned(live_key, WorldClock{});
+    const auto owned = [&](RegionKey key) {
+        return store.owns_region(key);
+    };
+    const auto key_at = [](std::uint32_t index) {
+        return RegionKey{static_cast<std::int32_t>(index % 1024u),
+                         static_cast<std::int32_t>(index / 1024u)};
+    };
+    std::uint64_t tick = 0;
+    for (std::uint32_t first = 0; first < kTotal; first += kBatch) {
+        SCOPED_TRACE(first);
+        for (std::uint32_t index = first; index < first + kBatch; ++index) {
+            std::uint64_t id = 0;
+            ASSERT_TRUE(ledger.allocate_persistent_id(id));
+            const auto key = key_at(index);
+            ASSERT_TRUE(ledger.can_activate(key));
+            auto object = MakeObject(id, key.x * kRegion + 1, key.z * kRegion + 1);
+            object.spawn_tick = tick;
+            object.despawn_after = 1;
+            ASSERT_TRUE(store.insert(object));
+            ledger.activate_owned(key, WorldClock(tick));
+        }
+        ASSERT_EQ(ledger.records().size(), kBatch + 1u);
+        ASSERT_LT(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+        tick += ActiveRegionLedger::kIdleEvictionTicks;
+        ledger.schedule(WorldClock(tick), {}, {}, {}, owned);
+        ASSERT_EQ(ledger.records().size(), kBatch + 1u);
+        ASSERT_TRUE(ledger.records().contains(live_key));
+        for (std::uint32_t index = first; index < first + kBatch; ++index) {
+            const auto key = key_at(index);
+            ASSERT_EQ(store.age_region(key, {}).despawned.size(), 1u);
+            ASSERT_FALSE(store.owns_region(key));
+        }
+        const auto schedule = ledger.schedule(WorldClock(++tick), {}, {}, {}, owned);
+        ASSERT_EQ(store.size(), 1u);
+        ASSERT_EQ(ledger.records().size(), 1u);
+        ASSERT_TRUE(ledger.records().contains(live_key));
+        EXPECT_EQ(schedule.ledger_records, 1u);
+    }
+    EXPECT_GT(kTotal, ActiveRegionLedger::kMaxRegions);
+    EXPECT_EQ(ledger.next_persistent_id(), kTotal + 2u);
+    ASSERT_TRUE(store.erase(live_id));
+    ledger.schedule(WorldClock(++tick), {}, {}, {}, owned);
+    EXPECT_TRUE(ledger.records().empty());
+}
+
 TEST(GroundObjectStoreTest, SerializeEmptyIsEmpty) {
     GroundObjectStore store;
     EXPECT_EQ(store.serialize(), "");

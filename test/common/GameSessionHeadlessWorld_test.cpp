@@ -7278,17 +7278,24 @@ TEST(GameSessionHeadlessWorldTest, UnknownRegionWorkFromEventCallbackIsRejectedA
     EXPECT_TRUE(session.SaveWorldState());
 }
 
-TEST(GameSessionHeadlessWorldTest, SpawnMarksItsRegionEdited) {
+TEST(GameSessionHeadlessWorldTest, SpawnActivatesItsRegionWithoutTerrainEdit) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    CreateGroundWorld(session, root, jobs, "Ground edit");
+    CreateGroundWorld(session, root, jobs, "Ground activation");
     ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
     const auto& records = session.GetActiveRegionLedger().records();
     ASSERT_EQ(records.count(kGroundRegion), 1u);
-    EXPECT_TRUE(records.at(kGroundRegion).edited);
+    EXPECT_FALSE(records.at(kGroundRegion).edited);
+    EXPECT_TRUE(records.at(kGroundRegion).wake_pending);
     EXPECT_EQ(records.size(), 1u);
+    auto ledger = session.GetActiveRegionLedger();
+    const auto owned = [&](Luminumbra::world::RegionKey key) {
+        return session.GetGroundObjects().owns_region(key);
+    };
+    ledger.schedule(Luminumbra::world::WorldClock(ledger.kIdleEvictionTicks), {}, {}, {}, owned);
+    EXPECT_TRUE(ledger.records().contains(kGroundRegion));
 }
 
 TEST(GameSessionHeadlessWorldTest, DespawnAfterRemovesObjectAndPublishesGroundDespawned) {

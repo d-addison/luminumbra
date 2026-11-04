@@ -681,7 +681,7 @@ private:
     void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     void AdvanceGroundObjects(std::uint64_t tick);
-    bool MarkGroundRegionEdited(const GroundObject& object);
+    bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     bool m_regionRequiresIndex = false;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.

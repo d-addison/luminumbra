@@ -2140,7 +2140,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         ++m_regionInputRejections.ground_spawns;
         return 0;
     }
-    if (!MarkGroundRegionEdited(candidate)) {
+    if (!ActivateGroundRegion(candidate)) {
         m_groundObjects.erase(id);
         return 0;
     }
@@ -2169,9 +2169,9 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
                              payload);
 }
 
-bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {
+bool GameSession::ActivateGroundRegion(const GroundObject& object) {
     try {
-        m_activeRegionLedger.mark_edited(GroundObjectStore::region_of(object), m_worldClock);
+        m_activeRegionLedger.activate_owned(GroundObjectStore::region_of(object), m_worldClock);
         return true;
     } catch (const std::length_error& error) {
         LatchRegionFault(m_worldClock.tick(), error.what());

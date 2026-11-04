@@ -369,3 +369,47 @@ target was built or run: the updated/new headless settling, reload, edited/coars
 terrain and zero-read cases, retained headless regressions and pinned engine hash
 tests remain runtime-unverified. Acceptance contract documents and fixture files
 are unchanged.
+
+### Ground object retention and subscriptions during delivery
+
+Ground spawns now activate and wake their region without setting the persistent
+`edited` flag. Object state already lives in the ground store, whose ownership
+probe retains the region while objects remain. After despawn, the existing
+tick-based idle eviction can reclaim the record when no other owner or retention
+condition applies. Terrain edits and existing saved edit flags keep their meaning;
+there is no migration or change to either save format. Admission still uses
+`can_activate`, the shared ledger file budget and the ground store's byte reserve.
+Procedural-height settling is unchanged.
+
+The deque handler comment now states its element-reference guarantee explicitly.
+The old delivery loop included subscribers appended during the current event.
+Delivery now captures each event's subscriber count and retains that cutoff across
+an interruption, so a subscription made by a handler starts with the next event.
+Tick, lane, sequence and subscription order remain deterministic. The cutoff is
+transient delivery progress; saved notification bytes are unchanged.
+
+Regressions cover 1,052,672 distinct ground regions in batches of 4,096, admission
+beyond the ledger's total record cap, empty-record reclamation, retention of a
+live object's region, activation wake-up, preserved terrain edits and file-budget
+refusal. The event-bus gate subscribes during delivery and checks later events,
+handler order, future ticks and interrupted delivery.
+
+Verification:
+
+- Seven changed C++ translation units pass `clang++-18 -fsyntax-only` and the
+  clang-tidy cognitive-complexity check at 250. Changed-line formatting and
+  `git diff --check` pass.
+- Fresh standalone GCC builds at `-j2` pass 26 ground-store tests, 77 ledger tests
+  and the event-bus gate. Restoring the sticky ground edit mark in a temporary
+  build fails the churn regression on the first batch's empty-record check.
+- The event-bus gate passes AddressSanitizer and UndefinedBehaviorSanitizer with
+  leak detection disabled. LeakSanitizer cannot run under this sandbox's ptrace
+  environment, so leak detection remains unverified.
+
+The headless session regression is syntax checked only. Engine-linked tests are
+not runnable in this sandbox, including `AllocatorOnlyLedgerIsSavedAndReloads`,
+which is omitted only from the temporary standalone ledger build. Engine-linked
+save/load, headless settling and pinned hash tests remain runtime-unverified.
+Acceptance contract documents and fixture files are unchanged. The description's
+claims of resident edited-terrain probes at spawn and activation still need to be
+replaced with procedural-height-only settling and its terrain-edit limitation.
