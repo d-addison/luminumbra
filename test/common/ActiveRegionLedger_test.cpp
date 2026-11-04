@@ -23,6 +23,11 @@ using Luminumbra::Vec3;
 
 const RegionKey kFar{10, -3};
 
+std::vector<RegionKey> ActivationKeys(const Vec3& anchor) {
+    const auto regions = ActiveRegionLedger::activation_regions(anchor);
+    return {regions.begin(), regions.end()};
+}
+
 ActiveRegionLedger Distant(RegionSchedulerConfig config = {10, 2, 2}) {
     ActiveRegionLedger ledger(config);
     ledger.mark_edited(kFar, WorldClock{});
@@ -118,9 +123,8 @@ TEST(ActiveRegionLedgerTest, SharedActivationRegionsPreserveClosedDiscAndPackedE
         {Vec3(-16777216.0f, 0, 16777215.0f), {{-32768, 32766}, {-32768, 32767}, {-32767, 32767}}}};
     for (const auto& [anchor, expected] : cases) {
         SCOPED_TRACE(::testing::Message() << anchor.x << ", " << anchor.z);
-        EXPECT_EQ(ActiveRegionLedger::activation_regions(anchor), expected);
-        EXPECT_EQ(ActiveRegionLedger::activation_regions(Vec3(anchor.x, -1e30f, anchor.z)),
-                  expected);
+        EXPECT_EQ(ActivationKeys(anchor), expected);
+        EXPECT_EQ(ActivationKeys(Vec3(anchor.x, -1e30f, anchor.z)), expected);
         ActiveRegionLedger local, replicated;
         local.set_local_anchor(anchor);
         const std::array anchors{anchor};

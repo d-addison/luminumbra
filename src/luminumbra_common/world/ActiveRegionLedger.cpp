@@ -213,8 +213,8 @@ RegionResumeWindow ActiveRegionLedger::resume_window(RegionKey key,
                       system_cap,
                       std::uint64_t{clock.calendar().dayLengthTicks}})};
 }
-std::vector<RegionKey> ActiveRegionLedger::activation_regions(const Vec3& anchor) {
-    std::vector<RegionKey> keys;
+ActivationRegions ActiveRegionLedger::activation_regions(const Vec3& anchor) {
+    ActivationRegions keys;
     if (!valid_anchor(anchor))
         return keys;
     const auto centre = region_at(anchor);
