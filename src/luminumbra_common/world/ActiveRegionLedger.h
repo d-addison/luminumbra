@@ -3,6 +3,7 @@
 #include "WorldClock.h"
 #include "luminumbra/core/Types.h"
 
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -21,6 +22,34 @@ struct RegionKey {
     std::int32_t x = 0;
     std::int32_t z = 0;
     auto operator<=>(const RegionKey&) const = default;
+};
+
+// Regions near an anchor; the fixed proximity disc never touches more than a 4x4 block,
+// so the set lives inline and the per-tick scheduler path allocates nothing.
+class ActiveRegionLedger;
+class ActivationRegions {
+public:
+    static constexpr std::size_t kCapacity = 16;
+    [[nodiscard]] const RegionKey* begin() const {
+        return m_keys.data();
+    }
+    [[nodiscard]] const RegionKey* end() const {
+        return m_keys.data() + m_size;
+    }
+    [[nodiscard]] std::size_t size() const {
+        return m_size;
+    }
+    [[nodiscard]] bool empty() const {
+        return m_size == 0;
+    }
+
+private:
+    friend class ActiveRegionLedger;
+    void push_back(RegionKey key) {
+        m_keys[m_size++] = key;
+    }
+    std::array<RegionKey, kCapacity> m_keys{};
+    std::size_t m_size = 0;
 };
 
 enum class RegionState : std::uint8_t {
@@ -202,6 +231,8 @@ public:
     // record, or move the canonical tick that the hash projection reads.
     void restore_clock(const WorldClock& clock);
     [[nodiscard]] static RegionKey region_at(const Vec3& position);
+    // Shared proximity rule for scheduler visits and authoritative consumers.
+    [[nodiscard]] static ActivationRegions activation_regions(const Vec3& anchor);
     [[nodiscard]] static std::uint32_t phase(RegionKey key, std::uint8_t shift);
     [[nodiscard]] static RegionResumeWindow resume_window(RegionKey key,
                                                           std::uint64_t frozen_at,

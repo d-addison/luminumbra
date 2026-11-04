@@ -7174,12 +7174,10 @@ TEST(GameSessionHeadlessWorldTest, ExhaustedGroundDespawnSequenceLatchesFaultWit
     EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
     // The spawn used the last sequence; the despawn is refused instead of wrapping the cursor.
     EXPECT_EQ(CountTopic(seen, "ground.despawned"), 0u);
+    // A latched fault retires pending notifications, so nothing is captured or persisted.
     const auto pending = loaded.CaptureGroundNotifications();
-    EXPECT_EQ(pending.next_sequence, maximum);
-    for (const auto& event : pending.events) {
-        EXPECT_LT(event.sequence, pending.next_sequence);
-        EXPECT_NE(event.topic, "ground.despawned");
-    }
+    EXPECT_EQ(pending.next_sequence, 0u);
+    EXPECT_TRUE(pending.events.empty());
     ASSERT_TRUE(loaded.SaveWorld());
 }
 
