@@ -101,7 +101,7 @@ struct RegionRejections {
 
 struct RegionSchedule {
     std::uint64_t tick = 0, work = 0;
-    std::vector<RegionKey> due;
+    std::vector<RegionKey> due; // Unique keys in scheduler rank/proximity order.
     std::vector<RegionTransition> transitions;
     RegionRejections rejected;
     std::string digest;

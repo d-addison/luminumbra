@@ -2047,21 +2047,24 @@ std::string GroundEventPayload(const GroundObject& object) {
            std::to_string(object.z_mm);
 }
 
-Vec3 GroundPosition(const GroundObject& object) {
-    return {static_cast<float>(object.x_mm) / 1000.0f,
-            static_cast<float>(object.y_mm) / 1000.0f,
-            static_cast<float>(object.z_mm) / 1000.0f};
-}
-
 std::optional<float> ProceduralGroundHeight(const Systems::SHIELD_WorldSystem& world,
                                             const GroundObject& object) {
-    const auto position = GroundPosition(object);
-    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
-        std::abs(position.x) >= 16777216.0f || std::abs(position.z) >= 16777216.0f ||
-        std::abs(position.y) >= 1048576.0f)
+    if (object.x_mm <= -GroundObjectStore::kMaxCoordinateMm ||
+        object.x_mm >= GroundObjectStore::kMaxCoordinateMm ||
+        object.z_mm <= -GroundObjectStore::kMaxCoordinateMm ||
+        object.z_mm >= GroundObjectStore::kMaxCoordinateMm ||
+        object.y_mm <= -GroundObjectStore::kMaxVerticalMm ||
+        object.y_mm >= GroundObjectStore::kMaxVerticalMm)
         return std::nullopt;
-    const float height = world.GetTerrainHeightAt(position.x, position.z);
-    if (!std::isfinite(height) || std::abs(height) >= 1048576.0f || height > position.y)
+    // The adjacent interior floats are exact; accepted millimetres can round to the boundary.
+    constexpr float kSamplerLimit = 16777215.0f;
+    const float x =
+        std::clamp(static_cast<float>(object.x_mm) / 1000.0f, -kSamplerLimit, kSamplerLimit);
+    const float z =
+        std::clamp(static_cast<float>(object.z_mm) / 1000.0f, -kSamplerLimit, kSamplerLimit);
+    const float height = world.GetTerrainHeightAt(x, z);
+    if (!std::isfinite(height) || std::abs(height) >= 1048576.0f ||
+        static_cast<double>(height) * 1000.0 > static_cast<double>(object.y_mm))
         return std::nullopt;
     return height;
 }
@@ -2182,12 +2185,18 @@ bool GameSession::ActivateGroundRegion(const GroundObject& object) {
 }
 
 void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
-    // The schedule's own order is rank/proximity order and must not change; age in key order.
-    std::vector<RegionKey> due = m_regionSchedule.due;
-    std::sort(due.begin(), due.end());
-    due.erase(std::unique(due.begin(), due.end()), due.end());
+    if (m_groundObjects.empty())
+        return;
+    ++m_groundObjectAdvanceCount;
+    // The ledger emits each map key at most once. Collect only owned due regions in key order;
+    // the schedule's rank/proximity order stays intact and needs no copy, sort or deduplication.
+    std::map<RegionKey, std::uint64_t> due;
     std::map<std::uint64_t, std::optional<float>> heights;
-    for (const RegionKey key : due) {
+    for (const RegionKey key : m_regionSchedule.due) {
+        const auto processed = static_cast<std::uint64_t>(m_groundObjects.region_size(key));
+        if (processed == 0)
+            continue;
+        due.emplace(key, processed);
         for (const auto& object : m_groundObjects.in_region(key)) {
             if (!object.settled()) {
                 heights.emplace(object.id, ProceduralGroundHeight(*m_worldSystem, object));
@@ -2197,10 +2206,7 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     const auto settle = [&heights](GroundObject& object) {
         return SettleGroundObjectOnTerrain(object, heights.at(object.id));
     };
-    for (const RegionKey key : due) {
-        if (!m_groundObjects.owns_region(key))
-            continue;
-        const auto processed = static_cast<std::uint64_t>(m_groundObjects.region_size(key));
+    for (const auto& [key, processed] : due) {
         const GroundObjectStore::AgeResult result = m_groundObjects.age_region(key, settle);
         m_regionCompletedWork.push_back(RegionWork{key, 0, processed, 0, 0});
         for (const GroundObject& object : result.despawned)

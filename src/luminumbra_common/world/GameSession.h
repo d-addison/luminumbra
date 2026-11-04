@@ -518,6 +518,10 @@ public:
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
+    // Observational nonempty advancement passes; never persisted or hashed.
+    [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
+        return m_groundObjectAdvanceCount;
+    }
     [[nodiscard]] GroundNotifications CaptureGroundNotifications() const;
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
@@ -676,6 +680,7 @@ private:
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Successful consumer work this tick.
     GroundObjectStore m_groundObjects;
+    std::uint64_t m_groundObjectAdvanceCount = 0;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
     void LatchRegionFault(std::uint64_t tick, const std::string& message);

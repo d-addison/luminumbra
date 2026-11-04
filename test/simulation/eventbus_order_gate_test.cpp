@@ -102,6 +102,68 @@ bool subscriptions_during_delivery_start_with_later_events() {
     return true;
 }
 
+bool callback_publications_follow_the_interrupted_batch() {
+    using luminumbra::simulation::OrderedEventBus;
+    std::vector<std::string> uninterrupted;
+    for (const int mode : {0, 1, 2}) {
+        OrderedEventBus bus;
+        bool keep_delivering = true;
+        std::vector<std::string> first, second, added, observed;
+        bus.subscribe([&](const auto& event) {
+            first.push_back(event.payload);
+            observed.push_back("first:" + event.payload);
+            if (event.payload == "original") {
+                bus.publish(1, "test", "published", -1);
+                bus.subscribe([&](const auto& later) {
+                    added.push_back(later.payload);
+                    observed.push_back("added:" + later.payload);
+                });
+                if (mode == 1)
+                    throw std::runtime_error("consumer fault");
+                keep_delivering = mode != 2;
+            }
+        });
+        bus.subscribe([&](const auto& event) {
+            second.push_back(event.payload);
+            observed.push_back("second:" + event.payload);
+        });
+        bus.publish(1, "test", "original");
+        bus.publish(1, "test", "batch tail", 1);
+        bus.publish(2, "test", "future");
+        bool caught = false;
+        try {
+            bus.drain(1, [&] { return keep_delivering; });
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (caught != (mode == 1) || !pending_bytes_match(bus))
+            return false;
+        if (mode != 0) {
+            if (!second.empty() || bus.pending_count() != 4)
+                return false;
+            // A lower retry horizon must not release the interrupted batch's ordering barrier.
+            if (!bus.drain(0).empty() || !second.empty() || !pending_bytes_match(bus))
+                return false;
+        }
+        keep_delivering = true;
+        bus.drain(1);
+        const std::vector<std::string> expected{"original", "batch tail", "published"};
+        if (first != expected || second != expected ||
+            added != std::vector<std::string>{"batch tail", "published"} ||
+            bus.pending_count() != 1 || !pending_bytes_match(bus))
+            return false;
+        bus.drain(2);
+        if (first.back() != "future" || second != first || added.back() != "future" ||
+            bus.pending_count() != 0 || !pending_bytes_match(bus))
+            return false;
+        if (mode == 0)
+            uninterrupted = observed;
+        else if (observed != uninterrupted)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -109,6 +171,8 @@ int main() {
         return fail("exhausted event sequence mutated pending state or wrapped the cursor");
     if (!subscriptions_during_delivery_start_with_later_events())
         return fail("subscription during delivery changed handler lifetime or event order");
+    if (!callback_publications_follow_the_interrupted_batch())
+        return fail("callback publication overtook an interrupted delivery batch");
     using luminumbra::simulation::describe_event_order;
     using luminumbra::simulation::OrderedEventBus;
     using luminumbra::simulation::replay_eventbus_order_fixture;

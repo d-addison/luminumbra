@@ -37,7 +37,8 @@ public:
     std::uint64_t
     publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
     // Aborted delivery retains per-event handler progress. A throwing handler counts as invoked;
-    // retry resumes with the next handler, then proceeds through the remaining events in order.
+    // retry resumes with the next handler, then finishes the batch before sorting publications
+    // from callbacks into the next batch.
     std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
                                        const std::function<bool()>& continue_delivery = {});
     // A subscription added during delivery starts with the next event, in subscription order.
@@ -62,6 +63,8 @@ private:
     };
     std::uint64_t next_sequence_ = 0;
     std::vector<PendingEvent> pending_events_;
+    // An interrupted batch stays at the front, ahead of callback publications.
+    std::size_t pending_batch_size_ = 0;
     std::map<std::string, std::size_t, std::less<>> pending_bytes_;
     std::deque<Handler> handlers_;
 };

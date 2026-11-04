@@ -7898,6 +7898,89 @@ TEST(GameSessionHeadlessWorldTest,
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawnAndAfterReload) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground integer limits");
+    using Luminumbra::world::GroundObjectStore;
+    constexpr auto edge = GroundObjectStore::kMaxCoordinateMm - 1;
+    constexpr auto top = GroundObjectStore::kMaxVerticalMm - 1;
+    struct Position {
+        std::int64_t x_mm, z_mm;
+        float sample_x, sample_z;
+    };
+    const std::array<Position, 5> positions{{{5200, -1500, 5.2f, -1.5f},
+                                             {edge, edge, 16777215.0f, 16777215.0f},
+                                             {-edge, -edge, -16777215.0f, -16777215.0f},
+                                             {edge, -edge, 16777215.0f, -16777215.0f},
+                                             {-edge, edge, -16777215.0f, 16777215.0f}}};
+    GroundObjectStore unsettled;
+    std::map<std::uint64_t, std::int64_t> expected;
+    for (const auto& [x, z, sample_x, sample_z] : positions) {
+        const float height = session.GetWorldSystem()->GetTerrainHeightAt(sample_x, sample_z);
+        ASSERT_TRUE(std::isfinite(height));
+        const auto id = session.SpawnGroundObject(kGroundType, x, top, z, 0, 0);
+        ASSERT_NE(id, 0u);
+        const auto& object = session.GetGroundObjects().objects().at(id);
+        expected.emplace(id, std::llround(static_cast<double>(height) * 1000.0));
+        EXPECT_TRUE(object.settled());
+        EXPECT_EQ(object.y_mm, expected.at(id));
+        auto waiting = object;
+        waiting.flags = 0;
+        waiting.y_mm = top;
+        ASSERT_TRUE(unsettled.insert(waiting));
+        session.PinActiveRegion(GroundObjectStore::region_of(object), true);
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(P::WorldSaveService::save_ground_objects(
+        unsettled, session.GetWorldSaveDir(), nullptr, session.CaptureGroundNotifications()));
+    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetGroundObjects().size(), positions.size());
+    for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+        EXPECT_FALSE(object.settled());
+        EXPECT_EQ(object.y_mm, top);
+    }
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, expected.at(id));
+            EXPECT_EQ(object.active_age, static_cast<std::uint32_t>(i + 1));
+        }
+    }
+    // The excluded integer bounds still refuse before allocating an id.
+    EXPECT_EQ(session.SpawnGroundObject(kGroundType, 0, top + 1, 0, 0, 0), 0u);
+    EXPECT_EQ(session.SpawnGroundObject(kGroundType, edge + 1, top, 0, 0, 0), 0u);
+    EXPECT_EQ(session.SpawnGroundObject(kGroundType, 0, top, -edge - 1, 0, 0), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyGroundStoreSkipsAdvancementWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Empty ground advancement");
+    session.PinActiveRegion(kGroundRegion, true);
+    const auto before = session.GetGroundObjectAdvanceCount();
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedule().due.empty());
+        EXPECT_EQ(session.GetGroundObjectAdvanceCount(), before);
+    }
+    ASSERT_NE(SpawnGround(session, 5200, -1500, 1), 0u);
+    TickOnce(session);
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    EXPECT_EQ(session.GetGroundObjectAdvanceCount(), before + 1);
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedule().due.empty());
+        EXPECT_EQ(session.GetGroundObjectAdvanceCount(), before + 1);
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest,
      UnsettledDistantGroundMatchesPristineResidentAndReopenedContinuation) {
     const HeadlessRoot root;

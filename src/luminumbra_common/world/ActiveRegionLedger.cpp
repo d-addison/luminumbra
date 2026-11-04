@@ -336,7 +336,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     for (const auto& anchor : anchors)
         visit(anchor, clock, result.rejected);
 
-    // std::map nodes are pointer stable and nothing is inserted after this point.
+    // Each map key contributes one row and at most one due entry. Nodes are pointer stable
+    // and nothing is inserted after this point.
     struct Row {
         RegionKey key;
         ActiveRegionRecord* record;

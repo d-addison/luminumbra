@@ -413,3 +413,60 @@ save/load, headless settling and pinned hash tests remain runtime-unverified.
 Acceptance contract documents and fixture files are unchanged. The description's
 claims of resident edited-terrain probes at spawn and activation still need to be
 replaced with procedural-height-only settling and its terrain-edit limitation.
+
+### Ground delivery retries, coordinate limits and empty-store work
+
+Interrupted event delivery retains the remaining original batch at the front of
+the queue. Retry finishes that batch, including the interrupted event's remaining
+subscribers, before collecting callback publications into the next sorted batch.
+Each event retains its subscriber-count cutoff across retries. Pending event bytes,
+canonical notification encoding and the exhausted-sequence fault policy are unchanged.
+
+Ground height lookup checks coordinate bounds in integer millimetres before any
+float conversion. The vertical comparison uses double-precision millimetres, so
+the accepted `y_mm = 1048575999` remains eligible to settle. Horizontal sampler
+coordinates clamp to the exact interior floats `-16777215` and `16777215` metres
+when conversion rounds an accepted integer onto the excluded boundary. Persisted
+horizontal coordinates are unchanged. Settling still uses procedural height at
+spawn and on due ticks, independently of residency; terrain edits are not sampled.
+
+An empty ground store returns before inspecting the due schedule or allocating
+advancement containers. A diagnostic counter records only nonempty advancement
+passes and contributes no save or hash bytes. For nonempty stores, only owned due
+regions enter an ordered map, preserving region-key despawn/publication order
+without copying, sorting or deduplicating the full schedule. Due keys are unique:
+the ledger constructs one row per unique record-map key and emits at most one due
+entry per row. All heights are collected before object mutation or notification
+publication. Ground activation continues to use `activate_owned`; region release,
+admission limits and file formats are unchanged.
+
+Three regressions were added: the event-bus gate compares uninterrupted delivery,
+a throwing callback and predicate cancellation when the callback publishes a
+lower-lane same-tick event and adds a subscriber; a headless case covers the last
+accepted vertical millimetre at ordinary coordinates and all four horizontal
+corners, at spawn and after loading unsettled objects; another headless case checks
+zero advancement passes before spawn and after despawn despite nonempty due lists.
+
+Verification:
+
+- Five changed C++ translation units pass `clang++-18 -fsyntax-only` and clang-tidy's
+  cognitive-complexity check at 250. Changed-line `clang-format-18` and
+  `git diff --check` pass.
+- Fresh standalone GCC builds at `-j2` pass all 26 ground-store tests, 77 ledger
+  tests and the event-bus gate. The new event regression fails against the original
+  delivery implementation.
+- The event-bus gate passes combined AddressSanitizer and UndefinedBehaviorSanitizer
+  with leak detection disabled. A supplemental executable using the actual settling
+  helper bodies and a bounded sampler stub passes nine coordinate combinations,
+  precise vertical comparison and integer-bound rejection checks.
+
+The two new headless cases are syntax checked only. This clone has no configured
+engine build, and the external build supplying dependency headers has no engine
+libraries. Engine-linked settling, save/load, empty-store advancement and pinned
+hash regressions remain runtime-unverified, as do native cross-platform execution
+and leak detection. The standalone ledger build continues to omit only the
+engine-linked `AllocatorOnlyLedgerIsSavedAndReloads` case. Acceptance contract
+documents and fixture files are unchanged. The PR description still needs to
+replace resident edited-terrain settling claims with procedural-height-only
+settling and its terrain-edit limitation; its validation text should retain the
+engine-linked and native qualification limits above.
