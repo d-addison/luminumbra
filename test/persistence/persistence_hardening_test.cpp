@@ -882,6 +882,23 @@ TEST(PersistenceHardening, AuthorityStampAdvancesWhenGeneratedParamsReplaceTerra
     }
 }
 
+TEST(PersistenceHardening, AuthorityStampAdvancesOnlyWhenLoadedOrEditedClaimsTerrain) {
+    for (const bool water_owned : {false, true}) {
+        SCOPED_TRACE(water_owned);
+        Chunk chunk({0, 0, 0});
+        if (water_owned) {
+            chunk.mark_water_data_dirty();
+        }
+        const auto before = chunk.authority_stamp();
+        chunk.mark_sdf_loaded_or_edited();
+        EXPECT_TRUE(chunk.has_terrain_authority());
+        const auto claimed = chunk.authority_stamp();
+        EXPECT_NE(claimed, before);
+        chunk.mark_sdf_loaded_or_edited();
+        EXPECT_EQ(chunk.authority_stamp(), claimed);
+    }
+}
+
 TEST(PersistenceHardening, SaveAcknowledgementKeepsChunksMarkedAfterCapture) {
     auto chunk = std::make_shared<Chunk>(IVec3{0, 0, 0});
     chunk->mark_water_data_dirty();

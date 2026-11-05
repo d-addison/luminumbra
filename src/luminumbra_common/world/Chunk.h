@@ -193,7 +193,9 @@ public:
     }
     void mark_sdf_loaded_or_edited() {
         advance_water_seed_edit_generation();
-        m_terrain_authority.store(true, std::memory_order_release);
+        // Claiming terrain authority changes what the authority projection hashes.
+        if (!m_terrain_authority.exchange(true, std::memory_order_acq_rel))
+            m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 expected = 0u;
