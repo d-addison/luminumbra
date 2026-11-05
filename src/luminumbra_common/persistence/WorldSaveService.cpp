@@ -6272,17 +6272,22 @@ WorldSaveService::chunk_save_acknowledgement(const std::vector<std::shared_ptr<C
         std::shared_ptr<Chunk> chunk;
         u32 voxel;
         u32 water;
+        u64 authority;
     };
     std::vector<Revision> revisions;
     for (const auto& chunk : chunks)
         if (chunk && chunk->is_voxel_data_dirty())
-            revisions.push_back({chunk, chunk->voxel_revision(), chunk->water_revision()});
+            revisions.push_back({chunk,
+                                 chunk->voxel_revision(),
+                                 chunk->water_revision(),
+                                 chunk->authority_hash_revision()});
     return [revisions = std::move(revisions)]() {
         for (const auto& revision : revisions)
             if (revision.voxel != std::numeric_limits<u32>::max() &&
                 revision.water != std::numeric_limits<u32>::max() &&
                 revision.chunk->voxel_revision() == revision.voxel &&
-                revision.chunk->water_revision() == revision.water) {
+                revision.chunk->water_revision() == revision.water &&
+                revision.chunk->authority_hash_revision() == revision.authority) {
                 revision.chunk->clear_voxel_data_dirty();
                 revision.chunk->clear_water_state_dirty();
             }

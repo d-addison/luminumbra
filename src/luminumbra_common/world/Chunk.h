@@ -160,6 +160,9 @@ public:
     }
     void mark_sdf_generated_current_params() {
         m_terrain_authority.store(false, std::memory_order_release);
+        // Terrain ownership and provenance change on every path, so cached authority stamps are
+        // stale.
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         if (has_water_authority()) {
             // Water divergence is sticky authority: a generation/promotion backfill of the
             // terrain must not make the chunk regenerable again.
@@ -171,8 +174,6 @@ public:
                                                            revision + 1u,
                                                            std::memory_order_acq_rel,
                                                            std::memory_order_acquire)) {}
-            // Terrain ownership and provenance changed, so cached authority stamps are stale.
-            m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
             // The representation changed. Persist it before clean durable eviction;
             // its generated terrain remains excluded from the authority projection.
             mark_dirty_for_save();

@@ -756,12 +756,16 @@ void ApplyChunkFields(const nlohmann::json& value,
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
-    if (const auto ownership = value.find("authority"); ownership != value.end()) {
-        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
-        const bool water_owned = ownership->at("water_owned").get<bool>();
+    // Every accepted ownership encoding must agree with the region record header.
+    const auto require_record_agreement = [&policy](bool terrain_edited, bool water_owned) {
         if (policy.validate_record_authority &&
             policy.terrain_edited != (terrain_edited || water_owned))
             throw std::invalid_argument("Chunk authority disagrees with region record");
+    };
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        require_record_agreement(terrain_edited, water_owned);
         if (water_owned)
             chunk.mark_water_data_dirty();
         if (terrain_edited)
@@ -769,6 +773,7 @@ void ApplyChunkFields(const nlohmann::json& value,
         else
             chunk.mark_sdf_generated_current_params();
     } else if (value.contains("water_authority")) {
+        require_record_agreement(value.at("water_authority") == "edited", true);
         chunk.mark_water_data_dirty();
         if (value.at("water_authority") == "edited")
             chunk.mark_sdf_loaded_or_edited();
@@ -777,6 +782,7 @@ void ApplyChunkFields(const nlohmann::json& value,
     } else if (water_state.contains("terrain_authoritative")) {
         if (!water_state.at("terrain_authoritative").is_boolean())
             throw std::invalid_argument("Water terrain authority must be a boolean");
+        require_record_agreement(water_state.at("terrain_authoritative").get<bool>(), true);
         chunk.set_water_authority();
         if (water_state.at("terrain_authoritative").get<bool>())
             chunk.mark_sdf_loaded_or_edited();
