@@ -3029,7 +3029,139 @@ std::string JoinErrors(const std::vector<std::string>& errors) {
     return joined;
 }
 
+void ExpectGroundNotificationPayloadSave(const std::string& payload, bool rejected, bool joined) {
+    using namespace Luminumbra::world;
+    TempSaveDir save_dir("ground_notification_payload");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    const WorldClock clock;
+    ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ledger.mark_edited(GroundObjectStore::region_of(*store.find(id)), clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    luminumbra::simulation::OrderedEventBus bus;
+    bus.publish(1, "ground.spawned", payload, -1);
+    bus.publish(2, "ground.despawned", "kept", 2);
+    bus.publish(3, "ground.despawned", payload);
+    const GroundNotifications notifications{bus.next_sequence(), bus.pending_events()};
+    auto expected = notifications;
+    if (rejected)
+        expected.events = {notifications.events[1]};
+    std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
+    if (joined) {
+        transaction.emplace(save_dir.path(),
+                            0,
+                            std::vector<std::array<float, 3>>{},
+                            WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
+    }
+    bool saved = false;
+    EXPECT_NO_THROW(saved = WorldSaveService::save_ground_objects(
+                        store, save_dir.path(), &errors, notifications));
+    ASSERT_TRUE(saved) << JoinErrors(errors);
+    EXPECT_EQ(errors.empty(), !rejected);
+    if (rejected)
+        EXPECT_NE(JoinErrors(errors).find("omitted 2 notification(s) with non-UTF-8 payloads"),
+                  std::string::npos);
+    if (joined)
+        ASSERT_TRUE(transaction->commit(&errors)) << JoinErrors(errors);
+    const auto bytes = ReadFileBytes(WorldSaveService::ground_objects_path(save_dir.path()));
+    EXPECT_EQ(bytes, store.serialize(expected));
+    if (!rejected) {
+        const auto legacy = store.serialize();
+        EXPECT_EQ(bytes,
+                  legacy.substr(0, legacy.size() - 2) +
+                      ",\"notifications\":{\"next_sequence\":3,\"events\":[" +
+                      notifications.events[0].canonical_bytes() + ',' +
+                      notifications.events[1].canonical_bytes() + ',' +
+                      notifications.events[2].canonical_bytes() + "]}}\n");
+    }
+    std::string hash;
+    EXPECT_NO_THROW(hash = notifications.canonical_bytes());
+    EXPECT_EQ(hash, "ground_notifications:v1:" + GroundObjectStore{}.serialize(expected));
+    GroundObjectStore restored;
+    GroundNotifications loaded;
+    ASSERT_TRUE(
+        WorldSaveService::load_ground_objects(restored, save_dir.path(), 2, &errors, {}, &loaded))
+        << JoinErrors(errors);
+    EXPECT_EQ(restored.objects(), store.objects());
+    EXPECT_EQ(loaded.next_sequence, 3u);
+    EXPECT_EQ(restored.serialize(loaded), bytes);
+    EXPECT_EQ(loaded.canonical_bytes(), hash);
+    ASSERT_EQ(loaded.events.size(), rejected ? 1u : 3u);
+    EXPECT_EQ(loaded.events.front().payload, rejected ? "kept" : payload);
+    EXPECT_EQ(loaded.events.back().payload, rejected ? "kept" : payload);
+    EXPECT_EQ(bus.pending_count(), 3u);
+    const auto delivered = bus.drain(3);
+    ASSERT_EQ(delivered.size(), 3u);
+    EXPECT_EQ(delivered.front().payload, payload);
+    EXPECT_EQ(delivered.back().payload, payload);
+}
+
+void ExpectGroundNotificationSerializationRefusal(bool joined) {
+    using namespace Luminumbra::world;
+    TempSaveDir save_dir("ground_notification_exception");
+    GroundNotifications notifications{1, {{0, 0, 0, "ground.spawned", "kept"}}};
+    std::vector<std::string> errors;
+    const WorldClock clock;
+    ActiveRegionLedger ledger;
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors, notifications));
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
+    const auto bytes = ReadFileBytes(path);
+    const auto index = ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save_dir.path()));
+    std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
+    if (joined) {
+        transaction.emplace(save_dir.path(),
+                            0,
+                            std::vector<std::array<float, 3>>{},
+                            WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
+    }
+    notifications.events.front().topic += static_cast<char>(0xff);
+    std::string hash;
+    EXPECT_NO_THROW(hash = notifications.canonical_bytes());
+    EXPECT_EQ(hash, "!");
+    bool saved = true;
+    EXPECT_NO_THROW(
+        saved = WorldSaveService::save_ground_objects({}, save_dir.path(), &errors, notifications));
+    EXPECT_FALSE(saved);
+    EXPECT_NE(JoinErrors(errors).find("serialization exception"), std::string::npos);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
+    EXPECT_EQ(ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save_dir.path())), index);
+}
+
 } // namespace
+
+TEST(WorldSaveService, GroundNotificationInvalidUtf8PayloadsAreOmittedWithoutLosingSave) {
+    for (const bool joined : {false, true}) {
+        SCOPED_TRACE(joined);
+        ExpectGroundNotificationPayloadSave(std::string(1, static_cast<char>(0xff)), true, joined);
+        ExpectGroundNotificationPayloadSave("\xe2\x82", true, joined);
+    }
+}
+
+TEST(WorldSaveService, GroundNotificationValidPayloadBytesAndHashSurviveSaveReload) {
+    const auto payload =
+        std::string("\0\b\f\n\r\t\"\\", 8) + "\xc3\xa9\xe2\x82\xac\xf0\x9f\x8c\x8d";
+    for (const bool joined : {false, true})
+        ExpectGroundNotificationPayloadSave(payload, false, joined);
+}
+
+TEST(WorldSaveService, GroundNotificationSerializationExceptionsRefuseBeforePublishing) {
+    for (const bool joined : {false, true})
+        ExpectGroundNotificationSerializationRefusal(joined);
+}
 
 TEST(WorldSaveService, NeverWrittenGroundObjectsStayUnlistedAcrossEmptySaves) {
     using Luminumbra::world::GroundObjectStore;

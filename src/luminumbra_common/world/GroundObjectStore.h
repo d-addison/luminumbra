@@ -20,7 +20,8 @@ struct GroundNotifications {
     std::uint64_t next_sequence = 0;
     std::vector<luminumbra::simulation::SimulationEvent> events;
 
-    [[nodiscard]] std::string canonical_bytes() const;
+    // Matches the persisted projection; "!" marks an unexpected serialization failure.
+    [[nodiscard]] std::string canonical_bytes() const noexcept;
 };
 
 // One persistent ground object (S5). Positions are integer millimetres; no floating point is ever
@@ -124,7 +125,10 @@ public:
     // Optional notifications add "notifications":{"next_sequence":N,"events":[...]} to
     // the envelope. Events ascend by sequence and contain tick, lane, sequence, topic, payload.
     // With empty notification state, legacy bytes are unchanged.
-    [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {}) const;
+    // Omit notifications with non-UTF-8 payloads, retaining the cursor and live bus state.
+    // Other serialization failures throw for the writer to diagnose and refuse.
+    [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {},
+                                        std::size_t* rejected_payloads = nullptr) const;
     // Includes reserved future object growth and the notification envelope/cursor.
     [[nodiscard]] bool fits_file_budget(const GroundNotifications& notifications = {}) const;
     // Strict transactional parse. Refuses (false, `error` set, `out` untouched) on: size >

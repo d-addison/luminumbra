@@ -4377,15 +4377,31 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
                                            std::vector<std::string>* errors,
                                            const world::GroundNotifications& notifications) {
     const SaveGuard guard;
-    const std::string bytes = store.serialize(notifications);
-    if (!bytes.empty()) {
-        world::GroundObjectStore parsed;
-        std::string error;
-        if (!world::GroundObjectStore::parse(
-                bytes, std::numeric_limits<std::uint64_t>::max(), parsed, error)) {
-            AddError(errors, "Ground objects save failed: " + error);
-            return false;
+    std::string bytes;
+    try {
+        std::size_t rejected_payloads = 0;
+        bytes = store.serialize(notifications, &rejected_payloads);
+        if (rejected_payloads != 0)
+            AddError(errors,
+                     "Ground objects save: omitted " + std::to_string(rejected_payloads) +
+                         " notification(s) with non-UTF-8 payloads");
+        if (!bytes.empty()) {
+            world::GroundObjectStore parsed;
+            std::string error;
+            if (!world::GroundObjectStore::parse(
+                    bytes, std::numeric_limits<std::uint64_t>::max(), parsed, error)) {
+                AddError(errors, "Ground objects save failed: " + error);
+                return false;
+            }
         }
+    } catch (const std::exception& error) {
+        AddError(errors,
+                 std::string("Ground objects save failed: serialization exception: ") +
+                     error.what());
+        return false;
+    } catch (...) {
+        AddError(errors, "Ground objects save failed: serialization exception");
+        return false;
     }
     TransactionScope scope(save_dir, {world::GroundObjectStore::kRelativePath}, errors, true);
     if (!scope.ok() || !validate_save(save_dir, errors))

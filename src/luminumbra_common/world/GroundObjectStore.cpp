@@ -37,6 +37,20 @@ std::size_t NotificationBytes(const GroundNotifications& notifications) {
     return bytes;
 }
 
+std::string SerializeNotification(const luminumbra::simulation::SimulationEvent& event,
+                                  std::size_t* rejected_payloads) {
+    try {
+        return event.canonical_bytes();
+    } catch (const Json::type_error& error) {
+        if (error.id != 316 ||
+            (event.topic != "ground.spawned" && event.topic != "ground.despawned"))
+            throw;
+        if (rejected_payloads)
+            ++*rejected_payloads;
+        return {};
+    }
+}
+
 constexpr const char* kObjectKeys[] = {"id",
                                        "type",
                                        "x_mm",
@@ -276,7 +290,10 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
     return result;
 }
 
-std::string GroundObjectStore::serialize(const GroundNotifications& notifications) const {
+std::string GroundObjectStore::serialize(const GroundNotifications& notifications,
+                                         std::size_t* rejected_payloads) const {
+    if (rejected_payloads)
+        *rejected_payloads = 0;
     const bool has_notifications =
         notifications.next_sequence != 0 || !notifications.events.empty();
     if (m_objects.empty() && !has_notifications) {
@@ -319,10 +336,13 @@ std::string GroundObjectStore::serialize(const GroundNotifications& notification
             ",\"events\":[";
         bool first_event = true;
         for (const auto& event : notifications.events) {
+            const auto event_bytes = SerializeNotification(event, rejected_payloads);
+            if (event_bytes.empty())
+                continue;
             if (!first_event)
                 out += ',';
             first_event = false;
-            out += event.canonical_bytes();
+            out += event_bytes;
         }
         out += "]}";
     }
@@ -330,9 +350,13 @@ std::string GroundObjectStore::serialize(const GroundNotifications& notification
     return out;
 }
 
-std::string GroundNotifications::canonical_bytes() const {
-    const auto bytes = GroundObjectStore{}.serialize(*this);
-    return bytes.empty() ? std::string{} : "ground_notifications:v1:" + bytes;
+std::string GroundNotifications::canonical_bytes() const noexcept {
+    try {
+        const auto bytes = GroundObjectStore{}.serialize(*this);
+        return bytes.empty() ? std::string{} : "ground_notifications:v1:" + bytes;
+    } catch (...) {
+        return "!";
+    }
 }
 
 bool GroundObjectStore::fits_file_budget(const GroundNotifications& notifications) const {
