@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_client/app/SessionExit.h"
@@ -1055,6 +1056,189 @@ TEST(WorldDurableResidency, NonQuiescentChunkIsNotParked) {
     const auto parked = fx.world->snapshot_parked_chunks();
     EXPECT_EQ(std::find(parked.begin(), parked.end(), edited), parked.end());
     edited->set_state(Luminumbra::ChunkState::Idle);
+}
+
+// Real generated terrain, but no unrelated caves, structures, biome relief or erosion bakes.
+// A dry plane at Y=8 puts the radius-3 spawn edit wholly inside one chunk (spawn X/Z=8),
+// above sea level and away from chunk seams. The SDF, mesh, collision and save paths still run.
+constexpr char kResidencyPreset[] = R"({
+    "schema_rev": 6,
+    "generation_params": {
+        "terrain": {
+            "base_frequency": 0.01,
+            "base_amplitude": 0.0,
+            "octaves": 1,
+            "persistence": 0.5,
+            "lacunarity": 2.0,
+            "height_offset": 8.0,
+            "shaping": {
+                "peaks_amplitude": 0.0,
+                "domain_warp_amplitude": 0.0,
+                "continental_spline": [[-1.0, 0.0], [1.0, 0.0]]
+            },
+            "hydro": {"enabled": false}
+        },
+        "features": {
+            "caves_enabled": false,
+            "cave_frequency": 0.02
+        }
+    }
+})";
+
+// Temp root containing the dry preset and its worldgen dependencies.
+// The root is unique per fixture instance; the destructor removes the tree.
+class DryResidencyRoot {
+public:
+    DryResidencyRoot() {
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("dry_residency_");
+        fs::create_directories(root_ / "worlds" / "atlas" / "presets");
+        std::ofstream preset;
+        preset.exceptions(std::ios::failbit | std::ios::badbit);
+        preset.open(root_ / "worlds" / "atlas" / "presets" / "durable.json");
+        preset << kResidencyPreset;
+        preset.close();
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
+    }
+    ~DryResidencyRoot() {
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+    }
+    [[nodiscard]] std::string root_string() const {
+        return root_.string() + static_cast<char>(fs::path::preferred_separator);
+    }
+
+private:
+    fs::path root_;
+};
+
+// A radius-1 disc streams five columns, each with the surface chunk and its two
+// vertical neighbours. Editing also builds the production radius-2 square (75 chunks);
+// the far anchor still evicts that entire band. The SDF edit touches one chunk;
+// its coupled water-bed edit can make the other two chunks in that column authoritative too.
+constexpr int kDryStreamRadiusCap = 1;
+// Far anchor distance in chunks along X: well outside radius + 2 of the spawn anchor.
+constexpr float kDryFarChunks = 40.0f;
+// Activation runs every four updates. Three passes suffice for this small set:
+// generate/restore, mesh and drain, then retry any eviction deferred by in-flight work.
+// Each update explicitly drains the real streaming jobs, independent of worker timing.
+constexpr int kDrySettleIterations = 12;
+
+// One headless world per TEST. Member order: root outlives the session, the job
+// system outlives the session, and the destructor tears the session down before
+// shutting the job system down.
+class DryDurableFixture {
+public:
+    explicit DryDurableFixture(bool durable, bool active_regions = false) {
+        // CTest runs cases in separate processes; bound each small fixture's worker pool.
+        jobs.startup(2);
+        session = std::make_unique<GameSession>();
+        // This fixture requires dry, regenerable water; weather rain is enabled by default.
+        session->SetWeatherRainEnabled(false);
+        session->SetActiveRegionsEnabled(active_regions);
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(root.root_string());
+        created = session->CreateWorld("DurableResidency", "12345", "durable");
+        if (!created) {
+            error = "CreateWorld failed";
+            return;
+        }
+        world = session->GetWorldSystem();
+        if (world == nullptr) {
+            created = false;
+            error = "no world system";
+            return;
+        }
+        world->debug_set_streaming_radius_cap(kDryStreamRadiusCap);
+        if (!active_regions) {
+            world->set_durable_residency(durable);
+        }
+        physics = session->GetPhysicsSystem();
+        spawn = session->GetMetadata().spawnPoint;
+    }
+    ~DryDurableFixture() {
+        session.reset();
+        jobs.shutdown();
+    }
+    DryDurableFixture(const DryDurableFixture&) = delete;
+    DryDurableFixture& operator=(const DryDurableFixture&) = delete;
+
+    Vec3 AnchorAt(float x, float z) {
+        return Vec3(x, world->GetTerrainHeightAt(x, z) + 2.0f, z);
+    }
+    Vec3 SpawnAnchor() {
+        return AnchorAt(spawn.x, spawn.z);
+    }
+    Vec3 FarAnchor() {
+        return AnchorAt(spawn.x + kDryFarChunks * static_cast<float>(Luminumbra::CHUNK_SIZE_X),
+                        spawn.z);
+    }
+    Vec3 SpawnSurfacePoint() {
+        return Vec3(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z), spawn.z);
+    }
+
+    void Settle(const Vec3& anchor, int iterations) {
+        for (int i = 0; i < iterations; ++i) {
+            world->update(session->GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+        }
+    }
+
+    // First resident chunk whose SDF is an edited / loaded authority.
+    std::shared_ptr<Chunk> ResidentLoadedChunk() {
+        for (const auto& chunk : world->snapshot_streamed_chunks()) {
+            if (chunk && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+                return chunk;
+        }
+        return nullptr;
+    }
+
+    // Spawn-surface edit, then the first resident LoadedOrEdited chunk (or null).
+    std::shared_ptr<Chunk> EditAtSpawnAndFindEdited() {
+        const int modified = world->EditTerrainVoxel(SpawnSurfacePoint(), 3.0f, false, physics);
+        if (modified <= 0)
+            return nullptr;
+        return ResidentLoadedChunk();
+    }
+
+    DryResidencyRoot root;
+    JobSystem jobs;
+    std::unique_ptr<GameSession> session;
+    SHIELD_WorldSystem* world = nullptr;
+    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
+    Vec3 spawn{};
+    bool created = false;
+    std::string error;
+};
+
+TEST(WorldDurableResidency, DryTerrainParksTheEditAndDiscardsRegenerableChunks) {
+    DryDurableFixture fx(/*durable=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kDrySettleIterations);
+    const auto pristine = fx.world->snapshot_streamed_chunks();
+    ASSERT_FALSE(pristine.empty());
+    for (const auto& chunk : pristine) {
+        ASSERT_TRUE(chunk);
+        ASSERT_FALSE(chunk->needs_authority());
+    }
+    // Dry terrain has no naturally moving water; include an actual edit so the
+    // authoritative half of this contract cannot pass with an empty parked set.
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    std::vector<std::shared_ptr<Chunk>> regenerable;
+    for (const auto& chunk : pristine) {
+        if (!chunk->needs_authority())
+            regenerable.push_back(chunk);
+    }
+    ASSERT_FALSE(regenerable.empty());
+    fx.Settle(fx.FarAnchor(), kDrySettleIterations);
+    EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    for (const auto& chunk : regenerable)
+        EXPECT_FALSE(fx.world->find_authoritative_chunk(chunk->get_coords()));
+    // Water that moved makes a chunk authoritative; everything else is regenerable and erased.
+    for (const auto& parked : fx.world->snapshot_parked_chunks()) {
+        ASSERT_TRUE(parked);
+        EXPECT_TRUE(parked->needs_authority());
+    }
 }
 
 } // namespace

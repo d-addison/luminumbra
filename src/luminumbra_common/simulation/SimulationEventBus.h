@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,17 +28,37 @@ class OrderedEventBus {
 public:
     using Handler = std::function<void(const SimulationEvent&)>;
 
+    // Throws std::overflow_error without mutation when the sequence cursor is exhausted.
     std::uint64_t
     publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
-    std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick);
+    // Aborted delivery retains per-event handler progress. A throwing handler counts as invoked;
+    // retry resumes with the next handler, then finishes the batch before sorting publications
+    // from callbacks into the next batch.
+    std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
+                                       const std::function<bool()>& continue_delivery = {});
+    // A subscription added during delivery starts with the next event, in subscription order.
     void subscribe(Handler handler);
     void clear();
     [[nodiscard]] std::size_t pending_count() const noexcept;
+    [[nodiscard]] std::vector<SimulationEvent> pending_events() const;
+    [[nodiscard]] std::uint64_t next_sequence() const noexcept {
+        return next_sequence_;
+    }
+    // Replace queued events in memory; retain subscribers, reset delivery progress.
+    void restore_pending(std::vector<SimulationEvent> events, std::uint64_t next_sequence);
 
 private:
+    struct PendingEvent {
+        SimulationEvent event;
+        // A handler that throws has been invoked and must not be invoked again on retry.
+        std::size_t next_handler = 0;
+        std::optional<std::size_t> handler_count;
+    };
     std::uint64_t next_sequence_ = 0;
-    std::vector<SimulationEvent> pending_events_;
-    std::vector<Handler> handlers_;
+    std::vector<PendingEvent> pending_events_;
+    // An interrupted batch stays at the front, ahead of callback publications.
+    std::size_t pending_batch_size_ = 0;
+    std::deque<Handler> handlers_;
 };
 
 std::vector<SimulationEvent> make_eventbus_order_fixture();
