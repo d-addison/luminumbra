@@ -8,6 +8,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include <nlohmann/json.hpp>
+
 namespace luminumbra::simulation {
 namespace {
 
@@ -41,7 +43,36 @@ std::string event_key(const SimulationEvent& event) {
     return out.str();
 }
 
+std::size_t quoted_size(const std::string& text) {
+    std::size_t bytes = text.size() + 2;
+    for (const char character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte == '"' || byte == '\\' || byte == '\b' || byte == '\t' || byte == '\n' ||
+            byte == '\f' || byte == '\r') {
+            ++bytes;
+        } else if (byte < 0x20) {
+            bytes += 5;
+        }
+    }
+    return bytes;
+}
+
 } // namespace
+
+std::string SimulationEvent::canonical_bytes() const {
+    return "{\"tick\":" + std::to_string(tick) + ",\"lane\":" + std::to_string(lane) +
+           ",\"sequence\":" + std::to_string(sequence) +
+           ",\"topic\":" + nlohmann::json(topic).dump() +
+           ",\"payload\":" + nlohmann::json(payload).dump() + '}';
+}
+
+std::size_t SimulationEvent::canonical_size() const {
+    // Count escaping without parsing payload text: event delivery also permits opaque bytes.
+    constexpr std::string_view kFields =
+        "{\"tick\":,\"lane\":,\"sequence\":,\"topic\":,\"payload\":}";
+    return kFields.size() + std::to_string(tick).size() + std::to_string(lane).size() +
+           std::to_string(sequence).size() + quoted_size(topic) + quoted_size(payload);
+}
 
 std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                        std::string topic,
@@ -59,6 +90,8 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                },
                                0,
                                std::nullopt});
+    const auto& event = pending_events_.back().event;
+    pending_bytes_[event.topic] += event.canonical_size() + 1;
     return sequence;
 }
 
@@ -81,6 +114,11 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
             resuming ? pending_events_.begin() + static_cast<std::ptrdiff_t>(pending_batch_size_)
                      : pending_events_.end();
         while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
+            const auto& event = first_future->event;
+            const auto bytes = pending_bytes_.find(event.topic);
+            bytes->second -= event.canonical_size() + 1;
+            if (bytes->second == 0)
+                pending_bytes_.erase(bytes);
             due.push_back(std::move(*first_future));
             ++first_future;
         }
@@ -90,6 +128,10 @@ OrderedEventBus::drain(std::uint64_t inclusive_tick,
 
         std::size_t current = 0;
         const auto requeue = [&] {
+            for (std::size_t i = current; i < due.size(); ++i) {
+                const auto& event = due[i].event;
+                pending_bytes_[event.topic] += event.canonical_size() + 1;
+            }
             // Preserve this batch's order and handler cutoffs before forming the next batch.
             pending_events_.insert(
                 pending_events_.begin(),
@@ -131,12 +173,18 @@ void OrderedEventBus::subscribe(Handler handler) {
 void OrderedEventBus::clear() {
     pending_events_.clear();
     pending_batch_size_ = 0;
+    pending_bytes_.clear();
     handlers_.clear();
     next_sequence_ = 0;
 }
 
 std::size_t OrderedEventBus::pending_count() const noexcept {
     return pending_events_.size();
+}
+
+std::size_t OrderedEventBus::pending_bytes(std::string_view topic) const {
+    const auto found = pending_bytes_.find(topic);
+    return found == pending_bytes_.end() ? 0 : found->second;
 }
 
 std::vector<SimulationEvent> OrderedEventBus::pending_events() const {
@@ -153,7 +201,9 @@ void OrderedEventBus::restore_pending(std::vector<SimulationEvent> events,
                                       std::uint64_t next_sequence) {
     pending_events_.clear();
     pending_batch_size_ = 0;
+    pending_bytes_.clear();
     for (auto& event : events) {
+        pending_bytes_[event.topic] += event.canonical_size() + 1;
         pending_events_.push_back({std::move(event), 0, std::nullopt});
     }
     next_sequence_ = next_sequence;

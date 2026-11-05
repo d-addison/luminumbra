@@ -79,6 +79,43 @@ for both Quality and Performance profiles. Publication uses the scoped tag gate
 in the [acceptance record](v0.3-acceptance.md); other expanded acceptance is
 deferred to v0.3.1 and is not recorded as passed.
 
+## Ground-object notification persistence
+
+The `luminumbra.ground_objects.v1` JSON envelope has an `objects` array and an
+optional `notifications` object. Notifications contain `next_sequence` (the
+unsigned event sequence cursor) and `events`, ordered by strictly increasing
+sequence. Each event contains integer `tick`, signed 32-bit `lane`, unsigned
+`sequence` below the cursor, and string `topic` and `payload`; supported topics
+are `ground.spawned` and `ground.despawned`. Field order is canonical as listed,
+with `schema`, `objects`, then `notifications` at the root and one trailing newline.
+The exhausted cursor `UINT64_MAX` remains saveable and loadable; the last event
+sequence is `UINT64_MAX - 1`.
+The whole file remains limited to 4 MiB, with nesting admitted by the shared
+64-container JSON depth limit before parsing. Missing notifications restore an
+empty queue and zero cursor, preserving older files. Empty delivery state keeps
+the existing object-file bytes; empty objects with delivery state retain the file.
+
+Metadata reconciliation outside a save transaction persists queued ground notifications and
+their sequence cursor even when no ground objects remain, while a store with no objects or
+notification state still creates no ground-object file.
+
+A missing ground-object file has two valid snapshot representations. A file
+that has never been written is omitted from the index; protecting it during an
+empty save does not add a member. Removing a previously indexed file retains
+an explicit absent member with zero byte count and fingerprint, preserving its
+member generation on repeated empty saves. Both forms load as empty objects
+and delivery state, and both refuse an unexpected file. Notification-only
+files remain present even when the object array is empty. These distinctions
+preserve the existing fixtures and hashes for worlds without ground objects.
+
+Saving never delivers simulation notifications. Reload restores ground events
+with their original due ticks, lanes, sequences and payloads, so consumers run at
+the usual end-of-tick delivery point and completed work feeds the following
+schedule. Other publishers' pending events are cleared on load. A faulted save
+omits notification state without invoking consumers, allowing recovery even
+with future events whose delivery ticks cannot be reached. Flag-off saves do
+not write this state.
+
 ## Qualification deferred to v0.3.1
 
 The following cases preserve the outstanding qualification obligations. Source
@@ -153,4 +190,289 @@ source on native hardware, the five-tier runtime, the world performance matrix,
 or any visual approval. Complete native qualification and the outstanding DW01–DW09 closure packets
 are deferred to v0.3.1. Implemented source does not approve a visual scenario.
 
-This PR delivers in-memory ground-object continuation and durable completed work. Ground objects, queued notifications and runtime IDs reset on restart or successful reload; ground-object persistence is deferred to the follow-up.
+### Ground object authority and admission
+
+Pending ground spawn/despawn notifications and their sequence cursor now join the
+authoritative hash through the same capture used by saves and the heavy comparison
+oracle. Empty notification state contributes no bytes, preserving existing empty
+and disabled-world hash projections. Canonical delivery records retain their saved
+sequence order and all event fields.
+
+Spawn admission budgets queued notification bytes and the candidate's event within
+the existing 4 MiB file cap. Loading applies the same combined growth budget before
+replacing either output, and the save writer refuses the same over-budget state
+before publishing. The envelope reserves maximum cursor width; object
+reservations continue to cover settling, ageing and replacement by a despawn event.
+Event byte accounting follows delivery, interrupted delivery, restore and clear.
+Unknown-region work submitted by callbacks follows the scheduler's rejection path;
+valid completed work still publishes at the boundary.
+
+Regression coverage includes all notification fields, cursor-only state, canonical
+ordering and save/load; byte and spawn-count admission boundaries; callback input
+rejection and continued ticks; and comparison-oracle and event-byte accounting.
+Clang 18 syntax checks pass for the changed translation units, and GCC builds the
+standalone store/oracle suites and event-bus gate at two jobs. The 34 store/oracle
+tests and the event-bus gate pass. The clone has no configured CMake build or built
+engine libraries, so the headless session regressions, save-writer regression and
+pinned engine hash tests remain unexecuted here. Fixture files and their pinned values are unchanged.
+
+### Ground objects, water debts and regional energy integration
+
+The ledger retains persistent ids, completed consumer work, sparse water debts and
+energy ages together. Its optional version-2 TLVs encode in ascending order:
+allocator 1, frozen projection 2, energy ages 4, water debts 5 and completed work 6.
+The fixed record layout and original file cap are unchanged. Every admission path
+counts all retained extensions before mutation, preserving boolean refusals for
+energy/water setters and exceptions for allocator/completed-work capacity failures.
+Idle retention protects both debt and completed-work owners; resume acknowledgement
+and legacy frozen-projection validation remain intact. Empty ground registers add
+no digest or persistence bytes.
+
+Both CMake lists retain the independently added GroundObjectStore and WaterShare
+sources/tests; neither side removes a listed file. The ledger tests retain both
+sets of cases. The water malformed-envelope test now uses type 7 for its unknown
+type refusal because type 6 carries completed work. Combined coverage checks all
+five TLVs, descending water/completed types and atomic refusals when their combined
+extensions exceed the original file cap.
+
+Verification in this clone:
+
+- No conflict markers under `src` or `test`; `git diff --check` passes.
+- `clang-format-18` applied to the resolved C++ files; its dry-run check passes for
+  all 11 C++ files changed by the merge.
+- `clang++-18 -fsyntax-only` passes for 27 translation units covering direct header
+  consumers and affected callers, including ActiveRegionLedger and its tests,
+  GameSession, WorldSaveService, SHIELD_WorldSystem, EnergyFieldState, GroundObjectStore,
+  WaterShare, ScalarFieldDiffusion, persistence tests and headless-session tests.
+  Flags come from the existing compilation database with the available dependency
+  include paths and source-root definition supplied for extra test consumers.
+- Standalone builds at `-j2` pass 72 ledger, 6 water-share, 24 ground-store and
+  59 energy/diffusion tests (161 total), using the production ledger, clock,
+  persistence checksum, event bus and field implementations.
+- Independently compiled devel and resolved ledgers produce identical encoded
+  bytes, canonical bytes and schedule digests across 16 scenarios of 40 ticks,
+  with/without energy ages and water debts, plus empty, anchor, eviction and
+  restored-clock cases: 288,216 compared bytes match exactly.
+
+There is no configured CMake build in this clone. Full engine-linked focused tests,
+runtime headless/save integration and pinned engine hash tests remain unverified.
+The standalone ledger executable omits only
+`AllocatorOnlyLedgerIsSavedAndReloads`, which needs engine persistence linkage;
+the repository test remains present and passes syntax checking.
+
+### Save comparison and admission boundaries
+
+The disabled ground-spawn save comparison now masks only the numeric
+`creationTime` value in `world_info.json`. Session creation uses wall time without
+a clock injection seam. All other metadata bytes, including formatting, and all
+other files retain exact byte comparisons. The helper has one save-tree caller;
+the other metadata comparisons preserve or reload an existing world's creation
+time and remain strict. A regression uses different creation seconds while also
+checking that changes to another field or formatting remain visible.
+
+New ledger records now share the existing envelope budget with the allocator,
+frozen projection, energy ages, water debts and completed work. Spawn admission
+checks the proposed region after allocation and counts a refusal without adding
+an object, region or event. The shared activation check also covers edits, pins
+and scheduler visits; visits retain their capacity rejection accounting. Tests
+exercise one below, at and one above the admissible record count, retained
+extensions, writes to existing records and continued saveability.
+
+The event bus now throws before publishing at an exhausted sequence cursor.
+Ground spawns reject that cursor before allocating an id; despawn publication
+uses the existing simulation fault latch. Loading still accepts the terminal
+cursor and can save it again. Tests cover loaded `UINT64_MAX` and
+`UINT64_MAX - 1`, the final publishable event, repeated refusal, pending byte
+accounting, draining, save/reload and despawn faults. The sibling counter sweep
+found the persistent allocator already stops at its limit, and restored ledger
+and world-clock ticks remain bounded below their tick limit.
+
+Verification in this clone:
+
+- Eleven translation units pass `clang++-18 -fsyntax-only`, including the changed
+  sources/tests and persistence, terrain-system and scripting callers.
+- GCC standalone builds at `-j2` pass 73 ledger tests, 25 ground-store tests, the
+  extracted metadata-masking regression and the event-bus gate. The standalone
+  ledger target omits only `AllocatorOnlyLedgerIsSavedAndReloads`, which requires
+  engine persistence linkage; the repository test is retained and syntax checked.
+- Temporary builds with the record-budget guard or sequence guard removed fail
+  the corresponding new regressions. The event-bus gate also fails without its
+  sequence guard.
+- Clang-tidy passes the cognitive-complexity check at 250 for all seven changed
+  C++ translation units. Formatting and `git diff --check` pass.
+
+There is no configured CMake build in this clone, only a compilation database.
+The complete engine-linked headless/save tests, including the new integration
+cases and original flaky test, and pinned engine hash tests remain unexecuted.
+Acceptance contract documents and fixture bytes are unchanged.
+
+### Ground settling uses procedural height only
+
+Ground settling is a function of the persisted object state, the due tick and the
+seed-derived procedural heightfield. Both spawn-time and due-tick settling use
+`SHIELD_WorldSystem::GetTerrainHeightAt`; neither path reads chunks, parked data,
+the durable inventory or files. The world-system terrain preparation and probe
+APIs have been removed. Resident and reloaded terrain can contain different
+columns, and full SDF and coarse heightmap chunks can represent different surfaces;
+none of those representations chooses a ground object's permanent height.
+
+The existing finite position and horizontal/vertical bounds still apply. A finite,
+in-range procedural surface at or below the requested position settles the object
+in millimetres. A surface above it leaves the object unsettled. Due-region heights
+remain keyed by object id; the store still settles first, ages next and despawns
+last in ascending id order.
+
+Terrain-edit-aware settling is a documented limitation: terrain edits, caves and
+structures do not affect settling. An object can therefore settle somewhere that
+differs from the visible or edited surface. Supporting those surfaces requires a
+separate deterministic simulation terrain contract.
+
+Headless regressions cover:
+
+- A persisted unsettled object outside the boot area has pristine resident terrain
+  in the original session and no resident, parked or durable column after reopening.
+  Five identical pinned-region ticks compare exact serialized ground stores, world
+  hashes, schedules and notifications. A second object despawns on its first tick
+  with the settled height in its notification. Subsequent spawns and final saved
+  ground-file bytes also match.
+- Fractional positions settle to the same procedural height with an absent column,
+  full generated SDF, a coarse heightmap, an edited column and a nearby edit.
+  Restored unsettled objects settle to that height on their next due tick.
+- Spawn publication uses the procedural height; quantization, position refusal and
+  generated cave/structure independence remain covered. An unavailable committed
+  terrain loader receives zero calls during spawn and due-tick settling.
+
+Tests solely for missing-band probing, batch probing and committed terrain
+acquisition were removed with those APIs. The completed-work, despawn/reopen,
+consumer-fault and storm-epoch regressions remain.
+
+The sibling sweep found these residency-dependent water paths, left unchanged:
+`SHIELD_WorldSystem::update` passes its streaming map to `WaterSystem::update`.
+Initialization, simulation-window selection, neighbor/seam exchange and source
+injection use that map. `WaterSystem::get_water_level_at`, `get_water_flow_at`,
+`apply_displacement` and `EditTerrainBed` use the active map; terrain edits delegate
+water-bed coupling to the last of these. `MigrateWaterSimResolution` also operates
+on streamed chunks. Parked or durable-only water can be absent from these decisions
+and needs separate simulation-activation qualification. `IsUnderwater`,
+`live_water_surface_at` and water debug queries also inspect live residency; their
+current callers are presentation or diagnostics.
+
+Regional scheduling/digests and enabled chunk hashing use combined live, parked
+and durable membership. Water authority synchronization checks live and parked
+changes. Terrain editing and synchronous surface preparation restore expected
+saved authority before mutation. Procedural height/density and plant-environment
+sampling do not consult streaming residency. No sibling behavior was changed.
+
+Verification: `clang++-18 -fsyntax-only` passes for GameSession, SHIELD_WorldSystem,
+the headless tests, WorldSaveService and LuaState. The three changed C++ translation
+units pass clang-tidy's cognitive-complexity check at 250. Changed-line formatting
+and `git diff --check` pass. A fresh standalone GCC build at `-j2` passes all 25
+GroundObjectStore tests and the event-order gate.
+
+This clone has a compilation database but no configured CMake engine build. The
+external build referenced by that database has no engine libraries. No engine-linked
+target was built or run: the updated/new headless settling, reload, edited/coarse
+terrain and zero-read cases, retained headless regressions and pinned engine hash
+tests remain runtime-unverified. Acceptance contract documents and fixture files
+are unchanged.
+
+### Ground object retention and subscriptions during delivery
+
+Ground spawns now activate and wake their region without setting the persistent
+`edited` flag. Object state already lives in the ground store, whose ownership
+probe retains the region while objects remain. After despawn, the existing
+tick-based idle eviction can reclaim the record when no other owner or retention
+condition applies. Terrain edits and existing saved edit flags keep their meaning;
+there is no migration or change to either save format. Admission still uses
+`can_activate`, the shared ledger file budget and the ground store's byte reserve.
+Procedural-height settling is unchanged.
+
+The deque handler comment now states its element-reference guarantee explicitly.
+The old delivery loop included subscribers appended during the current event.
+Delivery now captures each event's subscriber count and retains that cutoff across
+an interruption, so a subscription made by a handler starts with the next event.
+Tick, lane, sequence and subscription order remain deterministic. The cutoff is
+transient delivery progress; saved notification bytes are unchanged.
+
+Regressions cover 1,052,672 distinct ground regions in batches of 4,096, admission
+beyond the ledger's total record cap, empty-record reclamation, retention of a
+live object's region, activation wake-up, preserved terrain edits and file-budget
+refusal. The event-bus gate subscribes during delivery and checks later events,
+handler order, future ticks and interrupted delivery.
+
+Verification:
+
+- Seven changed C++ translation units pass `clang++-18 -fsyntax-only` and the
+  clang-tidy cognitive-complexity check at 250. Changed-line formatting and
+  `git diff --check` pass.
+- Fresh standalone GCC builds at `-j2` pass 26 ground-store tests, 77 ledger tests
+  and the event-bus gate. Restoring the sticky ground edit mark in a temporary
+  build fails the churn regression on the first batch's empty-record check.
+- The event-bus gate passes AddressSanitizer and UndefinedBehaviorSanitizer with
+  leak detection disabled. LeakSanitizer cannot run under this sandbox's ptrace
+  environment, so leak detection remains unverified.
+
+The headless session regression is syntax checked only. Engine-linked tests are
+not runnable in this sandbox, including `AllocatorOnlyLedgerIsSavedAndReloads`,
+which is omitted only from the temporary standalone ledger build. Engine-linked
+save/load, headless settling and pinned hash tests remain runtime-unverified.
+Acceptance contract documents and fixture files are unchanged. The description's
+claims of resident edited-terrain probes at spawn and activation still need to be
+replaced with procedural-height-only settling and its terrain-edit limitation.
+
+### Ground delivery retries, coordinate limits and empty-store work
+
+Interrupted event delivery retains the remaining original batch at the front of
+the queue. Retry finishes that batch, including the interrupted event's remaining
+subscribers, before collecting callback publications into the next sorted batch.
+Each event retains its subscriber-count cutoff across retries. Pending event bytes,
+canonical notification encoding and the exhausted-sequence fault policy are unchanged.
+
+Ground height lookup checks coordinate bounds in integer millimetres before any
+float conversion. The vertical comparison uses double-precision millimetres, so
+the accepted `y_mm = 1048575999` remains eligible to settle. Horizontal sampler
+coordinates clamp to the exact interior floats `-16777215` and `16777215` metres
+when conversion rounds an accepted integer onto the excluded boundary. Persisted
+horizontal coordinates are unchanged. Settling still uses procedural height at
+spawn and on due ticks, independently of residency; terrain edits are not sampled.
+
+An empty ground store returns before inspecting the due schedule or allocating
+advancement containers. A diagnostic counter records only nonempty advancement
+passes and contributes no save or hash bytes. For nonempty stores, only owned due
+regions enter an ordered map, preserving region-key despawn/publication order
+without copying, sorting or deduplicating the full schedule. Due keys are unique:
+the ledger constructs one row per unique record-map key and emits at most one due
+entry per row. All heights are collected before object mutation or notification
+publication. Ground activation continues to use `activate_owned`; region release,
+admission limits and file formats are unchanged.
+
+Three regressions were added: the event-bus gate compares uninterrupted delivery,
+a throwing callback and predicate cancellation when the callback publishes a
+lower-lane same-tick event and adds a subscriber; a headless case covers the last
+accepted vertical millimetre at ordinary coordinates and all four horizontal
+corners, at spawn and after loading unsettled objects; another headless case checks
+zero advancement passes before spawn and after despawn despite nonempty due lists.
+
+Verification:
+
+- Five changed C++ translation units pass `clang++-18 -fsyntax-only` and clang-tidy's
+  cognitive-complexity check at 250. Changed-line `clang-format-18` and
+  `git diff --check` pass.
+- Fresh standalone GCC builds at `-j2` pass all 26 ground-store tests, 77 ledger
+  tests and the event-bus gate. The new event regression fails against the original
+  delivery implementation.
+- The event-bus gate passes combined AddressSanitizer and UndefinedBehaviorSanitizer
+  with leak detection disabled. A supplemental executable using the actual settling
+  helper bodies and a bounded sampler stub passes nine coordinate combinations,
+  precise vertical comparison and integer-bound rejection checks.
+
+The two new headless cases are syntax checked only. This clone has no configured
+engine build, and the external build supplying dependency headers has no engine
+libraries. Engine-linked settling, save/load, empty-store advancement and pinned
+hash regressions remain runtime-unverified, as do native cross-platform execution
+and leak detection. The standalone ledger build continues to omit only the
+engine-linked `AllocatorOnlyLedgerIsSavedAndReloads` case. Acceptance contract
+documents and fixture files are unchanged. The PR description still needs to
+replace resident edited-terrain settling claims with procedural-height-only
+settling and its terrain-edit limitation; its validation text should retain the
+engine-linked and native qualification limits above.

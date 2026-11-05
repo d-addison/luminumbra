@@ -125,8 +125,8 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    // Version 2 adds a u32 extension length and ascending TLVs: type 2 digest projection
-    // (7 bytes), type 4 energy ages, type 5 water debt and
+    // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
+    // type 2 digest projection (7 bytes), type 4 energy ages, type 5 water debt and
     // type 6 completed work (each 10 + 16 bytes per owner). The original file cap is
     // unchanged; encode refuses when the records and extensions together exceed it.
     static constexpr std::size_t kMaxFileBytes =
@@ -141,8 +141,7 @@ public:
     // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
     static constexpr std::uint64_t kIdleEvictionTicks = 108000;
 
-    // Runtime ids are allocated from 1 and never reach 2^63. Cross-restart continuity
-    // is deferred to ground-object persistence.
+    // Persistent ids are allocated from 1 and never reach 2^63.
     static constexpr std::uint64_t kPersistentIdLimit = 1ull << 63;
 
     // An absent ledger starts at the restored clock without scheduling a tick.
@@ -173,6 +172,7 @@ public:
         return m_nextPersistentId;
     }
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
+    // Throws std::length_error without mutation when the allocator TLV exceeds the file cap.
     bool allocate_persistent_id(std::uint64_t& id);
     using WaterDebts = std::map<RegionKey, std::uint64_t>;
     static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
@@ -271,10 +271,11 @@ private:
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
     // Whether the combined envelope fits kMaxFileBytes with the proposed owner counts.
-    // Omitted completed owners retain the current register.
+    // Omitted completed owners and the allocator flag retain their current registers.
     bool encodable_with_counts(std::size_t energy_owners,
                                std::size_t water_debts,
                                std::optional<std::size_t> completed_owners = std::nullopt,
+                               bool allocator_advanced = false,
                                std::optional<std::size_t> record_count = std::nullopt) const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;

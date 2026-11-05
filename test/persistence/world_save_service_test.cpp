@@ -10,12 +10,14 @@
 #include "core/LogDispatcherSink.h"
 #include "luminumbra/core/Types.h"
 #include "persistence/CreatedWorldArtifacts.h"
+#include "persistence/SaveTransaction.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
+#include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
@@ -36,6 +38,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <span>
 #include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
@@ -3000,6 +3003,514 @@ TEST(ChunkDirtyTracking, DirtySaveDoesNotAcknowledgeRevisionChangedDuringPublica
     EXPECT_TRUE(report.saved);
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_EQ(chunk->sdf_data.front(), -3.0f);
+}
+
+// ---- Ground object persistence ----
+
+namespace {
+
+Luminumbra::world::GroundObject
+MakeGroundObject(std::uint64_t id, std::int64_t x_mm, std::uint64_t spawn_tick) {
+    Luminumbra::world::GroundObject object;
+    object.id = id;
+    object.type = 3;
+    object.x_mm = x_mm;
+    object.y_mm = 1000;
+    object.z_mm = -2000;
+    object.spawn_tick = spawn_tick;
+    object.payload = 7;
+    return object;
+}
+
+std::string JoinErrors(const std::vector<std::string>& errors) {
+    std::string joined;
+    for (const std::string& message : errors)
+        joined += message + "\n";
+    return joined;
+}
+
+void ExpectGroundNotificationPayloadSave(const std::string& payload, bool rejected, bool joined) {
+    using namespace Luminumbra::world;
+    TempSaveDir save_dir("ground_notification_payload");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    const WorldClock clock;
+    ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ledger.mark_edited(GroundObjectStore::region_of(*store.find(id)), clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    luminumbra::simulation::OrderedEventBus bus;
+    bus.publish(1, "ground.spawned", payload, -1);
+    bus.publish(2, "ground.despawned", "kept", 2);
+    bus.publish(3, "ground.despawned", payload);
+    const GroundNotifications notifications{bus.next_sequence(), bus.pending_events()};
+    const auto& expected = notifications;
+    std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
+    if (joined) {
+        transaction.emplace(save_dir.path(),
+                            0,
+                            std::vector<std::array<float, 3>>{},
+                            WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
+    }
+    bool saved = false;
+    EXPECT_NO_THROW(saved = WorldSaveService::save_ground_objects(
+                        store, save_dir.path(), &errors, notifications));
+    if (rejected) {
+        EXPECT_FALSE(saved);
+        EXPECT_NE(JoinErrors(errors).find("2 pending notification(s) have non-UTF-8 payloads"),
+                  std::string::npos);
+        if (joined) {
+            transaction->abort(&errors);
+        }
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+        EXPECT_EQ(bus.pending_count(), 3u);
+        EXPECT_NO_THROW(static_cast<void>(notifications.canonical_bytes()));
+        return;
+    }
+    ASSERT_TRUE(saved) << JoinErrors(errors);
+    EXPECT_TRUE(errors.empty());
+    if (joined) {
+        ASSERT_TRUE(transaction->commit(&errors)) << JoinErrors(errors);
+    }
+    const auto bytes = ReadFileBytes(WorldSaveService::ground_objects_path(save_dir.path()));
+    EXPECT_EQ(bytes, store.serialize(expected));
+    const auto legacy = store.serialize();
+    EXPECT_EQ(bytes,
+              legacy.substr(0, legacy.size() - 2) +
+                  ",\"notifications\":{\"next_sequence\":3,\"events\":[" +
+                  notifications.events[0].canonical_bytes() + ',' +
+                  notifications.events[1].canonical_bytes() + ',' +
+                  notifications.events[2].canonical_bytes() + "]}}\n");
+    std::string hash;
+    EXPECT_NO_THROW(hash = notifications.canonical_bytes());
+    EXPECT_EQ(hash, "ground_notifications:v1:" + GroundObjectStore{}.serialize(expected));
+    GroundObjectStore restored;
+    GroundNotifications loaded;
+    ASSERT_TRUE(
+        WorldSaveService::load_ground_objects(restored, save_dir.path(), 2, &errors, {}, &loaded))
+        << JoinErrors(errors);
+    EXPECT_EQ(restored.objects(), store.objects());
+    EXPECT_EQ(loaded.next_sequence, 3u);
+    EXPECT_EQ(restored.serialize(loaded), bytes);
+    EXPECT_EQ(loaded.canonical_bytes(), hash);
+    ASSERT_EQ(loaded.events.size(), 3u);
+    EXPECT_EQ(loaded.events.front().payload, payload);
+    EXPECT_EQ(loaded.events.back().payload, payload);
+    EXPECT_EQ(bus.pending_count(), 3u);
+    const auto delivered = bus.drain(3);
+    ASSERT_EQ(delivered.size(), 3u);
+    EXPECT_EQ(delivered.front().payload, payload);
+    EXPECT_EQ(delivered.back().payload, payload);
+}
+
+void ExpectGroundNotificationSerializationRefusal(bool joined) {
+    using namespace Luminumbra::world;
+    TempSaveDir save_dir("ground_notification_exception");
+    GroundNotifications notifications{1, {{0, 0, 0, "ground.spawned", "kept"}}};
+    std::vector<std::string> errors;
+    const WorldClock clock;
+    ActiveRegionLedger ledger;
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors, notifications));
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
+    const auto bytes = ReadFileBytes(path);
+    const auto index = ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save_dir.path()));
+    std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
+    if (joined) {
+        transaction.emplace(save_dir.path(),
+                            0,
+                            std::vector<std::array<float, 3>>{},
+                            WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
+    }
+    notifications.events.front().topic += static_cast<char>(0xff);
+    std::string hash;
+    EXPECT_NO_THROW(hash = notifications.canonical_bytes());
+    EXPECT_EQ(hash, "!");
+    bool saved = true;
+    EXPECT_NO_THROW(
+        saved = WorldSaveService::save_ground_objects({}, save_dir.path(), &errors, notifications));
+    EXPECT_FALSE(saved);
+    EXPECT_NE(JoinErrors(errors).find("serialization exception"), std::string::npos);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
+    EXPECT_EQ(ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save_dir.path())), index);
+}
+
+void ExpectCombinedGroundSaveRefusal(std::uint64_t spawn_tick,
+                                     bool record_region,
+                                     std::string_view expected_error) {
+    using namespace Luminumbra::world;
+    SCOPED_TRACE(expected_error);
+    TempSaveDir save_dir("ground_combined_precheck");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, spawn_tick)));
+    const WorldClock clock;
+    ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    if (record_region)
+        ledger.mark_edited(GroundObjectStore::region_of(*store.find(id)), clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+        metadata.dump(), ledger, store, GroundNotifications{}, save_dir.path(), &errors));
+    EXPECT_NE(JoinErrors(errors).find(expected_error), std::string::npos) << JoinErrors(errors);
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::active_regions_path(save_dir.path())));
+}
+
+} // namespace
+
+TEST(WorldSaveService, GroundNotificationInvalidUtf8PayloadsRefuseTheSaveWithoutWriting) {
+    for (const bool joined : {false, true}) {
+        SCOPED_TRACE(joined);
+        ExpectGroundNotificationPayloadSave(std::string(1, static_cast<char>(0xff)), true, joined);
+        ExpectGroundNotificationPayloadSave("\xe2\x82", true, joined);
+    }
+}
+
+TEST(WorldSaveService, CombinedGroundSaveRefusesObjectsTheNextLoadWouldReject) {
+    ExpectCombinedGroundSaveRefusal(0, false, "orphaned object");
+    ExpectCombinedGroundSaveRefusal(5, true, "spawn tick is ahead of the clock");
+}
+
+TEST(WorldSaveService, GroundNotificationValidPayloadBytesAndHashSurviveSaveReload) {
+    const auto payload =
+        std::string("\0\b\f\n\r\t\"\\", 8) + "\xc3\xa9\xe2\x82\xac\xf0\x9f\x8c\x8d";
+    for (const bool joined : {false, true})
+        ExpectGroundNotificationPayloadSave(payload, false, joined);
+}
+
+TEST(WorldSaveService, GroundNotificationSerializationExceptionsRefuseBeforePublishing) {
+    for (const bool joined : {false, true})
+        ExpectGroundNotificationSerializationRefusal(joined);
+}
+
+TEST(WorldSaveService, NeverWrittenGroundObjectsStayUnlistedAcrossEmptySaves) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_never_written");
+    std::vector<std::string> errors;
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kIndexedMetadataVersion},
+                               {"snapshotFormat", 1}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    Luminumbra::Persistence::SnapshotIndex initial;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), initial, &errors));
+    ASSERT_TRUE(
+        std::none_of(initial.members.begin(), initial.members.end(), [](const auto& member) {
+            return member.path == GroundObjectStore::kRelativePath;
+        }));
+    const auto metadata_bytes = ReadFileBytes(save_dir.path() / "world_info.json");
+    for (const bool joined : {false, true}) {
+        SCOPED_TRACE(joined);
+        {
+            WorldSaveService::SaveFactsScope facts(save_dir.path());
+            std::optional<Luminumbra::Persistence::SaveTransaction> transaction;
+            if (joined) {
+                transaction.emplace(save_dir.path(),
+                                    clock.tick(),
+                                    std::vector<std::array<float, 3>>{},
+                                    WorldSaveService::member_digest);
+                ASSERT_TRUE(transaction->begin(&errors)) << JoinErrors(errors);
+            }
+            ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, save_dir.path(), &errors))
+                << JoinErrors(errors);
+            if (joined) {
+                ASSERT_TRUE(transaction->commit(&errors)) << JoinErrors(errors);
+            }
+        }
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+        EXPECT_EQ(ReadFileBytes(save_dir.path() / "world_info.json"), metadata_bytes);
+        Luminumbra::Persistence::SnapshotIndex index;
+        ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+        EXPECT_GT(index.generation, initial.generation);
+        index.generation = initial.generation;
+        index.txn_id = initial.txn_id;
+        EXPECT_EQ(Luminumbra::Persistence::encode_snapshot_index(index),
+                  Luminumbra::Persistence::encode_snapshot_index(initial));
+        GroundObjectStore loaded;
+        ASSERT_TRUE(loaded.insert(MakeGroundObject(1, 100, 0)));
+        Luminumbra::world::GroundNotifications notifications{
+            1, {{0, 0, 0, "ground.spawned", "stale"}}};
+        ASSERT_TRUE(WorldSaveService::load_ground_objects(
+            loaded, save_dir.path(), 2, &errors, {}, &notifications))
+            << JoinErrors(errors);
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_TRUE(notifications.events.empty());
+        EXPECT_EQ(notifications.next_sequence, 0u);
+        EXPECT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors))
+            << JoinErrors(errors);
+    }
+    // An unlisted member is a clean miss only while its file is missing.
+    {
+        std::ofstream output(WorldSaveService::ground_objects_path(save_dir.path()),
+                             std::ios::binary);
+        output << GroundObjectStore{}.serialize({1, {{0, 0, 0, "ground.spawned", "unexpected"}}});
+        ASSERT_TRUE(output.good());
+    }
+    GroundObjectStore loaded;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 2, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path(), &errors));
+}
+
+TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
+    namespace fs = std::filesystem;
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_roundtrip");
+
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    ASSERT_TRUE(store.insert(MakeGroundObject(5, -600000, 2)));
+    std::vector<std::string> errors;
+    const Luminumbra::world::WorldClock clock(2);
+    Luminumbra::world::ActiveRegionLedger ledger({}, clock);
+    std::uint64_t allocated = 0;
+    for (int id = 0; id < 5; ++id)
+        ASSERT_TRUE(ledger.allocate_persistent_id(allocated));
+    for (const auto& [id, object] : store.objects()) {
+        (void)id;
+        ledger.mark_edited(GroundObjectStore::region_of(object), clock);
+    }
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    {
+        WorldSaveService::SaveFactsScope facts(save_dir.path());
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(transaction.protect({GroundObjectStore::kRelativePath}, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path(), &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    EXPECT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+
+    GroundObjectStore loaded;
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 100, &errors))
+        << JoinErrors(errors);
+    EXPECT_EQ(loaded.objects(), store.objects());
+
+    ASSERT_TRUE(
+        WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path(), &errors));
+    EXPECT_FALSE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+    GroundObjectStore absent;
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path(), 100, &errors));
+    EXPECT_TRUE(absent.empty());
+    // Repeating an empty save still declares the absent member in the snapshot.
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(absent, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+    const auto member =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+            return value.path == GroundObjectStore::kRelativePath;
+        });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_FALSE(member->present);
+    EXPECT_EQ(member->bytes, 0u);
+    EXPECT_EQ(member->fnv64, 0u);
+}
+
+TEST(WorldSaveService, GroundObjectsJoinedEmptySaveRemovesFileAndRetainsAbsentMember) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_joined_empty");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    std::vector<std::string> errors;
+    // Joined writers validate the installed snapshot, including object ownership.
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ledger.mark_edited(GroundObjectStore::region_of(*store.find(id)), clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    // Empty objects still need a present member for pending events or a sequence cursor.
+    for (const bool queued : {true, false}) {
+        SCOPED_TRACE(queued);
+        const auto maximum = std::numeric_limits<std::uint64_t>::max();
+        Luminumbra::world::GroundNotifications notifications{maximum, {}};
+        if (queued) {
+            notifications.events.push_back(
+                {0, 0, maximum - 1, "ground.despawned", "1,3,100,1000,-2000"});
+        }
+        ASSERT_TRUE(
+            WorldSaveService::save_ground_objects({}, save_dir.path(), &errors, notifications))
+            << JoinErrors(errors);
+        Luminumbra::Persistence::SnapshotIndex index;
+        ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+        const auto member =
+            std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+                return value.path == GroundObjectStore::kRelativePath;
+            });
+        ASSERT_NE(member, index.members.end());
+        EXPECT_TRUE(member->present);
+        GroundObjectStore loaded;
+        Luminumbra::world::GroundNotifications restored;
+        ASSERT_TRUE(WorldSaveService::load_ground_objects(
+            loaded, save_dir.path(), 2, &errors, {}, &restored))
+            << JoinErrors(errors);
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_EQ(loaded.serialize(restored), GroundObjectStore{}.serialize(notifications));
+        EXPECT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors))
+            << JoinErrors(errors);
+    }
+    std::uint64_t removed_generation = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        SCOPED_TRACE(attempt);
+        {
+            WorldSaveService::SaveFactsScope facts(save_dir.path());
+            Luminumbra::Persistence::SaveTransaction transaction(
+                save_dir.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+            ASSERT_TRUE(transaction.protect({GroundObjectStore::kRelativePath}, &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(WorldSaveService::save_ground_objects({}, save_dir.path(), &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+        }
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+        Luminumbra::Persistence::SnapshotIndex index;
+        ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
+        const auto member =
+            std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+                return value.path == GroundObjectStore::kRelativePath;
+            });
+        ASSERT_NE(member, index.members.end());
+        EXPECT_FALSE(member->present);
+        EXPECT_EQ(member->bytes, 0u);
+        EXPECT_EQ(member->fnv64, 0u);
+        if (attempt == 0) {
+            removed_generation = member->generation;
+        } else {
+            EXPECT_EQ(member->generation, removed_generation);
+        }
+        GroundObjectStore loaded;
+        ASSERT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 2, &errors))
+            << JoinErrors(errors);
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors))
+            << JoinErrors(errors);
+    }
+    // A listed absent member must also refuse a reintroduced file.
+    {
+        std::ofstream output(WorldSaveService::ground_objects_path(save_dir.path()),
+                             std::ios::binary);
+        output << store.serialize();
+        ASSERT_TRUE(output.good());
+    }
+    GroundObjectStore loaded;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 2, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save_dir.path(), &errors));
+}
+
+TEST(WorldSaveService, GroundNotificationGrowthBudgetRefusesBeforePublishing) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_notification_capacity");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors));
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
+    const auto before = ReadFileBytes(path);
+    Luminumbra::world::GroundNotifications notifications{1, {{0, 0, 0, "ground.spawned", ""}}};
+    notifications.events.front().payload.assign(
+        GroundObjectStore::kMaxFileBytes - store.serialize(notifications).size(), 'x');
+    ASSERT_EQ(store.serialize(notifications).size(), GroundObjectStore::kMaxFileBytes);
+    EXPECT_FALSE(
+        WorldSaveService::save_ground_objects(store, save_dir.path(), &errors, notifications));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(ReadFileBytes(path), before);
+}
+
+TEST(WorldSaveService, GroundObjectIdAtOrAboveNextIdIsRefused) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_next_id");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(5, 100, 0)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors));
+
+    GroundObjectStore loaded;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 5, &errors));
+    EXPECT_TRUE(loaded.empty()) << "a refused load leaves the output untouched";
+    EXPECT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 6, &errors));
+    EXPECT_EQ(loaded.size(), 1u);
+}
+
+TEST(WorldSaveService, CorruptGroundObjectsFileIsRefusedByLoadAndMemberDigest) {
+    TempSaveDir save_dir("ground_corrupt");
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
+    std::filesystem::create_directories(path.parent_path());
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "{\"schema\":\"luminumbra.ground_objects.v1\",\"objects\":[";
+    }
+    Luminumbra::world::GroundObjectStore loaded;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 100, &errors));
+    EXPECT_FALSE(errors.empty());
+
+    Luminumbra::Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(
+        save_dir.path(), "chunks/region/ground-objects.json", digest, error));
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
+    TempSaveDir save_dir("ground_orphan");
+    WorldSaveService service;
+    WorldStreamingState original;
+    // Indexing validates full SDF lattices; the tiny legacy chunk fixtures are
+    // deliberately incomplete. A manifest-only baseline isolates the orphan
+    // refusal without introducing an unrelated invalid chunk member.
+    std::vector<std::string> save_errors;
+    ASSERT_TRUE(service.save_world(original, save_dir.path(), &save_errors))
+        << JoinErrors(save_errors);
+
+    Luminumbra::world::GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &save_errors))
+        << JoinErrors(save_errors);
+
+    WorldStreamingState restored;
+    std::vector<std::string> load_errors;
+    EXPECT_FALSE(service.load_world(restored, save_dir.path(), load_errors));
+    EXPECT_NE(JoinErrors(load_errors).find("corrupt ground objects: orphaned object"),
+              std::string::npos)
+        << JoinErrors(load_errors);
 }
 
 TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBytes) {
