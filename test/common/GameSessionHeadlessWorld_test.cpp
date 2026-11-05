@@ -5977,6 +5977,45 @@ TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     EXPECT_EQ(audit.mismatched, std::size_t{0});
 }
 
+TEST(GameSessionHeadlessWorldTest, SimulatedWaterIsPromotedBeforeSaveWhenRegionsAreOff) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    owner.SetActiveRegionsEnabled(false);
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
+    owner.SetWaterHighResEnabled(false);
+    ASSERT_TRUE(owner.CreateWorld("Regions off water promotion", "1337", "default"));
+    const Luminumbra::IVec3 coords(0, 0, 0);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->current_water_resolution.store(8);
+    chunk->water_depth_mm.assign(64, 77);
+    chunk->water_bed_mm.assign(64, 0);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 0.077f);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(64, 0.0f);
+    chunk->water_rest_level.assign(64, 0.077f);
+    chunk->has_water_sim.store(true);
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    // A simulation writer marks the chunk for saving without claiming ownership itself.
+    chunk->mark_dirty_for_save();
+    chunk->mark_water_state_dirty();
+    ASSERT_FALSE(chunk->has_water_authority());
+    ASSERT_TRUE(owner.SaveWorldState());
+    EXPECT_TRUE(chunk->has_water_authority());
+    const auto saved = P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), coords);
+    ASSERT_EQ(saved.status, P::WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(saved.chunk, nullptr);
+    EXPECT_TRUE(saved.chunk->has_water_authority());
+    EXPECT_TRUE(saved.chunk->same_water_state(*chunk));
+}
+
 TEST(GameSessionHeadlessWorldTest, WaterOnlySaveWithRegionsOffKeepsDigestThroughRegionsUpgrade) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -6078,7 +6117,7 @@ TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesReg
     chunk->water_bed_mm.assign(64, 0);
     chunk->water_edge_flux.assign(128, 0);
     chunk->has_water_sim.store(true);
-    chunk->mark_water_state_dirty();
+    // No water-state mark: this fixture is the old record shape, water without its flag.
     chunk->mark_dirty_for_save();
     ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
     ASSERT_TRUE(owner.SaveWorldState());

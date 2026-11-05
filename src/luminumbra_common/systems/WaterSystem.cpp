@@ -1369,6 +1369,9 @@ void WaterSystem::update(entt::registry& registry,
             if (!HasCompleteIntegerWaterGrid(*B, res))
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
+            // Mutations are recorded once per chunk after the face pass, not per sample.
+            bool mutated_a = false;
+            bool mutated_b = false;
             for (int t = 0; t < res; ++t) {
                 std::size_t ai, bi, slot;
                 if (isX) {
@@ -1410,9 +1413,8 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 const std::int32_t flux_prev = A->water_edge_flux[slot];
                 A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
-                if (A->water_edge_flux[slot] != flux_prev) {
-                    MarkRuntimeWaterMutation(*A);
-                }
+                if (A->water_edge_flux[slot] != flux_prev)
+                    mutated_a = true;
                 AddWaterDepth(A->water_depth_mm[ai], -q);
                 AddWaterDepth(B->water_depth_mm[bi], q);
                 if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
@@ -1420,8 +1422,8 @@ void WaterSystem::update(entt::registry& registry,
                 if (q != 0) {
                     A->is_water_sleeping.store(false, std::memory_order_relaxed);
                     B->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    MarkRuntimeWaterMutation(*A);
-                    MarkRuntimeWaterMutation(*B);
+                    mutated_a = true;
+                    mutated_b = true;
                     if (have_mirror_A)
                         A->water_level_data[ai] =
                             static_cast<float>(static_cast<std::int64_t>(A->water_bed_mm[ai]) +
@@ -1434,6 +1436,10 @@ void WaterSystem::update(entt::registry& registry,
                             static_cast<float>(MM_PER_M);
                 }
             }
+            if (mutated_a)
+                MarkRuntimeWaterMutation(*A);
+            if (mutated_b)
+                MarkRuntimeWaterMutation(*B);
         };
         if (Chunk* east = find_in_window(Chunk::calculate_id(ac + IVec3(1, 0, 0))))
             step_face(east, true);

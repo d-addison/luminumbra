@@ -2757,10 +2757,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
-    if (m_activeRegionsEnabled) {
-        // After the quiesce: a finishing generation worker can no longer erase the obligation.
-        m_worldSystem->sync_water_authority();
-    }
+    // After the quiesce: a finishing generation worker can no longer erase the obligation. Resident
+    // worlds without active regions promote simulated water here too, or regeneration could
+    // overwrite water that was saved without its authority flag.
+    m_worldSystem->sync_water_authority();
     WorldStreamingState state;
     for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
                                                     : m_worldSystem->snapshot_streamed_chunks()) {
