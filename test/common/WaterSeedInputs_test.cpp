@@ -1217,6 +1217,19 @@ void ExpectRefusedWaterMirrors(const Chunk& chunk,
     EXPECT_EQ(chunk.water_mesh_dirty_ticks, 9);
 }
 
+void ExpectRejectedDisplacementIsInert(WaterSystem& water, Chunk& chunk, const Vec3& position) {
+    const auto revision = chunk.water_revision();
+    const auto authority_revision = chunk.authority_hash_revision();
+    const bool pending = chunk.is_water_state_dirty();
+    const bool save_dirty = chunk.is_voxel_data_dirty();
+    water.apply_displacement(position, 1.0f);
+    EXPECT_EQ(chunk.water_revision(), revision);
+    EXPECT_EQ(chunk.authority_hash_revision(), authority_revision);
+    EXPECT_EQ(chunk.is_water_state_dirty(), pending);
+    EXPECT_EQ(chunk.is_voxel_data_dirty(), save_dirty);
+    EXPECT_FALSE(chunk.has_water_authority());
+}
+
 TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits) {
     for (const int target : {8, 16}) {
         for (const std::size_t partial : {0u, 1u, 255u, 257u}) {
@@ -1267,16 +1280,7 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
                             Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
                             Vec3(8.0f, 0.0f, 8.0f);
                         EXPECT_FALSE(fixture.world().debug_water_grid_at(position.x, position.z));
-                        const auto revision = chunk->water_revision();
-                        const auto authority_revision = chunk->authority_hash_revision();
-                        const bool pending = chunk->is_water_state_dirty();
-                        const bool save_dirty = chunk->is_voxel_data_dirty();
-                        fixture.water().apply_displacement(position, 1.0f);
-                        EXPECT_EQ(chunk->water_revision(), revision);
-                        EXPECT_EQ(chunk->authority_hash_revision(), authority_revision);
-                        EXPECT_EQ(chunk->is_water_state_dirty(), pending);
-                        EXPECT_EQ(chunk->is_voxel_data_dirty(), save_dirty);
-                        EXPECT_FALSE(chunk->has_water_authority());
+                        ExpectRejectedDisplacementIsInert(fixture.water(), *chunk, position);
                         EXPECT_EQ(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
                         EXPECT_EQ(chunk->current_water_resolution.load(), 16);
                         EXPECT_EQ(chunk->water_bed_mm, beds.at(id));
