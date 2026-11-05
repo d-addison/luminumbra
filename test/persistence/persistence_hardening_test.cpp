@@ -352,7 +352,7 @@ TEST(PersistenceHardening, WaterOnlyRecordFlagsFollowSimulationOwnership) {
     ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
     const auto digest = WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
     ASSERT_NE(digest, WorldSaveService::region_simulation_digest({}, {0, 0}, {}));
-    ASSERT_TRUE(WorldSaveService{}.save_world(original, save.path));
+    ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(original, save.path).saved);
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
     EXPECT_FALSE(chunk->has_terrain_authority());
     std::vector<WorldSaveService::ContainerRecord> records;
@@ -433,7 +433,7 @@ void ExpectUnflaggedOwnedWaterIsRetainedAndReflagged(std::string_view encoding,
     EXPECT_FALSE(repaired->has_terrain_authority());
     EXPECT_TRUE(repaired->same_water_state(*chunk));
     const auto revision = repaired->authority_hash_revision();
-    ASSERT_TRUE(WorldSaveService{}.save_world(loaded, save.path, &errors));
+    ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(loaded, save.path, &errors).saved);
     EXPECT_FALSE(repaired->is_voxel_data_dirty());
     EXPECT_EQ(repaired->authority_hash_revision(), revision);
     std::vector<WorldSaveService::ContainerRecord> records;

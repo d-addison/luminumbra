@@ -1309,7 +1309,7 @@ void ApplyRuntimeWaterMutation(SeedFixture& fixture,
         EXPECT_NE(chunk.water_depth_mm, depth);
         EXPECT_TRUE(chunk.is_water_state_dirty());
         EXPECT_FALSE(chunk.has_water_authority());
-        EXPECT_FALSE(chunk.is_voxel_data_dirty());
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
         EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
         EXPECT_EQ(chunk.authority_hash_revision(), revision);
     } else if (mutation == "bed") {

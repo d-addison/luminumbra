@@ -171,6 +171,8 @@ public:
                                                            revision + 1u,
                                                            std::memory_order_acq_rel,
                                                            std::memory_order_acquire)) {}
+            // Terrain ownership and provenance changed, so cached authority stamps are stale.
+            m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
             // The representation changed. Persist it before clean durable eviction;
             // its generated terrain remains excluded from the authority projection.
             mark_dirty_for_save();

@@ -1664,7 +1664,7 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
-                    target_chunk.mark_water_state_dirty();
+                    MarkRuntimeWaterMutation(target_chunk);
                     m_water_activity_cache.erase(target_chunk.get_id());
                 }
             }
