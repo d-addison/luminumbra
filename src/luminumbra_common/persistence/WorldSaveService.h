@@ -180,7 +180,8 @@ public:
                                         std::vector<std::string>* errors,
                                         const std::stop_token& stop = {});
 
-    // Empty state removes field-pages.fpg; an absent member clears the load output.
+    // Nonempty writes require an indexed transaction; empty legacy state is a no-op.
+    // Empty state removes field-pages.fpg; verified absence clears the load output.
     static std::filesystem::path field_pages_path(const std::filesystem::path& save_dir);
     static bool save_field_pages(const world::FieldPageState& state,
                                  const std::filesystem::path& save_dir,

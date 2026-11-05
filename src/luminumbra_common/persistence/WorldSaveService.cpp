@@ -4601,7 +4601,14 @@ bool WorldSaveService::PreparedFieldWrite::publish(const std::filesystem::path& 
         return false;
     }
     TransactionScope scope(save_dir, {world::FieldPageState::kRelativePath}, errors);
-    if (!scope.ok() || !validate_save(save_dir, errors))
+    if (!scope.ok())
+        return false;
+    if (!m_bytes.empty() && !scope.engaged()) {
+        AddError(errors,
+                 "Field pages save refused: nonempty state requires an indexed transaction");
+        return false;
+    }
+    if (!validate_save(save_dir, errors))
         return false;
     if (m_bytes.empty()) {
         bool missing = false;
@@ -4628,22 +4635,52 @@ bool WorldSaveService::load_field_pages(world::FieldPageState& out,
                                         std::vector<std::string>* errors,
                                         const std::stop_token& stop) {
     const detail::SnapshotReadOwnership ownership;
-    const SavedInputFile input(field_pages_path(save_dir));
     if (stop.stop_requested()) {
         AddError(errors, "Saved-world validation cancelled.");
         return false;
     }
-    if (input.missing()) {
+    bool present = false;
+    std::string bytes;
+    {
+        const SavedInputFile input(field_pages_path(save_dir));
+        present = !input.missing();
+        if (present && !input.read(bytes, world::FieldPageState::kMaxFileBytes, stop)) {
+            AddError(errors,
+                     stop.stop_requested()
+                         ? "Saved-world validation cancelled."
+                         : "Field pages load failed: unreadable or oversized file (64 MiB cap)");
+            return false;
+        }
+    }
+    if (!SaveTransaction::active_for(save_dir)) {
+        if (snapshot_index_exists(save_dir)) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, errors, stop))
+                return false;
+            const auto member = std::find_if(
+                index.members.begin(), index.members.end(), [](const SnapshotMember& value) {
+                    return value.path == world::FieldPageState::kRelativePath;
+                });
+            const auto fingerprint = fnv1a64_bytes(bytes.data(), bytes.size());
+            if ((member == index.members.end() && present) ||
+                (member != index.members.end() &&
+                 (member->present != present ||
+                  (present && (member->bytes != bytes.size() || member->fnv64 != fingerprint))))) {
+                AddError(errors, "inconsistent snapshot: chunks/region/field-pages.fpg");
+                return false;
+            }
+        } else if (present) {
+            AddError(errors, "inconsistent snapshot: field authority without index");
+            return false;
+        }
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    if (!present) {
         out.clear();
         return true;
-    }
-    std::string bytes;
-    if (!input.read(bytes, world::FieldPageState::kMaxFileBytes, stop)) {
-        AddError(errors,
-                 stop.stop_requested()
-                     ? "Saved-world validation cancelled."
-                     : "Field pages load failed: unreadable or oversized file (64 MiB cap)");
-        return false;
     }
     world::FieldPageState parsed;
     std::string error;
