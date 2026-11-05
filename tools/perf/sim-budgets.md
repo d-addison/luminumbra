@@ -41,8 +41,10 @@ and emitted budgets retain it; comparisons refuse different preset hashes and
 the budget checker enforces a non-null pinned preset hash. It uses the same
 64 lowercase hexadecimal format. Historical captures may omit it, but cannot
 compare with captures that record it. Existing baselines may leave it unpinned.
-The common-data `fixture_hash` uses `fixture_hash(..., scope="headless-server")` over `data/common`;
-that scope still includes some client-only content, so pinning it would reject
+The shared resolved-input `fixture_hash` binds the headless `data/common` tree,
+presets and their dependencies, and any `.perf-controlled` marker; see the
+[identity recipe](../../docs/sim-budget-telemetry.md). The common scope still
+includes some client-only content, so pinning the identity would reject
 unrelated changes before checking simulation work. Simulation work changes
 still have to satisfy the pinned limits or receive a new capture and explicit
 budget calibration. Seed, ticks and both radii remain pinned.
