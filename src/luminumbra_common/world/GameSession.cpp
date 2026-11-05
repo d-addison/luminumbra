@@ -1961,6 +1961,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
         }
+    } else if (m_worldSystem) {
+        // Without active regions the same tick-boundary promotion applies, so water ownership
+        // (and the hash that covers it) never depends on when a save or a hash read happens.
+        m_worldSystem->sync_water_authority();
     }
     using luminumbra::simulation::SimWork;
     m_simBudgetTelemetry.RecordWork(SimWork::ActiveRegionRecords,
@@ -2329,7 +2333,7 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
 }
 
 std::string GameSession::ComputeChunkStateHash() {
-    if (m_activeRegionsEnabled && m_worldSystem)
+    if (m_worldSystem)
         m_worldSystem->sync_water_authority();
     if (!m_worldSystem)
         return {};

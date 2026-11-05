@@ -6016,6 +6016,69 @@ TEST(GameSessionHeadlessWorldTest, SimulatedWaterIsPromotedBeforeSaveWhenRegions
     EXPECT_TRUE(saved.chunk->same_water_state(*chunk));
 }
 
+namespace {
+
+std::shared_ptr<Luminumbra::Chunk> AdoptUnpromotedWaterChunk(GameSession& session) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->current_water_resolution.store(8);
+    chunk->water_depth_mm.assign(64, 77);
+    chunk->water_bed_mm.assign(64, 0);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 0.077f);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(64, 0.0f);
+    chunk->water_rest_level.assign(64, 0.077f);
+    chunk->has_water_sim.store(true);
+    EXPECT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    chunk->mark_dirty_for_save();
+    chunk->mark_water_state_dirty();
+    return chunk;
+}
+
+void CreateRegionsOffWaterSession(GameSession& session, const HeadlessRoot& root, JobSystem& jobs) {
+    session.SetActiveRegionsEnabled(false);
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetWaterHighResEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Regions off hash timing", "1337", "default"));
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, WaterOwnershipHashDoesNotDependOnSaveTimingWhenRegionsAreOff) {
+    const HeadlessRoot root_a;
+    const HeadlessRoot root_b;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession saved;
+    GameSession unsaved;
+    ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(saved, root_a, jobs));
+    ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(unsaved, root_b, jobs));
+    const auto saved_chunk = AdoptUnpromotedWaterChunk(saved);
+    const auto unsaved_chunk = AdoptUnpromotedWaterChunk(unsaved);
+    const auto before_save = saved.ComputeChunkStateHash();
+    ASSERT_TRUE(saved.SaveWorldState());
+    EXPECT_EQ(saved.ComputeChunkStateHash(), before_save);
+    EXPECT_EQ(unsaved.ComputeChunkStateHash(), before_save);
+    EXPECT_TRUE(saved_chunk->has_water_authority());
+    EXPECT_TRUE(unsaved_chunk->has_water_authority());
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterOwnershipIsPromotedAtTheTickBoundaryWhenRegionsAreOff) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(session, root, jobs));
+    const auto chunk = AdoptUnpromotedWaterChunk(session);
+    ASSERT_FALSE(chunk->has_water_authority());
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_TRUE(chunk->has_water_authority());
+}
+
 TEST(GameSessionHeadlessWorldTest, WaterOnlySaveWithRegionsOffKeepsDigestThroughRegionsUpgrade) {
     const HeadlessRoot root;
     JobSystem jobs;
