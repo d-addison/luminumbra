@@ -1,8 +1,12 @@
 #include "SimulationEventBus.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace luminumbra::simulation {
 namespace {
@@ -43,35 +47,81 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
                                        std::string topic,
                                        std::string payload,
                                        std::int32_t lane) {
+    if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Simulation event sequence exhausted");
     const std::uint64_t sequence = next_sequence_++;
-    pending_events_.push_back(SimulationEvent{
-        tick,
-        lane,
-        sequence,
-        std::move(topic),
-        std::move(payload),
-    });
+    pending_events_.push_back({SimulationEvent{
+                                   tick,
+                                   lane,
+                                   sequence,
+                                   std::move(topic),
+                                   std::move(payload),
+                               },
+                               0,
+                               std::nullopt});
     return sequence;
 }
 
-std::vector<SimulationEvent> OrderedEventBus::drain(std::uint64_t inclusive_tick) {
-    std::stable_sort(pending_events_.begin(), pending_events_.end(), event_order_less);
-
+std::vector<SimulationEvent>
+OrderedEventBus::drain(std::uint64_t inclusive_tick,
+                       const std::function<bool()>& continue_delivery) {
     std::vector<SimulationEvent> delivered;
-    auto first_future = pending_events_.begin();
-    while (first_future != pending_events_.end() && first_future->tick <= inclusive_tick) {
-        delivered.push_back(*first_future);
-        ++first_future;
-    }
-    pending_events_.erase(pending_events_.begin(), first_future);
-
-    for (const SimulationEvent& event : delivered) {
-        for (const Handler& handler : handlers_) {
-            handler(event);
+    for (;;) {
+        const bool resuming = pending_batch_size_ != 0;
+        if (!resuming) {
+            std::stable_sort(
+                pending_events_.begin(), pending_events_.end(), [](const auto& a, const auto& b) {
+                    return event_order_less(a.event, b.event);
+                });
         }
-    }
 
-    return delivered;
+        std::vector<PendingEvent> due;
+        auto first_future = pending_events_.begin();
+        const auto batch_end =
+            resuming ? pending_events_.begin() + static_cast<std::ptrdiff_t>(pending_batch_size_)
+                     : pending_events_.end();
+        while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
+            due.push_back(std::move(*first_future));
+            ++first_future;
+        }
+        pending_events_.erase(pending_events_.begin(), first_future);
+        if (resuming)
+            pending_batch_size_ -= due.size();
+
+        std::size_t current = 0;
+        const auto requeue = [&] {
+            // Preserve this batch's order and handler cutoffs before forming the next batch.
+            pending_events_.insert(
+                pending_events_.begin(),
+                std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
+                std::make_move_iterator(due.end()));
+            pending_batch_size_ += due.size() - current;
+        };
+        try {
+            for (; current < due.size(); ++current) {
+                auto& pending = due[current];
+                if (!pending.handler_count)
+                    pending.handler_count = handlers_.size();
+                while (pending.next_handler < pending.handler_count.value_or(0)) {
+                    if (continue_delivery && !continue_delivery()) {
+                        requeue();
+                        return delivered;
+                    }
+                    // std::deque appends keep references to existing handler elements valid.
+                    const Handler& handler = handlers_[pending.next_handler];
+                    ++pending.next_handler;
+                    handler(pending.event);
+                }
+                delivered.push_back(pending.event);
+            }
+        } catch (...) {
+            requeue();
+            throw;
+        }
+
+        if (!resuming || pending_batch_size_ != 0)
+            return delivered;
+    }
 }
 
 void OrderedEventBus::subscribe(Handler handler) {
@@ -80,12 +130,33 @@ void OrderedEventBus::subscribe(Handler handler) {
 
 void OrderedEventBus::clear() {
     pending_events_.clear();
+    pending_batch_size_ = 0;
     handlers_.clear();
     next_sequence_ = 0;
 }
 
 std::size_t OrderedEventBus::pending_count() const noexcept {
     return pending_events_.size();
+}
+
+std::vector<SimulationEvent> OrderedEventBus::pending_events() const {
+    std::vector<SimulationEvent> events;
+    for (const auto& pending : pending_events_)
+        events.push_back(pending.event);
+    std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) {
+        return a.sequence < b.sequence;
+    });
+    return events;
+}
+
+void OrderedEventBus::restore_pending(std::vector<SimulationEvent> events,
+                                      std::uint64_t next_sequence) {
+    pending_events_.clear();
+    pending_batch_size_ = 0;
+    for (auto& event : events) {
+        pending_events_.push_back({std::move(event), 0, std::nullopt});
+    }
+    next_sequence_ = next_sequence;
 }
 
 std::vector<SimulationEvent> make_eventbus_order_fixture() {

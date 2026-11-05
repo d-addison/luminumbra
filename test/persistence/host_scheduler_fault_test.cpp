@@ -63,7 +63,8 @@ void ArmHostFault(GameSession& session) {
     session.PinActiveRegion(kFaultRegion, true);
     ASSERT_TRUE(session.GetActiveRegionLedger().records().contains(kFaultRegion));
     session.GetSimulationEventBus().subscribe([&session](const auto& event) {
-        if (event.tick == kFaultTick - 1 || event.tick == kFaultTick)
+        // Consumers publish completed work for the following schedule.
+        if (event.tick == kFaultTick - 2 || event.tick == kFaultTick - 1)
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     });
     for (std::uint64_t tick = 1; tick <= kFaultTick + 1; ++tick)

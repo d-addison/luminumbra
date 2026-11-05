@@ -152,3 +152,5 @@ source. Those results and the earlier native attempt do not qualify the new
 source on native hardware, the five-tier runtime, the world performance matrix,
 or any visual approval. Complete native qualification and the outstanding DW01–DW09 closure packets
 are deferred to v0.3.1. Implemented source does not approve a visual scenario.
+
+This PR delivers in-memory ground-object continuation and durable completed work. Ground objects, queued notifications and runtime IDs reset on restart or successful reload; ground-object persistence is deferred to the follow-up.

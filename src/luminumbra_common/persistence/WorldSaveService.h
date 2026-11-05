@@ -46,6 +46,8 @@ struct RegionDigestInputs {
     std::vector<IVec3> durable;
     // Legacy admitted saves need no index until their first complete indexed save.
     bool require_index = true;
+    // Empty when the region holds no ground objects, preserving its existing digest.
+    std::string ground_object_bytes{};
 };
 
 // One owner-thread digest operation admits the index once. Durable authority is cached by

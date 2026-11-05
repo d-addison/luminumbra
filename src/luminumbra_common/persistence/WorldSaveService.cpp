@@ -4691,7 +4691,11 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
+    const std::string content_hash = ComputeRegionContentHash(region);
+    if (inputs.ground_object_bytes.empty())
+        return std::stoull(content_hash, nullptr, 16);
+    return std::stoull(
+        StableChecksum(content_hash + "|ground:" + inputs.ground_object_bytes), nullptr, 16);
 }
 
 std::uint64_t
@@ -4701,7 +4705,11 @@ WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir
     ValidateRegionDigestKey(key);
     // This compatibility overload projects chunks only. Durable chunks are read from save_dir;
     // callers with live ground objects or field pages supply those projections explicitly.
-    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}, {}});
+    return region_simulation_digest(
+        save_dir,
+        key,
+        RegionDigestInputs{
+            .live = live_chunks, .parked = {}, .durable = {}, .ground_object_bytes = {}});
 }
 
 std::uint64_t WorldSaveService::region_simulation_digest(

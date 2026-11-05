@@ -1,0 +1,215 @@
+#include "GroundObjectStore.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace Luminumbra::world {
+namespace {
+
+using RegionIndex = std::map<RegionKey, std::set<std::uint64_t>>;
+
+constexpr std::int64_t kRegionMm = GroundObjectStore::kRegionSizeMm;
+
+std::int32_t FloorRegion(std::int64_t value) {
+    std::int64_t quotient = value / kRegionMm;
+    if (value % kRegionMm != 0 && value < 0) {
+        --quotient;
+    }
+    return static_cast<std::int32_t>(quotient);
+}
+
+// Per-object text used by the hash projections: "<id>,...,<flags>;".
+std::string ObjectText(const GroundObject& object) {
+    return std::to_string(object.id) + ',' + std::to_string(object.type) + ',' +
+           std::to_string(object.x_mm) + ',' + std::to_string(object.y_mm) + ',' +
+           std::to_string(object.z_mm) + ',' + std::to_string(object.spawn_tick) + ',' +
+           std::to_string(object.active_age) + ',' + std::to_string(object.despawn_after) + ',' +
+           std::to_string(object.payload) + ',' + std::to_string(object.flags) + ';';
+}
+
+void Detach(RegionIndex& index, RegionKey key, std::uint64_t id) {
+    const auto it = index.find(key);
+    if (it == index.end()) {
+        return;
+    }
+    it->second.erase(id);
+    if (it->second.empty()) {
+        index.erase(it);
+    }
+}
+
+// True when `after` differs from `before` only in y_mm and the kSettled bit, and is still valid.
+bool OnlySettleChanged(const GroundObject& before, const GroundObject& after) {
+    constexpr std::uint16_t kOtherFlags = static_cast<std::uint16_t>(~GroundObject::kSettled);
+    return after.id == before.id && after.type == before.type && after.x_mm == before.x_mm &&
+           after.z_mm == before.z_mm && after.spawn_tick == before.spawn_tick &&
+           after.active_age == before.active_age && after.despawn_after == before.despawn_after &&
+           after.payload == before.payload && ((after.flags ^ before.flags) & kOtherFlags) == 0 &&
+           GroundObjectStore::valid(after);
+}
+
+} // namespace
+
+bool GroundObjectStore::valid(const GroundObject& object) {
+    constexpr std::int64_t kMax = kMaxCoordinateMm;
+    if (object.id == 0 || object.id >= ActiveRegionLedger::kPersistentIdLimit || object.type == 0) {
+        return false;
+    }
+    if ((object.flags & static_cast<std::uint16_t>(~GroundObject::kSettled)) != 0) {
+        return false;
+    }
+    if (object.x_mm <= -kMax || object.x_mm >= kMax) {
+        return false;
+    }
+    if (object.z_mm <= -kMax || object.z_mm >= kMax) {
+        return false;
+    }
+    if (object.y_mm <= -kMaxVerticalMm || object.y_mm >= kMaxVerticalMm) {
+        return false;
+    }
+    if (object.despawn_after != 0 && object.active_age >= object.despawn_after) {
+        return false;
+    }
+    return true;
+}
+
+RegionKey GroundObjectStore::region_of(const GroundObject& object) {
+    return RegionKey{FloorRegion(object.x_mm), FloorRegion(object.z_mm)};
+}
+
+bool GroundObjectStore::insert(const GroundObject& object) {
+    if (!valid(object) || m_objects.size() >= kMaxObjects) {
+        return false;
+    }
+    if (m_objects.find(object.id) != m_objects.end()) {
+        return false;
+    }
+    m_objects.emplace(object.id, object);
+    m_byRegion[region_of(object)].insert(object.id);
+    return true;
+}
+
+bool GroundObjectStore::erase(std::uint64_t id) {
+    const auto it = m_objects.find(id);
+    if (it == m_objects.end()) {
+        return false;
+    }
+    Detach(m_byRegion, region_of(it->second), id);
+    m_objects.erase(it);
+    return true;
+}
+
+const GroundObject* GroundObjectStore::find(std::uint64_t id) const {
+    const auto it = m_objects.find(id);
+    return it == m_objects.end() ? nullptr : &it->second;
+}
+
+void GroundObjectStore::clear() {
+    m_objects.clear();
+    m_byRegion.clear();
+}
+
+bool GroundObjectStore::owns_region(RegionKey key) const {
+    return m_byRegion.find(key) != m_byRegion.end();
+}
+
+std::size_t GroundObjectStore::region_size(RegionKey key) const {
+    const auto it = m_byRegion.find(key);
+    return it == m_byRegion.end() ? 0 : it->second.size();
+}
+
+std::vector<GroundObject> GroundObjectStore::in_region(RegionKey key) const {
+    std::vector<GroundObject> out;
+    const auto it = m_byRegion.find(key);
+    if (it == m_byRegion.end()) {
+        return out;
+    }
+    out.reserve(it->second.size());
+    for (const std::uint64_t id : it->second) {
+        out.push_back(m_objects.at(id));
+    }
+    return out;
+}
+
+std::vector<RegionKey> GroundObjectStore::regions() const {
+    std::vector<RegionKey> out;
+    out.reserve(m_byRegion.size());
+    for (const auto& entry : m_byRegion) {
+        out.push_back(entry.first);
+    }
+    return out;
+}
+
+GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const SettleFn& settle) {
+    AgeResult result;
+    const auto regionIt = m_byRegion.find(key);
+    if (regionIt == m_byRegion.end()) {
+        return result;
+    }
+    // Retain the region entry until iteration ends, including when its last object despawns.
+    auto& ids = regionIt->second;
+    for (auto idIt = ids.begin(); idIt != ids.end();) {
+        const auto current = idIt++;
+        const std::uint64_t id = *current;
+        const auto objectIt = m_objects.find(id);
+        if (objectIt == m_objects.end()) {
+            continue;
+        }
+        GroundObject& live = objectIt->second;
+
+        if (!live.settled() && settle) {
+            const GroundObject before = live;
+            settle(live);
+            if (!OnlySettleChanged(before, live)) {
+                live = before;
+            } else if (live.settled()) {
+                ++result.settled;
+            }
+        }
+
+        if (live.active_age != std::numeric_limits<std::uint32_t>::max()) {
+            ++live.active_age;
+            ++result.aged;
+        }
+
+        if (live.despawn_after != 0 && live.active_age >= live.despawn_after) {
+            result.despawned.push_back(live);
+            ids.erase(current);
+            m_objects.erase(objectIt);
+        }
+    }
+    if (ids.empty()) {
+        m_byRegion.erase(regionIt);
+    }
+    return result;
+}
+
+std::string GroundObjectStore::canonical_bytes() const {
+    if (m_objects.empty()) {
+        return {};
+    }
+    std::string out = "ground_objects:v1:";
+    for (const auto& entry : m_objects) {
+        out += ObjectText(entry.second);
+    }
+    return out;
+}
+
+std::string GroundObjectStore::region_bytes(RegionKey key) const {
+    std::string out;
+    const auto it = m_byRegion.find(key);
+    if (it == m_byRegion.end()) {
+        return out;
+    }
+    for (const std::uint64_t id : it->second) {
+        out += ObjectText(m_objects.at(id));
+    }
+    return out;
+}
+
+} // namespace Luminumbra::world

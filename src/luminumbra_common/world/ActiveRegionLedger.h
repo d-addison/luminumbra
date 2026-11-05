@@ -101,7 +101,7 @@ struct RegionRejections {
 
 struct RegionSchedule {
     std::uint64_t tick = 0, work = 0;
-    std::vector<RegionKey> due;
+    std::vector<RegionKey> due; // Unique keys in scheduler rank/proximity order.
     std::vector<RegionTransition> transitions;
     RegionRejections rejected;
     std::string digest;
@@ -126,9 +126,9 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 2 digest projection
-    // (7 bytes), type 4 energy ages and type 5 water debt (each 10 + 16 bytes per owner).
-    // The original file cap is unchanged; encode refuses when the records and extensions
-    // together exceed it.
+    // (7 bytes), type 4 energy ages, type 5 water debt and
+    // type 6 completed work (each 10 + 16 bytes per owner). The original file cap is
+    // unchanged; encode refuses when the records and extensions together exceed it.
     static constexpr std::size_t kMaxFileBytes =
         kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
@@ -140,6 +140,10 @@ public:
     using OwnershipProbe = std::function<bool(RegionKey)>;
     // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
     static constexpr std::uint64_t kIdleEvictionTicks = 108000;
+
+    // Runtime ids are allocated from 1 and never reach 2^63. Cross-restart continuity
+    // is deferred to ground-object persistence.
+    static constexpr std::uint64_t kPersistentIdLimit = 1ull << 63;
 
     // An absent ledger starts at the restored clock without scheduling a tick.
     explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
@@ -165,6 +169,11 @@ public:
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
     }
+    [[nodiscard]] std::uint64_t next_persistent_id() const {
+        return m_nextPersistentId;
+    }
+    // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
+    bool allocate_persistent_id(std::uint64_t& id);
     using WaterDebts = std::map<RegionKey, std::uint64_t>;
     static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
     [[nodiscard]] const WaterDebts& water_debts() const noexcept {
@@ -199,6 +208,11 @@ public:
     // touches the canonical tick or any record). Used after a scheduler fault.
     void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
+    // Existing records remain writable; new records must fit with every retained extension.
+    [[nodiscard]] bool can_activate(RegionKey key) const;
+    // Activate and wake a consumer-owned region without a persistent terrain edit.
+    // The consumer must retain it through the scheduler's ownership probe.
+    void activate_owned(RegionKey key, const WorldClock& clock);
     void mark_edited(RegionKey key, const WorldClock& clock);
     // Wakes an existing Frozen record whose authority changed; never creates or alters others.
     void wake_frozen(RegionKey key) noexcept;
@@ -206,6 +220,15 @@ public:
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
     void mark_saved(const WorldClock& clock);
+    // Completed consumer work produced at tick(), consumed once by schedule(tick()+1).
+    // Every successful consumer tick replaces this register, including an empty tick.
+    void publish_completed_work(std::span<const RegionWork> work);
+    void clear_completed_work() noexcept {
+        m_completedWork.clear();
+    }
+    [[nodiscard]] const std::map<RegionKey, std::uint64_t>& completed_work() const {
+        return m_completedWork;
+    }
     // An accepted partial save may have an older ledger than its clock. Raise
     // only the validation ceiling on load; never run catch-up, alter any region
     // record, or move the canonical tick that the hash projection reads.
@@ -240,16 +263,20 @@ private:
                                      const DurableDigest& durable_digest,
                                      const OwnershipProbe& owned);
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
-    // energy age or water debt, including records due in the current schedule.
+    // energy age, water debt or completed work, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
-    // Whether this ledger would still encode within kMaxFileBytes with that many energy owners and
-    // water debts.
-    bool encodable_with_counts(std::size_t energy_owners, std::size_t water_debts) const;
+    // Whether the combined envelope fits kMaxFileBytes with the proposed owner counts.
+    // Omitted completed owners retain the current register.
+    bool encodable_with_counts(std::size_t energy_owners,
+                               std::size_t water_debts,
+                               std::optional<std::size_t> completed_owners = std::nullopt,
+                               std::optional<std::size_t> record_count = std::nullopt) const;
+    std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
@@ -260,6 +287,7 @@ private:
     std::optional<Vec3> m_localAnchor;
     std::uint64_t m_tick = 0;
     std::uint64_t m_headerTick = 0;
+    std::uint64_t m_nextPersistentId = 1;
 };
 
 } // namespace Luminumbra::world
