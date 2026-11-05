@@ -15,9 +15,9 @@ from typing import Any
 
 from fixture_hash import fixture_hash
 from fixture_paths import read_text, resolve_reference
+from resolved_fixture import PRESETS, resolved_fixture_hash as capture_fixture_hash
 
 
-PRESETS = ("default", "mountains", "archipelago")
 STAGES = (
     "server_physics", "animation", "instinct", "perception", "scent", "locomotion",
     "creatures", "wind", "weather", "wind_weather", "aether", "energy", "irrigation", "soil", "plants",
@@ -168,7 +168,7 @@ def main() -> int:
     if not args.seed:
         parser.error("seed must be explicit and nonempty")
     try:
-        common_hash = fixture_hash(resolve_reference(root, "data/common"), scope="headless-server")
+        input_hash = capture_fixture_hash(root)
         preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
                                    reference_root=resolve_reference(root, "data"))
     except (OSError, ValueError) as exc:
@@ -183,7 +183,7 @@ def main() -> int:
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)),
         "binary_sha256": binary_digest.hexdigest(),
-        "fixture_hash": common_hash,
+        "fixture_hash": input_hash,
         "preset_hash": preset_hash,
         "seed": args.seed, "ticks": args.ticks, "surface_radius": args.radius,
         "collision_radius": args.collision_radius, "runs": [],
@@ -199,10 +199,10 @@ def main() -> int:
             data = json.loads(read_text(evidence, resolve_reference(evidence, artifact.name), encoding="utf-8-sig"))
             validate_artifact(data, preset, args.seed, args.ticks)
             manifest["runs"].append({"preset": preset, "artifact": artifact.name, "command": argv})
-        final_common_hash = fixture_hash(resolve_reference(root, "data/common"), scope="headless-server")
+        final_input_hash = capture_fixture_hash(root)
         final_preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
                                          reference_root=resolve_reference(root, "data"))
-        if (final_common_hash, final_preset_hash) != (common_hash, preset_hash):
+        if (final_input_hash, final_preset_hash) != (input_hash, preset_hash):
             raise ValueError("fixture hashes changed during capture")
         (evidence / "capture.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.CalledProcessError) as exc:
