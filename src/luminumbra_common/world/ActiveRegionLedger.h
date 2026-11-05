@@ -3,6 +3,7 @@
 #include "WorldClock.h"
 #include "luminumbra/core/Types.h"
 
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -21,6 +22,34 @@ struct RegionKey {
     std::int32_t x = 0;
     std::int32_t z = 0;
     auto operator<=>(const RegionKey&) const = default;
+};
+
+// Regions near an anchor; the fixed proximity disc never touches more than a 4x4 block,
+// so the set lives inline and the per-tick scheduler path allocates nothing.
+class ActiveRegionLedger;
+class ActivationRegions {
+public:
+    static constexpr std::size_t kCapacity = 16;
+    [[nodiscard]] const RegionKey* begin() const {
+        return m_keys.data();
+    }
+    [[nodiscard]] const RegionKey* end() const {
+        return m_keys.data() + m_size;
+    }
+    [[nodiscard]] std::size_t size() const {
+        return m_size;
+    }
+    [[nodiscard]] bool empty() const {
+        return m_size == 0;
+    }
+
+private:
+    friend class ActiveRegionLedger;
+    void push_back(RegionKey key) {
+        m_keys[m_size++] = key;
+    }
+    std::array<RegionKey, kCapacity> m_keys{};
+    std::size_t m_size = 0;
 };
 
 enum class RegionState : std::uint8_t {
@@ -96,7 +125,10 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    // Version 2 adds u32 extension length and one TLV (type 2, length 1, value 2 = 7 bytes).
+    // Version 2 adds a u32 extension length and ascending TLVs: type 2 digest projection
+    // (7 bytes), type 4 energy ages and type 5 water debt (each 10 + 16 bytes per owner).
+    // The original file cap is unchanged; encode refuses when the records and extensions
+    // together exceed it.
     static constexpr std::size_t kMaxFileBytes =
         kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
@@ -133,6 +165,32 @@ public:
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
     }
+    using WaterDebts = std::map<RegionKey, std::uint64_t>;
+    static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
+    [[nodiscard]] const WaterDebts& water_debts() const noexcept {
+        return m_waterDebts;
+    }
+    // Sparse positive Q32 debt owned by known records; zero is represented by absence.
+    // Validation/cap failure changes nothing. Explicitly retain absent due claims.
+    bool set_water_debts(const WaterDebts& debts);
+    // Apply only after every resume consumer succeeds. Refuses frozen/unknown or stale
+    // stamps, so a saved frozen_at cannot cause catch-up twice. Commits last_ticked to tick(),
+    // including a thaw between Reduced due phases, so consumers cannot replay that window.
+    bool acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at);
+    using EnergyAges = std::map<RegionKey, std::uint64_t>;
+    [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
+        return m_energyAges;
+    }
+    // Missing register returns false without changing age.
+    bool energy_age(const RegionKey& key, std::uint64_t& age) const noexcept;
+    // Ages are durable even at zero energy. Both setters refuse unknown owners,
+    // ages >= WorldClock::kTickLimit and owner counts the file cap cannot encode,
+    // without changing any register.
+    bool set_energy_age(const RegionKey& key, std::uint64_t age);
+    bool set_energy_ages(const EnergyAges& ages);
+    void reset_energy_ages() noexcept {
+        m_energyAges.clear();
+    }
     // Finite, and -2^24 <= x,z < 2^24 (exactly -2^24 is valid). y must be finite.
     [[nodiscard]] static bool valid_anchor(const Vec3& position) noexcept;
     // Non-throwing form: returns false and leaves the anchor untouched when invalid.
@@ -142,6 +200,8 @@ public:
     void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
     void mark_edited(RegionKey key, const WorldClock& clock);
+    // Wakes an existing Frozen record whose authority changed; never creates or alters others.
+    void wake_frozen(RegionKey key) noexcept;
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
@@ -151,6 +211,8 @@ public:
     // record, or move the canonical tick that the hash projection reads.
     void restore_clock(const WorldClock& clock);
     [[nodiscard]] static RegionKey region_at(const Vec3& position);
+    // Shared proximity rule for scheduler visits and authoritative consumers.
+    [[nodiscard]] static ActivationRegions activation_regions(const Vec3& anchor);
     [[nodiscard]] static std::uint32_t phase(RegionKey key, std::uint8_t shift);
     [[nodiscard]] static RegionResumeWindow resume_window(RegionKey key,
                                                           std::uint64_t frozen_at,
@@ -159,12 +221,14 @@ public:
     // Inputs are complete for this host tick. Duplicate work entries are summed
     // before any decision; unknown regions and repeated/backward ticks refuse.
     // nullopt uses the local single-player anchor; an explicit empty span visits nothing.
+    // due lists only records that survive this tick's retention, in scheduler order.
     RegionSchedule schedule(const WorldClock& clock,
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {},
                             const OwnershipProbe& owned = {});
     [[nodiscard]] std::string canonical_bytes() const;
+    // Throws std::length_error if the envelope would exceed kMaxFileBytes.
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
     static bool decode(std::string_view bytes, ActiveRegionLedger& out, std::string& error);
@@ -175,13 +239,19 @@ private:
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
                                      const OwnershipProbe& owned);
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor.
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
+    // energy age or water debt, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
+    // Whether this ledger would still encode within kMaxFileBytes with that many energy owners and
+    // water debts.
+    bool encodable_with_counts(std::size_t energy_owners, std::size_t water_debts) const;
+    EnergyAges m_energyAges;
+    WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.

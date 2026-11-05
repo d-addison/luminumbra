@@ -133,6 +133,7 @@ def relationship_groups(all_tests, eligible, profile):
             groups[member] = combined
 
     related = {}
+    isolated_gl = set()
     for test in all_tests:
         name = test["name"]
         for prop in test.get("properties", []):
@@ -145,6 +146,11 @@ def relationship_groups(all_tests, eligible, profile):
             if kind == "RESOURCE_LOCK" and name in excluded_manual:
                 continue
             for value in prop["value"]:
+                # Each ASan runner has its own Xvfb server. Keep the CTest
+                # lock in the inventory, but do not use it for placement.
+                if profile == "asan" and kind == "RESOURCE_LOCK" and value == "luminumbra_gl_context":
+                    isolated_gl.add(name)
+                    continue
                 if kind == "DEPENDS":
                     require(value in groups, "unknown CTest dependency")
                     join(name, value)
@@ -153,6 +159,8 @@ def relationship_groups(all_tests, eligible, profile):
                     if key in related:
                         join(name, related[key])
                     related[key] = name
+    require(not (isolated_gl & selected) or isolated_gl <= selected,
+            "eligible selection breaks fixture, dependency or resource lock closure")
     # The installed-runtime qualification consumes all prefab cases together.
     if profile == "gcc":
         prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]

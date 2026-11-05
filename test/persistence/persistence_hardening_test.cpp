@@ -312,263 +312,6 @@ TEST(PersistenceHardening, SnapshotRoundTripPreservesEveryFieldExactly) {
     ExpectChunkFieldExact(*expected, *loaded);
 }
 
-TEST(PersistenceHardening, SnapshotTerrainSamplesBypassNumericDomAndKeepCanonicalBytes) {
-    WorldStreamingState original;
-    PopulateRichWorld(original);
-    constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-                                    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
-                                    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
-    std::size_t expected_samples = 0;
-    for (const auto& chunk : original.snapshot_chunks()) {
-        chunk->sdf_data.resize(lattice, 0.125f);
-        chunk->sdf_data.front() = -0.0f;
-        chunk->sdf_data.back() = std::numeric_limits<float>::denorm_min();
-        expected_samples += chunk->sdf_data.size() + chunk->heightmap_data.size();
-    }
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    for (const bool ownership : {false, true}) {
-        SCOPED_TRACE(ownership);
-        const auto text = SerializeWorldStreamingStateSnapshotJson(original, ownership);
-        WorldStreamingState restored;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(decoder.load(text, restored, errors));
-        EXPECT_TRUE(errors.empty());
-        // This counts the production path that avoids allocating one JSON
-        // value per terrain sample, independently of machine speed or ASan.
-        EXPECT_EQ(decoder.direct_terrain_samples(), expected_samples);
-        EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(restored, ownership), text);
-        WorldStreamingState wrapped;
-        ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(text, wrapped, errors));
-        EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(wrapped, ownership), text);
-    }
-}
-
-TEST(PersistenceHardening, SnapshotDirectTerrainParsingKeepsNumericConversionsAndUnknownFields) {
-    WorldStreamingState original;
-    AddRichChunk(original, {0, 0, 0}, ChunkState::Ready, 1u);
-    auto snapshot = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original));
-    auto& value = snapshot["chunks"][0];
-    value["sdf_data"] = {-2, std::uint64_t{1} << 40, -0.0, 0.1, 1e-38};
-    value["heightmap_data"] = {3.25, 0, -5};
-    // These similarly named arrays belong to unknown metadata, not chunk terrain.
-    value["extra"] = {{"sdf_data", {nullptr, false, "unknown"}},
-                      {"heightmap_data", {{"nested", 1}}}};
-    snapshot["extra"] = {{"chunks", {{{"sdf_data", {true}}}}}};
-    const auto expected_sdf = value.at("sdf_data").get<std::vector<float>>();
-    const auto expected_heightmap = value.at("heightmap_data").get<std::vector<float>>();
-    // Exercise arbitrary field order without changing the serialized contract.
-    std::string reordered = "{";
-    for (auto entry = snapshot.rbegin(); entry != snapshot.rend(); ++entry) {
-        if (reordered.size() > 1)
-            reordered += ',';
-        reordered += nlohmann::json(entry.key()).dump() + ':' + entry.value().dump();
-    }
-    reordered += '}';
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    WorldStreamingState restored;
-    std::vector<std::string> errors;
-    ASSERT_TRUE(decoder.load(reordered, restored, errors));
-    EXPECT_EQ(decoder.direct_terrain_samples(), expected_sdf.size() + expected_heightmap.size());
-    const auto chunk = restored.find_chunk(IVec3(0, 0, 0));
-    ASSERT_NE(chunk, nullptr);
-    EXPECT_EQ(chunk->sdf_data, expected_sdf);
-    EXPECT_EQ(chunk->heightmap_data, expected_heightmap);
-}
-
-TEST(PersistenceHardening, SnapshotTerrainFallbackPreservesDuplicateKeysAndLegacyContainers) {
-    WorldStreamingState original;
-    AddRichChunk(original, {0, 0, 0}, ChunkState::Ready, 1u);
-    const auto canonical = SerializeWorldStreamingStateSnapshotJson(original);
-    auto snapshot = nlohmann::json::parse(canonical);
-    const auto chunk_text = snapshot.at("chunks")[0].dump();
-    std::vector<std::string> inputs;
-    for (const char* duplicate :
-         {"\"sdf_data\":[null],", "\"sdf_data\":[99],", "\"heightmap_data\":{},"}) {
-        auto text = snapshot.dump();
-        const auto start = text.find(chunk_text);
-        ASSERT_NE(start, std::string::npos);
-        text.insert(start + 1, duplicate);
-        inputs.push_back(std::move(text));
-    }
-    auto duplicate_chunks = snapshot.dump();
-    duplicate_chunks.insert(1, "\"chunks\":false,");
-    inputs.push_back(std::move(duplicate_chunks));
-    // The general loader historically iterates object values as well as arrays.
-    snapshot["chunks"] = {{"legacy", snapshot.at("chunks")[0]}};
-    inputs.push_back(snapshot.dump());
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    for (const auto& text : inputs) {
-        SCOPED_TRACE(text);
-        WorldStreamingState restored;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(decoder.load(text, restored, errors));
-        EXPECT_EQ(decoder.direct_terrain_samples(), 0u);
-        EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(restored), canonical);
-    }
-}
-
-TEST(PersistenceHardening, SnapshotTerrainParsingRefusesMalformedSamplesWithoutPartialState) {
-    WorldStreamingState original;
-    PopulateRichWorld(original);
-    const auto canonical = SerializeWorldStreamingStateSnapshotJson(original);
-    const auto snapshot = nlohmann::json::parse(canonical);
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    WorldStreamingState restored;
-    std::vector<std::string> errors;
-    ASSERT_TRUE(decoder.load(canonical, restored, errors));
-    EXPECT_GT(decoder.direct_terrain_samples(), 0u);
-    std::vector<std::string> invalid;
-    for (const char* field : {"sdf_data", "heightmap_data"}) {
-        for (const char* malformed : {"null",
-                                      "true",
-                                      "3",
-                                      "\"bad\"",
-                                      "{}",
-                                      "[null]",
-                                      "[false]",
-                                      "[\"bad\"]",
-                                      "[[1]]",
-                                      "[{}]"}) {
-            auto changed = snapshot;
-            changed["chunks"][1][field] = nlohmann::json::parse(malformed);
-            invalid.push_back(changed.dump());
-        }
-        auto missing = snapshot;
-        missing["chunks"][1].erase(field);
-        invalid.push_back(missing.dump());
-    }
-    for (const char* malformed : {"null", "true", "3", "\"bad\"", "[]"}) {
-        auto changed = snapshot;
-        changed["chunks"][1] = nlohmann::json::parse(malformed);
-        invalid.push_back(changed.dump());
-    }
-    invalid.push_back(canonical.substr(0, canonical.size() / 2));
-    invalid.push_back(canonical + "partial");
-    auto duplicate = snapshot;
-    duplicate["chunks"][1] = duplicate["chunks"][0];
-    invalid.push_back(duplicate.dump());
-    auto count_mismatch = snapshot;
-    count_mismatch["chunk_count"] = 0;
-    invalid.push_back(count_mismatch.dump());
-    for (const auto& text : invalid) {
-        SCOPED_TRACE(text);
-        errors.clear();
-        EXPECT_FALSE(decoder.load(text, restored, errors));
-        EXPECT_TRUE(restored.empty());
-        EXPECT_FALSE(errors.empty());
-        EXPECT_EQ(decoder.direct_terrain_samples(), 0u);
-    }
-    errors.clear();
-    ASSERT_TRUE(decoder.load(canonical, restored, errors));
-    EXPECT_GT(decoder.direct_terrain_samples(), 0u);
-    EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(restored), canonical);
-}
-
-TEST(PersistenceHardening, SnapshotNumericTypesMatchAcrossFastFallbackAndLegacyContainers) {
-    WorldStreamingState original;
-    PopulateRichWorld(original);
-    const auto canonical = SerializeWorldStreamingStateSnapshotJson(original);
-    const auto snapshot = nlohmann::json::parse(canonical);
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    // Legacy water initialization consumes hash-map order. Stage and commit in
-    // serialized order, including the historical object-valued chunks fallback.
-    for (const bool object_container : {false, true}) {
-        auto document = snapshot;
-        if (object_container)
-            document["chunks"] = {{"a", snapshot["chunks"][2]},
-                                  {"b", snapshot["chunks"][0]},
-                                  {"c", snapshot["chunks"][1]}};
-        WorldStreamingState expected;
-        for (const auto& record : document["chunks"]) {
-            ASSERT_TRUE(expected.insert_chunk(
-                original.find_chunk(record["chunk_id"].get<Luminumbra::ChunkID>())));
-        }
-        WorldStreamingState restored;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(decoder.load(document.dump(), restored, errors));
-        const auto expected_order = expected.snapshot_chunks();
-        const auto restored_order = restored.snapshot_chunks();
-        ASSERT_EQ(restored_order.size(), expected_order.size());
-        for (std::size_t i = 0; i < expected_order.size(); ++i) {
-            EXPECT_EQ(restored_order[i]->get_id(), expected_order[i]->get_id());
-        }
-    }
-    for (const char* field : {"schema", "order_contract"}) {
-        for (const bool missing : {false, true}) {
-            auto changed = snapshot;
-            if (missing)
-                changed.erase(field);
-            else
-                changed[field] = "unsupported";
-            WorldStreamingState restored;
-            std::vector<std::string> errors;
-            ASSERT_TRUE(decoder.load(canonical, restored, errors));
-            EXPECT_FALSE(decoder.load(changed.dump(), restored, errors));
-            EXPECT_TRUE(restored.empty());
-            EXPECT_FALSE(errors.empty());
-            EXPECT_EQ(decoder.direct_terrain_samples(), 0u);
-        }
-    }
-    for (const char* field :
-         {"sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
-        for (const char* malformed : {"null",
-                                      "false",
-                                      "3",
-                                      "{}",
-                                      "[false]",
-                                      "[true]",
-                                      "[null]",
-                                      "[{}]",
-                                      "[[1]]",
-                                      "[\"bad\"]"}) {
-            for (const bool legacy_container : {false, true}) {
-                auto changed = snapshot;
-                changed["chunks"][1][field] = nlohmann::json::parse(malformed);
-                if (legacy_container) {
-                    changed["chunks"] = {{"first", changed["chunks"][0]},
-                                         {"last", changed["chunks"][1]},
-                                         {"third", changed["chunks"][2]}};
-                }
-                auto text = changed.dump();
-                // Force the last-key-wins fallback with an earlier valid key,
-                // leaving the final malformed value as the one actually read.
-                if (!legacy_container) {
-                    const auto chunk_start = text.find(changed["chunks"][1].dump());
-                    ASSERT_NE(chunk_start, std::string::npos);
-                    text.insert(chunk_start + 1, std::string("\"") + field + "\":[1],");
-                }
-                SCOPED_TRACE(std::string(field) + " " + malformed);
-                WorldStreamingState restored;
-                std::vector<std::string> errors;
-                ASSERT_TRUE(decoder.load(canonical, restored, errors));
-                EXPECT_FALSE(decoder.load(text, restored, errors));
-                EXPECT_TRUE(restored.empty());
-                EXPECT_FALSE(errors.empty());
-                EXPECT_EQ(decoder.direct_terrain_samples(), 0u);
-                errors.clear();
-                ASSERT_TRUE(decoder.load(canonical, restored, errors));
-                EXPECT_TRUE(errors.empty());
-                EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(restored), canonical);
-            }
-        }
-    }
-}
-
-TEST(PersistenceHardening, SnapshotTerrainParsingHandlesEmptyWorldAndEmptyArrays) {
-    Luminumbra::Persistence::WorldStreamingSnapshotDecoder decoder;
-    WorldStreamingState original;
-    for (const bool populated : {false, true}) {
-        if (populated)
-            original.get_or_create_chunk({0, 0, 0});
-        const auto text = SerializeWorldStreamingStateSnapshotJson(original);
-        WorldStreamingState restored;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(decoder.load(text, restored, errors));
-        EXPECT_EQ(decoder.direct_terrain_samples(), 0u);
-        EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(restored), text);
-    }
-}
-
 TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndependent) {
     Chunk chunk({0, 0, 0});
     const auto seed_generation = chunk.water_seed_edit_generation();
@@ -593,6 +336,62 @@ TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndepende
     EXPECT_EQ(chunk.water_seed_edit_generation(), seed_generation + 1u);
     EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
     EXPECT_TRUE(chunk.has_water_authority());
+}
+
+TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority) {
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool saved : {false, true}) {
+            SCOPED_TRACE(terrain_edited);
+            SCOPED_TRACE(saved);
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            if (terrain_edited) {
+                chunk->mark_voxel_data_dirty();
+            }
+            chunk->mark_water_state_dirty();
+            chunk->set_water_authority();
+            if (saved) {
+                chunk->clear_voxel_data_dirty();
+            }
+            const auto depths = chunk->water_depth_mm;
+            const auto flux = chunk->water_edge_flux;
+            P::RegionContentHasher before;
+            before.append(*chunk);
+            chunk->mark_sdf_generated_current_params();
+            chunk->clear_voxel_data_dirty_after_generation();
+            EXPECT_TRUE(chunk->has_water_sim.load());
+            EXPECT_TRUE(chunk->has_water_authority());
+            EXPECT_TRUE(chunk->has_simulation_authority());
+            EXPECT_TRUE(chunk->needs_authority());
+            EXPECT_FALSE(chunk->has_terrain_authority());
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(chunk->water_depth_mm, depths);
+            EXPECT_EQ(chunk->water_edge_flux, flux);
+            P::RegionContentHasher after;
+            after.append(*chunk);
+            EXPECT_FALSE(after.empty());
+            EXPECT_EQ(after.water_value(), before.water_value());
+            const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+            const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
+            EXPECT_EQ(record["water_authority"], "generated");
+            EXPECT_EQ(record["authority"]["terrain_edited"], false);
+            EXPECT_EQ(record["authority"]["water_owned"], true);
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+            ASSERT_TRUE(errors.empty());
+            const auto loaded = restored.find_chunk(chunk->get_id());
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_TRUE(loaded->has_water_authority());
+            EXPECT_FALSE(loaded->has_terrain_authority());
+            EXPECT_TRUE(loaded->same_water_state(*chunk));
+            EXPECT_EQ(P::ComputeRegionContentHash(restored), P::ComputeRegionContentHash(original));
+            chunk->clear_water_data();
+            EXPECT_FALSE(chunk->has_water_authority());
+            EXPECT_FALSE(chunk->has_simulation_authority());
+            EXPECT_FALSE(chunk->needs_authority());
+        }
+    }
 }
 
 TEST(PersistenceHardening, AuthorityStampObservesSolverBookkeepingWithoutArrayRevision) {
@@ -732,7 +531,9 @@ TEST(PersistenceHardening, AuthoritySnapshotsKeepTerrainWaterAndRegenerableOwner
                 EXPECT_TRUE(errors.empty());
                 const auto restored = loaded.find_chunk(chunk->get_id());
                 ASSERT_NE(restored, nullptr);
-                EXPECT_EQ(restored->sdf_provenance(), chunk->sdf_provenance());
+                EXPECT_EQ(restored->has_terrain_authority(), terrain_edited);
+                EXPECT_EQ(restored->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited,
+                          terrain_edited || water_owned);
                 EXPECT_EQ(restored->has_water_authority(), water_owned);
                 EXPECT_EQ(restored->has_simulation_authority(), terrain_edited || water_owned);
                 EXPECT_FALSE(restored->is_voxel_data_dirty());
@@ -750,14 +551,14 @@ TEST(PersistenceHardening, AuthoritySnapshotsKeepTerrainWaterAndRegenerableOwner
 TEST(PersistenceHardening, AuthorityMetadataIsOptInAndKeepsLegacyBytesAndCursorHashes) {
     WorldStreamingState original;
     const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_voxel_data_dirty();
+    chunk->mark_water_data_dirty();
     const auto legacy = SerializeWorldStreamingStateSnapshotJson(original);
     const auto legacy_world = ComputeWorldStreamingStateHash(original);
     const auto legacy_sub = ComputeWorldStreamingStateSubHashes(original);
     constexpr std::uint64_t cursor = (std::uint64_t{1} << 63) + 7u;
     const auto scheduled_world = ComputeWorldStreamingStateHash(original, cursor);
     const auto scheduled_sub = ComputeWorldStreamingStateSubHashes(original, cursor);
-    chunk->mark_voxel_data_dirty();
-    chunk->mark_water_data_dirty();
     EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(original), legacy);
     EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(original, false), legacy);
     EXPECT_EQ(ComputeWorldStreamingStateHash(original), legacy_world);
@@ -778,7 +579,7 @@ TEST(PersistenceHardening, AuthorityMetadataIsOptInAndKeepsLegacyBytesAndCursorH
     ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(legacy, loaded, errors));
     const auto restored = loaded.find_chunk(chunk->get_id());
     ASSERT_NE(restored, nullptr);
-    EXPECT_FALSE(restored->has_simulation_authority());
+    EXPECT_TRUE(restored->has_simulation_authority());
     EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded), legacy);
 }
 
@@ -797,12 +598,15 @@ TEST(PersistenceHardening, LegacyAuthorityPolicyMigratesWaterOnlyWhenRequested) 
                 {.terrain_edited = terrain_edited, .migrate_legacy_water = migrate_water}));
             const auto restored = loaded.find_chunk(chunk->get_id());
             ASSERT_NE(restored, nullptr);
-            EXPECT_EQ(restored->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited,
-                      terrain_edited);
+            EXPECT_EQ(restored->has_terrain_authority(), terrain_edited);
             EXPECT_EQ(restored->has_water_authority(), migrate_water);
             EXPECT_FALSE(restored->is_voxel_data_dirty());
             EXPECT_TRUE(restored->same_water_state(*chunk));
-            EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded), legacy);
+            auto expected = nlohmann::json::parse(legacy);
+            if (migrate_water) {
+                expected["chunks"][0]["water_state"]["terrain_authoritative"] = terrain_edited;
+            }
+            EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded), expected.dump(4) + '\n');
         }
     }
     chunk->has_water_sim.store(false);
@@ -897,6 +701,54 @@ TEST(PersistenceHardening, MalformedAuthorityMetadataRefusesTheWholeSnapshot) {
     inconsistent = owned;
     inconsistent["authority"]["water_owned"] = false;
     reject_record(inconsistent);
+    inconsistent = owned;
+    inconsistent["water_state"]["terrain_authoritative"] = "true";
+    reject_record(inconsistent);
+    inconsistent["water_state"]["terrain_authoritative"] = false;
+    reject_record(inconsistent);
+}
+
+TEST(PersistenceHardening, WaterAuthorityMetadataRejectsMalformedValuesForEitherTerrainState) {
+    for (const bool terrain_edited : {false, true}) {
+        SCOPED_TRACE(terrain_edited);
+        WorldStreamingState original;
+        const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+        if (terrain_edited) {
+            chunk->mark_voxel_data_dirty();
+        }
+        chunk->mark_water_data_dirty();
+        const auto plain = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+        auto compact = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
+        compact["chunks"][0]["authority"] = plain["chunks"][0]["authority"];
+        compact["chunks"][0]["water_authority"] = plain["chunks"][0]["water_authority"];
+        for (const auto& invalid : {nlohmann::json(nullptr),
+                                    nlohmann::json(false),
+                                    nlohmann::json(true),
+                                    nlohmann::json(1),
+                                    nlohmann::json(1.5),
+                                    nlohmann::json::object(),
+                                    nlohmann::json::array(),
+                                    nlohmann::json(""),
+                                    nlohmann::json("unknown")}) {
+            SCOPED_TRACE(invalid.dump());
+            for (auto document : {plain, compact}) {
+                document["chunks"][0]["water_authority"] = invalid;
+                WorldStreamingState restored;
+                restored.get_or_create_chunk({1, 0, 0});
+                std::vector<std::string> errors;
+                EXPECT_FALSE(
+                    LoadWorldStreamingStateSnapshotJson(document.dump(), restored, errors));
+                EXPECT_TRUE(restored.empty());
+                EXPECT_FALSE(errors.empty());
+                if (!document.contains("record_format")) {
+                    errors.clear();
+                    EXPECT_FALSE(P::ValidateWorldStreamingChunkFormatJson(
+                        document["chunks"][0].dump(), errors));
+                    EXPECT_FALSE(errors.empty());
+                }
+            }
+        }
+    }
 }
 
 TEST(PersistenceHardening, WaterRetirementAndOmittedSnapshotPreserveTerrainAuthority) {
@@ -1067,6 +919,11 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
                                   "max_water_delta_last_tick",
                                   "ticks_below_threshold"}) {
             projected[field] = snapshot["chunks"][0].at(field);
+        }
+        if (!chunk->has_terrain_authority()) {
+            for (const char* field : {"sdf_data", "heightmap_data", "material_data"}) {
+                projected[field] = nlohmann::json::array();
+            }
         }
         contents.push_back(std::move(projected));
         hasher.append(*chunk);

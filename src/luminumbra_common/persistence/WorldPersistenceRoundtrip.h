@@ -78,33 +78,24 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
+// Process-local exact input identity for the canonical chunk serializer. Never persisted.
+std::string ChunkSnapshotInputBytes(const Chunk& chunk);
+std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 // Authority snapshots retain ownership explicitly. Legacy callers keep their byte protocol.
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
-    bool terrain_edited = false;
+    bool terrain_edited = true;
     bool migrate_legacy_water = false;
     bool validate_record_authority = false;
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
 std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water = false);
-// Decodes the same snapshot contract without boxing terrain samples as JSON values.
-// The const diagnostic counts samples decoded directly in the last successful load;
-// it is zero after failure or when a noncanonical input needs the general decoder.
-class WorldStreamingSnapshotDecoder {
-public:
-    bool load(const std::string& json_text,
-              WorldStreamingState& out_state,
-              std::vector<std::string>& errors,
-              const ChunkAuthorityLoadPolicy& authority = {});
-    [[nodiscard]] std::size_t direct_terrain_samples() const {
-        return m_directTerrainSamples;
-    }
-
-private:
-    std::size_t m_directTerrainSamples = 0;
-};
+// Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
+// (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
+// below accepts this form and the plain-JSON form.
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,

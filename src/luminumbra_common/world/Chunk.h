@@ -36,6 +36,25 @@ enum class ChunkSdfProvenance : u8 {
     LoadedOrEdited,
 };
 
+// One queued id per dirty chunk; storage is bounded by the world's resident and
+// parked inventories. The owner drains it after simulation, without scanning them.
+class ChunkWaterChanges {
+public:
+    void enqueue(ChunkID id) {
+        const std::lock_guard lock(m_mutex);
+        m_pending.push_back(id);
+    }
+    void take(std::vector<ChunkID>& pending) {
+        const std::lock_guard lock(m_mutex);
+        pending.clear();
+        pending.swap(m_pending);
+    }
+
+private:
+    std::mutex m_mutex;
+    std::vector<ChunkID> m_pending;
+};
+
 struct VoxelVertex {
     Vec3 position;
     Vec3 normal;
@@ -82,6 +101,7 @@ public:
     // successful save clears it again.
     void mark_voxel_data_dirty() {
         advance_water_seed_edit_generation();
+        m_terrain_authority.store(true, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 revision = m_voxel_revision.load(std::memory_order_acquire);
@@ -132,24 +152,45 @@ public:
     // Owner-thread retirement after a column migration is durably committed.
     // Terrain ownership and geometry are preserved independently.
     void clear_water_data();
-    bool has_water_authority() const {
-        return m_water_authority.load(std::memory_order_acquire);
-    }
     bool has_simulation_authority() const {
-        return has_water_authority() || sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
+        return has_water_authority() || has_terrain_authority();
     }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
-        m_water_authority.store(false, std::memory_order_release);
+        m_terrain_authority.store(false, std::memory_order_release);
+        if (has_water_authority()) {
+            // Water divergence is sticky authority: a generation/promotion backfill of the
+            // terrain must not make the chunk regenerable again.
+            m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
+                                   std::memory_order_release);
+            u32 revision = m_voxel_revision.load(std::memory_order_acquire);
+            while (revision != std::numeric_limits<u32>::max() &&
+                   !m_voxel_revision.compare_exchange_weak(revision,
+                                                           revision + 1u,
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_acquire)) {}
+            // The representation changed. Persist it before clean durable eviction;
+            // its generated terrain remains excluded from the authority projection.
+            mark_dirty_for_save();
+            return;
+        }
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
         m_voxel_revision.store(0u, std::memory_order_release);
         m_voxel_data_dirty.store(false, std::memory_order_release);
     }
+    // Post-generation acknowledgement: a promoted/backfilled terrain is pure generation output,
+    // except on water-authoritative chunks where the dirty bit may carry unsaved water state.
+    void clear_voxel_data_dirty_after_generation() {
+        if (!has_water_authority()) {
+            clear_voxel_data_dirty();
+        }
+    }
     void mark_sdf_loaded_or_edited() {
         advance_water_seed_edit_generation();
+        m_terrain_authority.store(true, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 expected = 0u;
@@ -163,6 +204,140 @@ public:
         return m_voxel_revision.load(std::memory_order_acquire);
     }
 
+    // --- Durable water state ---
+    // Water fields (depth/flux/bed/sleep bookkeeping) are persisted evolution state. Every writer
+    // that changes depth, flux or bed calls mark_water_state_dirty(); sleep bookkeeping marks only
+    // chunks that already need authority. Dirty notifications also mark ownership and save data
+    // immediately, before SHIELD_WorldSystem::sync_water_authority() drains the notification queue.
+    void mark_water_state_dirty() {
+        mark_water_data_dirty();
+        u32 revision = m_water_revision.load(std::memory_order_acquire);
+        while (revision != std::numeric_limits<u32>::max() &&
+               !m_water_revision.compare_exchange_weak(
+                   revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
+        m_water_state_dirty.store(true, std::memory_order_release);
+        if (m_water_changes && !m_water_change_queued.exchange(true, std::memory_order_acq_rel))
+            m_water_changes->enqueue(m_id);
+    }
+    void bind_water_changes(const std::shared_ptr<ChunkWaterChanges>& changes) {
+        if (m_water_changes == changes)
+            return;
+        m_water_changes = changes;
+        m_water_change_queued.store(false, std::memory_order_release);
+        if (m_water_changes && is_water_state_dirty()) {
+            m_water_change_queued.store(true, std::memory_order_release);
+            m_water_changes->enqueue(m_id);
+        }
+    }
+    void acknowledge_water_change() {
+        m_water_change_queued.store(false, std::memory_order_release);
+    }
+    bool is_water_state_dirty() const {
+        return m_water_state_dirty.load(std::memory_order_acquire);
+    }
+    void clear_water_state_dirty() {
+        m_water_state_dirty.store(false, std::memory_order_release);
+    }
+    u32 water_revision() const {
+        return m_water_revision.load(std::memory_order_acquire);
+    }
+    // Sticky: set once the chunk's water state has diverged from worldgen initialisation.
+    void set_water_authority() {
+        m_water_authority.store(true, std::memory_order_release);
+        m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
+                               std::memory_order_release);
+        u32 expected = 0u;
+        m_voxel_revision.compare_exchange_strong(
+            expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+    bool has_water_authority() const {
+        return m_water_authority.load(std::memory_order_acquire);
+    }
+    bool has_terrain_authority() const {
+        return m_terrain_authority.load(std::memory_order_acquire);
+    }
+    // True when the chunk cannot be regenerated byte-identically from worldgen.
+    bool needs_authority() const {
+        return sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited || has_water_authority() ||
+               is_water_state_dirty();
+    }
+    // Re-arms the save-dirty bit WITHOUT touching provenance or the voxel revision (used to
+    // transfer water divergence into the existing save selection and to retry after a failed save).
+    void mark_dirty_for_save() {
+        m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
+    // Approximate heap footprint: sum of vector capacities * element size, including water and
+    // mesh buffers. Used for the parked-bytes budget.
+    std::size_t estimated_heap_bytes() const {
+        std::size_t bytes = 0;
+        bytes += sdf_data.capacity() * sizeof(f32);
+        bytes += heightmap_data.capacity() * sizeof(f32);
+        bytes += material_data.capacity() * sizeof(u8);
+        bytes += mesh_vertices.capacity() * sizeof(VoxelVertex);
+        bytes += mesh_indices.capacity() * sizeof(u32);
+        bytes += water_mesh_vertices.capacity() * sizeof(VoxelVertex);
+        bytes += water_mesh_indices.capacity() * sizeof(u32);
+        bytes += pending_mesh_vertices.capacity() * sizeof(VoxelVertex);
+        bytes += pending_mesh_indices.capacity() * sizeof(u32);
+        bytes += pending_water_mesh_vertices.capacity() * sizeof(VoxelVertex);
+        bytes += pending_water_mesh_indices.capacity() * sizeof(u32);
+        bytes += pending_sdf_data.capacity() * sizeof(f32);
+        bytes += pending_heightmap_data.capacity() * sizeof(f32);
+        bytes += pending_material_data.capacity() * sizeof(u8);
+        bytes += water_level_data.capacity() * sizeof(f32);
+        bytes += water_flow_data.capacity() * sizeof(Vec2);
+        bytes += water_sim_terrain_height.capacity() * sizeof(f32);
+        bytes += water_rest_level.capacity() * sizeof(f32);
+        bytes += water_depth_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_bed_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_edge_flux.capacity() * sizeof(std::int32_t);
+        bytes += water_src_mm.capacity() * sizeof(std::int32_t);
+        return bytes;
+    }
+    // Sim-truth footprint only (what a parked chunk keeps after normalize_for_park()).
+    std::size_t estimated_sim_bytes() const {
+        std::size_t bytes = 0;
+        bytes += sdf_data.capacity() * sizeof(f32);
+        bytes += heightmap_data.capacity() * sizeof(f32);
+        bytes += material_data.capacity() * sizeof(u8);
+        bytes += water_level_data.capacity() * sizeof(f32);
+        bytes += water_flow_data.capacity() * sizeof(Vec2);
+        bytes += water_sim_terrain_height.capacity() * sizeof(f32);
+        bytes += water_rest_level.capacity() * sizeof(f32);
+        bytes += water_depth_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_bed_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_edge_flux.capacity() * sizeof(std::int32_t);
+        bytes += water_src_mm.capacity() * sizeof(std::int32_t);
+        return bytes;
+    }
+    // Drops every render-side buffer and transient pipeline marker so a quiescent chunk can sit in
+    // the parked store. Sim truth (sdf/heightmap/material/water state) is untouched. The caller
+    // guarantees no job owns the chunk.
+    void normalize_for_park() {
+        has_collision.store(false, std::memory_order_release);
+        current_lod.store(-1, std::memory_order_release);
+        pending_lod.store(-1, std::memory_order_release);
+        applied_transition_faces.store(0, std::memory_order_release);
+        pending_mesh_ready.store(false, std::memory_order_release);
+        pending_mesh_failed.store(false, std::memory_order_release);
+        pending_promotion_ready.store(false, std::memory_order_release);
+        pending_promotion_failed.store(false, std::memory_order_release);
+        pending_generation_ready.store(false, std::memory_order_release);
+        water_mesh_generated.store(false, std::memory_order_release);
+        std::vector<VoxelVertex>().swap(mesh_vertices);
+        std::vector<u32>().swap(mesh_indices);
+        std::vector<VoxelVertex>().swap(water_mesh_vertices);
+        std::vector<u32>().swap(water_mesh_indices);
+        std::vector<VoxelVertex>().swap(pending_mesh_vertices);
+        std::vector<u32>().swap(pending_mesh_indices);
+        std::vector<VoxelVertex>().swap(pending_water_mesh_vertices);
+        std::vector<u32>().swap(pending_water_mesh_indices);
+        std::vector<f32>().swap(pending_sdf_data);
+        std::vector<f32>().swap(pending_heightmap_data);
+        std::vector<u8>().swap(pending_material_data);
+        set_state(ChunkState::Idle);
+    }
     // Call only after workers have drained, when adopting persisted authority.
     // Serialized staging flags cannot represent a job in the current process.
     void reset_pending_jobs() {
@@ -331,7 +506,12 @@ private:
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
     std::atomic<u64> m_hash_revision{0};
     std::atomic<u32> m_voxel_revision{0};
+    std::atomic<bool> m_water_state_dirty{false};
     std::atomic<bool> m_water_authority{false};
+    std::atomic<bool> m_terrain_authority{false};
+    std::shared_ptr<ChunkWaterChanges> m_water_changes;
+    std::atomic<bool> m_water_change_queued{false};
+    std::atomic<u32> m_water_revision{0};
 };
 
 } // namespace Luminumbra

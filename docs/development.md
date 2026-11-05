@@ -30,6 +30,8 @@ both Visual C++ and MSYS2 UCRT64 through `.github/workflows/windows-build.yml`.
 | `coverage` | GCC/Clang coverage instrumentation |
 | `debug-simo0` | Simulation optimization-parity investigation |
 
+In GNU Debug ASan builds, `luminumbra_client` uses `-O1` while retaining Debug assertions.
+
 Configure, build, and test a preset with matching names:
 
 ```sh
@@ -89,12 +91,17 @@ caches, grace-window generations and saves in progress. Devel receives frequent 
 does. Main's newest caches remain reserved even when old, so infrequent main
 pushes do not create more headroom. The hosted lanes use standard runners and the
 existing cache actions, with zero extra cache spend and no paid cache service.
+Fast compile also saves verified FetchContent sources under an exact dependency
+key, with a 500 MB uncompressed save cap and one retained generation per branch.
+Those two source generations add at most 1 GB to the 3.5 GB compiler-cache total,
+leaving 5 GB within the unchanged 9.5 GB cleanup budget for other caches and
+protected generations. See [fast hosted validation](ci/local-checks.md).
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
 only after CI, AddressSanitizer or Performance observations completes for a push
-to main/devel. CI saves the Linux and Diligent compiler caches and
+to main/devel. CI saves the Linux and Diligent compiler caches, fast dependency sources and
 clang-tidy shards; AddressSanitizer saves its compiler cache;
 Performance observations saves preview and paired compiler caches (its candidate
 cache save is also covered, though qualification capture currently runs manually).

@@ -30,8 +30,9 @@ share tag numbers. There are no assigned due dates or invented completion percen
   current-format saves lacking embedded packaged presets use frozen revision-6
   copies. Replication uses acknowledged deltas and radius-3 chunk AOI.
 - **Distant simulation:** Persisted clock, active-region ledger, edited-content digest
-  and scheduler-fault foundations are implemented. The durability and continuation
-  stack (indexed authority durability/rehydration, durable completed work and
+  and scheduler-fault foundations are implemented. Indexed authority durability and
+  rehydration are in preparation with native qualification pending. The continuation
+  stack (durable completed work and
   ground-object continuation, durable regional fields/weather/scent/energy, and regional
   foliage/water continuation with host persistence, issue #242), strict distant policy
   and distant creatures (S8, issue #251), remaining S9 closure, and the

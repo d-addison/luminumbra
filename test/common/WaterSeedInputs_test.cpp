@@ -1285,6 +1285,291 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
     }
 }
 
+TEST(WaterSeedInputs, RuntimeMutationsEnterAuthoritySnapshotsAndRegionHashes) {
+    for (const std::string_view mutation :
+         {"displacement", "bed", "rain", "source", "flux", "resize"}) {
+        SCOPED_TRACE(mutation);
+        SeedFixture fixture;
+        const auto chunk = fixture.chunks().begin()->second;
+        chunk->set_state(ChunkState::Idle);
+        chunk->mark_sdf_generated_current_params();
+        chunk->is_water_sleeping.store(true);
+        fixture.water().SetHydrology(true, 0, 0);
+        fixture.tick();
+        ASSERT_TRUE(chunk->has_water_sim.load());
+        ASSERT_FALSE(chunk->has_water_authority());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        chunk->water_bed_mm.assign(64, 4000);
+        chunk->water_depth_mm.assign(64, 0);
+        chunk->water_edge_flux.assign(128, 0);
+        chunk->water_level_data.assign(64, 4.0f);
+        chunk->water_sim_terrain_height.assign(64, 4.0f);
+        const Vec3 position = Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
+                              Vec3(8.0f, 0.0f, 8.0f);
+        WorldStreamingState original;
+        ASSERT_TRUE(original.insert_chunk(chunk));
+        const auto empty_hash = Persistence::ComputeRegionContentHash(original);
+        const auto revision = chunk->authority_hash_revision();
+        const auto voxel_revision = chunk->voxel_revision();
+        const auto seed_generation = chunk->water_seed_edit_generation();
+        (void)fixture.water().get_water_level_at(position.x, position.z);
+        (void)fixture.water().get_water_flow_at(position.x, position.z);
+        EXPECT_EQ(chunk->authority_hash_revision(), revision);
+        EXPECT_FALSE(chunk->has_water_authority());
+        if (mutation == "displacement") {
+            fixture.water().apply_displacement(position, 1.0f);
+        } else if (mutation == "bed") {
+            ASSERT_GT(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
+        } else if (mutation == "rain") {
+            fixture.water().SetHydrology(true, 10, 0);
+            fixture.tick();
+        } else if (mutation == "source") {
+            entt::registry sources;
+            const auto entity = sources.create();
+            sources.emplace<Components::TransformComponent>(entity).position = position;
+            sources.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 1.0f;
+            fixture.water().update(sources, fixture.chunks());
+        } else if (mutation == "flux") {
+            chunk->water_edge_flux[0] = 57;
+            chunk->is_water_sleeping.store(false);
+            fixture.tick();
+        } else {
+            fixture.water().SetSimResolution(16);
+            ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+        }
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->has_simulation_authority());
+        EXPECT_FALSE(chunk->has_terrain_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_GT(chunk->authority_hash_revision(), revision);
+        EXPECT_EQ(chunk->voxel_revision(), voxel_revision);
+        EXPECT_EQ(chunk->water_seed_edit_generation(), seed_generation);
+        Persistence::RegionContentHasher hasher;
+        hasher.append(*chunk);
+        EXPECT_FALSE(hasher.empty());
+        const auto hash = Persistence::ComputeRegionContentHash(original);
+        EXPECT_NE(hash, empty_hash);
+        const auto snapshot = Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
+        const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
+        EXPECT_EQ(record["authority"]["water_owned"], true);
+        EXPECT_EQ(record["water_authority"], "generated");
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+        ASSERT_TRUE(errors.empty());
+        const auto loaded = restored.find_chunk(chunk->get_id());
+        ASSERT_NE(loaded, nullptr);
+        EXPECT_TRUE(loaded->has_water_authority());
+        EXPECT_FALSE(loaded->has_terrain_authority());
+        EXPECT_TRUE(loaded->same_water_state(*chunk));
+        EXPECT_EQ(Persistence::ComputeRegionContentHash(restored), hash);
+        chunk->clear_voxel_data_dirty();
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_EQ(Persistence::ComputeRegionContentHash(original), hash);
+        EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*chunk), snapshot);
+    }
+}
+
+TEST(WaterSeedInputs, SleepBookkeepingPersistsOnlyWithDurableWater) {
+    for (const int resolution : {8, 16}) {
+        for (const int calm_ticks :
+             {0, 119, std::numeric_limits<int>::max() - 1, std::numeric_limits<int>::max()}) {
+            for (const bool durable : {false, true}) {
+                SCOPED_TRACE(resolution);
+                SCOPED_TRACE(calm_ticks);
+                SCOPED_TRACE(durable);
+                SeedFixture fixture;
+                auto& chunk = *fixture.chunks().begin()->second;
+                chunk.set_state(ChunkState::Idle);
+                chunk.mark_sdf_generated_current_params();
+                chunk.is_water_sleeping.store(true);
+                fixture.water().SetSimResolution(resolution);
+                fixture.water().SetHydrology(true, 0, 0);
+                fixture.tick(); // Pure initialization of an isolated sleeping chunk is regenerable.
+                ASSERT_FALSE(chunk.needs_authority());
+                if (durable) {
+                    chunk.mark_water_state_dirty(); // An earlier real water change, already saved.
+                    fixture.world().sync_water_authority();
+                    ASSERT_TRUE(chunk.has_water_authority());
+                    chunk.clear_voxel_data_dirty();
+                }
+                const auto cells =
+                    static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+                chunk.water_bed_mm.assign(cells, 4000);
+                chunk.water_depth_mm.assign(cells, 0);
+                chunk.water_edge_flux.assign(2 * cells, 0);
+                chunk.ticks_below_threshold = calm_ticks;
+                chunk.is_water_sleeping.store(false);
+                const auto revision = chunk.water_revision();
+                fixture.tick();
+                EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 0));
+                EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+                const int expected_ticks =
+                    calm_ticks == std::numeric_limits<int>::max() ? calm_ticks : calm_ticks + 1;
+                EXPECT_EQ(chunk.ticks_below_threshold, expected_ticks);
+                EXPECT_EQ(chunk.is_water_sleeping.load(), calm_ticks >= 119);
+                // Every case changes the counter or the sleep flag, but only durable water saves
+                // it.
+                EXPECT_EQ(chunk.is_water_state_dirty(), durable);
+                EXPECT_EQ(chunk.water_revision() != revision, durable);
+                fixture.world().sync_water_authority();
+                EXPECT_EQ(chunk.has_water_authority(), durable);
+                EXPECT_EQ(chunk.is_voxel_data_dirty(), durable);
+                if (!durable) {
+                    EXPECT_FALSE(chunk.needs_authority());
+                    continue;
+                }
+                WorldStreamingState saved;
+                ASSERT_TRUE(saved.insert_chunk(fixture.chunks().begin()->second));
+                WorldStreamingState restored;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+                    Persistence::SerializeWorldStreamingStateSnapshotJson(saved),
+                    restored,
+                    errors));
+                const auto loaded = restored.snapshot_chunks();
+                ASSERT_EQ(loaded.size(), 1u);
+                EXPECT_EQ(loaded.front()->ticks_below_threshold, chunk.ticks_below_threshold);
+                EXPECT_EQ(loaded.front()->is_water_sleeping.load(), chunk.is_water_sleeping.load());
+                EXPECT_TRUE(loaded.front()->needs_authority());
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, NeighborWakeMarksOnlyDurableWater) {
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable);
+        SeedFixture fixture(2);
+        fixture.water().SetSimResolution(8);
+        fixture.water().SetHydrology(true, 0, 0);
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            chunk->mark_sdf_generated_current_params();
+            chunk->is_water_sleeping.store(true);
+        }
+        fixture.tick();
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            (void)id;
+            ASSERT_FALSE(chunk->needs_authority());
+            chunk->water_bed_mm.assign(64, 4000);
+            chunk->water_depth_mm.assign(64, 0);
+            chunk->water_edge_flux.assign(128, 0);
+            chunk->is_water_sleeping.store(chunk->get_coords().x == -4);
+        }
+        const auto sleeping = fixture.world().find_streamed_chunk({-4, 0, -2});
+        const auto awake = fixture.world().find_streamed_chunk({-3, 0, -2});
+        ASSERT_TRUE(sleeping);
+        ASSERT_TRUE(awake);
+        if (durable) {
+            sleeping->mark_water_state_dirty(); // An earlier real water change, already saved.
+            fixture.world().sync_water_authority();
+            ASSERT_TRUE(sleeping->has_water_authority());
+            sleeping->clear_voxel_data_dirty();
+        }
+        const auto before = sleeping->water_revision();
+        const auto awake_before = awake->water_revision();
+        fixture.tick();
+        EXPECT_FALSE(sleeping->is_water_sleeping.load());
+        EXPECT_EQ(awake->ticks_below_threshold, 1);
+        EXPECT_EQ(awake->water_revision(), awake_before);
+        EXPECT_FALSE(awake->needs_authority());
+        if (durable) {
+            // Wake and subsequent bookkeeping are separate persisted mutations.
+            EXPECT_GE(sleeping->water_revision(), before + 2u);
+            EXPECT_TRUE(sleeping->is_water_state_dirty());
+        } else {
+            EXPECT_EQ(sleeping->water_revision(), before);
+            EXPECT_FALSE(sleeping->needs_authority());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, DrySlopeTentativeFlowLeavesPristineWaterClean) {
+    constexpr int kResolution = 8;
+    constexpr std::size_t kCells = std::size_t{kResolution} * kResolution;
+    for (const bool wet : {false, true}) {
+        SCOPED_TRACE(wet);
+        SeedFixture fixture;
+        auto& chunk = *fixture.chunks().begin()->second;
+        chunk.set_state(ChunkState::Idle);
+        chunk.mark_sdf_generated_current_params();
+        chunk.is_water_sleeping.store(true);
+        fixture.water().SetSimResolution(kResolution);
+        fixture.water().SetHydrology(true, 0, 0);
+        fixture.tick();
+        ASSERT_FALSE(chunk.needs_authority());
+        // Every internal +X edge faces a 1 m rise, so the pipe step proposes flow on each one and
+        // the outflow clamp of the dry source cell must return it to zero.
+        chunk.water_bed_mm.resize(kCells);
+        for (std::size_t cell = 0; cell != kCells; ++cell)
+            chunk.water_bed_mm[cell] =
+                4000 + 1000 * static_cast<std::int32_t>(cell % std::size_t{kResolution});
+        chunk.water_depth_mm.assign(kCells, 0);
+        if (wet)
+            chunk.water_depth_mm[kResolution - 1] = 500;
+        chunk.water_edge_flux.assign(2 * kCells, 0);
+        chunk.is_water_sleeping.store(false);
+        const auto revision = chunk.water_revision();
+        fixture.tick();
+        if (!wet) {
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(kCells, 0));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * kCells, 0));
+        } else {
+            EXPECT_LT(chunk.water_depth_mm[kResolution - 1], 500);
+        }
+        EXPECT_EQ(chunk.is_water_state_dirty(), wet);
+        EXPECT_EQ(chunk.water_revision() != revision, wet);
+        fixture.world().sync_water_authority();
+        EXPECT_EQ(chunk.has_water_authority(), wet);
+        EXPECT_EQ(chunk.needs_authority(), wet);
+    }
+}
+
+TEST(WaterSeedInputs, FluxOnlyChangesPersistWithoutDepthDelta) {
+    for (const int resolution : {16, 2, 8, 4, 16}) {
+        for (const int changed_edge : {-1, 0, 1, 2}) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(changed_edge);
+            SeedFixture fixture;
+            auto& chunk = *fixture.chunks().begin()->second;
+            chunk.set_state(ChunkState::Idle);
+            chunk.mark_sdf_generated_current_params();
+            chunk.is_water_sleeping.store(true);
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.tick();
+            ASSERT_FALSE(chunk.needs_authority());
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            chunk.water_bed_mm.assign(cells, 4000);
+            chunk.water_depth_mm.assign(cells, 0);
+            chunk.water_edge_flux.assign(2 * cells, 0);
+            if (changed_edge == 0)
+                chunk.water_edge_flux.front() = 57; // Internal momentum on a level dry bed.
+            else if (changed_edge == 1)
+                chunk.water_edge_flux.back() = 57; // Boundary momentum is cleared by the kernel.
+            else if (changed_edge == 2)
+                chunk.water_edge_flux.clear(); // Missing momentum is repaired before the step.
+            chunk.ticks_below_threshold = 0;
+            chunk.is_water_sleeping.store(false);
+            const auto revision = chunk.water_revision();
+            fixture.tick();
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 0));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+            EXPECT_EQ(chunk.max_water_delta_last_tick, 0.0f);
+            EXPECT_EQ(chunk.ticks_below_threshold, 1);
+            const bool changed = changed_edge >= 0;
+            EXPECT_EQ(chunk.is_water_state_dirty(), changed);
+            // A flux mutation also makes the subsequent calm-counter change durable.
+            EXPECT_EQ(chunk.water_revision(), revision + (changed ? 2u : 0u));
+            fixture.world().sync_water_authority();
+            EXPECT_EQ(chunk.has_water_authority(), changed);
+            EXPECT_EQ(chunk.is_voxel_data_dirty(), changed);
+        }
+    }
+}
+
 TEST(WaterSeedInputs, InvalidResolutionAndMissingIntegerArraysCannotWakeOrStep) {
     for (const int resolution : {0, 1, 3, 33, std::numeric_limits<int>::max()}) {
         SeedFixture fixture(2);

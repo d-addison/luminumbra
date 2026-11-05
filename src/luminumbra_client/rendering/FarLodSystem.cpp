@@ -680,6 +680,9 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
         return true;
     };
 
+    // The home tile is stream-validated before its first reduction only; later
+    // reductions keep it valid, and validation CRCs every brick it holds.
+    bool home_tile_validated = false;
     const auto overlay_authority = [&](const World::FarLodSdfSnapshot& reduction,
                                        bool update_home,
                                        const char* source_label) -> bool {
@@ -700,12 +703,15 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
         if (update_home) {
             std::string reduction_error;
             const auto reduced =
-                World::ReduceChunkSdfIntoFarTile(tile, reduction, &reduction_error);
+                home_tile_validated
+                    ? World::ReduceChunkSdfIntoValidatedFarTile(tile, reduction, &reduction_error)
+                    : World::ReduceChunkSdfIntoFarTile(tile, reduction, &reduction_error);
             if (reduced == World::FarLodSdfReduceResult::Error) {
                 outcome.error = std::string("failed to update home ") + source_label +
                                 " far SDF: " + reduction_error;
                 return false;
             }
+            home_tile_validated = true;
             outcome.changed = outcome.changed || reduced != World::FarLodSdfReduceResult::Unchanged;
         }
         return true;

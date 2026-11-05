@@ -183,6 +183,22 @@ def needs_heavy(path: str) -> bool:
     return path not in HEAVY_EXEMPT_FILES
 
 
+def needs_server_perf(path: str) -> bool:
+    # Server measurements share the common runtime, fixtures and build inputs.
+    # Client world code stays sensitive; other client implementation is unlinked.
+    item = PurePosixPath(path)
+    if (path.startswith("src/luminumbra_client/world/")
+            or item.suffix.lower() == ".cmake"
+            or item.name in {"CMakeLists.txt", "CMakePresets.json"}):
+        return True
+    if path.startswith(("docs/", "src/luminumbra_client/")):
+        return False
+    if path in {"README.md", "CONTRIBUTING.md", "LICENSE", ".editorconfig"}:
+        return False
+    # Unknown inputs stay on the measurement path, including new tooling.
+    return True
+
+
 def covered_python(path: str) -> bool:
     return path in COVERED_PYTHON_FILES
 
@@ -264,6 +280,27 @@ def classify(root: Path, event: str, base: str, head: str,
             "heavy_sensitive_paths" if heavy else "reviewed_presentation_or_docs")
 
 
+def classify_performance(root: Path, event: str, base: str, head: str,
+                         repository: str, head_repository: str, base_ref: str) -> bool:
+    if event != "pull_request" or base_ref != "devel":
+        return True
+    try:
+        if not repository or repository != head_repository or not base or not head:
+            raise ValueError("missing or untrusted PR identity")
+        shallow = subprocess.check_output(
+            ["git", "rev-parse", "--is-shallow-repository"], cwd=root, text=True,
+        ).strip()
+        if shallow != "false":
+            raise ValueError("shallow repository or unknown history depth")
+        paths = changed_paths(root, base, head)
+        if not paths:
+            raise ValueError("empty PR diff")
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        print(f"Cannot classify PR diff; running server performance: {error}", file=sys.stderr)
+        return True
+    return any(needs_server_perf(path) for path in paths)
+
+
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
     commands = [(test,) for test in PYTHON_TESTS]
     commands.extend(sorted(set(PYTHON_SELF_CHECKS.values())))
@@ -272,7 +309,7 @@ def python_test_commands(root: Path) -> list[tuple[str, ...]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("classify", "python-tests"))
+    parser.add_argument("mode", choices=("classify", "classify-performance", "python-tests"))
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--event", default=os.environ.get("CI_EVENT", ""))
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
@@ -288,10 +325,15 @@ def main() -> int:
             print("Running:", " ".join(command), flush=True)
             subprocess.run([sys.executable, "-B", *command], cwd=root, check=True)
         return 0
-    cpp, python, heavy, reason = classify(root, args.event, args.base, args.head,
-                           args.repository, args.head_repository, args.base_ref)
-    output = (f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
-              f"needs_heavy={str(heavy).lower()}\nheavy_reason={reason}\n")
+    if args.mode == "classify-performance":
+        performance = classify_performance(root, args.event, args.base, args.head,
+                                          args.repository, args.head_repository, args.base_ref)
+        output = f"needs_server_perf={str(performance).lower()}\n"
+    else:
+        cpp, python, heavy, reason = classify(root, args.event, args.base, args.head,
+                               args.repository, args.head_repository, args.base_ref)
+        output = (f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
+                  f"needs_heavy={str(heavy).lower()}\nheavy_reason={reason}\n")
     print(output, end="")
     if args.output:
         with args.output.open("a", encoding="utf-8") as stream:

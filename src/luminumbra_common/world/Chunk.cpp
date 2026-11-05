@@ -88,6 +88,11 @@ void Chunk::clear_water_data() {
     ticks_below_threshold = 0;
     water_mesh_dirty_ticks = 0;
     m_water_authority.store(false, std::memory_order_release);
+    clear_water_state_dirty();
+    if (!has_terrain_authority()) {
+        m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
+                               std::memory_order_release);
+    }
     m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
     m_voxel_data_dirty.store(true, std::memory_order_release);
 }

@@ -58,6 +58,14 @@ public:
     [[nodiscard]] ScalarDiffusionReport
     diffuse(std::size_t iterations, double diffusion_rate, const EdgeFilter& admits);
 
+    // Coordinate gates use the same edge order and admission rules as index filters.
+    using EdgeGate = std::function<bool(std::size_t, std::size_t, std::size_t, std::size_t)>;
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, const EdgeGate& gate);
+    // An explicit empty argument selects the unfiltered solver unambiguously.
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, std::nullptr_t);
+
 private:
     [[nodiscard]] std::size_t index(std::size_t x, std::size_t y) const;
     [[nodiscard]] bool can_exchange(std::size_t lhs, std::size_t rhs) const noexcept;

@@ -101,7 +101,9 @@ UCRT_ROUTE = (
     "github.event_name == 'workflow_dispatch'"
 )
 SERVER_ROUTE = (
-    "((github.event_name == 'pull_request' && github.base_ref == 'main') || "
+    "((github.event_name == 'pull_request' && (github.base_ref == 'main' || "
+    "(github.base_ref == 'devel' && (needs.changes.result != 'success' || "
+    "needs.changes.outputs.needs_server_perf != 'false')))) || "
     "(github.event_name == 'push' && "
     "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && "
     "github.event.before != '0000000000000000000000000000000000000000'))"
@@ -1209,7 +1211,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(fast, "if", 4), ci_event_condition())
         self.assertIsNone(value(fast, "needs", 4))
         self.assertNotIn("draft", fast)
-        self.assertNotIn("continue-on-error", fast)
+        for step in steps(fast):
+            if value(step, "- name", 6) != "Save fast dependency sources":
+                self.assertIsNone(value(step, "continue-on-error", 8))
         self.assertIn("fetch-depth: 0", fast)
 
     def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
@@ -1220,16 +1224,21 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
-        for step in steps(fast)[3:6]:
+        native_steps = {value(step, "- name", 6): step for step in steps(fast)}
+        for name in ("Install fast validation dependencies",
+                     "Configure GCC and Clang databases and generate headers",
+                     "Replay selected compiles and both tidy configurations"):
+            step = native_steps[name]
             self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
-        evidence = steps(fast)[6]
+        evidence = native_steps["Upload fast selection and replay evidence"]
         self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
         self.assertIn("uses: actions/upload-artifact@", evidence)
         self.assertIn("path: build/fast-checks-evidence.json", evidence)
         self.assertIn("if-no-files-found: error", evidence)
-        self.assertIn("--evidence-file build/fast-checks-evidence.json", steps(fast)[5])
+        self.assertIn("--evidence-file build/fast-checks-evidence.json",
+                      native_steps["Replay selected compiles and both tidy configurations"])
         for compiler in ("gcc", "clang"):
-            self.assertIn(f"cmake -S . -B build/fast-{compiler}", fast)
+            self.assertIn(f"cmake -C scratch/fast-{compiler}-init.cmake -S . -B build/fast-{compiler}", fast)
             self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
         self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
         for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
@@ -1244,7 +1253,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertNotIn("--preset", fast)
         self.assertNotIn("-Wno", fast)
 
-    def test_fast_lane_has_only_bounded_local_cache_and_no_required_consumers(self):
+    def test_fast_lane_has_bounded_caches_and_no_required_consumers(self):
         blocks = jobs(self.workflows["ci.yml"])
         fast = blocks["fast-compile"]
         self.assertIn("CCACHE_DIR: ${{ github.workspace }}/scratch/fast-ccache", fast)
@@ -1252,12 +1261,19 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("CCACHE_COMPILERCHECK: content", fast)
         self.assertIn('CCACHE_REMOTE_STORAGE: ""', fast)
         self.assertIn("ccache --max-size 250M", fast)
-        self.assertNotIn("actions/cache", fast)
-        self.assertNotIn("save", fast.lower())
+        cache_steps = [step for step in steps(fast) if "uses: actions/cache" in step]
+        self.assertEqual(len(cache_steps), 2)
+        self.assertTrue(all("path: scratch/fast-deps\n" in step for step in cache_steps))
         self.assertIn("Advisory during warning and duration calibration; never a required gate.", fast)
         for name, job in blocks.items():
             if name != "fast-compile":
                 self.assertNotIn("fast-compile", value(job, "needs", 4) or "")
+        for workflow in ("asan.yml", "performance.yml"):
+            self.assertNotIn("fast-compile", self.workflows[workflow])
+        asan = jobs(self.workflows["asan.yml"])
+        self.assertEqual(value(asan["asan-shard"], "needs", 4), "[changes, fast-lane]")
+        self.assertIn("needs.fast-lane.result == 'success'", asan["asan-shard"])
+        self.assertIn("test_offline_deps.py", asan["fast-lane"])
         for path in sorted((ROOT / ".github").rglob("*")):
             if path.is_file() and any(word in path.name for word in ("ruleset", "required")):
                 self.assertNotIn("Fast compile / GCC + clang-tidy", path.read_text())
@@ -1267,6 +1283,76 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIsNone(value(contracts, "if", 8))
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
             self.assertIn("tools/ci/" + suite, inventory)
+
+    def test_fast_source_cache_is_exact_verified_bounded_and_trusted_push_only(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        named = {value(step, "- name", 6): step for step in steps(fast)}
+        restore = named["Restore fast dependency sources"]
+        self.assertIn("uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", restore)
+        self.assertEqual(value(restore, "if", 8), "steps.route.outputs.native != 'false'")
+        self.assertNotIn("restore-keys:", restore)
+        key = value(restore, "key", 10)
+        self.assertTrue(key.startswith("fast-deps-v1-${{ runner.os }}-${{ hashFiles("))
+        for path in ("CMakeLists.txt", "vendor/CMakeLists.txt", "tools/ci/deps-lock.json",
+                     "tools/ci/offline_deps.py", "tools/ci/path_safety.py", "tools/ci/jolt_startup.py",
+                     "cmake/jolt_startup.cmake", "cmake/patches/jolt-startup.*"):
+            self.assertIn("'" + path + "'", key)
+        populate = named["Populate missing fast dependency sources"]
+        self.assertIn("steps.fast-deps.outputs.cache-hit != 'true'", value(populate, "if", 8))
+        self.assertIn("offline_deps.py snapshot", value(populate, "run", 8))
+        stage = named["Verify and stage isolated fast dependency sources"]
+        self.assertEqual(value(stage, "if", 8), "steps.route.outputs.native != 'false'")
+        script = value(stage, "run", 8)
+        self.assertIn("offline_deps.py stage --build-local", script)
+        self.assertIn("for compiler in gcc clang", script)
+        self.assertIn('--cache scratch/fast-deps/sources --lock scratch/fast-deps/lock.json', script)
+        self.assertIn('if [ "$bytes" -le 500000000 ]; then', script)
+        self.assertIn("du -sb scratch/fast-deps", script)
+        save = named["Save fast dependency sources"]
+        self.assertEqual(value(save, "continue-on-error", 8), "true")
+        condition = value(save, "if", 8)
+        for clause in ("success()", "github.event_name == 'push'", "github.ref == 'refs/heads/main'",
+                       "github.ref == 'refs/heads/devel'", "steps.stage-deps.outputs.cacheable == 'true'",
+                       "steps.fast-deps.outputs.cache-hit != 'true'"):
+            self.assertIn(clause, condition)
+        self.assertEqual(value(save, "key", 10), "${{ steps.fast-deps.outputs.cache-primary-key }}")
+        self.assertLess(steps(fast).index(save), steps(fast).index(
+            named["Configure GCC and Clang databases and generate headers"]))
+
+    @unittest.skipUnless(BASH, "Bash is required")
+    def test_fast_source_save_cap_and_staging_failures(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        stage, = [step for step in steps(fast)
+                  if value(step, "- name", 6) == "Verify and stage isolated fast dependency sources"]
+        script = value(stage, "run", 8)
+        stubs = '''
+        python3() {
+          calls=$((calls + 1))
+          [ "$calls" != "$FAIL_STAGE" ]
+        }
+        du() { printf '%s\\tscratch/fast-deps\\n' "$TEST_BYTES"; }
+        calls=0
+        '''
+        with tempfile.TemporaryDirectory() as directory:
+            output, summary = (Path(directory) / name for name in ("output", "summary"))
+            for size, failure in ((499999999, "none"), (500000000, "none"),
+                                  (500000001, "none"), (1, "1"), (1, "2")):
+                with self.subTest(size=size, failure=failure):
+                    output.write_text("")
+                    summary.write_text("")
+                    result = run_bash_script(textwrap.dedent(stubs) + script, env=dict(
+                        os.environ, GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary),
+                        TEST_BYTES=str(size), FAIL_STAGE=failure), capture_output=True, text=True, timeout=10)
+                    if failure != "none":
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(output.read_text(), "")
+                        self.assertEqual(summary.read_text(), "")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(output.read_text(), "cacheable=true\n" if size <= 500000000 else "")
+                        self.assertIn(str(size), summary.read_text())
+                        if size > 500000000:
+                            self.assertIn("::warning::", result.stdout)
 
     def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
         # ccache cannot cache precompiled-header or /Zi compiles; the lane already
@@ -1286,7 +1372,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         expected = {
             "changes": "a0f410921dde3b73c324ac7a624eaf11a4fcab9537c200d72647d9ef8bf0fac9",
             # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "306cf8a35ba0bf836205559a40ea0d9d1da3bdd08b28f2b0291787b698223494",
+            "linux": "e25d7604295d938fd64db26bd4ac357d1703a7789f4d854fc7a4c7b317a24327",
             "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
             "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
             "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
@@ -1530,7 +1616,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertEqual(value(ci["tidy"], "if", 4), ci_event_condition("(!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ")"))
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ (" + WINDOWS_GUARD + ") && (needs.changes.result == 'success' && needs.changes.outputs.head_sha != '' && !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + ") }}")
         perf = jobs(self.workflows["performance.yml"])
-        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
+        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
             value(perf["qualification-capture"], "if", 4),
             "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && "
@@ -1671,7 +1757,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                          'ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json\n'
                          'ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json\n'
                          '# Balance fixture and required-suite groups using recorded costs.\n'
-                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"\n'
+                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --timings tools/ci/asan_timings.json --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"\n'
                          '# Recheck the ordered roster in the same context immediately before CTest.\n'
                          'env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \\\n'
                          '  xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan')
@@ -3220,6 +3306,9 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
     def test_side_lanes_reuse_the_trusted_classifier_and_required_skip_pattern(self):
         performance = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
         reference = jobs(performance)["changes"]
+        reference = reference.split("      - name: Classify server performance paths\n", 1)[0]
+        reference = reference.replace(
+            "      needs_server_perf: ${{ steps.server-paths.outputs.needs_server_perf }}\n", "", 1)
         for filename in ("ci.yml", "asan.yml", "ucrt-attribution.yml"):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             classifier = jobs(workflow)["changes"]
