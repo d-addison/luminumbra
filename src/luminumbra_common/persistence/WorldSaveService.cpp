@@ -6455,6 +6455,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         std::map<std::string, MemberDigest> region_digests;
         std::set<ChunkID> decoded_ids;
+        constexpr std::size_t kMaxStagedRepairBytes = std::size_t{256} * 1024 * 1024;
+        std::size_t staged_repair_bytes = 0;
         const bool promote_legacy_water = !indexed && authoritative_inventory != nullptr;
         std::sort(region_files.begin(), region_files.end());
         for (const auto& path : region_files) {
@@ -6493,7 +6495,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         facts.loaded_or_edited &&
                         !AdmitChunkRecord(record, path, &errors, facts, &chunk))
                         return reject("");
-                    // Retain promotions and flag repairs until the upgrade save commits.
+                    // Retain promotions and flag repairs until the save that records them commits.
+                    // A pure validation (no inventory) re-derives repairs on every load, so it
+                    // never retains them, and loads bound the staged repair chunks by bytes.
                     const bool promoted =
                         chunk &&
                         (promote_legacy_water ? PromoteLegacyWaterRecord(*chunk, record)
@@ -6511,7 +6515,13 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         authoritative_inventory->push_back(facts.coords);
                     if (decoded_chunk_count)
                         ++*decoded_chunk_count;
-                    if (retain || promoted)
+                    const bool repaired_only = promoted && !promote_legacy_water;
+                    if (repaired_only && authoritative_inventory) {
+                        staged_repair_bytes += record.uncompressed_size;
+                        if (staged_repair_bytes > kMaxStagedRepairBytes)
+                            return reject("Saved world exceeds the flag repair staging budget");
+                    }
+                    if (retain || (promoted && (promote_legacy_water || authoritative_inventory)))
                         state.insert_chunk(chunk);
                     else if (chunk)
                         AdmittedChunkRecordCache().remember_decoded(ChunkRecordKeyOf(record),
