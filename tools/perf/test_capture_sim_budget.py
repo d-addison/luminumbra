@@ -43,6 +43,36 @@ def artifact() -> dict:
 
 
 class SimBudgetCaptureTests(unittest.TestCase):
+    def test_invalid_selected_preset_refuses_before_launch_or_evidence(self):
+        for preset in capture.PRESETS:
+            for invalid in (None, b'{', b'{"schema_rev":6,"schema_rev":7}', b'[]',
+                            b'{"generation_params":{"biomes":{"table":0}}}'):
+                with self.subTest(preset=preset, invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    (root / "data/common").mkdir(parents=True)
+                    presets = root / "worlds/atlas/presets"
+                    presets.mkdir(parents=True)
+                    for name in capture.PRESETS:
+                        (presets / f"{name}.json").write_text('{}')
+                    path = presets / f"{preset}.json"
+                    if invalid is None:
+                        path.unlink()
+                    else:
+                        path.write_bytes(invalid)
+                    binary = root / "server"
+                    binary.write_bytes(b"synthetic server")
+                    evidence = root / "evidence"
+                    with mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                            mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                                   "--evidence-dir", str(evidence)]), \
+                            mock.patch.object(capture.subprocess, "run") as launch, \
+                            contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as refused:
+                            capture.main()
+                        self.assertEqual(refused.exception.code, 1)
+                        launch.assert_not_called()
+                        self.assertFalse(evidence.exists())
+
     def test_capture_refuses_external_preset_references_before_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -242,8 +272,7 @@ class SimBudgetCaptureTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(capture.main(), 0)
             manifest = json.loads((evidence / "capture.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["fixture_hash"], fixture_hash(root / "data/common",
-                                                                   scope="headless-server"))
+            self.assertEqual(manifest["fixture_hash"], capture.capture_fixture_hash(root))
             self.assertEqual(manifest["preset_hash"], fixture_hash(root / "worlds/atlas/presets",
                                                                   reference_root=root / "data"))
             self.assertEqual(manifest["seed"], "1337")
@@ -265,7 +294,8 @@ class SimBudgetCaptureTests(unittest.TestCase):
                 (pool / "cairn.json").write_text('{"weight":1}')
                 presets = root / "worlds/atlas/presets"
                 presets.mkdir(parents=True)
-                (presets / "default.json").write_text("{}")
+                for preset in capture.PRESETS:
+                    (presets / f"{preset}.json").write_text("{}")
                 binary = root / "synthetic-server"
                 binary.write_bytes(b"synthetic server; never executed")
                 evidence = root / "evidence"
@@ -290,7 +320,7 @@ class SimBudgetCaptureTests(unittest.TestCase):
                             contextlib.redirect_stdout(io.StringIO()):
                         self.assertEqual(capture.main(), 0)
                     manifest = json.loads((evidence / "capture.json").read_text())
-                    self.assertEqual(manifest["fixture_hash"], fixture_hash(common, scope="headless-server"))
+                    self.assertEqual(manifest["fixture_hash"], capture.capture_fixture_hash(root))
                     self.assertEqual(manifest["preset_hash"], fixture_hash(presets, reference_root=root / "data"))
                     self.assertEqual([entry["preset"] for entry in manifest["runs"]], list(capture.PRESETS))
                     hashes.append((manifest["fixture_hash"], manifest["preset_hash"]))
@@ -345,7 +375,7 @@ class SimBudgetCaptureTests(unittest.TestCase):
                             self.assertEqual(capture.main(), 0)
                         manifest = json.loads((evidence / "capture.json").read_text())
                         self.assertEqual(manifest["fixture_hash"],
-                                         fixture_hash(root / "data/common", scope="headless-server"))
+                                         comparison.identity(root))
                         self.assertEqual(manifest["preset_hash"],
                                          fixture_hash(root / "worlds/atlas/presets", reference_root=root / "data"))
                         self.assertEqual(record["fixture_hash"], comparison.identity(root))
@@ -362,12 +392,16 @@ class SimBudgetCaptureTests(unittest.TestCase):
     def test_capture_refuses_fixture_changes_during_runs(self):
         systems = (Path(capture.__file__).resolve().parents[2] / "data/common/systems.json").read_bytes()
         data = artifact()
-        for changed in ("data/common/value.json", "worlds/atlas/presets/default.json"):
+        for changed in ("data/common/value.json", "worlds/atlas/presets/default.json",
+                        ".perf-controlled"):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / "data/common").mkdir(parents=True)
                 (root / "data/common/systems.json").write_bytes(systems)
-                (root / "worlds/atlas/presets").mkdir(parents=True)
+                presets = root / "worlds/atlas/presets"
+                presets.mkdir(parents=True)
+                for preset in capture.PRESETS:
+                    (presets / f"{preset}.json").write_text("{}")
                 (root / changed).write_text('{}')
                 binary = root / "server"
                 binary.write_bytes(b"synthetic server")
