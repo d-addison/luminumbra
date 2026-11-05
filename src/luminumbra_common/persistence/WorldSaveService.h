@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/GroundObjectStore.h"
 #include "world/WorldClock.h"
@@ -49,6 +50,8 @@ struct RegionDigestInputs {
     bool require_index = true;
     // Empty when the region holds no ground objects, preserving its existing digest.
     std::string ground_object_bytes{};
+    // Empty when the region owns no field state, preserving its existing digest.
+    std::string field_page_bytes{};
 };
 
 // One owner-thread digest operation admits the index once. Durable authority is cached by
@@ -176,6 +179,32 @@ public:
                                         const world::ActiveRegionLedger& ledger,
                                         std::vector<std::string>* errors,
                                         const std::stop_token& stop = {});
+
+    // Empty state removes field-pages.fpg; an absent member clears the load output.
+    static std::filesystem::path field_pages_path(const std::filesystem::path& save_dir);
+    static bool save_field_pages(const world::FieldPageState& state,
+                                 const std::filesystem::path& save_dir,
+                                 std::vector<std::string>* errors = nullptr);
+    class PreparedFieldWrite {
+    public:
+        bool prepare(const world::FieldPageState& state,
+                     std::vector<std::string>* errors = nullptr);
+        bool publish(const std::filesystem::path& save_dir,
+                     std::vector<std::string>* errors = nullptr) const;
+
+    private:
+        std::string m_bytes;
+        bool m_prepared = false;
+    };
+    static bool load_field_pages(world::FieldPageState& out,
+                                 const std::filesystem::path& save_dir,
+                                 std::vector<std::string>* errors = nullptr,
+                                 const std::stop_token& stop = {});
+    // Every initialized cell and evolution-state owner must have a ledger record.
+    static bool validate_field_pages(const std::filesystem::path& save_dir,
+                                     const world::ActiveRegionLedger& ledger,
+                                     std::vector<std::string>* errors,
+                                     const std::stop_token& stop = {});
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
