@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1243,6 +1247,8 @@ TEST(ActiveRegionLedgerTest, RecordAdmissionCountsAllRetainedExtensionsAtBoundar
     const auto limit = ActiveRegionLedger::kMaxRegions - 1;
     for (std::uint32_t index = 0; index + 1 < limit; ++index)
         ledger.mark_edited(CapacityKey(index), WorldClock{});
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
     ASSERT_TRUE(ledger.set_energy_age(CapacityKey(0), 7));
     ASSERT_TRUE(ledger.set_water_debts({{CapacityKey(0), 9}}));
     const std::array completed{RegionWork{CapacityKey(0), 1, 2, 3, 4}};
@@ -1391,38 +1397,58 @@ TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysCanLeaveAnEmptySchedule) {
     EXPECT_EQ(schedule.transitions, unfiltered.transitions);
 }
 
-TEST(ActiveRegionLedgerTest, LegacyFrozenHistoryRoundTripsWithCompletedWorkUntilRefreeze) {
+TEST(ActiveRegionLedgerTest, LegacyFrozenHistoryRoundTripsWithGroundExtensionsUntilRefreeze) {
     const auto original = FrozenLedger();
     const auto projected = original.encode();
     auto legacy = projected.substr(0, projected.size() - 8 - 11) + std::string(8, '\0');
     legacy[4] = 1;
     Seal(legacy);
-    ActiveRegionLedger restored;
-    std::string error;
-    ASSERT_TRUE(ActiveRegionLedger::decode(legacy, restored, error)) << error;
-    const std::array completed{RegionWork{kFar, 1, 0, 0, 0}};
-    restored.publish_completed_work(completed);
-    const auto bytes = restored.encode();
-    EXPECT_EQ(Version(bytes), 2u);
-    // Completed work preserves historical digests without declaring projection 2.
-    EXPECT_EQ(bytes.size(), legacy.size() + 4 + 26);
-    auto reopened = Reload(restored);
-    EXPECT_EQ(reopened.encode(), bytes);
-    EXPECT_EQ(reopened.records(), original.records());
-    EXPECT_EQ(reopened.completed_work(), restored.completed_work());
-    EXPECT_EQ(reopened.canonical_bytes(), restored.canonical_bytes());
+    // Allocator only, completed work only, and both extensions must preserve legacy history.
+    for (const unsigned extensions : {1u, 2u, 3u}) {
+        SCOPED_TRACE(extensions);
+        ActiveRegionLedger restored;
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(legacy, restored, error)) << error;
+        std::size_t extension_bytes = 0;
+        if (extensions & 1u) {
+            std::uint64_t id = 0;
+            ASSERT_TRUE(restored.allocate_persistent_id(id));
+            EXPECT_EQ(id, 1u);
+            extension_bytes += 14;
+        }
+        if (extensions & 2u) {
+            const std::array completed{RegionWork{.key = kFar,
+                                                  .region_ticks = 1,
+                                                  .entity_updates = 0,
+                                                  .water_cells = 0,
+                                                  .page_updates = 0}};
+            restored.publish_completed_work(completed);
+            extension_bytes += 26;
+        }
+        const auto bytes = restored.encode();
+        EXPECT_EQ(Version(bytes), 2u);
+        // The extension contains only ground TLVs, without declaring projection 2.
+        EXPECT_EQ(bytes.size(), legacy.size() + 4 + extension_bytes);
+        auto reopened = Reload(restored);
+        EXPECT_EQ(reopened.encode(), bytes);
+        EXPECT_EQ(reopened.records(), original.records());
+        EXPECT_EQ(reopened.next_persistent_id(), restored.next_persistent_id());
+        EXPECT_EQ(reopened.completed_work(), restored.completed_work());
+        EXPECT_EQ(reopened.canonical_bytes(), restored.canonical_bytes());
 
-    reopened.mark_edited(kFar, WorldClock(3));
-    for (std::uint64_t tick = 4; tick <= 6; ++tick)
-        Step(reopened, tick, 1);
-    ASSERT_EQ(reopened.records().at(kFar).frozen_at, 6u);
-    EXPECT_TRUE(reopened.completed_work().empty());
-    // Refreezing replaces the last historical digest and now declares projection 2.
-    EXPECT_EQ(reopened.encode().size(), legacy.size() + 4 + 7);
-    EXPECT_EQ(Reload(reopened).encode(), reopened.encode());
+        reopened.mark_edited(kFar, WorldClock(3));
+        for (std::uint64_t tick = 4; tick <= 6; ++tick)
+            Step(reopened, tick, 1);
+        ASSERT_EQ(reopened.records().at(kFar).frozen_at, 6u);
+        EXPECT_TRUE(reopened.completed_work().empty());
+        // Refreezing replaces the last historical digest and now declares projection 2.
+        const std::size_t allocator_bytes = (extensions & 1u) ? 14 : 0;
+        EXPECT_EQ(reopened.encode().size(), legacy.size() + 4 + allocator_bytes + 7);
+        EXPECT_EQ(Reload(reopened).encode(), reopened.encode());
+    }
 }
 
-TEST(ActiveRegionLedgerTest, RuntimeIdsAllocateSequentiallyFromOne) {
+TEST(ActiveRegionLedgerTest, PersistentIdsAllocateSequentiallyFromOne) {
     ActiveRegionLedger ledger;
     EXPECT_EQ(ledger.next_persistent_id(), 1u);
     std::uint64_t id = 0;
@@ -1433,18 +1459,80 @@ TEST(ActiveRegionLedgerTest, RuntimeIdsAllocateSequentiallyFromOne) {
     EXPECT_EQ(ledger.next_persistent_id(), 4u);
 }
 
-TEST(ActiveRegionLedgerTest, RuntimeIdsDoNotChangeEncodedBytes) {
-    ActiveRegionLedger ledger;
-    const auto bytes = ledger.encode();
-    EXPECT_EQ(Version(bytes), 1u);
-    EXPECT_EQ(bytes.size(), 56u + 8u);
-    std::uint64_t id = 0;
-    ASSERT_TRUE(ledger.allocate_persistent_id(id));
-    EXPECT_EQ(ledger.encode(), bytes);
-    EXPECT_EQ(Reload(ledger).next_persistent_id(), 1u);
+TEST(ActiveRegionLedgerTest, PersistentIdExhaustionRefusesWithoutChanging) {
+    const auto limit = ActiveRegionLedger::kPersistentIdLimit;
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(
+        ActiveRegionLedger::decode(Version2With(Tlv(1, LittleEndian(limit, 8))), restored, error))
+        << error;
+    EXPECT_EQ(restored.next_persistent_id(), limit);
+    std::uint64_t id = 42;
+    EXPECT_FALSE(restored.allocate_persistent_id(id));
+    EXPECT_EQ(id, 42u);
+    EXPECT_EQ(restored.next_persistent_id(), limit);
+    for (const std::uint64_t refused : {limit + 1, std::uint64_t{1}, std::uint64_t{0}})
+        ExpectRefused(Version2With(Tlv(1, LittleEndian(refused, 8))),
+                      ActiveRegionLedger::kCorruptMessage);
 }
 
-TEST(ActiveRegionLedgerTest, CanonicalBytesTrackRuntimeIdAndAreEmptyOnlyWhenFresh) {
+TEST(ActiveRegionLedgerTest, PersistentIdTlvShapeIsChecked) {
+    ExpectRefused(Version2With(Tlv(1, LittleEndian(5, 4))), ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(Version2With(Tlv(1, LittleEndian(5, 9))), ActiveRegionLedger::kCorruptMessage);
+    // Duplicate, reversed and unknown TLV types.
+    ExpectRefused(Version2With(Tlv(1, LittleEndian(5, 8)) + Tlv(1, LittleEndian(6, 8))),
+                  ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(Version2With(Tlv(2, std::string(1, '\x02')) + Tlv(1, LittleEndian(5, 8))),
+                  ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(Version2With(Tlv(3, std::string(1, '\x01'))),
+                  ActiveRegionLedger::kCorruptMessage);
+    // A redundant digest projection TLV without frozen history is refused.
+    ExpectRefused(Version2With(Tlv(2, std::string(1, '\x02'))),
+                  ActiveRegionLedger::kCorruptMessage);
+}
+
+TEST(ActiveRegionLedgerTest, PersistentIdOnlyEnvelopeRoundTripsByteIdentical) {
+    auto ledger = Distant();
+    std::uint64_t id = 0;
+    for (int i = 0; i < 3; ++i)
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 2u);
+    EXPECT_EQ(bytes.size(), 56u + 104u + 4u + 14u + 8u);
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, decoded, error)) << error;
+    EXPECT_EQ(decoded.next_persistent_id(), 4u);
+    EXPECT_EQ(decoded.encode(), bytes);
+}
+
+TEST(ActiveRegionLedgerTest, PersistentIdWithFrozenHistoryRoundTripsByteIdentical) {
+    auto ledger = FrozenLedger();
+    std::uint64_t id = 0;
+    for (int i = 0; i < 3; ++i)
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 2u);
+    EXPECT_EQ(bytes.size(), 56u + 104u + 4u + 21u + 8u);
+    // Ascending TLVs: type 1 (next id 4) then type 2 (projection 2).
+    EXPECT_EQ(bytes.substr(bytes.size() - 8 - 25, 25),
+              std::string("\x15\0\0\0", 4) + std::string("\x01\0\x08\0\0\0", 6) +
+                  LittleEndian(4, 8) + std::string("\x02\0\x01\0\0\0\x02", 7));
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, decoded, error)) << error;
+    EXPECT_EQ(decoded.next_persistent_id(), 4u);
+    EXPECT_EQ(decoded.encode(), bytes);
+}
+
+TEST(ActiveRegionLedgerTest, EncodeStaysVersionOneWhileNextIdIsOne) {
+    const ActiveRegionLedger fresh;
+    const auto bytes = fresh.encode();
+    EXPECT_EQ(Version(bytes), 1u);
+    EXPECT_EQ(bytes.size(), 56u + 8u);
+}
+
+TEST(ActiveRegionLedgerTest, CanonicalBytesTrackPersistentIdAndAreEmptyOnlyWhenFresh) {
     ActiveRegionLedger ledger;
     EXPECT_TRUE(ledger.canonical_bytes().empty());
     std::uint64_t id = 0;
@@ -1454,6 +1542,32 @@ TEST(ActiveRegionLedgerTest, CanonicalBytesTrackRuntimeIdAndAreEmptyOnlyWhenFres
     EXPECT_NE(one.find("|next_id:2"), std::string::npos);
     ASSERT_TRUE(ledger.allocate_persistent_id(id));
     EXPECT_NE(ledger.canonical_bytes(), one);
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
+    EXPECT_EQ(restored.canonical_bytes(), ledger.canonical_bytes());
+}
+
+TEST(ActiveRegionLedgerTest, AllocatorOnlyLedgerIsSavedAndReloads) {
+    const auto dir = Luminumbra::TestSupport::CreateUniqueTempDirectory("arl-allocator-only-");
+    ActiveRegionLedger ledger;
+    std::uint64_t id = 0;
+    for (int i = 0; i < 4; ++i)
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ASSERT_EQ(ledger.next_persistent_id(), 5u);
+    std::vector<std::string> save_errors;
+    EXPECT_TRUE(Luminumbra::Persistence::WorldSaveService::save_active_regions(
+        ledger, WorldClock{}, dir, &save_errors));
+    EXPECT_TRUE(save_errors.empty());
+    EXPECT_TRUE(std::filesystem::exists(
+        Luminumbra::Persistence::WorldSaveService::active_regions_path(dir)));
+    ActiveRegionLedger restored;
+    std::vector<std::string> load_errors;
+    EXPECT_TRUE(Luminumbra::Persistence::WorldSaveService::load_active_regions(
+        restored, dir, &load_errors));
+    EXPECT_TRUE(load_errors.empty());
+    EXPECT_EQ(restored.next_persistent_id(), 5u);
+    std::filesystem::remove_all(dir);
 }
 
 TEST(ActiveRegionLedgerTest, CompletedWorkIsDurableConsumedOnceAndEmptyReplacesIt) {
@@ -1504,13 +1618,16 @@ TEST(ActiveRegionLedgerTest, CompletedWorkCodecRefusesUnknownOwnerAndZeroTotalAt
     }
 }
 
-TEST(ActiveRegionLedgerTest, CompletedWorkEnergyAndWaterExtensionsRoundTripInAscendingOrder) {
+TEST(ActiveRegionLedgerTest, GroundEnergyAndWaterExtensionsRoundTripInAscendingOrder) {
     auto ledger = FrozenLedger();
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
     ASSERT_TRUE(ledger.set_energy_age(kFar, 7));
     ASSERT_TRUE(ledger.set_water_debts({{kFar, 9}}));
     const std::array completed{RegionWork{kFar, 1, 2, 3, 4}};
     ledger.publish_completed_work(completed);
-    const auto extensions = Tlv(2, std::string(1, '\x02')) + Tlv(4, EnergyAgePayload(1, kFar, 7)) +
+    const auto extensions = Tlv(1, LittleEndian(2, 8)) + Tlv(2, std::string(1, '\x02')) +
+                            Tlv(4, EnergyAgePayload(1, kFar, 7)) +
                             Tlv(5, EnergyAgePayload(1, kFar, 9)) +
                             Tlv(6, EnergyAgePayload(1, kFar, 10));
     const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
@@ -1520,29 +1637,29 @@ TEST(ActiveRegionLedgerTest, CompletedWorkEnergyAndWaterExtensionsRoundTripInAsc
     auto descending = encoded;
     const auto reversed =
         Tlv(6, EnergyAgePayload(1, kFar, 10)) + Tlv(5, EnergyAgePayload(1, kFar, 9));
-    descending.replace(offset + 4 + 7 + 26, reversed.size(), reversed);
+    descending.replace(offset + 4 + 14 + 7 + 26, reversed.size(), reversed);
     Seal(descending);
     ExpectRefused(descending, ActiveRegionLedger::kCorruptMessage);
     const auto loaded = Reload(ledger);
     EXPECT_EQ(loaded.encode(), encoded);
+    EXPECT_EQ(loaded.next_persistent_id(), 2u);
     EXPECT_EQ(loaded.energy_ages(), ledger.energy_ages());
     EXPECT_EQ(loaded.water_debts(), ledger.water_debts());
     EXPECT_EQ(loaded.completed_work(), ledger.completed_work());
     EXPECT_EQ(loaded.canonical_bytes(), ledger.canonical_bytes());
 }
 
-TEST(ActiveRegionLedgerTest, CompletedWorkRefusesTheOriginalFileCapWithoutMutation) {
+TEST(ActiveRegionLedgerTest, GroundSettersRefuseTheOriginalFileCapWithoutMutation) {
     ActiveRegionLedger ledger;
     for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
         ledger.mark_edited(CapacityKey(index), WorldClock{});
     const std::array completed{RegionWork{{0, 0}, 1, 0, 0, 0}};
     EXPECT_THROW(ledger.publish_completed_work(completed), std::length_error);
     EXPECT_TRUE(ledger.completed_work().empty());
-    const auto bytes = ledger.encode();
-    std::uint64_t id = 0;
-    EXPECT_TRUE(ledger.allocate_persistent_id(id));
-    EXPECT_EQ(id, 1u);
-    EXPECT_EQ(ledger.encode(), bytes);
+    std::uint64_t id = 42;
+    EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    EXPECT_EQ(id, 42u);
+    EXPECT_EQ(ledger.next_persistent_id(), 1u);
     EXPECT_TRUE(ledger.energy_ages().empty());
     EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
 }
@@ -1823,16 +1940,22 @@ TEST(ActiveRegionLedgerTest, CombinedExtensionsShareTheFileCapAndRefuseAtomicall
     for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
         ledger.mark_edited(CapacityKey(index), WorldClock{});
     const auto first = CapacityKey(0), second = CapacityKey(1), third = CapacityKey(2);
-    const auto fourth = CapacityKey(3);
     const ActiveRegionLedger::EnergyAges ages{{first, 1}, {second, 2}, {third, 3}};
     const ActiveRegionLedger::WaterDebts debts{{first, 4}, {second, 5}};
     ASSERT_TRUE(ledger.set_energy_ages(ages));
     ASSERT_TRUE(ledger.set_water_debts(debts));
-    // One missing record leaves 115 bytes for the extension block. These owners use 104.
+    std::uint64_t id = 42;
+    EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    EXPECT_EQ(id, 42u);
+    EXPECT_EQ(ledger.next_persistent_id(), 1u);
+    EXPECT_EQ(ledger.energy_ages(), ages);
+    EXPECT_EQ(ledger.water_debts(), debts);
+
+    ASSERT_TRUE(ledger.set_energy_ages({{first, 1}, {second, 2}}));
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
     const std::array completed{RegionWork{first, 1, 0, 0, 0}};
     EXPECT_THROW(ledger.publish_completed_work(completed), std::length_error);
     EXPECT_TRUE(ledger.completed_work().empty());
-    EXPECT_EQ(ledger.energy_ages(), ages);
     EXPECT_EQ(ledger.water_debts(), debts);
 
     ASSERT_TRUE(ledger.set_water_debts({}));
@@ -1840,14 +1963,13 @@ TEST(ActiveRegionLedgerTest, CombinedExtensionsShareTheFileCapAndRefuseAtomicall
     ledger.publish_completed_work(two_completed);
     EXPECT_FALSE(ledger.set_water_debts({{first, 4}}));
     EXPECT_TRUE(ledger.water_debts().empty());
-    EXPECT_FALSE(ledger.set_energy_age(fourth, 4));
-    auto four_ages = ages;
-    four_ages.emplace(fourth, 4);
-    EXPECT_FALSE(ledger.set_energy_ages(four_ages));
-    EXPECT_EQ(ledger.energy_ages(), ages);
+    EXPECT_FALSE(ledger.set_energy_age(third, 3));
+    EXPECT_FALSE(ledger.set_energy_ages(ages));
+    EXPECT_EQ(ledger.energy_ages(), (ActiveRegionLedger::EnergyAges{{first, 1}, {second, 2}}));
     EXPECT_EQ(ledger.completed_work(),
               (std::map<RegionKey, std::uint64_t>{{first, 1}, {second, 2}}));
-    EXPECT_EQ(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes - 11);
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
+    EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
 }
 
 } // namespace

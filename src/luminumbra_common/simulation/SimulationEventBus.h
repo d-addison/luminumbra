@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace luminumbra::simulation {
@@ -16,6 +18,9 @@ struct SimulationEvent {
     std::uint64_t sequence = 0;
     std::string topic;
     std::string payload;
+
+    [[nodiscard]] std::string canonical_bytes() const;
+    [[nodiscard]] std::size_t canonical_size() const;
 };
 
 struct EventBusReplayResult {
@@ -41,10 +46,12 @@ public:
     void clear();
     [[nodiscard]] std::size_t pending_count() const noexcept;
     [[nodiscard]] std::vector<SimulationEvent> pending_events() const;
+    // Canonical JSON event bytes plus one array separator per queued event of this topic.
+    [[nodiscard]] std::size_t pending_bytes(std::string_view topic) const;
     [[nodiscard]] std::uint64_t next_sequence() const noexcept {
         return next_sequence_;
     }
-    // Replace queued events in memory; retain subscribers, reset delivery progress.
+    // Replace queued events after loading; retain subscribers, reset delivery progress.
     void restore_pending(std::vector<SimulationEvent> events, std::uint64_t next_sequence);
 
 private:
@@ -58,6 +65,7 @@ private:
     std::vector<PendingEvent> pending_events_;
     // An interrupted batch stays at the front, ahead of callback publications.
     std::size_t pending_batch_size_ = 0;
+    std::map<std::string, std::size_t, std::less<>> pending_bytes_;
     std::deque<Handler> handlers_;
 };
 

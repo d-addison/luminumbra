@@ -3495,6 +3495,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "aether_state.efs",
                                               "chunks/region/world-manifest.json",
                                               "chunks/region/plant-entities.json",
+                                              "chunks/region/ground-objects.json",
                                               "chunks/region/active-regions.arl"};
     std::set<std::string> listed;
     for (const SnapshotMember& member : index.members) {
@@ -3990,6 +3991,64 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     return scope.commit(errors);
 }
 
+namespace {
+// Every object must lie in a region the ledger records and must not be spawned after the clock.
+bool GroundObjectsMatchLedger(const world::GroundObjectStore& store,
+                              const world::ActiveRegionLedger& ledger,
+                              std::uint64_t tick,
+                              std::vector<std::string>* errors) {
+    for (const auto& entry : store.objects()) {
+        const world::GroundObject& object = entry.second;
+        if (ledger.records().count(world::GroundObjectStore::region_of(object)) == 0) {
+            AddError(errors, "corrupt ground objects: orphaned object");
+            return false;
+        }
+        if (object.spawn_tick > tick) {
+            AddError(errors, "corrupt ground objects: spawn tick is ahead of the clock");
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
+bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
+    const std::string& bytes,
+    const world::ActiveRegionLedger& ledger,
+    const world::GroundObjectStore& store,
+    const world::GroundNotifications& notifications,
+    const std::filesystem::path& save_dir,
+    std::vector<std::string>* errors,
+    CreatedWorldArtifacts* artifacts) {
+    const SaveGuard guard;
+    // Refuse what the next load would reject: orphaned objects or spawns ahead of the saved clock.
+    if (!admit_metadata_bytes(bytes, errors))
+        return false;
+    {
+        world::WorldClock clock;
+        std::string clock_error;
+        if (!world::WorldClock::from_metadata(
+                nlohmann::json::parse(bytes, nullptr, false), clock, clock_error)) {
+            AddError(errors, clock_error);
+            return false;
+        }
+        if (!GroundObjectsMatchLedger(store, ledger, clock.tick(), errors))
+            return false;
+    }
+    TransactionScope scope(save_dir,
+                           {world::GroundObjectStore::kRelativePath,
+                            "world_info.json",
+                            "chunks/region/active-regions.arl"},
+                           errors,
+                           true,
+                           artifacts);
+    if (!scope.ok() || !save_ground_objects(store, save_dir, errors, notifications))
+        return false;
+    auto saved_ledger = ledger;
+    return save_metadata_and_active_regions(bytes, saved_ledger, save_dir, errors, artifacts) &&
+           scope.commit(errors);
+}
+
 bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
@@ -4023,7 +4082,9 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         return false;
     }
     TransactionScope scope(save_dir,
-                           {"world_info.json", "chunks/region/active-regions.arl"},
+                           {"world_info.json",
+                            "chunks/region/active-regions.arl",
+                            world::GroundObjectStore::kRelativePath},
                            errors,
                            metadata.contains("snapshotFormat") ||
                                (metadata.contains("container_version") &&
@@ -4350,6 +4411,170 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     return true;
 }
 
+std::filesystem::path WorldSaveService::ground_objects_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "ground-objects.json";
+}
+
+bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors,
+                                           const world::GroundNotifications& notifications) {
+    const SaveGuard guard;
+    std::string bytes;
+    try {
+        std::size_t rejected_payloads = 0;
+        bytes = store.serialize(notifications, &rejected_payloads);
+        if (rejected_payloads != 0) {
+            // Dropping an accepted event would lose it on reload, so the save is refused.
+            AddError(errors,
+                     "Ground objects save refused: " + std::to_string(rejected_payloads) +
+                         " pending notification(s) have non-UTF-8 payloads");
+            return false;
+        }
+        if (!bytes.empty()) {
+            world::GroundObjectStore parsed;
+            std::string error;
+            if (!world::GroundObjectStore::parse(
+                    bytes, std::numeric_limits<std::uint64_t>::max(), parsed, error)) {
+                AddError(errors, "Ground objects save failed: " + error);
+                return false;
+            }
+        }
+    } catch (const std::exception& error) {
+        AddError(errors,
+                 std::string("Ground objects save failed: serialization exception: ") +
+                     error.what());
+        return false;
+    } catch (...) {
+        AddError(errors, "Ground objects save failed: serialization exception");
+        return false;
+    }
+    TransactionScope scope(save_dir, {world::GroundObjectStore::kRelativePath}, errors, true);
+    if (!scope.ok() || !validate_save(save_dir, errors))
+        return false;
+    if (bytes.empty()) {
+        bool missing = false;
+        {
+            const SavedInputFile input(ground_objects_path(save_dir));
+            missing = input.missing();
+        }
+        return (missing ||
+                remove_member(save_dir, world::GroundObjectStore::kRelativePath, errors)) &&
+               scope.commit(errors);
+    }
+    return write_member_bytes(save_dir, world::GroundObjectStore::kRelativePath, bytes, errors) &&
+           scope.commit(errors);
+}
+
+bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
+                                           const std::filesystem::path& save_dir,
+                                           std::uint64_t next_id,
+                                           std::vector<std::string>* errors,
+                                           const std::stop_token& stop,
+                                           world::GroundNotifications* notifications) {
+    const detail::SnapshotReadOwnership ownership;
+    const std::filesystem::path path = ground_objects_path(save_dir);
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    bool present = false;
+    std::string bytes;
+    {
+        const SavedInputFile input(path);
+        present = !input.missing();
+        if (present && !input.read(bytes, world::GroundObjectStore::kMaxFileBytes, stop)) {
+            AddError(errors,
+                     stop.stop_requested()
+                         ? "Saved-world validation cancelled."
+                         : "Corrupt ground objects: unreadable or oversized file.");
+            return false;
+        }
+    }
+    if (!SaveTransaction::active_for(save_dir)) {
+        if (snapshot_index_exists(save_dir)) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, errors, stop))
+                return false;
+            const auto member = std::find_if(
+                index.members.begin(), index.members.end(), [](const SnapshotMember& value) {
+                    return value.path == "chunks/region/ground-objects.json";
+                });
+            const auto fingerprint = fnv1a64_bytes(bytes.data(), bytes.size());
+            if ((member == index.members.end() && present) ||
+                (member != index.members.end() &&
+                 (member->present != present ||
+                  (present && (member->bytes != bytes.size() || member->fnv64 != fingerprint))))) {
+                AddError(errors, "inconsistent snapshot: chunks/region/ground-objects.json");
+                return false;
+            }
+        } else if (present) {
+            AddError(errors, "inconsistent snapshot: ground authority without index");
+            return false;
+        }
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    if (!present) {
+        out.clear();
+        if (notifications)
+            *notifications = {};
+        return true; // A verified absent member is a clean miss.
+    }
+    world::GroundObjectStore parsed;
+    world::GroundNotifications pending;
+    std::string error;
+    if (!world::GroundObjectStore::parse(bytes, next_id, parsed, error, &pending)) {
+        AddError(errors, "Ground objects load failed: " + error);
+        return false;
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    out = std::move(parsed);
+    if (notifications)
+        *notifications = std::move(pending);
+    return true;
+}
+
+bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save_dir,
+                                               const world::ActiveRegionLedger& ledger,
+                                               std::vector<std::string>* errors,
+                                               const std::stop_token& stop) {
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    bool has_objects = false;
+    {
+        const SavedInputFile input(ground_objects_path(save_dir));
+        has_objects = !input.missing();
+    }
+    if (!has_objects)
+        return true;
+    bool has_ledger = false;
+    {
+        const SavedInputFile input(active_regions_path(save_dir));
+        has_ledger = !input.missing();
+    }
+    if (!has_ledger) {
+        // A ledger-less save has no records, so every ground object is orphaned.
+        AddError(errors, "corrupt ground objects: orphaned object");
+        return false;
+    }
+    world::GroundObjectStore store;
+    if (!load_ground_objects(store, save_dir, ledger.next_persistent_id(), errors, stop))
+        return false;
+    world::WorldClock clock;
+    bool required = false;
+    if (!read_clock_metadata(save_dir, clock, required, errors, nullptr, nullptr, nullptr, stop))
+        return false;
+    return GroundObjectsMatchLedger(store, ledger, clock.tick(), errors);
+}
+
 std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / "active-regions.arl";
 }
@@ -4408,7 +4633,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
-    bool has_ledger = !ledger.records().empty() || ledger.local_anchor();
+    bool has_ledger =
+        !ledger.records().empty() || ledger.local_anchor() || ledger.next_persistent_id() != 1;
     {
         // Close the admitted reader before transaction publication takes its lock.
         const SavedInputFile input(active_regions_path(save_dir));
@@ -5604,6 +5830,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
         std::uint64_t maximum = SavedInputLimits::kManifestBytes;
         if (relative == "chunks/region/plant-entities.json")
             maximum = SavedInputLimits::kPlantFileBytes;
+        else if (relative == "chunks/region/ground-objects.json")
+            maximum = world::GroundObjectStore::kMaxFileBytes;
         else if (relative == "chunks/region/active-regions.arl")
             maximum = world::ActiveRegionLedger::kMaxFileBytes;
         else if (relative == "aether_state.efs")
@@ -5661,6 +5889,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 !Ecs::LoadEntityRegistrySnapshotJson(member_bytes, plants, diagnostics) ||
                 !luminumbra::foliage::ValidatePlantEntitySnapshot(plants, false)) {
                 error = first_error("corrupt plant entities");
+                return false;
+            }
+        } else if (relative == "chunks/region/ground-objects.json") {
+            world::GroundObjectStore objects;
+            const std::uint64_t no_id_limit = std::numeric_limits<std::uint64_t>::max();
+            if (!world::GroundObjectStore::parse(member_bytes, no_id_limit, objects, error)) {
                 return false;
             }
         } else if (relative == "aether_state.efs") {
@@ -6430,6 +6664,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                               Filesystem::GenericUtf8PathString(entry.path()));
             if (entry.path() == world_manifest_path(save_dir) ||
                 entry.path() == plant_entities_path(save_dir) ||
+                entry.path() == ground_objects_path(save_dir) ||
                 entry.path() == active_regions_path(save_dir)) {
                 present = true;
             } else if (ParseRegionFileName(entry.path(), rx, rz)) {
@@ -6558,6 +6793,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (ledger.header_tick() > clock.tick())
                     return reject(world::ActiveRegionLedger::kCorruptMessage);
             }
+            if (!validate_ground_objects(save_dir, ledger, &errors, stop))
+                return reject("");
         }
         Ecs::EntityRegistrySnapshot plants;
         if (stop.stop_requested())

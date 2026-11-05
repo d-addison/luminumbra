@@ -7028,6 +7028,20 @@ std::shared_ptr<Luminumbra::Chunk> GroundSurfaceChunk(const Luminumbra::IVec3& c
     return chunk;
 }
 
+void RestoreUnsettledGroundObjects(GameSession& session) {
+    Luminumbra::world::GroundObjectStore unsettled;
+    for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+        auto waiting = object;
+        waiting.flags = 0;
+        waiting.y_mm += 10000;
+        ASSERT_TRUE(unsettled.insert(waiting));
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(P::WorldSaveService::save_ground_objects(
+        unsettled, session.GetWorldSaveDir(), nullptr, session.CaptureGroundNotifications()));
+    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
+}
+
 // Spawns a ground object at (x_mm, 0, z_mm) with the fixed test type and payload.
 std::uint64_t SpawnGround(GameSession& session,
                           std::int64_t x_mm,
@@ -7087,6 +7101,24 @@ void ExpectSameSaveTree(const fs::path& actual, const fs::path& expected) {
         }
         EXPECT_EQ(actual_bytes, expected_bytes) << relative.string();
     }
+}
+
+std::uint64_t GroundSpawnAdmissionLimit() {
+    Luminumbra::world::GroundObjectStore store;
+    std::size_t notification_bytes = 0;
+    for (std::uint64_t id = 1; id <= Luminumbra::world::GroundObjectStore::kMaxObjects; ++id) {
+        Luminumbra::world::GroundObject object;
+        object.id = id;
+        object.type = kGroundType;
+        object.x_mm = 5200;
+        object.z_mm = -1500;
+        const luminumbra::simulation::SimulationEvent event{
+            0, 0, id - 1, "ground.spawned", std::to_string(id) + ",7,5200,0,-1500"};
+        notification_bytes += event.canonical_bytes().size() + 1;
+        if (!store.insert(object, notification_bytes))
+            return id - 1;
+    }
+    return store.size();
 }
 
 } // namespace
@@ -7183,8 +7215,6 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
             {static_cast<std::int32_t>(index % 1024u), static_cast<std::int32_t>(index / 1024u)},
             owner.GetWorldClock());
     }
-    const std::array completed{Luminumbra::world::RegionWork{{0, 0}, 1, 0, 0, 0}};
-    ledger.publish_completed_work(completed);
     ASSERT_TRUE(P::WorldSaveService::save_active_regions(
         ledger, owner.GetWorldClock(), owner.GetWorldSaveDir()));
     EnableSnapshotSession(loaded, root, jobs);
@@ -7192,15 +7222,12 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
     ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit - 1);
     ASSERT_EQ(SpawnGround(loaded, 5200, -1500), 1u);
     ASSERT_EQ(loaded.GetActiveRegionLedger().records().size(), limit);
-    const auto notifications = luminumbra::simulation::describe_event_order(
-        loaded.GetSimulationEventBus().pending_events());
+    const auto notifications = loaded.CaptureGroundNotifications().canonical_bytes();
     EXPECT_EQ(SpawnGround(loaded, 600000, -1500), 0u);
     EXPECT_EQ(loaded.GetRegionInputRejections().ground_spawns, 1u);
     EXPECT_EQ(loaded.GetActiveRegionLedger().records().size(), limit);
     EXPECT_EQ(loaded.GetGroundObjects().size(), 1u);
-    EXPECT_EQ(luminumbra::simulation::describe_event_order(
-                  loaded.GetSimulationEventBus().pending_events()),
-              notifications);
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
     EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(SpawnGround(loaded, 5300, -1500), 3u);
     // Saving a million records is the expensive step, so the admitted, refused and
@@ -7208,24 +7235,123 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnRegionAdmissionRetainsSaveableLedg
     ASSERT_TRUE(loaded.SaveWorld());
 }
 
+TEST(GameSessionHeadlessWorldTest, LoadedGroundNotificationCursorNeverWrapsOnSpawn) {
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    for (const auto cursor : {maximum, maximum - 1}) {
+        SCOPED_TRACE(cursor);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner, loaded, reloaded;
+        CreateGroundWorld(owner, root, jobs, "Ground sequence admission");
+        owner.GetSimulationEventBus().restore_pending({}, cursor);
+        ASSERT_TRUE(owner.SaveWorld());
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        ASSERT_EQ(loaded.GetSimulationEventBus().next_sequence(), cursor);
+        if (cursor < maximum) {
+            ASSERT_EQ(SpawnGround(loaded, 5200, -1500), 1u);
+            const auto pending = loaded.CaptureGroundNotifications();
+            ASSERT_EQ(pending.events.size(), 1u);
+            EXPECT_EQ(pending.events.front().sequence, maximum - 1);
+            EXPECT_EQ(pending.next_sequence, maximum);
+        }
+        ASSERT_TRUE(loaded.SaveWorld());
+        EnableSnapshotSession(reloaded, root, jobs);
+        ASSERT_TRUE(reloaded.LoadWorld(owner.GetMetadata().worldId))
+            << reloaded.GetWorldOpenError();
+        EXPECT_EQ(reloaded.CaptureGroundNotifications().canonical_bytes(),
+                  loaded.CaptureGroundNotifications().canonical_bytes());
+        for (auto* session : {&loaded, &reloaded}) {
+            const auto next_id = session->GetActiveRegionLedger().next_persistent_id();
+            const auto notifications = session->CaptureGroundNotifications().canonical_bytes();
+            EXPECT_EQ(SpawnGround(*session, 5300, -1500), 0u);
+            EXPECT_EQ(session->GetRegionInputRejections().ground_spawns, 1u);
+            EXPECT_EQ(session->GetActiveRegionLedger().next_persistent_id(), next_id);
+            EXPECT_EQ(session->GetSimulationEventBus().next_sequence(), maximum);
+            EXPECT_EQ(session->GetGroundObjects().size(), cursor < maximum ? 1u : 0u);
+            EXPECT_EQ(session->CaptureGroundNotifications().canonical_bytes(), notifications);
+            EXPECT_TRUE(session->SaveWorld());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     ExhaustedGroundNotificationCursorLoadsButInvalidCursorRefusesLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground exhausted cursor");
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    owner.GetSimulationEventBus().restore_pending({}, maximum);
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
+    const auto save = owner.GetWorldSaveDir();
+    const auto valid_bytes = owner.GetGroundObjects().serialize({maximum, {}});
+    const auto cursor_text = std::to_string(maximum);
+    const auto cursor_offset = valid_bytes.find(cursor_text);
+    ASSERT_NE(cursor_offset, std::string::npos);
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    const auto member =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& value) {
+            return value.path == Luminumbra::world::GroundObjectStore::kRelativePath;
+        });
+    ASSERT_NE(member, index.members.end());
+    for (const auto* invalid_cursor : {"18446744073709551616", "-1", "1.5"}) {
+        SCOPED_TRACE(invalid_cursor);
+        auto bytes = valid_bytes;
+        bytes.replace(cursor_offset, cursor_text.size(), invalid_cursor);
+        member->bytes = bytes.size();
+        member->fnv64 = P::fnv1a64_bytes(bytes.data(), bytes.size());
+        // Keep the fingerprint consistent so admission reaches the notification parser.
+        std::ofstream(P::WorldSaveService::ground_objects_path(save), std::ios::binary) << bytes;
+        std::ofstream(P::snapshot_index_path(save), std::ios::binary)
+            << P::encode_snapshot_index(index);
+        Luminumbra::world::GroundObjectStore restored;
+        Luminumbra::world::GroundNotifications notifications{maximum, {}};
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::WorldSaveService::load_ground_objects(
+            restored, save, 1, &errors, {}, &notifications));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("malformed notifications"), std::string::npos);
+        EXPECT_EQ(restored.serialize(notifications), valid_bytes);
+        EXPECT_FALSE(loaded.LoadWorld(owner.GetMetadata().worldId));
+        EXPECT_FALSE(loaded.GetWorldOpenError().empty());
+        EXPECT_TRUE(loaded.GetGroundObjects().empty());
+        EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, ExhaustedGroundDespawnSequenceLatchesFaultWithoutWrapping) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession loaded;
-    CreateGroundWorld(loaded, root, jobs, "Ground despawn exhaustion");
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground despawn exhaustion");
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
-    loaded.GetSimulationEventBus().restore_pending({}, maximum - 1);
+    owner.GetSimulationEventBus().restore_pending({}, maximum - 1);
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
     GroundEvents seen;
     CollectGroundEvents(loaded, seen);
-    ASSERT_EQ(SpawnGround(loaded, 5200, -1500, 1), 1u);
-    const auto objects = loaded.GetGroundObjects().objects();
+    const auto objects = loaded.GetGroundObjects().serialize();
     ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
     EXPECT_TRUE(loaded.GetRegionSchedulerFault().has_value());
     EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), maximum);
-    EXPECT_EQ(loaded.GetGroundObjects().objects(), objects);
+    EXPECT_EQ(loaded.GetGroundObjects().serialize(), objects);
     // The spawn used the last sequence; the despawn is refused instead of wrapping the cursor.
     EXPECT_EQ(CountTopic(seen, "ground.despawned"), 0u);
+    // A latched fault retires pending notifications, so nothing is captured or persisted.
+    const auto pending = loaded.CaptureGroundNotifications();
+    EXPECT_EQ(pending.next_sequence, 0u);
+    EXPECT_TRUE(pending.events.empty());
     ASSERT_TRUE(loaded.SaveWorld());
 }
 
@@ -7239,15 +7365,50 @@ TEST(GameSessionHeadlessWorldTest, InsufficientGroundDespawnCapacityPreservesAll
     ASSERT_EQ(SpawnGround(session, 600000, -1500, 1), 2u);
     session.GetSimulationEventBus().restore_pending({},
                                                     std::numeric_limits<std::uint64_t>::max() - 1);
-    const auto objects = session.GetGroundObjects().objects();
+    const auto objects = session.GetGroundObjects().serialize();
     GroundEvents seen;
     CollectGroundEvents(session, seen);
     ASSERT_NO_FATAL_FAILURE(TickOnce(session));
     EXPECT_TRUE(session.GetRegionSchedulerFault().has_value());
-    EXPECT_EQ(session.GetGroundObjects().objects(), objects);
+    EXPECT_EQ(session.GetGroundObjects().serialize(), objects);
     EXPECT_EQ(session.GetSimulationEventBus().next_sequence(),
               std::numeric_limits<std::uint64_t>::max() - 1);
     EXPECT_EQ(CountTopic(seen, "ground.despawned"), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, GroundSpawnBurstRemainsSaveableAtAdmissionLimit) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    CreateGroundWorld(session, root, jobs, "Ground admission");
+    const auto limit = GroundSpawnAdmissionLimit();
+    ASSERT_GT(limit, 1u);
+    ASSERT_LT(limit, Luminumbra::world::GroundObjectStore::kMaxObjects);
+    for (std::uint64_t id = 1; id < limit; ++id) {
+        ASSERT_EQ(SpawnGround(session, 5200, -1500), id);
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(session.GetGroundObjects().size(), limit - 1);
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), limit);
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto hash = SessionWorldHash(session);
+    const auto notifications = session.CaptureGroundNotifications().canonical_bytes();
+    EXPECT_EQ(SpawnGround(session, 5200, -1500), 0u);
+    EXPECT_EQ(session.GetRegionInputRejections().ground_spawns, 1u);
+    EXPECT_EQ(session.GetGroundObjects().size(), limit);
+    EXPECT_EQ(session.CaptureGroundNotifications().canonical_bytes(), notifications);
+    ASSERT_TRUE(session.SaveWorldState());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    // A refused spawn consumes an id, but does not enqueue an event or invalidate the save.
+    EXPECT_NE(SessionWorldHash(session), hash);
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_NE(SpawnGround(session, 5200, -1500), 0u);
+    EXPECT_TRUE(session.SaveWorldState());
 }
 
 TEST(GameSessionHeadlessWorldTest, UnknownRegionWorkFromEventCallbackIsRejectedAndKeepsRunning) {
@@ -7345,6 +7506,499 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     EXPECT_GT(frozen_ticks, 0u);
 }
 
+TEST(GameSessionHeadlessWorldTest, MetadataOnlySaveAfterSpawnWritesObjectFileAndLedger) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground metadata");
+    const auto save = session.GetWorldSaveDir();
+    P::SnapshotIndex initial;
+    ASSERT_TRUE(P::read_snapshot_index(save, initial, nullptr));
+    const auto absent =
+        std::find_if(initial.members.begin(), initial.members.end(), [](const auto& member) {
+            return member.path == Luminumbra::world::GroundObjectStore::kRelativePath;
+        });
+    // A never-written member may be omitted; a deleted member is explicitly absent.
+    if (absent != initial.members.end()) {
+        EXPECT_FALSE(absent->present);
+    }
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::ground_objects_path(save)));
+    Luminumbra::world::GroundObjectStore restored;
+    Luminumbra::world::GroundNotifications notifications;
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        restored,
+        save,
+        session.GetActiveRegionLedger().next_persistent_id(),
+        nullptr,
+        {},
+        &notifications));
+    EXPECT_TRUE(restored.empty());
+    EXPECT_TRUE(notifications.events.empty());
+    EXPECT_EQ(notifications.next_sequence, 0u);
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
+    ASSERT_TRUE(session.SaveWorld());
+    P::SnapshotIndex committed;
+    ASSERT_TRUE(P::read_snapshot_index(save, committed, nullptr));
+    const auto present =
+        std::find_if(committed.members.begin(), committed.members.end(), [](const auto& member) {
+            return member.path == Luminumbra::world::GroundObjectStore::kRelativePath;
+        });
+    ASSERT_NE(present, committed.members.end());
+    EXPECT_TRUE(present->present);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::GroundObjectStore::parse(
+        ReadClockTestFile(P::WorldSaveService::ground_objects_path(save)),
+        session.GetActiveRegionLedger().next_persistent_id(),
+        restored,
+        error,
+        &notifications))
+        << error;
+    EXPECT_EQ(restored.objects(), session.GetGroundObjects().objects());
+    EXPECT_EQ(notifications.events.size(), 2u);
+    EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(save)));
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidGroundNotificationsRefuseSaveWithoutChangingDisk) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground notification admission");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto ground = ReadClockTestFile(P::WorldSaveService::ground_objects_path(save));
+    const auto index = ReadClockTestFile(P::snapshot_index_path(save));
+    const std::vector<Luminumbra::world::GroundNotifications> invalid{
+        {1, {{0, 0, 1, "ground.spawned", "equal cursor"}}},
+        {1, {{0, 0, 2, "ground.spawned", "above cursor"}}},
+        {1, {{0, 0, 0, "script.trigger", "unsupported topic"}}},
+        {1, {{0, 0, 0, "ground.spawned", "first"}, {0, 0, 0, "ground.despawned", "duplicate"}}},
+        {2, {{0, 0, 1, "ground.spawned", "first"}, {0, 0, 0, "ground.despawned", "unordered"}}},
+        {std::numeric_limits<std::uint64_t>::max(),
+         {{0, 0, std::numeric_limits<std::uint64_t>::max(), "ground.spawned", "equal cursor"}}},
+        {1,
+         {{0,
+           0,
+           0,
+           "ground.spawned",
+           std::string(Luminumbra::world::GroundObjectStore::kMaxFileBytes, 'x')}}}};
+    for (const bool joined : {false, true}) {
+        SCOPED_TRACE(joined);
+        std::unique_ptr<P::SaveTransaction> transaction;
+        if (joined) {
+            transaction = std::make_unique<P::SaveTransaction>(
+                save, 0, std::vector<std::array<float, 3>>{}, &P::WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction->begin(nullptr));
+        }
+        for (std::size_t i = 0; i < invalid.size(); ++i) {
+            SCOPED_TRACE(i);
+            std::vector<std::string> errors;
+            EXPECT_FALSE(P::WorldSaveService::save_ground_objects(
+                session.GetGroundObjects(), save, &errors, invalid[i]));
+            EXPECT_FALSE(errors.empty());
+            EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::ground_objects_path(save)), ground);
+            EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), index);
+        }
+    }
+}
+
+namespace Luminumbra::world {
+
+class GameSessionGroundMetadataTest : public testing::Test {
+protected:
+    static bool ReconcileMetadata(GameSession& session, const fs::path& save_dir) {
+        return session.ReconcileWorldStateMetadataTo(save_dir);
+    }
+};
+
+TEST_F(GameSessionGroundMetadataTest, GroundMetadataSaveCommitsOneGeneration) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata transaction"));
+    const auto save = session.GetWorldSaveDir();
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(ReconcileMetadata(session, save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    const auto old_objects = session.GetGroundObjects().objects();
+    const auto old_notifications = session.CaptureGroundNotifications().canonical_bytes();
+    const std::array<const char*, 3> members{
+        GroundObjectStore::kRelativePath, "world_info.json", "chunks/region/active-regions.arl"};
+    std::map<std::string, std::string> previous;
+    for (const auto* member : members)
+        previous.emplace(member, ReadClockTestFile(save / member));
+    const auto old_index = ReadClockTestFile(P::snapshot_index_path(save));
+    P::SnapshotIndex initial;
+    ASSERT_TRUE(P::read_snapshot_index(save, initial, nullptr));
+
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    static bool ledger_replacement_attempted;
+    ledger_replacement_attempted = false;
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] {
+        ledger_replacement_attempted = true;
+        return false;
+    });
+    const bool saved = ReconcileMetadata(session, save);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_TRUE(ledger_replacement_attempted);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    for (const auto& [member, bytes] : previous) {
+        EXPECT_EQ(ReadClockTestFile(save / member), bytes) << member;
+    }
+    EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), old_index);
+    EXPECT_FALSE(P::journal_pending(save));
+    ActiveRegionLedger ledger;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(ledger, save));
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
+    GroundObjectStore objects;
+    GroundNotifications notifications;
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        objects, save, ledger.next_persistent_id(), nullptr, {}, &notifications));
+    EXPECT_EQ(objects.objects(), old_objects);
+    EXPECT_EQ(notifications.canonical_bytes(), old_notifications);
+
+    ASSERT_TRUE(ReconcileMetadata(session, save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    P::SnapshotIndex committed;
+    ASSERT_TRUE(P::read_snapshot_index(save, committed, nullptr));
+    EXPECT_EQ(committed.generation, initial.generation + 1);
+    for (const auto* member : members) {
+        const auto found =
+            std::find_if(committed.members.begin(),
+                         committed.members.end(),
+                         [member](const auto& entry) { return entry.path == member; });
+        ASSERT_NE(found, committed.members.end()) << member;
+        EXPECT_TRUE(found->present) << member;
+        EXPECT_EQ(found->generation, committed.generation) << member;
+        EXPECT_NE(ReadClockTestFile(save / member), previous.at(member)) << member;
+    }
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(ledger, save));
+    EXPECT_EQ(ledger.next_persistent_id(), 3u);
+    EXPECT_EQ(ledger.header_tick(), session.GetSimulationTickCount());
+    WorldClock clock;
+    bool requires_active_regions = false;
+    ASSERT_TRUE(P::WorldSaveService::read_clock_metadata(save, clock, requires_active_regions));
+    EXPECT_TRUE(requires_active_regions);
+    EXPECT_EQ(clock.tick(), session.GetSimulationTickCount());
+    ASSERT_TRUE(P::WorldSaveService::load_ground_objects(
+        objects, save, ledger.next_persistent_id(), nullptr, {}, &notifications));
+    EXPECT_EQ(objects.objects(), session.GetGroundObjects().objects());
+    EXPECT_EQ(notifications.canonical_bytes(),
+              session.CaptureGroundNotifications().canonical_bytes());
+    EXPECT_FALSE(P::journal_pending(save));
+}
+
+TEST_F(GameSessionGroundMetadataTest, EmptyGroundMetadataSavePreservesNotifications) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Empty ground metadata"));
+    const auto save = session.GetWorldSaveDir();
+    const auto ground_path = P::WorldSaveService::ground_objects_path(save);
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    ASSERT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(ReconcileMetadata(session, save));
+    EXPECT_FALSE(fs::exists(ground_path));
+
+    GroundEvents saved_seen;
+    CollectGroundEvents(session, saved_seen);
+    session.GetSimulationEventBus().publish(0, "ground.spawned", "first", 1);
+    session.GetSimulationEventBus().publish(0, "ground.despawned", "second", -1);
+    session.GetSimulationEventBus().publish(0, "ground.spawned", "third", 1);
+    const auto notifications = session.CaptureGroundNotifications().canonical_bytes();
+    ASSERT_FALSE(notifications.empty());
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(ReconcileMetadata(session, save));
+    EXPECT_TRUE(fs::exists(ground_path));
+    EXPECT_TRUE(saved_seen.empty());
+    EXPECT_EQ(session.CaptureGroundNotifications().canonical_bytes(), notifications);
+
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_TRUE(loaded.GetGroundObjects().empty());
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(), notifications);
+    GroundEvents seen;
+    CollectGroundEvents(loaded, seen);
+    const GroundEvents expected{
+        {"ground.despawned", "second"}, {"ground.spawned", "first"}, {"ground.spawned", "third"}};
+    ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    EXPECT_EQ(seen, expected);
+    EXPECT_TRUE(loaded.CaptureGroundNotifications().events.empty());
+    ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+    EXPECT_EQ(seen, expected);
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyGroundMetadataSaveRemovesExistingFile) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Ground metadata removal"));
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto ground_path = P::WorldSaveService::ground_objects_path(save);
+    ASSERT_TRUE(fs::exists(ground_path));
+    ASSERT_FALSE(session.GetGroundObjects().empty());
+    ASSERT_FALSE(session.CaptureGroundNotifications().events.empty());
+
+    const GroundObjectStore objects;
+    const GroundNotifications notifications;
+    ASSERT_EQ(P::SaveTransaction::active_for(save), nullptr);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_active_regions_and_ground_objects(
+        ReadClockTestFile(save / "world_info.json"),
+        session.GetActiveRegionLedger(),
+        objects,
+        notifications,
+        save));
+    EXPECT_FALSE(fs::exists(ground_path));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_TRUE(loaded.GetGroundObjects().empty());
+    EXPECT_TRUE(loaded.CaptureGroundNotifications().events.empty());
+    EXPECT_EQ(loaded.CaptureGroundNotifications().next_sequence, 0u);
+}
+
+} // namespace Luminumbra::world
+
+TEST(GameSessionHeadlessWorldTest, ReloadedSessionRestoresGroundObjectsAndContinuesIds) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground reload");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_EQ(SpawnGround(owner, 5300, -1500), 2u);
+    ASSERT_EQ(SpawnGround(owner, 5400, -1500), 3u);
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetGroundObjects().serialize(), owner.GetGroundObjects().serialize());
+    EXPECT_EQ(loaded.GetGroundObjects().size(), 3u);
+    EXPECT_EQ(SpawnGround(loaded, 5500, -1500), 4u);
+}
+
+TEST(GameSessionHeadlessWorldTest, ResumedSessionMatchesUninterruptedGroundObjectsAndHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, uninterrupted, loaded;
+    CreateGroundWorld(original, root, jobs, "Ground resume");
+    CreateGroundWorld(uninterrupted, root, jobs, "Ground twin");
+    for (auto* s : {&original, &uninterrupted}) {
+        ASSERT_EQ(SpawnGround(*s, 5200, -1500), 1u);
+        ASSERT_EQ(SpawnGround(*s, -600000, 900000), 2u);
+    }
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(original);
+        TickOnce(uninterrupted);
+    }
+    ASSERT_TRUE(original.SaveWorldState());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    for (int i = 0; i < 5; ++i) {
+        TickOnce(uninterrupted);
+        TickOnce(loaded);
+        EXPECT_EQ(loaded.GetRegionSchedule(), uninterrupted.GetRegionSchedule());
+        EXPECT_EQ(loaded.GetGroundObjects().objects(), uninterrupted.GetGroundObjects().objects());
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(uninterrupted));
+    }
+    EXPECT_EQ(loaded.GetGroundObjects().objects().at(1).active_age, 8u);
+}
+
+TEST(GameSessionHeadlessWorldTest, CorruptGroundObjectsFileRefusesToOpen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, control, victim;
+    CreateGroundWorld(owner, root, jobs, "Ground corrupt");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    EnableSnapshotSession(control, root, jobs);
+    ASSERT_TRUE(control.LoadWorld(owner.GetMetadata().worldId)) << control.GetWorldOpenError();
+    std::ofstream(P::WorldSaveService::ground_objects_path(save), std::ios::binary) << "not json\n";
+    EnableSnapshotSession(victim, root, jobs);
+    EXPECT_FALSE(victim.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_FALSE(victim.GetWorldOpenError().empty());
+    EXPECT_TRUE(victim.GetGroundObjects().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, BetweenTickGroundSpawnSaveRestoresDeliveryTimingAndWork) {
+    for (const bool full_save : {false, true}) {
+        SCOPED_TRACE(full_save);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession original, uninterrupted, loaded;
+        CreateGroundWorld(original, root, jobs, "Ground pending save");
+        CreateGroundWorld(uninterrupted, root, jobs, "Ground pending twin");
+        GroundEvents resumed_events, uninterrupted_events;
+        CollectGroundEvents(original, resumed_events);
+        CollectGroundEvents(uninterrupted, uninterrupted_events);
+        std::vector<std::string> resumed_order, uninterrupted_order;
+        const auto observe_work = [](GameSession& session, std::vector<std::string>& order) {
+            session.GetSimulationEventBus().subscribe([&session, &order](const auto& event) {
+                order.push_back(luminumbra::simulation::describe_event_order({event}).front());
+                session.RecordActiveRegionWork({kGroundRegion, 0, 2, 0, 0});
+            });
+        };
+        observe_work(original, resumed_order);
+        observe_work(uninterrupted, uninterrupted_order);
+        for (auto* session : {&original, &uninterrupted}) {
+            ASSERT_EQ(SpawnGround(*session, 5200, -1500), 1u);
+            TickOnce(*session);
+            ASSERT_EQ(SpawnGround(*session, 5300, -1500, 2), 2u);
+            ASSERT_EQ(SpawnGround(*session, 5400, -1500), 3u);
+        }
+        ASSERT_EQ(resumed_events.size(), 1u);
+        ASSERT_TRUE(full_save ? original.SaveWorldState() : original.SaveWorld());
+        // Saving preserves the next tick's consumer work and notifications.
+        EXPECT_EQ(CountTopic(resumed_events, "ground.spawned"), 1u);
+        EXPECT_EQ(original.GetSimulationEventBus().pending_count(), 2u);
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        CollectGroundEvents(loaded, resumed_events);
+        observe_work(loaded, resumed_order);
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+        for (int i = 0; i < 3; ++i) {
+            TickOnce(uninterrupted);
+            TickOnce(loaded);
+            EXPECT_EQ(resumed_events, uninterrupted_events);
+            EXPECT_EQ(resumed_order, uninterrupted_order);
+            EXPECT_EQ(loaded.GetActiveRegionLedger().completed_work(),
+                      uninterrupted.GetActiveRegionLedger().completed_work());
+            EXPECT_EQ(loaded.GetRegionSchedule(), uninterrupted.GetRegionSchedule());
+            EXPECT_EQ(loaded.GetGroundObjects().objects(),
+                      uninterrupted.GetGroundObjects().objects());
+            EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(uninterrupted));
+        }
+        EXPECT_EQ(CountTopic(resumed_events, "ground.despawned"), 1u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, SavingPendingEventsDoesNotInvokeConsumers) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    CreateGroundWorld(session, root, jobs, "Ground save delivery");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    int calls = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        ++calls;
+        EXPECT_FALSE(session.IsSimulationTickBoundary());
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    });
+    session.GetSimulationEventBus().publish(10, "script.trigger", "pending");
+    session.GetSimulationEventBus().publish(3, "ground.despawned", "future", -1);
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(calls, 0);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(session.GetSimulationEventBus().pending_count(), 3u);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    const auto pending = loaded.GetSimulationEventBus().pending_events();
+    ASSERT_EQ(pending.size(), 2u);
+    EXPECT_EQ(pending.front().topic, "ground.spawned");
+    EXPECT_EQ(pending.front().tick, 0u);
+    EXPECT_EQ(pending.back().topic, "ground.despawned");
+    EXPECT_EQ(pending.back().tick, 3u);
+    EXPECT_EQ(pending.back().lane, -1);
+    EXPECT_EQ(pending.back().sequence, 2u);
+    GroundEvents resumed;
+    CollectGroundEvents(loaded, resumed);
+    TickOnce(session);
+    EXPECT_EQ(calls, 1);
+    TickOnce(loaded);
+    EXPECT_EQ(CountTopic(resumed, "ground.despawned"), 0u);
+    TickOnce(loaded);
+    EXPECT_EQ(CountTopic(resumed, "ground.despawned"), 0u);
+    TickOnce(loaded);
+    EXPECT_EQ(CountTopic(resumed, "ground.despawned"), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, RefusedSavePreservesPendingEventsWorkAndHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground save refusal");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    int calls = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        ++calls;
+        session.RecordActiveRegionWork({kGroundRegion, 0, 2, 0, 0});
+    });
+    const auto index = P::snapshot_index_path(session.GetWorldSaveDir());
+    const auto before = ReadClockTestFile(index);
+    const auto hash = SessionWorldHash(session);
+    const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+    const auto pending = luminumbra::simulation::describe_event_order(
+        session.GetSimulationEventBus().pending_events());
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    const bool saved = session.SaveWorld();
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(ReadClockTestFile(index), before);
+    EXPECT_EQ(SessionWorldHash(session), hash);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(luminumbra::simulation::describe_event_order(
+                  session.GetSimulationEventBus().pending_events()),
+              pending);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(calls, 0);
+    TickOnce(session);
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(GameSessionHeadlessWorldTest, FaultedSessionSavesWithFutureNotificationsWithoutDelivery) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    CreateGroundWorld(session, root, jobs, "Ground fault save");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    session.GetSimulationEventBus().publish(100, "ground.spawned", "future");
+    session.GetSimulationEventBus().publish(100, "script.trigger", "future");
+    int calls = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        ++calls;
+        throw std::runtime_error("injected consumer callback fault");
+    });
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
+    const auto pending = session.GetSimulationEventBus().pending_count();
+    EXPECT_GE(pending, 2u);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(session.GetSimulationEventBus().pending_count(), pending);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetSimulationEventBus().pending_count(), 0u);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+}
+
 TEST(GameSessionHeadlessWorldTest, GroundObjectsChangeTheWorldHash) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -7356,6 +8010,76 @@ TEST(GameSessionHeadlessWorldTest, GroundObjectsChangeTheWorldHash) {
     EXPECT_EQ(SessionWorldHash(bare), before);
     ASSERT_EQ(SpawnGround(with, 5200, -1500), 1u);
     EXPECT_NE(SessionWorldHash(with), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, GroundNotificationHashIncludesEveryDurableField) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Ground notification hash");
+    const auto empty_hash = SessionWorldHash(session);
+    EXPECT_TRUE(session.CaptureGroundNotifications().canonical_bytes().empty());
+    session.GetSimulationEventBus().publish(4, "ground.spawned", "first", -1);
+    session.GetSimulationEventBus().publish(3, "ground.despawned", "second", 2);
+    auto notifications = session.CaptureGroundNotifications();
+    notifications.next_sequence = 9;
+    session.GetSimulationEventBus().restore_pending(notifications.events,
+                                                    notifications.next_sequence);
+    const auto hash = SessionWorldHash(session);
+    ASSERT_NE(hash, empty_hash);
+    ASSERT_TRUE(session.GetGroundObjects().empty());
+    const std::array<void (*)(Luminumbra::world::GroundNotifications&), 8> mutations{{
+        [](auto& n) { ++n.next_sequence; },
+        [](auto& n) { ++n.events.front().tick; },
+        [](auto& n) { ++n.events.front().lane; },
+        [](auto& n) { ++n.events.back().sequence; },
+        [](auto& n) { n.events.front().topic = "ground.despawned"; },
+        [](auto& n) { n.events.front().payload += "x"; },
+        [](auto& n) { n.events.pop_back(); },
+        [](auto& n) { n.events.clear(); },
+    }};
+    for (const auto mutate : mutations) {
+        auto changed = notifications;
+        mutate(changed);
+        session.GetSimulationEventBus().restore_pending(changed.events, changed.next_sequence);
+        EXPECT_NE(SessionWorldHash(session), hash);
+    }
+    session.GetSimulationEventBus().restore_pending({}, notifications.next_sequence);
+    EXPECT_NE(SessionWorldHash(session), empty_hash);
+    auto reversed = notifications.events;
+    std::reverse(reversed.begin(), reversed.end());
+    session.GetSimulationEventBus().restore_pending(reversed, notifications.next_sequence);
+    EXPECT_EQ(SessionWorldHash(session), hash);
+    ASSERT_TRUE(session.SaveWorldState());
+    GameSession loaded;
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), hash);
+    EXPECT_EQ(loaded.CaptureGroundNotifications().canonical_bytes(),
+              notifications.canonical_bytes());
+}
+
+TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThroughSnapshot) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Ground snapshot");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_EQ(SpawnGround(owner, 5300, -1500), 2u);
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    EXPECT_TRUE(std::any_of(
+        index.members.begin(), index.members.end(), [](const P::SnapshotMember& member) {
+            return member.path == "chunks/region/ground-objects.json" && member.present;
+        }));
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetGroundObjects().size(), 2u);
 }
 
 TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndUsesProceduralHeightBeforePublishing) {
@@ -7460,18 +8184,15 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     ASSERT_TRUE(owner.SaveWorldState());
     ASSERT_TRUE(owner.SaveWorld());
     ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
-    EXPECT_EQ(loaded.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
-    EXPECT_EQ(loaded.GetActiveRegionLedger().next_persistent_id(), 1u);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
     TickOnce(loaded);
     EXPECT_EQ(owner.GetRegionSchedule().work, 1u);
     EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
     EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
-    EXPECT_TRUE(loaded.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
-    TickOnce(loaded);
     EXPECT_EQ(owner.GetRegionSchedule().work, 0u);
-    EXPECT_EQ(loaded.GetRegionSchedule().work, 0u);
 }
 
 TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompletedWork) {
@@ -7540,9 +8261,18 @@ TEST(GameSessionHeadlessWorldTest,
         EXPECT_TRUE(object.settled());
         EXPECT_EQ(object.y_mm, expected);
     }
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(session));
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, expected);
+            EXPECT_EQ(object.active_age, static_cast<std::uint64_t>(i + 1));
+        }
+    }
 }
 
-TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawn) {
+TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawnAndAfterReload) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -7560,6 +8290,7 @@ TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawn) {
                                              {-edge, -edge, -16777215.0f, -16777215.0f},
                                              {edge, -edge, 16777215.0f, -16777215.0f},
                                              {-edge, edge, -16777215.0f, 16777215.0f}}};
+    GroundObjectStore unsettled;
     std::map<std::uint64_t, std::int64_t> expected;
     for (const auto& [x, z, sample_x, sample_z] : positions) {
         const float height = session.GetWorldSystem()->GetTerrainHeightAt(sample_x, sample_z);
@@ -7570,6 +8301,29 @@ TEST(GameSessionHeadlessWorldTest, GroundIntegerLimitsSettleAtSpawn) {
         expected.emplace(id, std::llround(static_cast<double>(height) * 1000.0));
         EXPECT_TRUE(object.settled());
         EXPECT_EQ(object.y_mm, expected.at(id));
+        auto waiting = object;
+        waiting.flags = 0;
+        waiting.y_mm = top;
+        ASSERT_TRUE(unsettled.insert(waiting));
+        session.PinActiveRegion(GroundObjectStore::region_of(object), true);
+    }
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(P::WorldSaveService::save_ground_objects(
+        unsettled, session.GetWorldSaveDir(), nullptr, session.CaptureGroundNotifications()));
+    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetGroundObjects().size(), positions.size());
+    for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+        EXPECT_FALSE(object.settled());
+        EXPECT_EQ(object.y_mm, top);
+    }
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        for (const auto& [id, object] : session.GetGroundObjects().objects()) {
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, expected.at(id));
+            EXPECT_EQ(object.active_age, static_cast<std::uint32_t>(i + 1));
+        }
     }
     // The excluded integer bounds still refuse before allocating an id.
     EXPECT_EQ(session.SpawnGroundObject(kGroundType, 0, top + 1, 0, 0, 0), 0u);
@@ -7601,6 +8355,91 @@ TEST(GameSessionHeadlessWorldTest, EmptyGroundStoreSkipsAdvancementWork) {
     }
 }
 
+TEST(GameSessionHeadlessWorldTest,
+     UnsettledDistantGroundMatchesPristineResidentAndReopenedContinuation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, reopened;
+    CreateGroundWorld(original, root, jobs, "Distant ground continuation");
+    auto* world = original.GetWorldSystem();
+    const float height = world->GetTerrainHeightAt(5208.25f, -1527.5f);
+    const auto expected = std::llround(static_cast<double>(height) * 1000.0);
+    const Luminumbra::IVec3 coords{
+        325, static_cast<int>(std::floor(height / Luminumbra::CHUNK_SIZE_Y)), -96};
+    const Luminumbra::Vec3 position{5208.25f, height + 8, -1527.5f};
+    ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
+    const auto id = original.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(id, 0u);
+    const float short_height = world->GetTerrainHeightAt(5212.25f, -1527.5f);
+    const auto short_lived = original.SpawnGroundObject(
+        kGroundType, Luminumbra::Vec3{5212.25f, short_height + 8, -1527.5f}, 1, 0);
+    ASSERT_NE(short_lived, 0u);
+    original.PinActiveRegion(Luminumbra::world::GroundObjectStore::region_of(
+                                 original.GetGroundObjects().objects().at(id)),
+                             true);
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(original));
+    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    auto pristine = GroundSurfaceChunk(coords, height - 2);
+    pristine->mark_sdf_generated_current_params();
+    ASSERT_TRUE(world->adopt_streamed_chunk(pristine));
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_FALSE(original.GetGroundObjects().objects().at(id).settled());
+    ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
+
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(original.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    auto* restored = reopened.GetWorldSystem();
+    ASSERT_EQ(restored->find_streamed_chunk(coords), nullptr);
+    const auto parked = restored->snapshot_parked_chunks();
+    ASSERT_TRUE(std::none_of(parked.begin(), parked.end(), [&coords](const auto& chunk) {
+        return chunk->get_coords() == coords;
+    }));
+    const auto durable = restored->durable_chunk_inventory();
+    ASSERT_EQ(std::find(durable.begin(), durable.end(), coords), durable.end());
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+    GroundEvents original_events, reopened_events;
+    CollectGroundEvents(original, original_events);
+    CollectGroundEvents(reopened, reopened_events);
+    for (int i = 0; i < 5; ++i) {
+        TickOnce(original);
+        TickOnce(reopened);
+        ASSERT_FALSE(original.GetRegionSchedulerFault().has_value());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(reopened.GetRegionSchedule(), original.GetRegionSchedule());
+        EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+        EXPECT_EQ(reopened_events, original_events);
+        for (const auto* session : {&original, &reopened}) {
+            const auto& object = session->GetGroundObjects().objects().at(id);
+            EXPECT_TRUE(object.settled());
+            EXPECT_EQ(object.y_mm, expected);
+            EXPECT_EQ(object.active_age, static_cast<std::uint64_t>(i + 1));
+            EXPECT_EQ(session->GetGroundObjects().find(short_lived), nullptr);
+        }
+        EXPECT_EQ(restored->find_streamed_chunk(coords), nullptr);
+    }
+    EXPECT_EQ(FirstPayload(original_events, "ground.despawned"),
+              std::to_string(short_lived) + ",7,5212250," +
+                  std::to_string(std::llround(static_cast<double>(short_height) * 1000.0)) +
+                  ",-1527500");
+    const auto original_spawn = original.SpawnGroundObject(kGroundType, position, 0, 0);
+    const auto reopened_spawn = reopened.SpawnGroundObject(kGroundType, position, 0, 0);
+    ASSERT_NE(original_spawn, 0u);
+    ASSERT_EQ(reopened_spawn, original_spawn);
+    EXPECT_TRUE(reopened.GetGroundObjects().objects().at(reopened_spawn).settled());
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(original));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto ground_bytes =
+        ReadClockTestFile(P::WorldSaveService::ground_objects_path(original.GetWorldSaveDir()));
+    ASSERT_TRUE(reopened.SaveWorldState());
+    EXPECT_EQ(
+        ReadClockTestFile(P::WorldSaveService::ground_objects_path(reopened.GetWorldSaveDir())),
+        ground_bytes);
+}
+
 TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -7615,6 +8454,7 @@ TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
     session.PinActiveRegion(Luminumbra::world::GroundObjectStore::region_of(
                                 session.GetGroundObjects().objects().at(id)),
                             true);
+    ASSERT_NO_FATAL_FAILURE(RestoreUnsettledGroundObjects(session));
     std::size_t reads = 0;
     std::string fault;
     world->remember_durable_chunks({{325, 0, -96}, {325, 1, -96}});
@@ -7626,128 +8466,14 @@ TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
         [&fault](const auto& error) { fault = error; });
     const auto spawned = session.SpawnGroundObject(kGroundType, position, 0, 0);
     ASSERT_NE(spawned, 0u);
+    TickOnce(session);
     for (const auto object_id : {id, spawned}) {
         const auto& object = session.GetGroundObjects().objects().at(object_id);
         EXPECT_TRUE(object.settled());
         EXPECT_EQ(object.y_mm, std::llround(static_cast<double>(height) * 1000.0));
+        EXPECT_EQ(object.active_age, 1u);
     }
     EXPECT_EQ(reads, 0u);
     EXPECT_TRUE(fault.empty());
     EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
-}
-
-TEST(GameSessionHeadlessWorldTest, GroundStateIsTransientAcrossOrdinarySavesAndFreshRestart) {
-    for (const bool metadata_only : {false, true}) {
-        SCOPED_TRACE(metadata_only);
-        const HeadlessRoot root;
-        JobSystem jobs;
-        jobs.startup(1);
-        GameSession owner, loaded;
-        CreateGroundWorld(owner, root, jobs, "Transient ground restart");
-        ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
-        ASSERT_EQ(SpawnGround(owner, 5300, -1500), 2u);
-        int calls = 0;
-        owner.GetSimulationEventBus().subscribe([&](const auto&) { ++calls; });
-        ASSERT_TRUE(metadata_only ? owner.SaveWorld() : owner.SaveWorldState());
-        EXPECT_EQ(calls, 0);
-        EXPECT_EQ(owner.GetGroundObjects().size(), 2u);
-        EXPECT_EQ(owner.GetSimulationEventBus().pending_count(), 2u);
-        const auto save = owner.GetWorldSaveDir();
-        EXPECT_FALSE(fs::exists(save / "chunks/region/ground-objects.json"));
-        P::SnapshotIndex index;
-        ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
-        for (const auto& member : index.members) {
-            EXPECT_NE(member.path, "chunks/region/ground-objects.json");
-        }
-        EnableSnapshotSession(loaded, root, jobs);
-        ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
-        EXPECT_TRUE(loaded.GetGroundObjects().empty());
-        EXPECT_EQ(loaded.GetSimulationEventBus().pending_count(), 0u);
-        EXPECT_EQ(loaded.GetSimulationEventBus().next_sequence(), 0u);
-        EXPECT_EQ(loaded.GetActiveRegionLedger().next_persistent_id(), 1u);
-        EXPECT_EQ(SpawnGround(loaded, 5400, -1500), 1u);
-    }
-}
-
-TEST(GameSessionHeadlessWorldTest,
-     SuccessfulReloadResetsTransientGroundStateAndRetainsSubscribers) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession session;
-    CreateGroundWorld(session, root, jobs, "Transient ground reload");
-    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
-    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
-    session.GetSimulationEventBus().publish(100, "script.trigger", "future");
-    ASSERT_TRUE(session.SaveWorldState());
-    int calls = 0;
-    session.GetSimulationEventBus().subscribe([&](const auto&) { ++calls; });
-    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
-    EXPECT_EQ(calls, 0);
-    EXPECT_TRUE(session.GetGroundObjects().empty());
-    EXPECT_EQ(session.GetSimulationEventBus().pending_count(), 0u);
-    EXPECT_EQ(session.GetSimulationEventBus().next_sequence(), 0u);
-    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), 1u);
-    ASSERT_EQ(SpawnGround(session, 5400, -1500), 1u);
-    session.GetSimulationEventBus().drain(session.GetWorldClock().tick());
-    EXPECT_EQ(calls, 1);
-}
-
-TEST(GameSessionHeadlessWorldTest, RefusedReloadPreservesTransientGroundState) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession session;
-    CreateGroundWorld(session, root, jobs, "Transient ground refused reload");
-    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
-    ASSERT_TRUE(session.SaveWorldState());
-    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
-    session.GetSimulationEventBus().publish(100, "script.trigger", "future");
-    const auto objects = session.GetGroundObjects().objects();
-    const auto events = luminumbra::simulation::describe_event_order(
-        session.GetSimulationEventBus().pending_events());
-    const auto cursor = session.GetSimulationEventBus().next_sequence();
-    const auto next_id = session.GetActiveRegionLedger().next_persistent_id();
-    int calls = 0;
-    session.GetSimulationEventBus().subscribe([&](const auto&) { ++calls; });
-    std::ofstream(session.GetWorldSaveDir() / "world_info.json", std::ios::binary) << "invalid";
-    EXPECT_FALSE(session.LoadWorldState());
-    EXPECT_EQ(calls, 0);
-    EXPECT_EQ(session.GetGroundObjects().objects(), objects);
-    EXPECT_EQ(luminumbra::simulation::describe_event_order(
-                  session.GetSimulationEventBus().pending_events()),
-              events);
-    EXPECT_EQ(session.GetSimulationEventBus().next_sequence(), cursor);
-    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next_id);
-}
-
-TEST(GameSessionHeadlessWorldTest, ExhaustedRuntimeEventCursorDoesNotPreventSaving) {
-    const auto maximum = std::numeric_limits<std::uint64_t>::max();
-    for (const bool pending : {false, true}) {
-        SCOPED_TRACE(pending);
-        const HeadlessRoot root;
-        JobSystem jobs;
-        jobs.startup(1);
-        GameSession session;
-        CreateGroundWorld(session, root, jobs, "Transient exhausted cursor");
-        auto& bus = session.GetSimulationEventBus();
-        bus.restore_pending({}, maximum - 1);
-        ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
-        ASSERT_EQ(bus.next_sequence(), maximum);
-        int calls = 0;
-        bus.subscribe([&](const auto&) { ++calls; });
-        if (!pending) {
-            bus.drain(session.GetWorldClock().tick());
-        }
-        const auto events = luminumbra::simulation::describe_event_order(bus.pending_events());
-        const auto next_id = session.GetActiveRegionLedger().next_persistent_id();
-        EXPECT_EQ(SpawnGround(session, 5300, -1500), 0u);
-        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next_id);
-        ASSERT_TRUE(session.SaveWorldState());
-        ASSERT_TRUE(session.SaveWorld());
-        EXPECT_EQ(calls, pending ? 0 : 1);
-        EXPECT_EQ(bus.next_sequence(), maximum);
-        EXPECT_EQ(luminumbra::simulation::describe_event_order(bus.pending_events()), events);
-        EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
-    }
 }
