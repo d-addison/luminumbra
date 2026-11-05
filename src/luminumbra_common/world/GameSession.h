@@ -696,10 +696,20 @@ private:
     // Stage existing field authority; publish only after the tick's consumers and work succeed.
     [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
     void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
+    void BindRegionalFieldQueries();
+    [[nodiscard]] const FieldPageState& RegionalFields() const;
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    void ProjectRegionalWeather(std::uint64_t tick, bool restoring = false);
+    void AdvanceRegionalWeather(FieldPageState& fields, std::uint64_t tick);
+    void StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick);
+    // Query-only view of this tick's candidate, cleared before publication or fault recovery.
+    const FieldPageState* m_regionalFieldView = nullptr;
+    bool m_regionalFieldsBound = false;
     bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     bool m_regionRequiresIndex = false;
-    // Stable only in the clock slice; world-anchored pages replace this grid in C4.
+    // Persisted anchor for ambient diagnostics and derived presentation grids.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
     // Exact canonical preset source, independent of dependency-content identity.
