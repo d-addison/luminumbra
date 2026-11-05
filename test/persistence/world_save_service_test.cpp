@@ -3066,11 +3066,13 @@ void ExpectGroundNotificationPayloadSave(const std::string& payload, bool reject
                         store, save_dir.path(), &errors, notifications));
     ASSERT_TRUE(saved) << JoinErrors(errors);
     EXPECT_EQ(errors.empty(), !rejected);
-    if (rejected)
+    if (rejected) {
         EXPECT_NE(JoinErrors(errors).find("omitted 2 notification(s) with non-UTF-8 payloads"),
                   std::string::npos);
-    if (joined)
+    }
+    if (joined) {
         ASSERT_TRUE(transaction->commit(&errors)) << JoinErrors(errors);
+    }
     const auto bytes = ReadFileBytes(WorldSaveService::ground_objects_path(save_dir.path()));
     EXPECT_EQ(bytes, store.serialize(expected));
     if (!rejected) {
