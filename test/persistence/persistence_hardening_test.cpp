@@ -18,6 +18,7 @@
 #include "core/ResidencyContract.h"
 #include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp"
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
@@ -34,6 +35,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -336,6 +339,181 @@ TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndepende
     EXPECT_EQ(chunk.water_seed_edit_generation(), seed_generation + 1u);
     EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
     EXPECT_TRUE(chunk.has_water_authority());
+}
+
+TEST(PersistenceHardening, WaterOnlyRecordFlagsFollowSimulationOwnership) {
+    const TempSaveDir save("water_only_flags");
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->mark_water_data_dirty();
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+    const auto digest = WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    ASSERT_NE(digest, WorldSaveService::region_simulation_digest({}, {0, 0}, {}));
+    ASSERT_TRUE(WorldSaveService{}.save_world(original, save.path));
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(chunk->has_terrain_authority());
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(
+        WorldSaveService::region_file_path(save.path, 0, 0), records));
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_NE(records.front().flags & 0x01u, 0u);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, {chunk}), digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(
+                  save.path, {0, 0}, P::RegionDigestInputs{{}, {chunk}, {}}),
+              digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, {}), digest);
+}
+
+TEST(PersistenceHardening, UnflaggedOwnedWaterIsRetainedAndReflagged) {
+    for (const std::string_view encoding : {"authority", "water_authority", "water_state"}) {
+        for (const std::uint8_t flags : {std::uint8_t{0}, std::uint8_t{2}}) {
+            for (const bool indexed : {false, true}) {
+                for (const bool initialized : {false, true}) {
+                    SCOPED_TRACE(encoding);
+                    SCOPED_TRACE(flags);
+                    SCOPED_TRACE(indexed);
+                    SCOPED_TRACE(initialized);
+                    const TempSaveDir save("unflagged_owned_water");
+                    WorldStreamingState original;
+                    const auto chunk = AddCompleteWaterChunk(original, {1280, 0, -1280});
+                    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+                    chunk->mark_sdf_generated_current_params();
+                    chunk->mark_water_data_dirty();
+                    if (!initialized) {
+                        chunk->has_water_sim.store(false);
+                        chunk->current_water_resolution.store(0);
+                        chunk->water_depth_mm.clear();
+                        chunk->water_bed_mm.clear();
+                        chunk->water_edge_flux.clear();
+                        chunk->water_level_data.clear();
+                        chunk->water_flow_data.clear();
+                        chunk->water_sim_terrain_height.clear();
+                    }
+                    auto payload =
+                        nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+                    auto& object = payload["chunks"][0];
+                    if (encoding != "authority")
+                        object.erase("authority");
+                    if (encoding != "water_authority")
+                        object.erase("water_authority");
+                    if (encoding != "water_state")
+                        object["water_state"].erase("terrain_authoritative");
+                    const WorldSaveService::ContainerRecord record{
+                        chunk->get_id(), 0, flags, payload.dump()};
+                    const auto region = WorldSaveService::region_file_path(save.path, 40, -40);
+                    if (indexed) {
+                        P::SaveTransaction transaction(
+                            save.path, 1, {}, &WorldSaveService::member_digest);
+                        ASSERT_TRUE(transaction.begin(nullptr));
+                        ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+                        ASSERT_TRUE(transaction.commit(nullptr));
+                    } else {
+                        ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+                    }
+                    EXPECT_EQ(P::snapshot_index_exists(save.path), indexed);
+                    ASSERT_TRUE(WorldSaveService::validate_save(save.path));
+                    const auto digest =
+                        WorldSaveService::region_simulation_digest({}, {40, -40}, {chunk});
+                    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {40, -40}, {}),
+                              digest);
+                    const auto exact =
+                        WorldSaveService::read_chunk(save.path, chunk->get_coords(), indexed);
+                    ASSERT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Found);
+                    ASSERT_NE(exact.chunk, nullptr);
+                    EXPECT_TRUE(exact.chunk->is_voxel_data_dirty());
+                    EXPECT_TRUE(exact.chunk->has_water_authority());
+                    EXPECT_FALSE(exact.chunk->has_terrain_authority());
+                    EXPECT_TRUE(exact.chunk->same_water_state(*chunk));
+                    const std::unordered_set<ChunkID> retain_none;
+                    std::vector<IVec3> inventory;
+                    std::vector<std::string> errors;
+                    WorldStreamingState loaded;
+                    ASSERT_TRUE(WorldSaveService{}.load_world(
+                        loaded, save.path, errors, {}, &retain_none, &inventory));
+                    EXPECT_EQ(inventory, (std::vector<IVec3>{chunk->get_coords()}));
+                    const auto repaired = loaded.find_chunk(chunk->get_id());
+                    ASSERT_NE(repaired, nullptr);
+                    EXPECT_TRUE(repaired->is_voxel_data_dirty());
+                    EXPECT_FALSE(repaired->has_terrain_authority());
+                    EXPECT_TRUE(repaired->same_water_state(*chunk));
+                    const auto revision = repaired->authority_hash_revision();
+                    ASSERT_TRUE(WorldSaveService{}.save_world(loaded, save.path, &errors));
+                    EXPECT_FALSE(repaired->is_voxel_data_dirty());
+                    EXPECT_EQ(repaired->authority_hash_revision(), revision);
+                    std::vector<WorldSaveService::ContainerRecord> records;
+                    ASSERT_TRUE(WorldSaveService::read_container_records(region, records));
+                    ASSERT_EQ(records.size(), 1u);
+                    EXPECT_NE(records.front().flags & 0x01u, 0u);
+                    WorldStreamingState reopened;
+                    inventory.clear();
+                    ASSERT_TRUE(WorldSaveService{}.load_world(
+                        reopened, save.path, errors, {}, &retain_none, &inventory));
+                    EXPECT_EQ(reopened.size(), 0u);
+                    EXPECT_EQ(inventory, (std::vector<IVec3>{chunk->get_coords()}));
+                    const auto clean =
+                        WorldSaveService::read_chunk(save.path, chunk->get_coords(), indexed);
+                    ASSERT_EQ(clean.status, WorldSaveService::ChunkReadStatus::Found);
+                    ASSERT_NE(clean.chunk, nullptr);
+                    EXPECT_FALSE(clean.chunk->is_voxel_data_dirty());
+                    EXPECT_TRUE(clean.chunk->same_water_state(*chunk));
+                    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {40, -40}, {}),
+                              digest);
+                    EXPECT_TRUE(errors.empty());
+                }
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, UnflaggedUnownedWaterRequiresExplicitLegacyUpgrade) {
+    for (const std::uint8_t flags : {std::uint8_t{0}, std::uint8_t{2}}) {
+        for (const bool indexed : {false, true}) {
+            SCOPED_TRACE(flags);
+            SCOPED_TRACE(indexed);
+            const TempSaveDir save("unflagged_unowned_water");
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+            chunk->mark_sdf_generated_current_params();
+            const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+            const WorldSaveService::ContainerRecord record{
+                chunk->get_id(), 0, flags, P::SerializeWorldStreamingStateSnapshotJson(original)};
+            if (indexed) {
+                P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+                ASSERT_TRUE(transaction.begin(nullptr));
+                ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+                ASSERT_TRUE(transaction.commit(nullptr));
+            } else {
+                ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+            }
+            std::vector<std::shared_ptr<Chunk>> authoritative;
+            ASSERT_TRUE(WorldSaveService::read_authoritative_region_chunks(
+                region, 0, 31, 0, 31, authoritative));
+            EXPECT_TRUE(authoritative.empty());
+            WorldStreamingState ordinary;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(WorldSaveService{}.load_world(ordinary, save.path, errors));
+            ASSERT_NE(ordinary.find_chunk(chunk->get_id()), nullptr);
+            EXPECT_FALSE(ordinary.find_chunk(chunk->get_id())->has_water_authority());
+            const std::unordered_set<ChunkID> retain_none;
+            std::vector<IVec3> inventory;
+            WorldStreamingState upgraded;
+            ASSERT_TRUE(WorldSaveService{}.load_world(
+                upgraded, save.path, errors, {}, &retain_none, &inventory));
+            EXPECT_EQ(inventory.empty(), indexed);
+            EXPECT_EQ(upgraded.size(), indexed ? 0u : 1u);
+            if (!indexed) {
+                const auto promoted = upgraded.find_chunk(chunk->get_id());
+                ASSERT_NE(promoted, nullptr);
+                EXPECT_TRUE(promoted->has_water_authority());
+                EXPECT_TRUE(promoted->is_voxel_data_dirty());
+                EXPECT_EQ(promoted->water_depth_mm, chunk->water_depth_mm);
+            }
+        }
+    }
 }
 
 TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority) {

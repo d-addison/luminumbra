@@ -2916,9 +2916,8 @@ bool SdfLatticeAdmissible(const Chunk& chunk) {
 }
 
 ChunkRecordFacts DecodedChunkRecordFacts(const Chunk& chunk) {
-    return ChunkRecordFacts{chunk.get_coords(),
-                            SdfLatticeAdmissible(chunk),
-                            chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited};
+    return ChunkRecordFacts{
+        chunk.get_coords(), SdfLatticeAdmissible(chunk), chunk.has_simulation_authority()};
 }
 
 // Exact record bytes gate both facts and the transfer of a cold validation decode.
@@ -2970,11 +2969,21 @@ bool AdmitChunkRecord(const RegionRecord& record,
     return true;
 }
 
+bool RepairOwnedWaterRecordFlag(Chunk& chunk, const RegionRecord& record) {
+    if ((record.flags & kRecordFlagEdited) == 0u && chunk.has_water_authority()) {
+        chunk.mark_dirty_for_save();
+        return true;
+    }
+    return false;
+}
+
 // Legacy containers predate water authority, so evolved water on a generated
 // chunk was saved without the edited flag. Keep that water instead of
 // regenerating it; the chunk stays save-dirty until an indexed save records it.
 bool PromoteLegacyWaterRecord(Chunk& chunk, const RegionRecord& record) {
-    if ((record.flags & kRecordFlagEdited) != 0u || chunk.has_water_authority())
+    if (RepairOwnedWaterRecordFlag(chunk, record))
+        return true;
+    if ((record.flags & kRecordFlagEdited) != 0u)
         return false;
     if ((record.flags & kRecordFlagWaterPresent) == 0u &&
         !chunk.has_water_sim.load(std::memory_order_acquire))
@@ -2989,8 +2998,7 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     // Edited/authoritative is sticky: once a chunk record was persisted with
     // post-generation edits it stays authoritative even after the in-memory
     // dirty flag is cleared by the save.
-    if (chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited ||
-        (previous_flags & kRecordFlagEdited) != 0) {
+    if (chunk.has_simulation_authority() || (previous_flags & kRecordFlagEdited) != 0u) {
         flags |= kRecordFlagEdited;
     }
     if (chunk.has_water_sim.load(std::memory_order_acquire) || !chunk.water_mesh_vertices.empty()) {
@@ -4654,7 +4662,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+        if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
@@ -4932,14 +4940,31 @@ bool WorldSaveService::read_authoritative_region_chunks(
         return false;
     }
     for (const RegionRecord& record : raw_records) {
-        if (record.lod_level != 0u || (record.flags & kRecordFlagEdited) == 0u)
+        if (record.lod_level != 0u)
             continue;
         const IVec3 indexed_coords = Chunk::decode_id(record.id);
         if (indexed_coords.x < min_chunk_x || indexed_coords.x > max_chunk_x ||
             indexed_coords.z < min_chunk_z || indexed_coords.z > max_chunk_z) {
             continue;
         }
-        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        std::shared_ptr<Chunk> chunk;
+        if ((record.flags & kRecordFlagEdited) != 0u) {
+            chunk = DecodeChunkRecord(record, region_file, errors);
+        } else {
+            ChunkRecordFacts facts;
+            if (!AdmitChunkRecord(record, region_file, errors, facts, nullptr, false, true)) {
+                out_chunks.clear();
+                return false;
+            }
+            if (!facts.loaded_or_edited)
+                continue;
+            if (!AdmitChunkRecord(record, region_file, errors, facts, &chunk) || !chunk) {
+                out_chunks.clear();
+                return false;
+            }
+            if (!chunk->has_water_authority())
+                continue;
+        }
         if (!chunk) {
             out_chunks.clear();
             return false;
@@ -6221,6 +6246,8 @@ WorldSaveService::read_chunk(const std::filesystem::path& save_dir,
                                            : errors.front());
             if (!admission->format.indexed)
                 PromoteLegacyWaterRecord(*result.chunk, record);
+            else
+                RepairOwnedWaterRecordFlag(*result.chunk, record);
             result.chunk->normalize_for_park();
             result.status = ChunkReadStatus::Found;
             return result;
@@ -6449,9 +6476,15 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                               !authoritative_inventory,
                                           true))
                         return reject("");
-                    // Promoted chunks are adopted so the upgrade save records their authority.
+                    if (!chunk && (record.flags & kRecordFlagEdited) == 0u &&
+                        facts.loaded_or_edited &&
+                        !AdmitChunkRecord(record, path, &errors, facts, &chunk))
+                        return reject("");
+                    // Retain promotions and flag repairs until the upgrade save commits.
                     const bool promoted =
-                        promote_legacy_water && PromoteLegacyWaterRecord(*chunk, record);
+                        chunk &&
+                        (promote_legacy_water ? PromoteLegacyWaterRecord(*chunk, record)
+                                              : RepairOwnedWaterRecordFlag(*chunk, record));
                     if (promoted)
                         facts.loaded_or_edited = true;
                     if ((indexed || authoritative_inventory) && !facts.lattice_ok)

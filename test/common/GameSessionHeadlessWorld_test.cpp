@@ -5972,6 +5972,89 @@ TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     EXPECT_EQ(audit.mismatched, std::size_t{0});
 }
 
+TEST(GameSessionHeadlessWorldTest, WaterOnlySaveWithRegionsOffKeepsDigestThroughRegionsUpgrade) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    owner.SetActiveRegionsEnabled(false);
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
+    owner.SetWaterHighResEnabled(false);
+    ASSERT_TRUE(owner.CreateWorld("Water-only regions upgrade", "1337", "default"));
+    const Luminumbra::IVec3 distant(1280, 0, -1280);
+    const Luminumbra::world::RegionKey key{40, -40};
+    auto chunk = std::make_shared<Luminumbra::Chunk>(distant);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->current_water_resolution.store(8);
+    chunk->water_depth_mm.assign(64, 123);
+    chunk->water_bed_mm.assign(64, 0);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 0.123f);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(64, 0.0f);
+    chunk->water_rest_level.assign(64, 0.123f);
+    chunk->has_water_sim.store(true);
+    chunk->is_water_sleeping.store(true);
+    chunk->mark_water_data_dirty();
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_EQ(chunk->sdf_provenance(), Luminumbra::ChunkSdfProvenance::GeneratedCurrentParams);
+    ASSERT_FALSE(chunk->has_terrain_authority());
+    const auto digest = Digest({}, key, {chunk});
+    ASSERT_NE(digest, Digest({}, key, {}));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto world_id = owner.GetMetadata().worldId;
+    ASSERT_FALSE(P::snapshot_index_exists(save));
+    EXPECT_EQ(chunk->sdf_provenance(), Luminumbra::ChunkSdfProvenance::GeneratedCurrentParams);
+    EXPECT_FALSE(chunk->has_terrain_authority());
+    EXPECT_EQ(Digest(save, key, {chunk}), digest);
+    std::vector<P::WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(P::WorldSaveService::read_container_records(
+        P::WorldSaveService::region_file_path(save, key.x, key.z), records));
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records.front().id, chunk->get_id());
+    EXPECT_NE(records.front().flags & 0x01u, 0u);
+    const auto saved = P::WorldSaveService::read_chunk(save, distant);
+    ASSERT_EQ(saved.status, P::WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(saved.chunk, nullptr);
+    EXPECT_TRUE(saved.chunk->same_water_state(*chunk));
+    EXPECT_TRUE(saved.chunk->has_water_authority());
+    EXPECT_FALSE(saved.chunk->has_terrain_authority());
+
+    const auto expect_digests = [&](GameSession& session) {
+        EXPECT_EQ(Digest(save, key, {}), digest);
+        auto* world = session.GetWorldSystem();
+        ASSERT_TRUE(world->restore_authoritative_chunk(distant));
+        const auto restored = world->find_streamed_chunk(distant);
+        ASSERT_NE(restored, nullptr);
+        EXPECT_TRUE(restored->same_water_state(*chunk));
+        EXPECT_TRUE(restored->has_water_authority());
+        EXPECT_FALSE(restored->has_terrain_authority());
+        EXPECT_EQ(Digest(save, key, {restored}), digest);
+        EXPECT_EQ(Digest(save, key, {}, {restored}), digest);
+        auto inputs = world->region_digest_inputs(key.x, key.z);
+        inputs.require_index = P::snapshot_index_exists(save);
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, key, inputs), digest);
+    };
+    GameSession upgraded;
+    EnableSnapshotSession(upgraded, root, jobs);
+    ASSERT_TRUE(upgraded.LoadWorld(world_id)) << upgraded.GetWorldOpenError();
+    ASSERT_FALSE(upgraded.GetWorldSystem()->find_streamed_chunk(distant));
+    ASSERT_NO_FATAL_FAILURE(expect_digests(upgraded));
+    ASSERT_TRUE(upgraded.SaveWorldState());
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    ASSERT_NO_FATAL_FAILURE(expect_digests(upgraded));
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(world_id)) << reopened.GetWorldOpenError();
+    ASSERT_FALSE(reopened.GetWorldSystem()->find_streamed_chunk(distant));
+    ASSERT_NO_FATAL_FAILURE(expect_digests(reopened));
+}
+
 TEST(GameSessionHeadlessWorldTest, LegacyEvolvedWaterOnGeneratedChunkSurvivesRegionsUpgrade) {
     const HeadlessRoot root;
     JobSystem jobs;
