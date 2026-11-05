@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
 #include <algorithm>
