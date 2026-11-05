@@ -77,9 +77,18 @@ protected:
         ledger.mark_edited({0, 0}, session.GetWorldClock());
         nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
         session.GetWorldClock().write_metadata(metadata);
-        ASSERT_TRUE(
-            WorldSaveService::save_metadata_and_active_regions(metadata.dump(), ledger, input));
-        ASSERT_TRUE(WorldSaveService::save_field_pages(fields, input));
+        {
+            WorldSaveService::SaveFactsScope facts(input);
+            Luminumbra::Persistence::SaveTransaction transaction(
+                input, 0, {}, &WorldSaveService::member_digest);
+            std::vector<std::string> errors;
+            ASSERT_TRUE(transaction.begin(&errors));
+            ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, input, &errors));
+            ASSERT_TRUE(WorldSaveService::save_field_pages(fields, input, &errors));
+            ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(input, &errors));
+            ASSERT_TRUE(transaction.commit(&errors));
+        }
         ASSERT_TRUE(session.LoadWorldStateFrom(input));
         ASSERT_FALSE(session.GetFieldPages().empty());
     }
@@ -203,7 +212,7 @@ protected:
             EXPECT_NE(reader.GetWorldOpenError().find("water simulation cursor"),
                       std::string::npos);
         } else if (failure == LoadFailure::Fields) {
-            EXPECT_NE(reader.GetWorldOpenError().find("Field pages load failed:"),
+            EXPECT_NE(reader.GetWorldOpenError().find("chunks/region/field-pages.fpg"),
                       std::string::npos);
         } else if (failure == LoadFailure::ActiveRegionsRequired) {
             EXPECT_EQ(reader.GetWorldOpenError(),
