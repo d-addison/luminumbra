@@ -91,9 +91,11 @@ bool ActiveRegionLedger::try_set_local_anchor(const Vec3& walking_feet) noexcept
 bool ActiveRegionLedger::can_activate(RegionKey key) const {
     return ValidKey(key) &&
            (m_records.contains(key) ||
-            (m_records.size() < kMaxRegions &&
-             encodable_with_counts(
-                 m_energyAges.size(), m_waterDebts.size(), std::nullopt, m_records.size() + 1)));
+            (m_records.size() < kMaxRegions && encodable_with_counts(m_energyAges.size(),
+                                                                     m_waterDebts.size(),
+                                                                     std::nullopt,
+                                                                     false,
+                                                                     m_records.size() + 1)));
 }
 ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock& clock) {
     if (!ValidKey(key) || clock.tick() < m_headerTick)
@@ -179,6 +181,8 @@ void ActiveRegionLedger::acknowledge_world_clock(const WorldClock& clock) noexce
 bool ActiveRegionLedger::allocate_persistent_id(std::uint64_t& id) {
     if (m_nextPersistentId >= kPersistentIdLimit)
         return false;
+    if (!encodable_with_counts(m_energyAges.size(), m_waterDebts.size(), std::nullopt, true))
+        throw std::length_error("Active-region ledger file capacity reached");
     id = m_nextPersistentId++;
     return true;
 }
@@ -566,15 +570,18 @@ bool ActiveRegionLedger::any_frozen_history() const {
 bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
                                                std::size_t debts,
                                                std::optional<std::size_t> completed_owners,
+                                               bool allocator_advanced,
                                                std::optional<std::size_t> record_count) const {
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
     const std::size_t completed_count = completed_owners.value_or(m_completedWork.size());
     const std::size_t completed = completed_count == 0 ? 0u : 10u + 16u * completed_count;
+    const std::size_t allocator = (allocator_advanced || m_nextPersistentId != 1) ? 14u : 0u;
     const std::size_t base =
         kHeaderBytes + record_count.value_or(m_records.size()) * kRecordBytes + 8;
-    const std::size_t extension_payload =
-        completed + (owners == 0 ? 0u : 10u + 16u * owners) + (debts == 0 ? 0u : 10u + 16u * debts);
+    const std::size_t extension_payload = completed + allocator +
+                                          (owners == 0 ? 0u : 10u + 16u * owners) +
+                                          (debts == 0 ? 0u : 10u + 16u * debts);
     if (base + 4u + 7u + extension_payload <= kMaxFileBytes)
         return true;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
@@ -585,8 +592,9 @@ bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
-    const bool extension = declare_projection || !m_energyAges.empty() || !m_waterDebts.empty() ||
-                           !m_completedWork.empty();
+    const bool allocator_advanced = m_nextPersistentId != 1;
+    const bool extension = declare_projection || allocator_advanced || !m_energyAges.empty() ||
+                           !m_waterDebts.empty() || !m_completedWork.empty();
     if (!encodable_with_counts(m_energyAges.size(), m_waterDebts.size()))
         throw std::length_error("Active-region ledger file capacity reached");
     std::string bytes = "ARL1";
@@ -596,6 +604,11 @@ std::string ActiveRegionLedger::encode() const {
     if (extension) {
         // Extension block: u32 length, then ascending TLVs (u16 type, u32 length, value).
         std::string tlvs;
+        if (allocator_advanced) {
+            Append(tlvs, 1, 2);
+            Append(tlvs, 8, 4);
+            Append(tlvs, m_nextPersistentId, 8);
+        }
         if (declare_projection) {
             Append(tlvs, 2, 2);
             Append(tlvs, 1, 4);
@@ -761,10 +774,21 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 at += length;
                 // Strictly ascending types refuse duplicates; unsupported types refuse.
                 if ((have_previous && type <= previous_type) ||
-                    (type != 2 && type != 4 && type != 5 && type != 6))
+                    (type != 1 && type != 2 && type != 4 && type != 5 && type != 6))
                     return false;
                 have_previous = true;
                 previous_type = type;
+                if (type == 1) {
+                    // Persistent id allocator: the next id, in [2, 2^63].
+                    if (length != 8)
+                        return false;
+                    Reader next_id(value);
+                    const auto next = next_id.read(8);
+                    if (next < 2 || next > kPersistentIdLimit)
+                        return false;
+                    result.m_nextPersistentId = next;
+                    continue;
+                }
                 if (type == 6) {
                     if (length < 4)
                         return false;
@@ -851,7 +875,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     result.m_legacyFrozenDigests.insert(key);
         }
         // An envelope without a projection TLV preserves historical digests verbatim, even
-        // when completed work, energy ages or water debt require version 2. Do not
+        // when allocator, completed work, energy ages or water debt require version 2. Do not
         // label them projection 2 until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
