@@ -3983,6 +3983,27 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     return scope.commit(errors);
 }
 
+namespace {
+// Every object must lie in a region the ledger records and must not be spawned after the clock.
+bool GroundObjectsMatchLedger(const world::GroundObjectStore& store,
+                              const world::ActiveRegionLedger& ledger,
+                              std::uint64_t tick,
+                              std::vector<std::string>* errors) {
+    for (const auto& entry : store.objects()) {
+        const world::GroundObject& object = entry.second;
+        if (ledger.records().count(world::GroundObjectStore::region_of(object)) == 0) {
+            AddError(errors, "corrupt ground objects: orphaned object");
+            return false;
+        }
+        if (object.spawn_tick > tick) {
+            AddError(errors, "corrupt ground objects: spawn tick is ahead of the clock");
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
     const std::string& bytes,
     const world::ActiveRegionLedger& ledger,
@@ -3992,6 +4013,20 @@ bool WorldSaveService::save_metadata_active_regions_and_ground_objects(
     std::vector<std::string>* errors,
     CreatedWorldArtifacts* artifacts) {
     const SaveGuard guard;
+    // Refuse what the next load would reject: orphaned objects or spawns ahead of the saved clock.
+    if (!admit_metadata_bytes(bytes, errors))
+        return false;
+    {
+        world::WorldClock clock;
+        std::string clock_error;
+        if (!world::WorldClock::from_metadata(
+                nlohmann::json::parse(bytes, nullptr, false), clock, clock_error)) {
+            AddError(errors, clock_error);
+            return false;
+        }
+        if (!GroundObjectsMatchLedger(store, ledger, clock.tick(), errors))
+            return false;
+    }
     TransactionScope scope(save_dir,
                            {world::GroundObjectStore::kRelativePath,
                             "world_info.json",
@@ -4381,10 +4416,13 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
     try {
         std::size_t rejected_payloads = 0;
         bytes = store.serialize(notifications, &rejected_payloads);
-        if (rejected_payloads != 0)
+        if (rejected_payloads != 0) {
+            // Dropping an accepted event would lose it on reload, so the save is refused.
             AddError(errors,
-                     "Ground objects save: omitted " + std::to_string(rejected_payloads) +
-                         " notification(s) with non-UTF-8 payloads");
+                     "Ground objects save refused: " + std::to_string(rejected_payloads) +
+                         " pending notification(s) have non-UTF-8 payloads");
+            return false;
+        }
         if (!bytes.empty()) {
             world::GroundObjectStore parsed;
             std::string error;
@@ -4493,27 +4531,6 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         *notifications = std::move(pending);
     return true;
 }
-
-namespace {
-// Every object must lie in a region the ledger records and must not be spawned after the clock.
-bool GroundObjectsMatchLedger(const world::GroundObjectStore& store,
-                              const world::ActiveRegionLedger& ledger,
-                              std::uint64_t tick,
-                              std::vector<std::string>* errors) {
-    for (const auto& entry : store.objects()) {
-        const world::GroundObject& object = entry.second;
-        if (ledger.records().count(world::GroundObjectStore::region_of(object)) == 0) {
-            AddError(errors, "corrupt ground objects: orphaned object");
-            return false;
-        }
-        if (object.spawn_tick > tick) {
-            AddError(errors, "corrupt ground objects: spawn tick is ahead of the clock");
-            return false;
-        }
-    }
-    return true;
-}
-} // namespace
 
 bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save_dir,
                                                const world::ActiveRegionLedger& ledger,

@@ -125,8 +125,8 @@ public:
     // Optional notifications add "notifications":{"next_sequence":N,"events":[...]} to
     // the envelope. Events ascend by sequence and contain tick, lane, sequence, topic, payload.
     // With empty notification state, legacy bytes are unchanged.
-    // Omit notifications with non-UTF-8 payloads, retaining the cursor and live bus state.
-    // Other serialization failures throw for the writer to diagnose and refuse.
+    // Notifications with non-UTF-8 payloads are left out of the bytes and counted in
+    // rejected_payloads so the writer can refuse the save; other failures throw.
     [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {},
                                         std::size_t* rejected_payloads = nullptr) const;
     // Includes reserved future object growth and the notification envelope/cursor.
