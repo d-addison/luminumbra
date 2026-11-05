@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ActiveRegionLedger.h"
-#include "simulation/SimulationEventBus.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -9,21 +8,11 @@
 #include <map>
 #include <set>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace Luminumbra::world {
 
-// Delivery state is persisted with objects and hashed independently of their region projection.
-struct GroundNotifications {
-    std::uint64_t next_sequence = 0;
-    std::vector<luminumbra::simulation::SimulationEvent> events;
-
-    [[nodiscard]] std::string canonical_bytes() const;
-};
-
-// One persistent ground object (S5). Positions are integer millimetres; no floating point is ever
-// persisted or hashed.
+// One runtime ground object. Positions and hash projections use integer millimetres.
 struct GroundObject {
     static constexpr std::uint16_t kSettled = 1;
     std::uint64_t id = 0;
@@ -45,17 +34,12 @@ struct GroundObject {
 // Ordered, bounded store of ground objects keyed by id. Pure data: no IO, no engine access.
 class GroundObjectStore {
 public:
-    // Both limits apply independently. Admission reserves enough bytes for future settling and
-    // ageing, so a successful spawn cannot later make its store unsaveable.
     static constexpr std::size_t kMaxObjects = 65536;
-    static constexpr std::size_t kMaxFileBytes = 4u * 1024u * 1024u;
     // Horizontal coordinates satisfy |v| < 2^24 metres; vertical coordinates satisfy
     // |y| < 2^20 metres. Bounds apply to the quantized integer millimetres.
     static constexpr std::int64_t kMaxCoordinateMm = 16'777'216'000;
     static constexpr std::int64_t kMaxVerticalMm = 1'048'576'000;
     static constexpr std::int64_t kRegionSizeMm = 512'000;
-    static constexpr const char* kSchema = "luminumbra.ground_objects.v1";
-    static constexpr const char* kRelativePath = "chunks/region/ground-objects.json";
 
     // id != 0, type != 0, coordinates in range (see above), flags only kSettled, and
     // (despawn_after == 0 or active_age < despawn_after).
@@ -64,8 +48,7 @@ public:
     [[nodiscard]] static RegionKey region_of(const GroundObject& object);
 
     // Refuses (false, store unchanged) on an invalid object, a duplicate id or a full store.
-    // notification_bytes includes queued events and the candidate's spawn event, with separators.
-    bool insert(const GroundObject& object, std::size_t notification_bytes = 0);
+    bool insert(const GroundObject& object);
     // Removes by id. Returns false when absent.
     bool erase(std::uint64_t id);
     [[nodiscard]] const GroundObject* find(std::uint64_t id) const;
@@ -114,31 +97,6 @@ public:
     // despawn_after != 0 and active_age >= despawn_after is removed and reported.
     AgeResult age_region(RegionKey key, const SettleFn& settle);
 
-    // Canonical file bytes. Empty string when objects and notification state are empty.
-    // Format, exactly (no whitespace other than the single trailing newline):
-    //   {"schema":"luminumbra.ground_objects.v1","objects":[{"id":N,"type":N,"x_mm":N,
-    //   "y_mm":N,"z_mm":N,"spawn_tick":N,"active_age":N,"despawn_after":N,"payload":N,
-    //   "flags":N},...]}\n
-    // (the example is wrapped; the real output is one line). Objects ascend by id.
-    // Optional notifications add "notifications":{"next_sequence":N,"events":[...]} to
-    // the envelope. Events ascend by sequence and contain tick, lane, sequence, topic, payload.
-    // With empty notification state, legacy bytes are unchanged.
-    [[nodiscard]] std::string serialize(const GroundNotifications& notifications = {}) const;
-    // Includes reserved future object growth and the notification envelope/cursor.
-    [[nodiscard]] bool fits_file_budget(const GroundNotifications& notifications = {}) const;
-    // Strict transactional parse. Refuses (false, `error` set, `out` untouched) on: size >
-    // kMaxFileBytes, excessive nesting, malformed JSON, wrong schema, unknown/missing/duplicate
-    // keys, a non-integer number, any invalid object, ids not strictly ascending, more than
-    // kMaxObjects, an id >= `next_id`, or bytes that differ from serialize() of the parsed result
-    // (rejects alternate encodings), or object growth reservations plus notifications exceed the
-    // file budget. An empty `bytes` is not valid input (callers handle absence
-    // themselves).
-    static bool parse(std::string_view bytes,
-                      std::uint64_t next_id,
-                      GroundObjectStore& out,
-                      std::string& error,
-                      GroundNotifications* notifications = nullptr);
-
     // Hash text. Empty string when the store is empty, otherwise
     // "ground_objects:v1:" + region_bytes of every object, i.e. objects_bytes(all).
     [[nodiscard]] std::string canonical_bytes() const;
@@ -151,7 +109,6 @@ public:
 private:
     std::map<std::uint64_t, GroundObject> m_objects;
     std::map<RegionKey, std::set<std::uint64_t>> m_byRegion;
-    std::size_t m_reserved_bytes = 0;
 };
 
 } // namespace Luminumbra::world

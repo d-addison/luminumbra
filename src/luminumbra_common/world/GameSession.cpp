@@ -199,8 +199,6 @@ struct GameSession::LoadedWorldState {
     std::optional<Vec3> ambient_anchor;
     std::optional<WorldCalendar> render_calendar;
     std::optional<ActiveRegionLedger> ledger;
-    GroundObjectStore ground_objects;
-    GroundNotifications ground_notifications;
     bool snapshot_present = false;
     bool requires_index = false;
     Ecs::EntityRegistrySnapshot plants;
@@ -2115,13 +2113,8 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         return 0;
     }
     std::uint64_t id = 0;
-    try {
-        if (!m_activeRegionLedger.allocate_persistent_id(id)) {
-            LatchRegionFault(tick, "persistent id space exhausted");
-            return 0;
-        }
-    } catch (const std::length_error& error) {
-        LatchRegionFault(tick, error.what());
+    if (!m_activeRegionLedger.allocate_persistent_id(id)) {
+        LatchRegionFault(tick, "runtime id space exhausted");
         return 0;
     }
     // A failure from here on still consumes the id.
@@ -2131,15 +2124,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         return 0;
     }
     SettleGroundObjectOnTerrain(candidate, ProceduralGroundHeight(*m_worldSystem, candidate));
-    const luminumbra::simulation::SimulationEvent notification{tick,
-                                                               0,
-                                                               m_simulationEventBus.next_sequence(),
-                                                               "ground.spawned",
-                                                               GroundEventPayload(candidate)};
-    const auto notification_bytes = m_simulationEventBus.pending_bytes("ground.spawned") +
-                                    m_simulationEventBus.pending_bytes("ground.despawned") +
-                                    notification.canonical_bytes().size() + 1;
-    if (!m_groundObjects.insert(candidate, notification_bytes)) {
+    if (!m_groundObjects.insert(candidate)) {
         ++m_regionInputRejections.ground_spawns;
         return 0;
     }
@@ -2147,7 +2132,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
         m_groundObjects.erase(id);
         return 0;
     }
-    m_simulationEventBus.publish(tick, notification.topic, notification.payload);
+    m_simulationEventBus.publish(tick, "ground.spawned", GroundEventPayload(candidate));
     return id;
 }
 
@@ -2373,22 +2358,8 @@ std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_has
     return m_activeRegionsEnabled
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
                                              m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             CaptureGroundNotifications().canonical_bytes())
+                                             m_groundObjects.canonical_bytes())
                : ecology_hash;
-}
-
-GroundNotifications GameSession::CaptureGroundNotifications() const {
-    GroundNotifications notifications;
-    // Fault recovery retires notifications without invoking consumers.
-    if (m_activeRegionsEnabled && !m_regionFault) {
-        notifications.next_sequence = m_simulationEventBus.next_sequence();
-        for (const auto& event : m_simulationEventBus.pending_events()) {
-            if (event.topic == "ground.spawned" || event.topic == "ground.despawned")
-                notifications.events.push_back(event);
-        }
-    }
-    return notifications;
 }
 
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
@@ -2588,15 +2559,9 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
     if (!PersistSavedPreset(save_dir, m_savedPresetJson, artifacts))
         return false;
     if (m_activeRegionsEnabled) {
-        const auto notifications = CaptureGroundNotifications();
-        return Persistence::WorldSaveService::save_metadata_active_regions_and_ground_objects(
-            bytes,
-            m_activeRegionLedger,
-            m_groundObjects,
-            notifications,
-            save_dir,
-            nullptr,
-            artifacts);
+        auto ledger = m_activeRegionLedger;
+        return Persistence::WorldSaveService::save_metadata_and_active_regions(
+            bytes, ledger, save_dir, nullptr, artifacts);
     }
     return Persistence::WorldSaveService::save_metadata(bytes, save_dir, nullptr, artifacts);
 }
@@ -3177,16 +3142,6 @@ bool GameSession::ReadPreparedWorldState(
                 errors.empty() ? std::string(ActiveRegionLedger::kCorruptMessage) : errors.front();
             return false;
         }
-        if (!Persistence::WorldSaveService::load_ground_objects(state.ground_objects,
-                                                                save_dir,
-                                                                state.ledger->next_persistent_id(),
-                                                                &errors,
-                                                                stop,
-                                                                &state.ground_notifications)) {
-            state.input_refused = true;
-            error = errors.empty() ? "Corrupt ground objects." : errors.front();
-            return false;
-        }
         if (options.scheduler_override && state.ledger->config() != *options.scheduler_override) {
             error = "Incompatible configuration: persisted region scheduler differs "
                     "from explicit override.";
@@ -3247,9 +3202,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         // Interrupted pairs may have an older ledger. Rebase without scheduling.
         saved.ledger->restore_clock(saved.clock);
         ReplaceActiveRegionLedger(std::move(*saved.ledger));
-        m_groundObjects = std::move(saved.ground_objects);
-        m_simulationEventBus.restore_pending(std::move(saved.ground_notifications.events),
-                                             saved.ground_notifications.next_sequence);
+        m_groundObjects.clear();
+        m_simulationEventBus.restore_pending({}, 0);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;

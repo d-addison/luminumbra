@@ -522,7 +522,6 @@ public:
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
         return m_groundObjectAdvanceCount;
     }
-    [[nodiscard]] GroundNotifications CaptureGroundNotifications() const;
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -550,7 +549,7 @@ public:
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
-    // Main-thread only, like the other host inputs. Returns the new persistent id, or 0 when the
+    // Main-thread only, like the other host inputs. Returns the new runtime id, or 0 when the
     // flag is off (no state touched) or the spawn is refused.
     std::uint64_t SpawnGroundObject(std::uint32_t type,
                                     std::int64_t x_mm,
@@ -643,7 +642,6 @@ private:
     bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
                                 bool full_metadata,
                                 std::string& bytes) const;
-    friend class GameSessionGroundMetadataTest;
     bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
     struct LoadedWorldState;
     bool ReadWorldStateFrom(const std::filesystem::path& save_dir,

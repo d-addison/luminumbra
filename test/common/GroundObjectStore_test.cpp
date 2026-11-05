@@ -4,16 +4,13 @@
 
 #include <cstdint>
 #include <limits>
-#include <stdexcept>
 #include <string>
-#include <string_view>
 
 namespace {
 using namespace Luminumbra::world;
 
 constexpr std::int64_t kMax = GroundObjectStore::kMaxCoordinateMm;
 constexpr std::int64_t kRegion = GroundObjectStore::kRegionSizeMm;
-constexpr std::uint64_t kU64Max = std::numeric_limits<std::uint64_t>::max();
 
 GroundObject MakeObject(std::uint64_t id, std::int64_t x = 0, std::int64_t z = 0) {
     GroundObject object;
@@ -22,34 +19,6 @@ GroundObject MakeObject(std::uint64_t id, std::int64_t x = 0, std::int64_t z = 0
     object.x_mm = x;
     object.z_mm = z;
     return object;
-}
-
-std::string ObjectJson(std::uint64_t id) {
-    return "{\"id\":" + std::to_string(id) +
-           ",\"type\":1,\"x_mm\":0,\"y_mm\":0,\"z_mm\":0,\"spawn_tick\":0,\"active_age\":0,"
-           "\"despawn_after\":0,\"payload\":0,\"flags\":0}";
-}
-
-std::string FileJson(const std::string& objects) {
-    return std::string("{\"schema\":\"luminumbra.ground_objects.v1\",\"objects\":[") + objects +
-           "]}\n";
-}
-
-std::string Replace(std::string text, const std::string& from, const std::string& to) {
-    const auto position = text.find(from);
-    if (position != std::string::npos) {
-        text.replace(position, from.size(), to);
-    }
-    return text;
-}
-
-// True when parse refuses the bytes, reports an error and leaves the existing store untouched.
-bool RefusedUntouched(std::string_view bytes, std::uint64_t next_id = 100) {
-    GroundObjectStore out;
-    out.insert(MakeObject(99));
-    std::string error;
-    const bool accepted = GroundObjectStore::parse(bytes, next_id, out, error);
-    return !accepted && !error.empty() && out.size() == 1 && out.find(99) != nullptr;
 }
 
 } // namespace
@@ -125,54 +94,12 @@ TEST(GroundObjectStoreTest, InsertRefusesInvalidDuplicateAndFullStore) {
     std::uint64_t refused_id = 1;
     while (refused_id <= GroundObjectStore::kMaxObjects && full.insert(MakeObject(refused_id)))
         ++refused_id;
-    EXPECT_LT(full.size(), GroundObjectStore::kMaxObjects); // file budget also binds
+    EXPECT_EQ(full.size(), GroundObjectStore::kMaxObjects);
     const auto unchanged = full.canonical_bytes();
     EXPECT_FALSE(full.insert(MakeObject(refused_id)));
     EXPECT_EQ(full.canonical_bytes(), unchanged);
-    EXPECT_LE(full.serialize().size(), GroundObjectStore::kMaxFileBytes);
     EXPECT_TRUE(full.erase(1));
     EXPECT_TRUE(full.insert(MakeObject(refused_id)));
-}
-
-TEST(GroundObjectStoreTest, NotificationAdmissionChecksLimitMinusOneLimitAndLimitPlusOne) {
-    GroundObject future = MakeObject(1);
-    future.active_age = std::numeric_limits<std::uint32_t>::max();
-    future.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
-    future.flags = GroundObject::kSettled;
-    GroundObjectStore reference;
-    ASSERT_TRUE(reference.insert(future));
-    const auto reserved = reference.serialize().size() - FileJson("").size() + 1;
-    const auto limit = GroundObjectStore::kMaxFileBytes - 128 - reserved;
-    for (const auto bytes : {limit - 1, limit, limit + 1}) {
-        SCOPED_TRACE(bytes);
-        GroundObjectStore store;
-        EXPECT_EQ(store.insert(MakeObject(1), bytes), bytes <= limit);
-        if (bytes > limit) {
-            EXPECT_TRUE(store.empty());
-            continue;
-        }
-        GroundNotifications notifications{kU64Max - 1,
-                                          {{kU64Max, 0, kU64Max - 2, "ground.spawned", ""}}};
-        auto& event = notifications.events.front();
-        event.payload.assign(bytes - event.canonical_bytes().size() - 1, 'x');
-        const auto settle = [&future](GroundObject& object) {
-            object.y_mm = future.y_mm;
-            object.flags = future.flags;
-            return true;
-        };
-        store.age_region({0, 0}, settle);
-        EXPECT_TRUE(store.fits_file_budget(notifications));
-        const auto serialized = store.serialize(notifications);
-        EXPECT_LE(serialized.size(), GroundObjectStore::kMaxFileBytes);
-        GroundObjectStore restored;
-        GroundNotifications loaded;
-        std::string error;
-        ASSERT_TRUE(GroundObjectStore::parse(serialized, 2, restored, error, &loaded)) << error;
-        EXPECT_EQ(restored.serialize(loaded), serialized);
-    }
-    GroundObjectStore store;
-    EXPECT_FALSE(store.insert(MakeObject(1), std::numeric_limits<std::size_t>::max()));
-    EXPECT_TRUE(store.empty());
 }
 
 TEST(GroundObjectStoreTest, OwnsRegionInRegionAndRegionsAreOrdered) {
@@ -284,96 +211,10 @@ TEST(GroundObjectStoreTest, DespawnedRegionsStayEvictableBeyondLedgerCapacity) {
     EXPECT_TRUE(ledger.records().empty());
 }
 
-TEST(GroundObjectStoreTest, SerializeEmptyIsEmpty) {
+TEST(GroundObjectStoreTest, EmptyStoreHasEmptyHashProjections) {
     GroundObjectStore store;
-    EXPECT_EQ(store.serialize(), "");
     EXPECT_EQ(store.canonical_bytes(), "");
     EXPECT_EQ(store.region_bytes(RegionKey{0, 0}), "");
-}
-
-TEST(GroundObjectStoreTest, SerializeParseRoundTrip) {
-    GroundObjectStore store;
-    GroundObject first = MakeObject(3, -1, kRegion * 4);
-    first.type = 7;
-    first.y_mm = -250;
-    first.spawn_tick = 12;
-    first.active_age = 4;
-    first.despawn_after = 9;
-    first.payload = 77;
-    first.flags = GroundObject::kSettled;
-    ASSERT_TRUE(store.insert(first));
-    ASSERT_TRUE(store.insert(MakeObject(8, 0, 0)));
-
-    const std::string bytes = store.serialize();
-    EXPECT_EQ(bytes.back(), '\n');
-    EXPECT_EQ(bytes.find(' '), std::string::npos);
-
-    GroundObjectStore parsed;
-    std::string error;
-    ASSERT_TRUE(GroundObjectStore::parse(bytes, 100, parsed, error)) << error;
-    EXPECT_EQ(parsed.objects(), store.objects());
-    EXPECT_EQ(parsed.serialize(), bytes);
-}
-
-TEST(GroundObjectStoreTest, WorstCaseRecordsRoundTripUnderFileCap) {
-    GroundObjectStore store;
-    std::uint64_t admitted = 0;
-    for (std::uint64_t i = 0; i < GroundObjectStore::kMaxObjects; ++i) {
-        GroundObject object;
-        object.id = ActiveRegionLedger::kPersistentIdLimit - GroundObjectStore::kMaxObjects + i;
-        object.type = std::numeric_limits<std::uint32_t>::max();
-        object.x_mm = kMax - 1;
-        object.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
-        object.z_mm = -kMax + 1;
-        object.spawn_tick = kU64Max;
-        object.active_age = std::numeric_limits<std::uint32_t>::max() - 1;
-        object.despawn_after = std::numeric_limits<std::uint32_t>::max();
-        object.payload = std::numeric_limits<std::uint32_t>::max();
-        object.flags = GroundObject::kSettled;
-        if (!store.insert(object))
-            break;
-        ++admitted;
-    }
-    ASSERT_GT(admitted, 0u);
-    const std::string bytes = store.serialize();
-    EXPECT_LE(bytes.size(), GroundObjectStore::kMaxFileBytes);
-    GroundObjectStore parsed;
-    std::string error;
-    ASSERT_TRUE(
-        GroundObjectStore::parse(bytes, ActiveRegionLedger::kPersistentIdLimit, parsed, error))
-        << error;
-    EXPECT_EQ(parsed.size(), admitted);
-    EXPECT_EQ(parsed.serialize(), bytes);
-}
-
-TEST(GroundObjectStoreTest, ParseAcceptsCanonicalFormat) {
-    GroundObjectStore out;
-    std::string error;
-    ASSERT_TRUE(GroundObjectStore::parse(FileJson(ObjectJson(1)), 2, out, error)) << error;
-    EXPECT_EQ(out.size(), 1u);
-}
-
-TEST(GroundObjectStoreTest, ParseRefusesAndLeavesOutUntouched) {
-    const std::string good = FileJson(ObjectJson(1));
-
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "v1", "v2")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "{\"schema\"", "{\"extra\":1,\"schema\"")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, ",\"objects\":[", "}")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, ",\"flags\":0}", "}")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, ",\"flags\":0}", ",\"flags\":0,\"extra\":0}")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "\"payload\":0", "\"payload\":0.5")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "\"id\":1", "\"id\":-1")));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "\"type\":1", "\"type\":0")));
-    EXPECT_TRUE(RefusedUntouched(FileJson(ObjectJson(2) + "," + ObjectJson(1))));
-    EXPECT_TRUE(RefusedUntouched(FileJson(ObjectJson(1) + "," + ObjectJson(1))));
-    EXPECT_TRUE(RefusedUntouched(FileJson(ObjectJson(5)), 5));
-    EXPECT_TRUE(RefusedUntouched(FileJson("")));
-    EXPECT_TRUE(RefusedUntouched(good + "x"));
-    EXPECT_TRUE(RefusedUntouched(Replace(good, "\"schema\":", "\"schema\": ")));
-    EXPECT_TRUE(RefusedUntouched(good.substr(0, good.size() - 1)));
-    EXPECT_TRUE(RefusedUntouched("{"));
-    EXPECT_TRUE(RefusedUntouched(""));
-    EXPECT_TRUE(RefusedUntouched(std::string(GroundObjectStore::kMaxFileBytes + 1, ' ')));
 }
 
 TEST(GroundObjectStoreTest, AgeRegionDespawnOrderAndCounts) {
@@ -533,116 +374,4 @@ TEST(GroundObjectStoreTest, CanonicalBytesEmptyAndStable) {
     EXPECT_EQ(store.canonical_bytes(), store.canonical_bytes());
     EXPECT_EQ(store.region_bytes(RegionKey{0, 0}), "1,1,0,0,0,0,0,0,0,0;");
     EXPECT_EQ(store.region_bytes(RegionKey{5, 5}), "");
-    EXPECT_EQ(store.serialize(), FileJson(ObjectJson(1)));
-}
-
-TEST(GroundObjectStoreTest, DeeplyNestedInputRefusesBeforeParsingAndPreservesOutputs) {
-    GroundObjectStore store;
-    ASSERT_TRUE(store.insert(MakeObject(99)));
-    GroundNotifications notifications{7, {{3, 0, 6, "ground.spawned", "kept"}}};
-    const auto before = store.serialize(notifications);
-    const std::string nested = std::string("{\"schema\":") + std::string(100000, '[') + "0" +
-                               std::string(100000, ']') + "}";
-    std::string error;
-    EXPECT_FALSE(GroundObjectStore::parse(nested, 100, store, error, &notifications));
-    EXPECT_NE(error.find("nesting depth"), std::string::npos);
-    EXPECT_EQ(store.serialize(notifications), before);
-}
-
-TEST(GroundObjectStoreTest, NotificationsRoundTripWithoutChangingLegacyBytesOrHash) {
-    GroundObjectStore store, restored;
-    ASSERT_TRUE(store.insert(MakeObject(1)));
-    const auto legacy = store.serialize();
-    const auto hash = store.canonical_bytes();
-    GroundNotifications notifications{9,
-                                      {{4, -1, 3, "ground.spawned", "1,1,0,0,0"},
-                                       {100, 2, 8, "ground.despawned", "quoted \"[{}]\\"}}};
-    GroundNotifications loaded;
-    std::string error;
-    ASSERT_TRUE(
-        GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded))
-        << error;
-    EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
-    EXPECT_EQ(restored.canonical_bytes(), hash);
-    EXPECT_EQ(loaded.next_sequence, 9u);
-    ASSERT_EQ(loaded.events.size(), 2u);
-    EXPECT_EQ(loaded.events.back().tick, 100u);
-    ASSERT_TRUE(GroundObjectStore::parse(legacy, 2, restored, error, &loaded));
-    EXPECT_EQ(restored.serialize(), legacy);
-    EXPECT_EQ(loaded.next_sequence, 0u);
-    EXPECT_TRUE(loaded.events.empty());
-    // Notifications also survive the removal of the final object.
-    ASSERT_TRUE(store.erase(1));
-    ASSERT_TRUE(
-        GroundObjectStore::parse(store.serialize(notifications), 2, restored, error, &loaded));
-    EXPECT_TRUE(restored.empty());
-    EXPECT_EQ(restored.serialize(loaded), store.serialize(notifications));
-}
-
-TEST(GroundObjectStoreTest, LoadedNotificationCursorRefusesExhaustionWithoutChangingState) {
-    for (const auto cursor : {kU64Max, kU64Max - 1}) {
-        SCOPED_TRACE(cursor);
-        GroundObjectStore store;
-        GroundNotifications loaded{7, {{3, 0, 6, "ground.spawned", "kept"}}};
-        std::string error;
-        if (cursor == kU64Max) {
-            const auto before = store.serialize(loaded);
-            EXPECT_FALSE(GroundObjectStore::parse(
-                store.serialize(GroundNotifications{cursor, {}}), 1, store, error, &loaded));
-            EXPECT_FALSE(error.empty());
-            EXPECT_EQ(store.serialize(loaded), before);
-            continue;
-        }
-        ASSERT_TRUE(GroundObjectStore::parse(
-            store.serialize(GroundNotifications{cursor, {}}), 1, store, error, &loaded))
-            << error;
-        luminumbra::simulation::OrderedEventBus bus;
-        bus.restore_pending(loaded.events, loaded.next_sequence);
-        if (cursor < kU64Max) {
-            EXPECT_EQ(bus.publish(0, "ground.spawned", "last"), kU64Max - 1);
-        }
-        const GroundNotifications before{bus.next_sequence(), bus.pending_events()};
-        const auto bytes = store.serialize(before);
-        EXPECT_THROW(bus.publish(0, "ground.despawned", "refused"), std::overflow_error);
-        EXPECT_EQ(bus.next_sequence(), kU64Max);
-        EXPECT_EQ(store.serialize(GroundNotifications{bus.next_sequence(), bus.pending_events()}),
-                  bytes);
-        EXPECT_FALSE(GroundObjectStore::parse(bytes, 1, store, error, &loaded));
-        EXPECT_FALSE(error.empty());
-        EXPECT_EQ(loaded.next_sequence, cursor);
-        EXPECT_TRUE(loaded.events.empty());
-    }
-}
-
-TEST(GroundObjectStoreTest, ParseReservesObjectGrowthAlongsidePendingNotifications) {
-    GroundObjectStore source;
-    ASSERT_TRUE(source.insert(MakeObject(1)));
-    GroundNotifications notifications{kU64Max - 1,
-                                      {{kU64Max, 0, kU64Max - 2, "ground.spawned", ""}}};
-    notifications.events.front().payload.assign(
-        GroundObjectStore::kMaxFileBytes - source.serialize(notifications).size(), 'x');
-    const auto bytes = source.serialize(notifications);
-    ASSERT_EQ(bytes.size(), GroundObjectStore::kMaxFileBytes);
-    EXPECT_FALSE(source.fits_file_budget(notifications));
-    GroundObjectStore restored;
-    ASSERT_TRUE(restored.insert(MakeObject(99)));
-    GroundNotifications loaded{7, {{3, 0, 6, "ground.spawned", "kept"}}};
-    const auto before = restored.serialize(loaded);
-    std::string error;
-    EXPECT_FALSE(GroundObjectStore::parse(bytes, 100, restored, error, &loaded));
-    EXPECT_FALSE(error.empty());
-    EXPECT_EQ(restored.serialize(loaded), before);
-}
-
-TEST(GroundObjectStoreTest, InvalidNotificationsRefuseTransactionally) {
-    GroundObjectStore store;
-    ASSERT_TRUE(store.insert(MakeObject(1)));
-    const GroundNotifications notifications{2, {{4, 0, 1, "ground.spawned", "1,1,0,0,0"}}};
-    const auto bytes = store.serialize(notifications);
-    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"next_sequence\":2", "\"next_sequence\":1")));
-    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "ground.spawned", "script.trigger")));
-    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"lane\":0", "\"lane\":2147483648")));
-    EXPECT_TRUE(RefusedUntouched(Replace(bytes, "\"tick\":4", "\"tick\":4.5")));
-    EXPECT_TRUE(
-        RefusedUntouched(Replace(bytes, "\"sequence\":1", "\"sequence\":1,\"sequence\":1")));
 }
