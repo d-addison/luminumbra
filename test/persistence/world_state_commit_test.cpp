@@ -32,6 +32,7 @@ enum class LoadFailure {
     PartialMetadata,
     UnreadableMetadata,
     Cursor,
+    Fields,
     PartialLedger,
     EmptyLedger,
     Scheduler,
@@ -64,6 +65,23 @@ protected:
     static nlohmann::json Metadata(const fs::path& save) {
         std::ifstream input(save / "world_info.json", std::ios::binary);
         return nlohmann::json::parse(input);
+    }
+    void SeedRetainedFields(GameSession& session) {
+        if (!GetParam())
+            return;
+        const auto input = root / "retained-fields";
+        fs::create_directories(input);
+        world::FieldPageState fields;
+        ASSERT_TRUE(fields.activate_region({0, 0}, 1234, 0));
+        auto ledger = session.GetActiveRegionLedger();
+        ledger.mark_edited({0, 0}, session.GetWorldClock());
+        nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+        session.GetWorldClock().write_metadata(metadata);
+        ASSERT_TRUE(
+            WorldSaveService::save_metadata_and_active_regions(metadata.dump(), ledger, input));
+        ASSERT_TRUE(WorldSaveService::save_field_pages(fields, input));
+        ASSERT_TRUE(session.LoadWorldStateFrom(input));
+        ASSERT_FALSE(session.GetFieldPages().empty());
     }
     void CheckIncrementalZeroCursor(bool canonical, bool dirty) {
         SCOPED_TRACE(canonical);
@@ -155,6 +173,7 @@ protected:
         if (failure == LoadFailure::Scheduler)
             reader.SetRegionSchedulerConfig(world::RegionSchedulerConfig{});
         ASSERT_TRUE(reader.CreateTransientWorld("Retained world", "1234", "default"));
+        ASSERT_NO_FATAL_FAILURE(SeedRetainedFields(reader));
         auto retained_chunk = std::make_shared<Chunk>(IVec3(9, 0, 9));
         retained_chunk->set_state(ChunkState::Idle);
         ASSERT_TRUE(reader.GetWorldSystem()->adopt_streamed_chunk(retained_chunk));
@@ -162,6 +181,7 @@ protected:
         const auto calendar = reader.GetRenderCalendar();
         const auto clock = reader.GetWorldClock().canonical_bytes();
         const auto ledger = reader.GetActiveRegionLedger().canonical_bytes();
+        const auto fields = reader.GetFieldPages().canonical_bytes();
         const auto previous_id = reader.GetMetadata().worldId;
         const auto* previous_system = reader.GetWorldSystem();
         ASSERT_NE(calendar, world::WorldCalendar::Legacy());
@@ -182,6 +202,9 @@ protected:
         } else if (failure == LoadFailure::Cursor) {
             EXPECT_NE(reader.GetWorldOpenError().find("water simulation cursor"),
                       std::string::npos);
+        } else if (failure == LoadFailure::Fields) {
+            EXPECT_NE(reader.GetWorldOpenError().find("Field pages load failed:"),
+                      std::string::npos);
         } else if (failure == LoadFailure::ActiveRegionsRequired) {
             EXPECT_EQ(reader.GetWorldOpenError(),
                       "Incompatible configuration: this world requires sim.active_regions.");
@@ -189,6 +212,7 @@ protected:
         EXPECT_EQ(reader.GetRenderCalendar(), calendar);
         EXPECT_EQ(reader.GetWorldClock().canonical_bytes(), clock);
         EXPECT_EQ(reader.GetActiveRegionLedger().canonical_bytes(), ledger);
+        EXPECT_EQ(reader.GetFieldPages().canonical_bytes(), fields);
         EXPECT_EQ(reader.GetMetadata().worldId, previous_id);
         EXPECT_EQ(reader.GetWorldSystem(), previous_system);
         EXPECT_EQ(reader.GetWorldSystem()->GetWaterSimWindowCursor(), 19u);
@@ -256,6 +280,11 @@ protected:
         if (failure == LoadFailure::Chunk) {
             const auto region = WorldSaveService::region_file_path(save, 0, 0);
             ASSERT_TRUE(WorldSaveService::write_file_durably(region, "partial chunk"));
+        }
+        if (failure == LoadFailure::Fields) {
+            const auto field_path = WorldSaveService::field_pages_path(save);
+            fs::create_directories(field_path.parent_path());
+            ASSERT_TRUE(WorldSaveService::write_file_durably(field_path, "FPG1"));
         }
         if (failure == LoadFailure::PartialMetadata) {
             ASSERT_TRUE(WorldSaveService::write_file_durably(save / "world_info.json", "{"));
@@ -419,7 +448,8 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
                                       LoadFailure::Chunk,
                                       LoadFailure::PartialMetadata,
                                       LoadFailure::UnreadableMetadata,
-                                      LoadFailure::Cursor};
+                                      LoadFailure::Cursor,
+                                      LoadFailure::Fields};
     if (GetParam()) {
         failures.insert(
             failures.end(),
