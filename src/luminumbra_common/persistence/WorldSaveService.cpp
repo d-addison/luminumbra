@@ -3488,6 +3488,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "chunks/region/world-manifest.json",
                                               "chunks/region/plant-entities.json",
                                               "chunks/region/ground-objects.json",
+                                              "chunks/region/field-pages.fpg",
                                               "chunks/region/active-regions.arl"};
     std::set<std::string> listed;
     for (const SnapshotMember& member : index.members) {
@@ -4567,6 +4568,203 @@ bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save
     return GroundObjectsMatchLedger(store, ledger, clock.tick(), errors);
 }
 
+std::filesystem::path WorldSaveService::field_pages_path(const std::filesystem::path& save_dir) {
+    return save_dir / world::FieldPageState::kRelativePath;
+}
+
+bool WorldSaveService::PreparedFieldWrite::prepare(const world::FieldPageState& state,
+                                                   std::vector<std::string>* errors) {
+    m_prepared = false;
+    m_bytes.clear();
+    try {
+        std::string bytes = state.serialize();
+        world::FieldPageState parsed;
+        std::string error;
+        if (!bytes.empty() && !world::FieldPageState::parse(bytes, parsed, error)) {
+            AddError(errors, "Field pages save failed: " + error);
+            return false;
+        }
+        m_bytes = std::move(bytes);
+        m_prepared = true;
+        return true;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("Field pages save failed: ") + error.what());
+        return false;
+    }
+}
+
+bool WorldSaveService::PreparedFieldWrite::publish(const std::filesystem::path& save_dir,
+                                                   std::vector<std::string>* errors) const {
+    const SaveGuard guard;
+    if (!m_prepared) {
+        AddError(errors, "field write has not been prepared");
+        return false;
+    }
+    TransactionScope scope(save_dir, {world::FieldPageState::kRelativePath}, errors);
+    if (!scope.ok())
+        return false;
+    if (!m_bytes.empty() && !scope.engaged()) {
+        AddError(errors,
+                 "Field pages save refused: nonempty state requires an indexed transaction");
+        return false;
+    }
+    if (!validate_save(save_dir, errors))
+        return false;
+    if (m_bytes.empty()) {
+        bool missing = false;
+        {
+            const SavedInputFile input(field_pages_path(save_dir));
+            missing = input.missing();
+        }
+        return (missing || remove_member(save_dir, world::FieldPageState::kRelativePath, errors)) &&
+               scope.commit(errors);
+    }
+    return write_member_bytes(save_dir, world::FieldPageState::kRelativePath, m_bytes, errors) &&
+           scope.commit(errors);
+}
+
+bool WorldSaveService::save_field_pages(const world::FieldPageState& state,
+                                        const std::filesystem::path& save_dir,
+                                        std::vector<std::string>* errors) {
+    PreparedFieldWrite prepared;
+    return prepared.prepare(state, errors) && prepared.publish(save_dir, errors);
+}
+
+bool WorldSaveService::load_field_pages(world::FieldPageState& out,
+                                        const std::filesystem::path& save_dir,
+                                        std::vector<std::string>* errors,
+                                        const std::stop_token& stop) {
+    const detail::SnapshotReadOwnership ownership;
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    bool present = false;
+    std::string bytes;
+    {
+        const SavedInputFile input(field_pages_path(save_dir));
+        present = !input.missing();
+        if (present && !input.read(bytes, world::FieldPageState::kMaxFileBytes, stop)) {
+            AddError(errors,
+                     stop.stop_requested()
+                         ? "Saved-world validation cancelled."
+                         : "Field pages load failed: unreadable or oversized file (64 MiB cap)");
+            return false;
+        }
+    }
+    if (!SaveTransaction::active_for(save_dir)) {
+        if (snapshot_index_exists(save_dir)) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, errors, stop))
+                return false;
+            const auto member = std::find_if(
+                index.members.begin(), index.members.end(), [](const SnapshotMember& value) {
+                    return value.path == world::FieldPageState::kRelativePath;
+                });
+            const auto fingerprint = fnv1a64_bytes(bytes.data(), bytes.size());
+            if ((member == index.members.end() && present) ||
+                (member != index.members.end() &&
+                 (member->present != present ||
+                  (present && (member->bytes != bytes.size() || member->fnv64 != fingerprint))))) {
+                AddError(errors, "inconsistent snapshot: chunks/region/field-pages.fpg");
+                return false;
+            }
+        } else if (present) {
+            AddError(errors, "inconsistent snapshot: field authority without index");
+            return false;
+        }
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    if (!present) {
+        out.clear();
+        return true;
+    }
+    world::FieldPageState parsed;
+    std::string error;
+    if (!world::FieldPageState::parse(bytes, parsed, error)) {
+        AddError(errors, "Field pages load failed: " + error);
+        return false;
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    }
+    out = std::move(parsed);
+    return true;
+}
+
+namespace {
+// Called only on parsed state: initialized coordinates are bounded before narrowing.
+world::ScentCellKey FieldCellAt(const world::FieldPageKey& key, std::size_t index) {
+    return {static_cast<std::int32_t>(static_cast<std::int64_t>(key.x) * 16 +
+                                      static_cast<std::int64_t>(index % 16)),
+            static_cast<std::int32_t>(static_cast<std::int64_t>(key.z) * 16 +
+                                      static_cast<std::int64_t>(index / 16))};
+}
+
+template<typename Pages, typename Owner>
+bool FieldPageOwnersRecorded(const Pages& pages,
+                             const world::ActiveRegionLedger& ledger,
+                             const Owner& owner) {
+    for (const auto& [key, page] : pages) {
+        for (std::size_t index = 0; index < world::FieldPage::kCells; ++index) {
+            if (((page.mask[index / 64] >> (index % 64)) & std::uint64_t{1}) != 0 &&
+                !ledger.records().contains(owner(FieldCellAt(key, index))))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool FieldPagesMatchLedger(const world::FieldPageState& state,
+                           const world::ActiveRegionLedger& ledger) {
+    const auto has_owner = [&ledger](world::RegionKey key) {
+        return ledger.records().contains(key);
+    };
+    const auto ambient_owner = [](world::ScentCellKey cell) {
+        return world::FieldPageState::region_of_cell(cell.x, cell.z);
+    };
+    const auto metre_owner = world::FieldPageState::region_of_scent_cell;
+    return FieldPageOwnersRecorded(state.pages(), ledger, ambient_owner) &&
+           FieldPageOwnersRecorded(state.soil().pages(), ledger, metre_owner) &&
+           FieldPageOwnersRecorded(state.irrigation().pages(), ledger, metre_owner) &&
+           std::all_of(state.storms().begin(),
+                       state.storms().end(),
+                       [&has_owner](const auto& storm) { return has_owner(storm.owner); }) &&
+           std::all_of(state.strikes().begin(),
+                       state.strikes().end(),
+                       [&has_owner](const auto& strike) { return has_owner(strike.owner); }) &&
+           std::all_of(state.weather_clocks().begin(),
+                       state.weather_clocks().end(),
+                       [&has_owner](const auto& clock) { return has_owner(clock.first); }) &&
+           std::all_of(state.scent_cells().begin(),
+                       state.scent_cells().end(),
+                       [&has_owner, metre_owner](const auto& cell) {
+                           return has_owner(metre_owner(cell.first));
+                       });
+}
+} // namespace
+
+bool WorldSaveService::validate_field_pages(const std::filesystem::path& save_dir,
+                                            const world::ActiveRegionLedger& ledger,
+                                            std::vector<std::string>* errors,
+                                            const std::stop_token& stop) {
+    world::FieldPageState state;
+    if (!load_field_pages(state, save_dir, errors, stop))
+        return false;
+    if (state.empty())
+        return true;
+    const SavedInputFile input(active_regions_path(save_dir));
+    if (input.missing() || !FieldPagesMatchLedger(state, ledger)) {
+        AddError(errors, "corrupt field pages: orphaned owner");
+        return false;
+    }
+    return true;
+}
+
 std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / "active-regions.arl";
 }
@@ -4909,11 +5107,12 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    const std::string content_hash = ComputeRegionContentHash(region);
-    if (inputs.ground_object_bytes.empty())
-        return std::stoull(content_hash, nullptr, 16);
-    return std::stoull(
-        StableChecksum(content_hash + "|ground:" + inputs.ground_object_bytes), nullptr, 16);
+    std::string composed = ComputeRegionContentHash(region);
+    if (!inputs.ground_object_bytes.empty())
+        composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
+    if (!inputs.field_page_bytes.empty())
+        composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
+    return std::stoull(composed, nullptr, 16);
 }
 
 std::uint64_t
@@ -5807,6 +6006,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             maximum = SavedInputLimits::kPlantFileBytes;
         else if (relative == "chunks/region/ground-objects.json")
             maximum = world::GroundObjectStore::kMaxFileBytes;
+        else if (relative == world::FieldPageState::kRelativePath)
+            maximum = world::FieldPageState::kMaxFileBytes;
         else if (relative == "chunks/region/active-regions.arl")
             maximum = world::ActiveRegionLedger::kMaxFileBytes;
         else if (relative == "aether_state.efs")
@@ -5870,6 +6071,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             world::GroundObjectStore objects;
             const std::uint64_t no_id_limit = std::numeric_limits<std::uint64_t>::max();
             if (!world::GroundObjectStore::parse(member_bytes, no_id_limit, objects, error)) {
+                return false;
+            }
+        } else if (relative == world::FieldPageState::kRelativePath) {
+            world::FieldPageState pages;
+            if (!world::FieldPageState::parse(member_bytes, pages, error)) {
+                error = "Field pages load failed: " + error;
                 return false;
             }
         } else if (relative == "aether_state.efs") {
@@ -6633,6 +6840,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (entry.path() == world_manifest_path(save_dir) ||
                 entry.path() == plant_entities_path(save_dir) ||
                 entry.path() == ground_objects_path(save_dir) ||
+                entry.path() == field_pages_path(save_dir) ||
                 entry.path() == active_regions_path(save_dir)) {
                 present = true;
             } else if (ParseRegionFileName(entry.path(), rx, rz)) {
@@ -6745,7 +6953,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (ledger.header_tick() > clock.tick())
                     return reject(world::ActiveRegionLedger::kCorruptMessage);
             }
-            if (!validate_ground_objects(save_dir, ledger, &errors, stop))
+            if (!validate_ground_objects(save_dir, ledger, &errors, stop) ||
+                !validate_field_pages(save_dir, ledger, &errors, stop))
                 return reject("");
         }
         Ecs::EntityRegistrySnapshot plants;
