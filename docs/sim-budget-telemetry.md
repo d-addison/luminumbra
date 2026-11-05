@@ -242,6 +242,23 @@ or damaged log text does not synthesize measurements. No evidence file is read
 by world loading or hashed into simulation. Compare stage work traces/totals
 separately from duration distributions. This slice proposes no limits or caps.
 
+Capture and paired server comparison share the resolved-input recipe in
+`tools/perf/resolved_fixture.py`. The `fixture_hash` uses the
+`luminumbra.sim_budget.inputs.v2` domain over compact, sorted JSON containing
+the canonical headless common-tree hash (`common`), preset-tree hash (`presets`),
+and, when present, `.perf-controlled` marker text (`configuration`). Both tree
+hashes retain their existing dependency and containment rules, including
+transitive biome tables outside `data/common`. The preset tree includes all
+three selected documents and any additional presets. Marker text uses universal
+newline normalization; its presence enables runtime overrides, so controlled
+and shipping fixtures have different identities even with identical data.
+Clone locations and generated saves do not enter the digest. This replaces
+the common-only capture identity and the comparison's separate recipe;
+`preset_hash` remains unchanged and the committed fixture identity stays unpinned.
+Missing, malformed or duplicate-key selected presets and non-string biome-table
+paths refuse capture before launching the executable or creating evidence.
+Inputs are hashed again before publication; changes refuse a success manifest.
+
 ## Executable checks
 
 Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality

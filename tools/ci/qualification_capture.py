@@ -273,7 +273,7 @@ def write_manifest(args):
             require(args.binary.resolve() == ROOT / SERVER_BINARY, "server binary path differs")
             require(digest(args.baseline) == digest(BASELINE), "baseline is not from this candidate")
             document["producer_source_root"] = str(ROOT)
-            loaded = capture_contract(args.capture, args.expected_sha, binding["fixture_hash"], document["binary_sha256"], str(ROOT))
+            loaded = capture_contract(args.capture, args.expected_sha, module("resolved_fixture").resolved_fixture_hash(ROOT), document["binary_sha256"], str(ROOT))
             proposal = read_json(args.proposal)
             require(proposal == module("propose_sim_budgets").build_proposal(loaded, 3, 2), "proposal does not match capture")
             check_contract(loaded, args.baseline, args.check)
@@ -405,7 +405,7 @@ def validate_chain(expected, paths):
     require(document["parameters"] == PARAMETERS and document["budget_complete"] is False
             and document["paired_comparison"] == "unevaluated:not-requested", "unsupported capture qualification claim")
     require(digest(path.parent / "sim-budget-baseline.json") == digest(BASELINE), "baseline is not from this candidate")
-    loaded = capture_contract(path.parent / "sim-budget-capture", expected, document["fixture_hash"], document["binary_sha256"], document["producer_source_root"])
+    loaded = capture_contract(path.parent / "sim-budget-capture", expected, module("resolved_fixture").resolved_fixture_hash(ROOT), document["binary_sha256"], document["producer_source_root"])
     require(read_json(path.parent / "sim-budget-proposal.json") == module("propose_sim_budgets").build_proposal(loaded, 3, 2), "proposal differs from selected capture")
     check_contract(loaded, path.parent / "sim-budget-baseline.json", path.parent / "sim-budget-check.json")
     require(all(digest(item) == value for item, value in observed.items()), "evidence changed during validation")
