@@ -289,8 +289,10 @@ int PositiveMod(int value, int divisor) {
 // Sleep flags and the calm counter are saved only with water that is already durable.
 // They never make regenerable water authoritative.
 void MarkWaterBookkeeping(Chunk& chunk) {
-    if (chunk.needs_authority())
+    if (chunk.needs_authority()) {
+        chunk.mark_water_data_dirty();
         chunk.mark_water_state_dirty();
+    }
 }
 
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
@@ -329,6 +331,7 @@ void StepChunkWaterFixed(Chunk& c,
     // the historical zero-momentum initialization, bounded to 2 * 32 * 32 entries.
     if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n)) {
         c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0);
+        c.mark_water_data_dirty();
         c.mark_water_state_dirty();
     }
 
@@ -565,6 +568,7 @@ void StepChunkWaterFixed(Chunk& c,
         }
     }
     if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {
+        c.mark_water_data_dirty();
         c.mark_water_state_dirty();
     }
 }
@@ -946,8 +950,10 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
         }
     }
     cp->has_water_sim.store(true);
-    if (cp->needs_authority())
+    if (cp->needs_authority()) {
+        cp->mark_water_data_dirty();
         cp->mark_water_state_dirty();
+    }
     m_water_activity_cache.erase(cp->get_id());
     cp->water_mesh_generated.store(false);
     cp->water_mesh_dirty_ticks = 0;
@@ -1113,6 +1119,7 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                chunk.mark_water_data_dirty();
                 chunk.mark_water_state_dirty();
                 m_water_activity_cache.erase(chunk.get_id());
             }
@@ -1400,8 +1407,10 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 const std::int32_t flux_prev = A->water_edge_flux[slot];
                 A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
-                if (A->water_edge_flux[slot] != flux_prev)
+                if (A->water_edge_flux[slot] != flux_prev) {
+                    A->mark_water_data_dirty();
                     A->mark_water_state_dirty();
+                }
                 AddWaterDepth(A->water_depth_mm[ai], -q);
                 AddWaterDepth(B->water_depth_mm[bi], q);
                 if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
@@ -1409,7 +1418,9 @@ void WaterSystem::update(entt::registry& registry,
                 if (q != 0) {
                     A->is_water_sleeping.store(false, std::memory_order_relaxed);
                     B->is_water_sleeping.store(false, std::memory_order_relaxed);
+                    A->mark_water_data_dirty();
                     A->mark_water_state_dirty();
+                    B->mark_water_data_dirty();
                     B->mark_water_state_dirty();
                     if (have_mirror_A)
                         A->water_level_data[ai] =
@@ -1704,6 +1715,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
         if (edited) {
             c.stage_water_seed_inputs({});
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
+            c.mark_water_data_dirty();
             c.mark_water_state_dirty();
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
@@ -1786,6 +1798,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
+        chunk.mark_water_data_dirty();
         chunk.mark_water_state_dirty();
         return true;
     }
@@ -1949,6 +1962,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
 
     chunk.has_water_sim.store(true);
+    chunk.mark_water_data_dirty();
     chunk.mark_water_state_dirty();
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;

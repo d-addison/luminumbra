@@ -1318,6 +1318,12 @@ TEST(WaterSeedInputs, RuntimeMutationsEnterAuthoritySnapshotsAndRegionHashes) {
         EXPECT_FALSE(chunk->has_water_authority());
         if (mutation == "displacement") {
             fixture.water().apply_displacement(position, 1.0f);
+            EXPECT_TRUE(chunk->is_water_state_dirty());
+            EXPECT_FALSE(chunk->has_water_authority());
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+            EXPECT_EQ(chunk->authority_hash_revision(), revision);
+            fixture.world().sync_water_authority();
         } else if (mutation == "bed") {
             ASSERT_GT(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
         } else if (mutation == "rain") {
@@ -1342,7 +1348,8 @@ TEST(WaterSeedInputs, RuntimeMutationsEnterAuthoritySnapshotsAndRegionHashes) {
         EXPECT_FALSE(chunk->has_terrain_authority());
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
         EXPECT_GT(chunk->authority_hash_revision(), revision);
-        EXPECT_EQ(chunk->voxel_revision(), voxel_revision);
+        EXPECT_EQ(chunk->voxel_revision(),
+                  mutation == "displacement" ? voxel_revision + 1u : voxel_revision);
         EXPECT_EQ(chunk->water_seed_edit_generation(), seed_generation);
         Persistence::RegionContentHasher hasher;
         hasher.append(*chunk);

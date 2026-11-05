@@ -207,10 +207,9 @@ public:
     // --- Durable water state ---
     // Water fields (depth/flux/bed/sleep bookkeeping) are persisted evolution state. Every writer
     // that changes depth, flux or bed calls mark_water_state_dirty(); sleep bookkeeping marks only
-    // chunks that already need authority. Dirty notifications also mark ownership and save data
-    // immediately, before SHIELD_WorldSystem::sync_water_authority() drains the notification queue.
+    // chunks that already need authority. Notifications defer ownership and save data to
+    // SHIELD_WorldSystem::sync_water_authority(); simulation writers also mark water data dirty.
     void mark_water_state_dirty() {
-        mark_water_data_dirty();
         u32 revision = m_water_revision.load(std::memory_order_acquire);
         while (revision != std::numeric_limits<u32>::max() &&
                !m_water_revision.compare_exchange_weak(

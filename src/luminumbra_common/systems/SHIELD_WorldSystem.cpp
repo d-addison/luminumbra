@@ -7055,7 +7055,7 @@ void SHIELD_WorldSystem::sync_water_authority() {
             bump_far_lod_authority_revision(chunk->get_coords());
         }
         chunk->set_water_authority();
-        chunk->mark_dirty_for_save();
+        chunk->mark_water_data_dirty();
         chunk->clear_water_state_dirty();
         if (m_waterAuthorityObserver)
             m_waterAuthorityObserver(chunk->get_coords());
