@@ -784,7 +784,15 @@ private:
     bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
-    bool HasScentParticipants() const;
+    [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
+    [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
+    [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RestoreRegionalScent();
+    void CaptureRegionalScent(std::optional<FieldPageState>& fields);
+    bool AdvanceNearScent(std::optional<FieldPageState>& fields);
+    bool HasScentBorderWork() const;
+    bool HasScentParticipants(bool require_due = true) const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
     std::filesystem::path m_saveRootPath;
