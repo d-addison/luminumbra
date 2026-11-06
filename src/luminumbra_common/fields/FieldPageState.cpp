@@ -1110,7 +1110,10 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
         origin.x + (side - 1) < -kScentLimit || origin.z + (side - 1) < -kScentLimit) {
         return false;
     }
-    std::map<ScentCellKey, ScentCell> changes;
+    auto& changes = m_scentChanges.scratch;
+    changes.clear();
+    changes.reserve(cells.size());
+    std::map<ScentCellKey, ScentCell> admitted;
     std::map<RegionKey, std::uint64_t> completed;
     std::size_t added = 0, removed = 0, visits = 0;
     for (int x = 0; x < side; ++x) {
@@ -1133,34 +1136,37 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
             }
             added += static_cast<std::size_t>(!exists);
             removed += static_cast<std::size_t>(zero);
-            changes.emplace_hint(changes.end(), key, values);
+            if (exists) {
+                changes.emplace_back(key, values);
+            } else {
+                admitted.emplace_hint(admitted.end(), key, values);
+            }
             ++completed[region_of_scent_cell(key)];
         }
     }
     if (added > kMaxScentCells - (source.m_scent.size() - removed)) {
         return false;
     }
-    m_scentUpdates.swap(changes);
+    m_scentChanges.changes.swap(changes);
+    m_scentUpdates.swap(admitted);
     m_scentCaptureVisits = visits;
     work.swap(completed);
     return true;
 }
 
 void FieldPageState::adopt_scent_state(FieldPageState& staged) noexcept {
-    for (auto change = staged.m_scentUpdates.begin(); change != staged.m_scentUpdates.end();) {
-        const auto current = change++;
-        const bool zero = std::all_of(
-            current->second.begin(), current->second.end(), [](auto bits) { return bits == 0; });
+    for (const auto& [key, values] : staged.m_scentChanges.changes) {
+        const bool zero =
+            std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+        const auto found = m_scent.find(key);
         if (zero) {
-            m_scent.erase(current->first);
-            staged.m_scentUpdates.erase(current);
-        } else if (const auto found = m_scent.find(current->first); found != m_scent.end()) {
-            found->second = current->second;
-            staged.m_scentUpdates.erase(current);
+            m_scent.erase(found);
         } else {
-            m_scent.insert(staged.m_scentUpdates.extract(current));
+            found->second = values;
         }
     }
+    staged.m_scentChanges.changes.clear();
+    m_scent.merge(staged.m_scentUpdates);
 }
 
 RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {

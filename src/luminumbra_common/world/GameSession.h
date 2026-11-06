@@ -5,8 +5,9 @@
 #include "../ai/CreatureReproductionSystem.h" // ai::ReproductionTuning
 #include "../ai/ForagingSystem.h"             // ai::ForagingParams
 #include "../ai/ScavengingSystem.h"           // ai::ScavengingTuning
-#include "../ai/ThirstSystem.h"               // ai::ThirstTuning
-#include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
+#include "../ai/ScentFieldGates.h"
+#include "../ai/ThirstSystem.h"          // ai::ThirstTuning
+#include "../ai/WildlifeFoliageSystem.h" // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
@@ -285,10 +286,7 @@ public:
     }
 
     // Update spawn point (useful for debugging)
-    void SetSpawnPoint(const Vec3& new_spawn) {
-        m_metadata.spawnPoint = new_spawn;
-        m_preparedInitialChunks.reset();
-    }
+    void SetSpawnPoint(const Vec3& new_spawn);
 
     // Get the world system for chunk generation
     Systems::SHIELD_WorldSystem* GetWorldSystem() {
@@ -345,6 +343,10 @@ public:
     }
     const luminumbra::ai::ScentField* GetScentField() const {
         return m_scentField.get();
+    }
+    // Observational eligibility work; never persisted or included in a hash.
+    [[nodiscard]] std::size_t GetScentEligibilityVisits() const {
+        return m_scentDueCache.query_visits();
     }
     [[nodiscard]] std::string ComputeScentSubHash() const;
 
@@ -778,6 +780,9 @@ private:
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
     bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
+    std::vector<ScentCell> m_scentCapture;
+    ScentChangeBuffers m_scentChangeBuffers;
+    luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
     // Immutable species definitions shared with the captured dependency snapshot.
     // Only the forward declaration is needed for the header-only parsing registry.
     std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
@@ -818,6 +823,8 @@ private:
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
     [[nodiscard]] bool ScentCellDue(int x, int z) const;
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RefreshScentDueCache();
+    void RebaseForagingCells(int dx, int dz);
     void RestoreRegionalScent();
     void CaptureRegionalScent(std::optional<FieldPageState>& fields);
     bool AdvanceNearScent(std::optional<FieldPageState>& fields);

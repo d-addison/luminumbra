@@ -47,6 +47,11 @@ struct RegionalStrike {
 };
 using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative binary64 concentrations
 
+// Reused runtime storage; never serialized or included in authority hashes.
+struct ScentChangeBuffers {
+    std::vector<std::pair<ScentCellKey, ScentCell>> changes, scratch;
+};
+
 class FieldPageState {
 public:
     static constexpr std::int64_t kCellMm = 24'000;
@@ -100,6 +105,8 @@ public:
         invalidate_weather_cache();
         m_scent.clear();
         m_scentUpdates.clear();
+        m_scentChanges.changes.clear();
+        m_scentChanges.scratch.clear();
         m_scentCaptureVisits = 0;
         m_soil = {};
         m_irrigation = {};
@@ -192,7 +199,17 @@ public:
     // Commit preallocated nodes after completed-work admission; no full-store copy or allocation.
     void adopt_scent_state(FieldPageState& staged) noexcept;
     [[nodiscard]] std::size_t staged_scent_cells() const {
+        return m_scentUpdates.size() + m_scentChanges.changes.size();
+    }
+    // Swap retained contiguous storage into/out of a short-lived tick candidate.
+    void reuse_scent_buffers(ScentChangeBuffers& buffers) noexcept {
+        std::swap(m_scentChanges, buffers);
+    }
+    [[nodiscard]] std::size_t staged_scent_nodes() const {
         return m_scentUpdates.size();
+    }
+    [[nodiscard]] std::size_t scent_change_capacity() const {
+        return m_scentChanges.changes.capacity() + m_scentChanges.scratch.capacity();
     }
     [[nodiscard]] std::size_t scent_capture_visits() const {
         return m_scentCaptureVisits;
@@ -287,7 +304,8 @@ private:
     }
     std::map<ScentCellKey, ScentCell> m_scent;
     // Runtime candidate changes, never serialized or included in authority hashes.
-    std::map<ScentCellKey, ScentCell> m_scentUpdates;
+    std::map<ScentCellKey, ScentCell> m_scentUpdates; // New authority nodes only.
+    ScentChangeBuffers m_scentChanges;
     std::size_t m_scentCaptureVisits = 0;
     FoliageFieldPages m_soil, m_irrigation;
 };

@@ -319,6 +319,60 @@ TEST(ScentFieldGates, CachedDecisionsStaySealedUntilRebuilt) {
     EXPECT_FALSE(rebuilt.exchange);
 }
 
+namespace {
+
+void CheckNearDueQueryCost(std::size_t unrelated) {
+    SCOPED_TRACE(unrelated);
+    LiveSchedule schedule({480, 500});
+    schedule.Reschedule(4);
+    const auto owner_of = [&schedule](int x, int z) {
+        return schedule.Owner(x, z);
+    };
+    auto due = schedule.due;
+    for (std::size_t i = 0; i < unrelated; ++i) {
+        due.push_back({static_cast<std::int32_t>(100 + i), 100});
+    }
+    luminumbra::ai::detail::NearScentDueCache<RegionKey> cache;
+    cache.Refresh(kCells, owner_of, due);
+    const auto queries = [&] {
+        const auto before = cache.query_visits();
+        for (int x = 0; x < kCells; ++x) {
+            for (int z = 0; z < kCells; ++z) {
+                EXPECT_EQ(cache.Allows(owner_of(x, z)), schedule.CellDue(x, z));
+            }
+        }
+        return cache.query_visits() - before;
+    };
+    const auto work = queries();
+    EXPECT_LE(work, 4u * kCells * kCells);
+    due.clear();
+    // A changed global schedule cannot leak into queries until refresh.
+    EXPECT_EQ(queries(), work);
+    cache.Refresh(kCells, owner_of, due);
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+    due.push_back(schedule.Owner(kCells - 1, kCells - 1));
+    cache.Refresh(kCells, owner_of, due);
+    EXPECT_TRUE(cache.Allows(owner_of(kCells - 1, kCells - 1)));
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+    const auto shifted_owner = [](int, int) {
+        return RegionKey{1000, -1000};
+    };
+    cache.Refresh(kCells, shifted_owner, due);
+    EXPECT_FALSE(cache.Allows(shifted_owner(0, 0)));
+    due.push_back(shifted_owner(0, 0));
+    cache.Refresh(kCells, shifted_owner, due);
+    EXPECT_TRUE(cache.Allows(shifted_owner(0, 0)));
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+}
+
+} // namespace
+
+TEST(ScentFieldGates, NearDueQueriesStayBoundedAsGlobalScheduleGrows) {
+    for (const std::size_t unrelated : {std::size_t{0}, std::size_t{128}, std::size_t{8192}}) {
+        ASSERT_NO_FATAL_FAILURE(CheckNearDueQueryCost(unrelated));
+    }
+}
+
 TEST(ScentFieldGates, DepositSkipsFrozenEmittersAndEmptyGateRestoresEligibility) {
     namespace Comp = Luminumbra::Components;
     entt::registry registry;

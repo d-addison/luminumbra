@@ -160,6 +160,7 @@ void CheckStagedScentWindow(std::size_t unrelated) {
         ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 2, cells, work));
         EXPECT_EQ(candidate.scent_capture_visits(), 4u);
         EXPECT_EQ(candidate.staged_scent_cells(), 3u);
+        EXPECT_EQ(candidate.staged_scent_nodes(), 1u);
         EXPECT_EQ(work, (std::map<RegionKey, std::uint64_t>{{{0, 0}, 3}}));
         EXPECT_TRUE(candidate.scent_cells().empty());
         EXPECT_TRUE(candidate.pages().empty());
@@ -211,6 +212,38 @@ void CheckStagedScentWindow(std::size_t unrelated) {
     EXPECT_EQ(candidate.scent_capture_visits(), 0u);
 }
 
+void CheckDenseScentBufferReuse() {
+    constexpr int side = 128;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    const ScentCell two{std::bit_cast<std::uint64_t>(2.0), 0, 0, 0};
+    std::vector<ScentCell> cells(static_cast<std::size_t>(side) * side, one);
+    FieldPageState source;
+    std::map<RegionKey, std::uint64_t> work;
+    ASSERT_TRUE(source.capture_scent_window({0, 0}, side, cells, work));
+    const auto* node = &source.scent_cells().begin()->second;
+    Luminumbra::world::ScentChangeBuffers buffers;
+    std::size_t capacity = 0;
+    for (int pass = 0; pass < 6; ++pass) {
+        std::fill(cells.begin(), cells.end(), pass % 2 == 0 ? two : one);
+        FieldPageState candidate;
+        candidate.reuse_scent_buffers(buffers);
+        ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, side, cells, work));
+        EXPECT_EQ(candidate.scent_capture_visits(), cells.size());
+        EXPECT_EQ(candidate.staged_scent_cells(), cells.size());
+        EXPECT_EQ(candidate.staged_scent_nodes(), 0u);
+        // Both alternating vectors have warmed after two captures.
+        if (pass >= 2) {
+            EXPECT_EQ(candidate.scent_change_capacity(), capacity);
+        }
+        capacity = candidate.scent_change_capacity();
+        source.adopt_scent_state(candidate);
+        EXPECT_EQ(&source.scent_cells().begin()->second, node);
+        EXPECT_EQ(source.scent_cells().size(), cells.size());
+        EXPECT_EQ(source.scent_cells().begin()->second, cells.front());
+        candidate.reuse_scent_buffers(buffers);
+    }
+}
+
 void CheckStagedScentEdges() {
     const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
     for (const ScentCellKey origin :
@@ -234,6 +267,10 @@ TEST(FieldPageStateTest, StagedScentPublishesOnlyChangedCellsWithBoundedVisits) 
          {std::size_t{0}, std::size_t{2048}, FieldPageState::kMaxScentCells - 2}) {
         ASSERT_NO_FATAL_FAILURE(CheckStagedScentWindow(unrelated));
     }
+}
+
+TEST(FieldPageStateTest, DenseScentReplacementsReuseBuffersAndAuthorityNodes) {
+    ASSERT_NO_FATAL_FAILURE(CheckDenseScentBufferReuse());
 }
 
 TEST(FieldPageStateTest, StagedScentPreservesDomainEdges) {

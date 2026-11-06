@@ -2,11 +2,55 @@
 
 #include "ScentField.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <span>
 #include <utility>
 
 namespace luminumbra::ai::detail {
+
+// Membership for the near window's at most four world owners. Only Refresh reads
+// the global schedule; every deposit, steering and foraging query stays bounded.
+template<typename Owner>
+class NearScentDueCache {
+public:
+    template<typename OwnerOf>
+    void Refresh(int cells, const OwnerOf& owner_of, std::span<const Owner> due) {
+        m_count = 0;
+        for (const auto& [x, z] : std::array<std::pair<int, int>, 4>{
+                 std::pair{0, 0}, {cells - 1, 0}, {0, cells - 1}, {cells - 1, cells - 1}}) {
+            const auto owner = owner_of(x, z);
+            bool present = false;
+            for (std::size_t i = 0; i < m_count; ++i) {
+                present = present || m_owners[i] == owner;
+            }
+            if (!present) {
+                m_owners[m_count] = owner;
+                m_due[m_count++] = std::find(due.begin(), due.end(), owner) != due.end();
+            }
+        }
+    }
+    [[nodiscard]] bool Allows(const Owner& owner) const {
+        for (std::size_t i = 0; i < m_count; ++i) {
+            ++m_queryVisits;
+            if (m_owners[i] == owner) {
+                return m_due[i];
+            }
+        }
+        return false;
+    }
+    // Observational only; never persisted or hashed.
+    [[nodiscard]] std::size_t query_visits() const {
+        return m_queryVisits;
+    }
+
+private:
+    std::array<Owner, 4> m_owners{};
+    std::array<bool, 4> m_due{};
+    std::size_t m_count = 0;
+    mutable std::size_t m_queryVisits = 0;
+};
 
 struct ScentStepGates {
     ScentField::CellGate participants;
