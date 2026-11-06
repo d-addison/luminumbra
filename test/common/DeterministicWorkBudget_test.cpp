@@ -119,6 +119,170 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
     }
 }
 
+void RememberBudgetRestorations(Systems::SHIELD_WorldSystem& world, bool disk_only = true) {
+    std::vector<IVec3> inventory;
+    for (int x = -8; x <= 8; ++x)
+        for (int z = -8; z <= 8; ++z)
+            for (int y = -16; y <= 16; ++y)
+                if (disk_only || x % 2 == 0)
+                    inventory.emplace_back(x, y, z);
+    world.remember_durable_chunks(inventory);
+}
+
+std::shared_ptr<Chunk> BudgetRestoredChunk(const IVec3& coords) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    constexpr std::size_t lattice_size =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(lattice_size, -1.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    return chunk;
+}
+
+void WaitForBudgetActivation(Systems::SHIELD_WorldSystem& world, entt::registry& registry) {
+    for (std::int64_t tick = 1; tick <= 3; ++tick) {
+        world.begin_tick(tick);
+        world.update(registry, Vec3{8, 35, 8}, nullptr);
+    }
+}
+
+void FillRestorationActiveCap(Systems::SHIELD_WorldSystem& world) {
+    const auto cap = world.get_last_streaming_budget_stats().max_active_chunks_budget;
+    ASSERT_GT(cap, 0u);
+    for (std::size_t index = 0; index < cap; ++index) {
+        auto chunk = std::make_shared<Chunk>(IVec3(100 + static_cast<int>(index), 0, 0));
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+}
+
+void CheckRestorationBudget(const Systems::SHIELD_WorldSystem& world,
+                            std::size_t reads,
+                            bool at_active_cap,
+                            bool disk_only) {
+    const auto& stats = world.get_last_streaming_budget_stats();
+    ASSERT_GT(stats.generation_budget, 0);
+    const auto budget = static_cast<std::size_t>(stats.generation_budget);
+    EXPECT_GT(stats.generation_candidates, budget);
+    EXPECT_EQ(stats.scheduled_generation, at_active_cap ? 0u : budget);
+    EXPECT_EQ(stats.deferred_generation, stats.generation_candidates - stats.scheduled_generation);
+    EXPECT_GT(stats.deferred_generation, 0u);
+    EXPECT_EQ(stats.surface_generation_scheduled + stats.vertical_generation_scheduled,
+              stats.scheduled_generation);
+    EXPECT_LE(reads, stats.scheduled_generation);
+    if (disk_only || at_active_cap) {
+        EXPECT_EQ(reads, stats.scheduled_generation);
+    } else {
+        EXPECT_GT(reads, 0u);
+        EXPECT_LT(reads, stats.scheduled_generation);
+    }
+    // New terrain is still Loading until its due tick, even if its worker finished.
+    EXPECT_EQ(world.get_runtime_chunk_stats().loading_chunks, stats.scheduled_generation - reads);
+}
+
+void CheckRestorationAdmission(bool at_active_cap, bool disk_only) {
+    JobSystem jobs;
+    jobs.startup(1);
+    std::size_t reads = 0, faults = 0;
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    world.debug_set_streaming_radius_cap(8);
+    world.set_durable_residency(true);
+    RememberBudgetRestorations(world, disk_only);
+    world.set_durable_chunk_loader(
+        [&reads](const IVec3& coords) {
+            ++reads;
+            return BudgetRestoredChunk(coords);
+        },
+        [&faults](const std::string&) { ++faults; });
+    entt::registry registry;
+    WaitForBudgetActivation(world, registry);
+    EXPECT_EQ(reads, 0u);
+    if (at_active_cap) {
+        ASSERT_NO_FATAL_FAILURE(FillRestorationActiveCap(world));
+    }
+    world.begin_tick(4);
+    world.update(registry, std::vector<Vec3>{Vec3{8, 35, 8}}, nullptr);
+    CheckRestorationBudget(world, reads, at_active_cap, disk_only);
+    EXPECT_EQ(faults, 0u);
+    const auto admitted_reads = reads;
+    const auto deferred = world.get_last_streaming_budget_stats().deferred_generation;
+    world.quiesce_streaming_jobs_for_save();
+    world.begin_tick(5);
+    world.update(registry, Vec3{8, 35, 8}, nullptr);
+    EXPECT_EQ(reads, admitted_reads);
+    EXPECT_EQ(faults, 0u);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_generation, 0u);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().deferred_generation, deferred);
+}
+
+TEST(DeterministicWorkBudget, DiskOnlyRestorationSharesTheActivationGenerationBudget) {
+    for (const bool disk_only : {true, false}) {
+        for (const bool at_active_cap : {false, true}) {
+            SCOPED_TRACE(disk_only);
+            SCOPED_TRACE(at_active_cap);
+            CheckRestorationAdmission(at_active_cap, disk_only);
+        }
+    }
+}
+
+void CheckResidentsAfterRestorationFailure(const Systems::SHIELD_WorldSystem& world,
+                                           const std::array<std::shared_ptr<Chunk>, 2>& residents,
+                                           std::size_t successful_reads) {
+    for (const auto& resident : residents) {
+        EXPECT_EQ(world.find_streamed_chunk(resident->get_coords()), resident);
+        EXPECT_EQ(resident->get_state(), ChunkState::Ready);
+    }
+    EXPECT_TRUE(residents.front()->is_voxel_data_dirty());
+    EXPECT_EQ(residents.front()->sdf_data.front(), -1.0f);
+    EXPECT_EQ(world.get_runtime_chunk_stats().total_chunks, residents.size() + successful_reads);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().unloaded_chunks, 0u);
+    EXPECT_EQ(world.parking_status().parked_count, 0u);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+}
+
+void CheckRestorationFailure(std::size_t fail_on_read) {
+    JobSystem jobs;
+    jobs.startup(1);
+    std::size_t reads = 0, faults = 0;
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    world.debug_set_streaming_radius_cap(8);
+    world.set_durable_residency(true);
+    RememberBudgetRestorations(world);
+    world.set_durable_chunk_loader(
+        [&reads, fail_on_read](const IVec3& coords) -> std::shared_ptr<Chunk> {
+            ++reads;
+            return reads == fail_on_read ? nullptr : BudgetRestoredChunk(coords);
+        },
+        [&faults](const std::string&) { ++faults; });
+    entt::registry registry;
+    WaitForBudgetActivation(world, registry);
+    ASSERT_EQ(reads, 0u);
+    const std::array residents{BudgetRestoredChunk({100, 0, 0}),
+                               std::make_shared<Chunk>(IVec3{101, 0, 0})};
+    residents.front()->mark_voxel_data_dirty();
+    for (const auto& resident : residents) {
+        resident->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(resident));
+    }
+    world.begin_tick(4);
+    world.update(registry, Vec3{8, 35, 8}, nullptr);
+    EXPECT_EQ(reads, fail_on_read);
+    EXPECT_EQ(faults, 1u);
+    CheckResidentsAfterRestorationFailure(world, residents, fail_on_read - 1u);
+    // A failed loader also prevents later updates from evicting resident authority.
+    world.begin_tick(5);
+    world.update(registry, std::vector<Vec3>{Vec3{8, 35, 8}}, nullptr);
+    EXPECT_EQ(reads, fail_on_read);
+    EXPECT_EQ(faults, 1u);
+    CheckResidentsAfterRestorationFailure(world, residents, fail_on_read - 1u);
+}
+
+TEST(DeterministicWorkBudget, DiskRestorationFailureStopsActivationBeforeUnloading) {
+    for (const std::size_t fail_on_read : {1u, 3u}) {
+        SCOPED_TRACE(fail_on_read);
+        CheckRestorationFailure(fail_on_read);
+    }
+}
+
 TEST(DeterministicWorkBudget, DeferredGenerationKeepsTelemetryBackloggedBetweenActivationPasses) {
     for (const bool at_active_cap : {false, true}) {
         SCOPED_TRACE(at_active_cap);
