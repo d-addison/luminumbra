@@ -5,6 +5,7 @@
 #include "core/Profiler.h"
 #include "core/WaterSeedInputs.h"
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -108,16 +109,60 @@ public:
                !m_voxel_revision.compare_exchange_weak(
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_voxel_data_dirty.store(true, std::memory_order_release);
     }
     void clear_voxel_data_dirty() {
         m_voxel_data_dirty.store(false, std::memory_order_release);
+    }
+    // Water shares the durable chunk record but does not change voxel geometry
+    // or invalidate SDF/render revisions. Water ownership is sticky after saving.
+    void mark_water_data_dirty() {
+        m_water_authority.store(true, std::memory_order_release);
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
+        m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
+    // Changes to authoritative voxel or water fields must mark the corresponding dirty data.
+    u64 authority_hash_revision() const {
+        return m_hash_revision.load(std::memory_order_acquire);
+    }
+    // Owner-thread identity of mutable authority. Array writers advance revision;
+    // public solver bookkeeping is compared directly without scanning cell data.
+    struct AuthorityStamp {
+        u64 revision = 0;
+        bool water_initialized = false;
+        bool water_sleeping = false;
+        int water_resolution = 0;
+        int quiet_ticks = 0;
+        u32 max_delta_bits = 0;
+        bool operator==(const AuthorityStamp&) const = default;
+    };
+    AuthorityStamp authority_stamp() const {
+        return {.revision = authority_hash_revision(),
+                .water_initialized = has_water_sim.load(std::memory_order_acquire),
+                .water_sleeping = is_water_sleeping.load(std::memory_order_acquire),
+                .water_resolution = current_water_resolution.load(std::memory_order_acquire),
+                .quiet_ticks = ticks_below_threshold,
+                .max_delta_bits = std::bit_cast<u32>(max_water_delta_last_tick)};
+    }
+    // Bounded migration validation and exact comparison of evolution-relevant
+    // water state, including persisted mirrors consumed by queries and sources.
+    bool has_complete_water_state() const;
+    bool same_water_state(const Chunk& other) const;
+    // Owner-thread retirement after a column migration is durably committed.
+    // Terrain ownership and geometry are preserved independently.
+    void clear_water_data();
+    bool has_simulation_authority() const {
+        return has_water_authority() || has_terrain_authority();
     }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
         m_terrain_authority.store(false, std::memory_order_release);
+        // Terrain ownership and provenance change on every path, so cached authority stamps are
+        // stale.
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         if (has_water_authority()) {
             // Water divergence is sticky authority: a generation/promotion backfill of the
             // terrain must not make the chunk regenerable again.
@@ -148,7 +193,9 @@ public:
     }
     void mark_sdf_loaded_or_edited() {
         advance_water_seed_edit_generation();
-        m_terrain_authority.store(true, std::memory_order_release);
+        // Claiming terrain authority changes what the authority projection hashes.
+        if (!m_terrain_authority.exchange(true, std::memory_order_acq_rel))
+            m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 expected = 0u;
@@ -162,12 +209,11 @@ public:
         return m_voxel_revision.load(std::memory_order_acquire);
     }
 
-    // --- Durable water state (S3 durable residency) ---
+    // --- Durable water state ---
     // Water fields (depth/flux/bed/sleep bookkeeping) are persisted evolution state. Every writer
     // that changes depth, flux or bed calls mark_water_state_dirty(); sleep bookkeeping marks only
-    // chunks that already need authority. The bit is flag independent and
-    // unobservable unless SHIELD_WorldSystem::sync_water_authority() consumes it (only called when
-    // sim.active_regions is on).
+    // chunks that already need authority. Notifications defer ownership and save data to
+    // SHIELD_WorldSystem::sync_water_authority(); simulation writers also mark water data dirty.
     void mark_water_state_dirty() {
         u32 revision = m_water_revision.load(std::memory_order_acquire);
         while (revision != std::numeric_limits<u32>::max() &&
@@ -296,6 +342,24 @@ public:
         std::vector<u8>().swap(pending_material_data);
         set_state(ChunkState::Idle);
     }
+    // Call only after workers have drained, when adopting persisted authority.
+    // Serialized staging flags cannot represent a job in the current process.
+    void reset_pending_jobs() {
+        pending_lod.store(-1, std::memory_order_release);
+        pending_mesh_ready.store(false, std::memory_order_release);
+        pending_mesh_failed.store(false, std::memory_order_release);
+        pending_promotion_ready.store(false, std::memory_order_release);
+        pending_promotion_failed.store(false, std::memory_order_release);
+        pending_generation_ready.store(false, std::memory_order_release);
+        pending_mesh_vertices.clear();
+        pending_mesh_indices.clear();
+        pending_water_mesh_vertices.clear();
+        pending_water_mesh_indices.clear();
+        pending_sdf_data.clear();
+        pending_heightmap_data.clear();
+        pending_material_data.clear();
+    }
+
     // Unlike voxel_revision, this derived-input key never resets on regeneration:
     // an edit followed by regeneration must not revive a retired seed payload.
     [[nodiscard]] std::uint64_t water_seed_edit_generation() const {
@@ -444,6 +508,7 @@ private:
     mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
+    std::atomic<u64> m_hash_revision{0};
     std::atomic<u32> m_voxel_revision{0};
     std::atomic<bool> m_water_state_dirty{false};
     std::atomic<bool> m_water_authority{false};

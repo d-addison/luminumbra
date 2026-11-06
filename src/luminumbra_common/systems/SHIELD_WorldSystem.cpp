@@ -6798,19 +6798,16 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
     // streaming never allocates or maintains the regional membership index.
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
-        chunk->bind_water_changes(on ? m_water_changes : nullptr);
+        chunk->bind_water_changes(m_water_changes);
         note_digest_chunk(chunk, false, true);
     }
     for (const auto& [id, parked] : m_parked) {
         (void)id;
-        parked.chunk->bind_water_changes(on ? m_water_changes : nullptr);
+        parked.chunk->bind_water_changes(m_water_changes);
         note_digest_chunk(parked.chunk, true, true);
     }
-    if (!on) {
-        m_water_changes->take(m_pending_water_changes);
-        m_pending_water_changes.clear();
+    if (!on)
         return;
-    }
     for (const auto& [id, coords] : m_durable_chunks) {
         int rx = 0, rz = 0;
         Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
@@ -6821,10 +6818,14 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
 void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
                                            bool parked,
                                            bool present) {
-    if (!m_durable_residency || !chunk)
+    if (!chunk)
         return;
+    // Every resident chunk reports water changes, so ownership promotion visits only the chunks
+    // that changed. The regional membership index below stays durable-residency only.
     if (present)
         chunk->bind_water_changes(m_water_changes);
+    if (!m_durable_residency)
+        return;
     int rx = 0, rz = 0;
     Persistence::WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
     const auto key = digest_region_id(rx, rz);
@@ -7061,20 +7062,11 @@ void SHIELD_WorldSystem::sync_water_authority() {
             bump_far_lod_authority_revision(chunk->get_coords());
         }
         chunk->set_water_authority();
-        chunk->mark_dirty_for_save();
+        chunk->mark_water_data_dirty();
         chunk->clear_water_state_dirty();
         if (m_waterAuthorityObserver)
             m_waterAuthorityObserver(chunk->get_coords());
     };
-    if (!m_durable_residency) {
-        // Explicit synchronization also supports ordinary resident worlds. Their
-        // chunks deliberately do not maintain the enabled-only notification queue.
-        for (const auto& [id, chunk] : m_streaming_state.chunks) {
-            (void)id;
-            promote(chunk);
-        }
-        return;
-    }
     m_water_changes->take(m_pending_water_changes);
     for (const auto id : m_pending_water_changes) {
         ++m_water_authority_input_items;

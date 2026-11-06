@@ -271,6 +271,8 @@ TEST(WorldDurableResidency, WholeSnapshotCommitReleasesParkedPayloadAndReturnRes
     const auto sdf_hash = HashVec(edited->sdf_data);
     fx.Settle(fx.FarAnchor(), kSettleIterations);
     ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    // Hash reads observe the last completed boundary; settle it as a finished tick would.
+    fx.world->sync_water_authority();
     const auto before = fx.session->ComputeChunkStateHash();
     const auto parked_bytes = fx.world->parking_status().parked_bytes;
     const auto generation = fx.world->debug_dirty_generation();

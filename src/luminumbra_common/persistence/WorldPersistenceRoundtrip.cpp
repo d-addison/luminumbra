@@ -225,14 +225,18 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
     return state;
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_arrays = false) {
+nlohmann::json ChunkToJson(const Chunk& chunk,
+                           bool sim_only = false,
+                           bool omit_arrays = false,
+                           bool preserve_authority = false,
+                           bool omit_pending = false) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
     // Snapshot callers retain the complete canonical representation.
-    const auto array_field = [sim_only, omit_arrays](const char* field,
-                                                     const auto& build) -> nlohmann::json {
-        if (omit_arrays)
+    const auto array_field = [sim_only, omit_arrays, omit_pending](
+                                 const char* field, const auto& build) -> nlohmann::json {
+        if (omit_arrays || (omit_pending && std::string_view(field).starts_with("pending_")))
             return nlohmann::json::array();
         if (sim_only) {
             for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
@@ -245,7 +249,7 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
         return build();
     };
     const ChunkState state = chunk.get_state();
-    return nlohmann::json{
+    nlohmann::json result{
         {"coords", IVec3ToJson(chunk.get_coords())},
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
@@ -322,6 +326,13 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
         {"ticks_below_threshold", chunk.ticks_below_threshold},
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks},
         {"water_state", WaterStateToJson(chunk)}};
+    // Optional ownership metadata leaves legacy and pristine snapshot bytes intact.
+    if (preserve_authority && chunk.has_water_authority())
+        result["water_authority"] = !chunk.has_terrain_authority() ? "generated" : "edited";
+    if (preserve_authority)
+        result["authority"] = {{"terrain_edited", chunk.has_terrain_authority()},
+                               {"water_owned", chunk.has_water_authority()}};
+    return result;
 }
 
 std::vector<std::int32_t> WaterGridFromJson(const nlohmann::json& values) {
@@ -347,6 +358,34 @@ std::vector<std::int32_t> WaterGridFromJson(const nlohmann::json& values) {
         }
     }
     return grid;
+}
+
+void ValidateAuthorityMetadata(const nlohmann::json& value) {
+    const auto& water_state = value.contains("water_state") ? value.at("water_state") : value;
+    const auto terrain = water_state.find("terrain_authoritative");
+    if (terrain != water_state.end() && !terrain->is_boolean())
+        throw std::invalid_argument("Water terrain authority must be a boolean");
+    if (const auto water = value.find("water_authority"); water != value.end()) {
+        if (!water->is_string() || (*water != "generated" && *water != "edited"))
+            throw std::invalid_argument("Unknown water authority provenance");
+        if (terrain != water_state.end() && terrain->get<bool>() != (*water == "edited"))
+            throw std::invalid_argument("Inconsistent water terrain authority");
+    }
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        if (!ownership->is_object() || ownership->size() != 2 ||
+            !ownership->contains("terrain_edited") ||
+            !ownership->at("terrain_edited").is_boolean() || !ownership->contains("water_owned") ||
+            !ownership->at("water_owned").is_boolean())
+            throw std::invalid_argument("Invalid chunk authority metadata");
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        if (value.contains("water_authority") &&
+            (!water_owned || (value.at("water_authority") == "edited") != terrain_edited))
+            throw std::invalid_argument("Inconsistent chunk authority metadata");
+        if (terrain != water_state.end() &&
+            (!water_owned || terrain->get<bool>() != terrain_edited))
+            throw std::invalid_argument("Inconsistent water terrain authority");
+    }
 }
 
 // Region chunk records (record_format 2) keep every chunk array as one encoded array object:
@@ -658,7 +697,11 @@ struct EncodedChunkArrays {
 };
 
 template<typename Arrays>
-void ApplyChunkFields(const nlohmann::json& value, const Arrays& arrays, Chunk& chunk) {
+void ApplyChunkFields(const nlohmann::json& value,
+                      const Arrays& arrays,
+                      Chunk& chunk,
+                      const ChunkAuthorityLoadPolicy& policy) {
+    ValidateAuthorityMetadata(value);
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
     chunk.sdf_data = arrays.floats("sdf_data");
     chunk.heightmap_data = arrays.floats("heightmap_data");
@@ -713,22 +756,56 @@ void ApplyChunkFields(const nlohmann::json& value, const Arrays& arrays, Chunk& 
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
-    // A raw snapshot is loaded authority. Region containers subsequently restore their
-    // explicit edited flag, allowing pristine cache records to remain regenerable.
-    chunk.mark_sdf_loaded_or_edited();
-    if (water_state.contains("terrain_authoritative")) {
+    // Every accepted ownership encoding must agree with the region record header.
+    const auto require_record_agreement = [&policy](bool terrain_edited, bool water_owned) {
+        if (!policy.validate_record_authority)
+            return;
+        const bool disagrees = policy.allow_unflagged_water
+                                   ? terrain_edited && !policy.terrain_edited
+                                   : policy.terrain_edited != (terrain_edited || water_owned);
+        if (disagrees)
+            throw std::invalid_argument("Chunk authority disagrees with region record");
+    };
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        require_record_agreement(terrain_edited, water_owned);
+        if (water_owned)
+            chunk.mark_water_data_dirty();
+        if (terrain_edited)
+            chunk.mark_sdf_loaded_or_edited();
+        else
+            chunk.mark_sdf_generated_current_params();
+    } else if (value.contains("water_authority")) {
+        require_record_agreement(value.at("water_authority") == "edited", true);
+        chunk.mark_water_data_dirty();
+        if (value.at("water_authority") == "edited")
+            chunk.mark_sdf_loaded_or_edited();
+        else
+            chunk.mark_sdf_generated_current_params();
+    } else if (water_state.contains("terrain_authoritative")) {
         if (!water_state.at("terrain_authoritative").is_boolean())
             throw std::invalid_argument("Water terrain authority must be a boolean");
+        require_record_agreement(water_state.at("terrain_authoritative").get<bool>(), true);
         chunk.set_water_authority();
-        if (!water_state.at("terrain_authoritative").get<bool>()) {
+        if (water_state.at("terrain_authoritative").get<bool>())
+            chunk.mark_sdf_loaded_or_edited();
+        else
             chunk.mark_sdf_generated_current_params();
-            chunk.clear_voxel_data_dirty();
-        }
+    } else {
+        // Region containers supply the legacy ownership policy explicitly.
+        if (policy.terrain_edited)
+            chunk.mark_sdf_loaded_or_edited();
+        if (policy.migrate_legacy_water && chunk.has_water_sim.load(std::memory_order_acquire))
+            chunk.mark_water_data_dirty();
     }
+    chunk.clear_voxel_data_dirty();
 }
 
-void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
-    ApplyChunkFields(value, JsonChunkArrays{value}, chunk);
+void ApplyChunkJson(const nlohmann::json& value,
+                    Chunk& chunk,
+                    const ChunkAuthorityLoadPolicy& policy) {
+    ApplyChunkFields(value, JsonChunkArrays{value}, chunk, policy);
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -1072,6 +1149,7 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
         }
     }
     ValidateWaterStateObject(chunk, errors);
+    ValidateAuthorityMetadata(chunk);
 
     if (coords_valid && chunk.contains("chunk_id") && IsJsonInteger(chunk.at("chunk_id"))) {
         const IVec3 coords = IVec3FromJson(chunk.at("coords"));
@@ -1171,8 +1249,9 @@ namespace {
 // allocated or copied just to immediately turn it back into text.
 class SnapshotJsonWriter {
 public:
-    explicit SnapshotJsonWriter(std::string& bytes)
-        : m_bytes(bytes)
+    explicit SnapshotJsonWriter(std::string& bytes, bool preserve_authority = false)
+        : m_preserve_authority(preserve_authority)
+        , m_bytes(bytes)
         , m_serializer(nlohmann::detail::output_adapter<char>(bytes), ' ') {}
 
     void value(const nlohmann::json& item, unsigned indent) {
@@ -1268,7 +1347,7 @@ private:
     }
 
     void element(const std::shared_ptr<Chunk>& chunk, unsigned indent) {
-        const auto object = ChunkToJson(*chunk, false, true);
+        const auto object = ChunkToJson(*chunk, false, true, m_preserve_authority);
         m_bytes += '{';
         bool first = true;
         for (const auto& [key, item] : object.items()) {
@@ -1322,6 +1401,7 @@ private:
         std::size_t size = 0;
         std::array<char, 32> bytes{};
     };
+    bool m_preserve_authority;
     std::string& m_bytes;
     nlohmann::detail::serializer<nlohmann::json> m_serializer;
     std::array<Number, 1024> m_numbers{};
@@ -1369,14 +1449,15 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
         .dump();
 }
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool preserve_authority) {
     auto chunks = state.snapshot_chunks();
     std::erase(chunks, nullptr);
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         return lhs->get_id() < rhs->get_id();
     });
     std::string bytes = "{\n    \"chunk_count\": ";
-    SnapshotJsonWriter writer(bytes);
+    SnapshotJsonWriter writer(bytes, preserve_authority);
     writer.value(chunks.size(), 4);
     bytes += ",\n    \"chunks\": ";
     writer.array(chunks, 4);
@@ -1390,9 +1471,45 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     return bytes;
 }
 
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water) {
+    auto contents = ChunkToJson(chunk, false, false, true, true);
+    if (omit_water) {
+        // A migration clears the old grid in the same atomic region image as
+        // its replacement. Use the ordinary empty-water encoding, without a new tag.
+        const auto empty = ChunkToJson(Chunk(chunk.get_coords()), false, false, true, true);
+        for (const char* field : {"water_level_data",
+                                  "water_flow_data",
+                                  "water_sim_terrain_height",
+                                  "water_depth_mm",
+                                  "water_bed_mm",
+                                  "water_edge_flux",
+                                  "water_mesh_vertices",
+                                  "water_mesh_indices",
+                                  "has_water_sim",
+                                  "water_mesh_generated",
+                                  "current_water_resolution",
+                                  "is_water_sleeping",
+                                  "max_water_delta_last_tick",
+                                  "ticks_below_threshold",
+                                  "water_mesh_dirty_ticks",
+                                  "water_state"})
+            contents[field] = empty.at(field);
+        contents.erase("water_authority");
+        contents["authority"]["water_owned"] = false;
+    }
+    const nlohmann::json snapshot = {{"schema", kSnapshotSchema},
+                                     {"order_contract", kOrderContract},
+                                     {"chunk_count", 1},
+                                     {"persisted_fields", PersistedFields()},
+                                     {"chunks", nlohmann::json::array({std::move(contents)})}};
+    return StableDump(snapshot);
+}
+
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors) {
+                                         std::vector<std::string>& errors,
+                                         const ChunkAuthorityLoadPolicy& authority) {
+    out_state.clear();
     if (!SavedInputLimits::JsonDepthAllowed(json_text)) {
         errors.push_back(
             "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
@@ -1436,9 +1553,9 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)
-                ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk);
+                ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
             else
-                ApplyChunkJson(chunk_json, *chunk);
+                ApplyChunkJson(chunk_json, *chunk, authority);
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
@@ -1582,42 +1699,106 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
                     WaterCursorHashInput(water_sim_cursor));
 }
 
+RegionContentHasher::RegionContentHasher() {
+    feed("{\n    \"chunks\": [");
+}
+
+void RegionContentHasher::feed(std::string_view bytes) {
+    for (const char byte : bytes) {
+        m_hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(byte));
+        m_hash *= 1099511628211ull;
+    }
+}
+
+namespace {
+nlohmann::json TerrainAuthorityJson(const Chunk& chunk) {
+    return {
+        {"chunk_id", chunk.get_id()},
+        {"coords", IVec3ToJson(chunk.get_coords())},
+        {"sdf_data",
+         chunk.has_terrain_authority() ? nlohmann::json(chunk.sdf_data) : nlohmann::json::array()},
+        {"heightmap_data",
+         chunk.has_terrain_authority() ? nlohmann::json(chunk.heightmap_data)
+                                       : nlohmann::json::array()},
+        {"material_data",
+         chunk.has_terrain_authority() ? nlohmann::json(chunk.material_data)
+                                       : nlohmann::json::array()}};
+}
+nlohmann::json WaterAuthorityJson(const Chunk& chunk) {
+    return {{"chunk_id", chunk.get_id()},
+            {"water_depth_mm", chunk.water_depth_mm},
+            {"water_bed_mm", chunk.water_bed_mm},
+            {"water_edge_flux", chunk.water_edge_flux},
+            {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
+            {"current_water_resolution",
+             chunk.current_water_resolution.load(std::memory_order_acquire)},
+            {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
+            {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
+            {"ticks_below_threshold", chunk.ticks_below_threshold}};
+}
+void HashAuthorityBytes(std::uint64_t& hash, std::string_view bytes) {
+    for (const char byte : bytes) {
+        hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(byte));
+        hash *= 1099511628211ull;
+    }
+}
+void HashTerrainFields(std::uint64_t& hash, const nlohmann::json& terrain) {
+    for (const char* field :
+         {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
+        HashAuthorityBytes(hash, terrain.at(field).dump());
+        HashAuthorityBytes(hash, "|");
+    }
+}
+} // namespace
+
+void RegionContentHasher::append(const Chunk& chunk) {
+    if (!chunk.has_simulation_authority())
+        return;
+    if (m_hasChunks && chunk.get_id() <= m_lastId)
+        throw std::invalid_argument("Region content chunks must have increasing ids");
+    feed(m_hasChunks ? ",\n" : "\n");
+    m_lastId = chunk.get_id();
+    m_hasChunks = true;
+    auto content = TerrainAuthorityJson(chunk);
+    const auto water = WaterAuthorityJson(chunk);
+    HashTerrainFields(m_terrainHash, content);
+    HashAuthorityBytes(m_waterHash, water.dump());
+    content.update(water);
+    // Match StableDump's four-space layout, at the array's eight-space depth.
+    // The byte protocol stays identical without retaining the whole region JSON.
+    const auto bytes = content.dump(4);
+    feed("        ");
+    std::size_t begin = 0;
+    for (;;) {
+        const auto end = bytes.find('\n', begin);
+        if (end == std::string::npos) {
+            feed(std::string_view(bytes).substr(begin));
+            break;
+        }
+        feed(std::string_view(bytes).substr(begin, end - begin + 1));
+        feed("        ");
+        begin = end + 1;
+    }
+}
+
+std::uint64_t RegionContentHasher::value() const {
+    auto finished = *this;
+    finished.feed(m_hasChunks ? "\n    ],\n" : "],\n");
+    finished.feed("    \"hash_scope\": \"region_content_v2\"\n}\n");
+    return finished.m_hash;
+}
+
 std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         return lhs->get_id() < rhs->get_id();
     });
-    nlohmann::json contents = nlohmann::json::array();
-    for (const auto& chunk : chunks) {
-        // The provider filters incomplete live/parked inputs before merging. Durable
-        // edited records may retain any lifecycle state, including Loading; this
-        // content projection must not filter them again by residency bookkeeping.
-        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
-            continue;
-        contents.push_back(
-            {{"chunk_id", chunk->get_id()},
-             {"coords", IVec3ToJson(chunk->get_coords())},
-             {"sdf_data",
-              chunk->has_terrain_authority() ? nlohmann::json(chunk->sdf_data)
-                                             : nlohmann::json::array()},
-             {"heightmap_data",
-              chunk->has_terrain_authority() ? nlohmann::json(chunk->heightmap_data)
-                                             : nlohmann::json::array()},
-             {"material_data",
-              chunk->has_terrain_authority() ? nlohmann::json(chunk->material_data)
-                                             : nlohmann::json::array()},
-             {"water_depth_mm", chunk->water_depth_mm},
-             {"water_bed_mm", chunk->water_bed_mm},
-             {"water_edge_flux", chunk->water_edge_flux},
-             {"has_water_sim", chunk->has_water_sim.load(std::memory_order_acquire)},
-             {"current_water_resolution",
-              chunk->current_water_resolution.load(std::memory_order_acquire)},
-             {"is_water_sleeping", chunk->is_water_sleeping.load(std::memory_order_acquire)},
-             {"max_water_delta_last_tick", chunk->max_water_delta_last_tick},
-             {"ticks_below_threshold", chunk->ticks_below_threshold}});
-    }
-    return Checksum(StableDump(
-        nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks)
+        hasher.append(*chunk);
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    return stream.str();
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,

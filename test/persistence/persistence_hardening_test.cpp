@@ -16,11 +16,16 @@
 #include "../support/UniqueTempPath.h"
 
 #include "core/ResidencyContract.h"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp"
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
+#include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -28,19 +33,25 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using Luminumbra::Chunk;
 using Luminumbra::ChunkID;
+using Luminumbra::ChunkSdfProvenance;
 using Luminumbra::ChunkState;
 using Luminumbra::IVec3;
 using Luminumbra::Vec2;
 using Luminumbra::Vec3;
 using Luminumbra::VoxelVertex;
 using Luminumbra::WorldStreamingState;
+namespace P = Luminumbra::Persistence;
 using Luminumbra::Persistence::ComputeWorldStreamingStateHash;
 using Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes;
 using Luminumbra::Persistence::LoadWorldStreamingStateSnapshotJson;
@@ -254,6 +265,20 @@ std::shared_ptr<Chunk> CloneChunk(const Chunk& src) {
     return copy;
 }
 
+// Small, complete water grid; unlike the legacy serialization fixture, this
+// also satisfies the admission contract for an evolving column.
+std::shared_ptr<Chunk> AddCompleteWaterChunk(WorldStreamingState& world, const IVec3& coords) {
+    auto chunk = AddRichChunk(world, coords, ChunkState::Ready, 1u);
+    chunk->current_water_resolution.store(4);
+    chunk->water_depth_mm.assign(16, 250);
+    chunk->water_bed_mm.assign(16, -1250);
+    chunk->water_edge_flux.assign(32, -7);
+    chunk->water_level_data.assign(16, -1.0f);
+    chunk->water_flow_data.assign(16, Vec2(0.25f, -0.125f));
+    chunk->water_sim_terrain_height.assign(16, -1.25f);
+    return chunk;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -288,6 +313,904 @@ TEST(PersistenceHardening, SnapshotRoundTripPreservesEveryFieldExactly) {
     auto loaded = restored.find_chunk(IVec3(4, -2, 6));
     ASSERT_NE(loaded, nullptr);
     ExpectChunkFieldExact(*expected, *loaded);
+}
+
+TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndependent) {
+    Chunk chunk({0, 0, 0});
+    const auto seed_generation = chunk.water_seed_edit_generation();
+    EXPECT_EQ(chunk.authority_hash_revision(), 0u);
+    EXPECT_FALSE(chunk.has_simulation_authority());
+    chunk.mark_water_data_dirty();
+    EXPECT_TRUE(chunk.is_voxel_data_dirty());
+    EXPECT_TRUE(chunk.has_water_authority());
+    EXPECT_TRUE(chunk.has_simulation_authority());
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+    EXPECT_EQ(chunk.voxel_revision(), 0u);
+    EXPECT_EQ(chunk.water_seed_edit_generation(), seed_generation);
+    EXPECT_EQ(chunk.authority_hash_revision(), 1u);
+    const auto saved_stamp = chunk.authority_stamp();
+    chunk.clear_voxel_data_dirty();
+    EXPECT_FALSE(chunk.is_voxel_data_dirty());
+    EXPECT_TRUE(chunk.has_water_authority());
+    EXPECT_EQ(chunk.authority_stamp(), saved_stamp);
+    chunk.mark_voxel_data_dirty();
+    EXPECT_EQ(chunk.voxel_revision(), 1u);
+    EXPECT_EQ(chunk.authority_hash_revision(), 2u);
+    EXPECT_EQ(chunk.water_seed_edit_generation(), seed_generation + 1u);
+    EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_TRUE(chunk.has_water_authority());
+}
+
+TEST(PersistenceHardening, WaterOnlyRecordFlagsFollowSimulationOwnership) {
+    const TempSaveDir save("water_only_flags");
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->mark_water_data_dirty();
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+    const auto digest = WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    ASSERT_NE(digest, WorldSaveService::region_simulation_digest({}, {0, 0}, {}));
+    ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(original, save.path).saved);
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(chunk->has_terrain_authority());
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(
+        WorldSaveService::region_file_path(save.path, 0, 0), records));
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_NE(records.front().flags & 0x01u, 0u);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, {chunk}), digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(
+                  save.path, {0, 0}, P::RegionDigestInputs{{}, {chunk}, {}}),
+              digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {0, 0}, {}), digest);
+}
+
+void ExpectUnflaggedOwnedWaterIsRetainedAndReflagged(std::string_view encoding,
+                                                     std::uint8_t flags,
+                                                     bool indexed,
+                                                     bool initialized) {
+    SCOPED_TRACE(encoding);
+    SCOPED_TRACE(flags);
+    SCOPED_TRACE(indexed);
+    SCOPED_TRACE(initialized);
+    const TempSaveDir save("unflagged_owned_water");
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {1280, 0, -1280});
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->mark_water_data_dirty();
+    if (!initialized) {
+        chunk->has_water_sim.store(false);
+        chunk->current_water_resolution.store(0);
+        chunk->water_depth_mm.clear();
+        chunk->water_bed_mm.clear();
+        chunk->water_edge_flux.clear();
+        chunk->water_level_data.clear();
+        chunk->water_flow_data.clear();
+        chunk->water_sim_terrain_height.clear();
+    }
+    auto payload = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    auto& object = payload["chunks"][0];
+    if (encoding != "authority")
+        object.erase("authority");
+    if (encoding != "water_authority")
+        object.erase("water_authority");
+    if (encoding != "water_state")
+        object["water_state"].erase("terrain_authoritative");
+    const WorldSaveService::ContainerRecord record{chunk->get_id(), 0, flags, payload.dump()};
+    const auto region = WorldSaveService::region_file_path(save.path, 40, -40);
+    if (indexed) {
+        P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    } else {
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+    }
+    EXPECT_EQ(P::snapshot_index_exists(save.path), indexed);
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path));
+    const auto digest = WorldSaveService::region_simulation_digest({}, {40, -40}, {chunk});
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {40, -40}, {}), digest);
+    const auto exact = WorldSaveService::read_chunk(save.path, chunk->get_coords(), indexed);
+    ASSERT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(exact.chunk, nullptr);
+    EXPECT_TRUE(exact.chunk->is_voxel_data_dirty());
+    EXPECT_TRUE(exact.chunk->has_water_authority());
+    EXPECT_FALSE(exact.chunk->has_terrain_authority());
+    EXPECT_TRUE(exact.chunk->same_water_state(*chunk));
+    const std::unordered_set<ChunkID> retain_none;
+    std::vector<IVec3> inventory;
+    std::vector<std::string> errors;
+    WorldStreamingState loaded;
+    ASSERT_TRUE(
+        WorldSaveService{}.load_world(loaded, save.path, errors, {}, &retain_none, &inventory));
+    EXPECT_EQ(inventory, (std::vector<IVec3>{chunk->get_coords()}));
+    const auto repaired = loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_TRUE(repaired->is_voxel_data_dirty());
+    EXPECT_FALSE(repaired->has_terrain_authority());
+    EXPECT_TRUE(repaired->same_water_state(*chunk));
+    const auto revision = repaired->authority_hash_revision();
+    ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(loaded, save.path, &errors).saved);
+    EXPECT_FALSE(repaired->is_voxel_data_dirty());
+    EXPECT_EQ(repaired->authority_hash_revision(), revision);
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, records));
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_NE(records.front().flags & 0x01u, 0u);
+    WorldStreamingState reopened;
+    inventory.clear();
+    ASSERT_TRUE(
+        WorldSaveService{}.load_world(reopened, save.path, errors, {}, &retain_none, &inventory));
+    EXPECT_EQ(reopened.size(), 0u);
+    EXPECT_EQ(inventory, (std::vector<IVec3>{chunk->get_coords()}));
+    const auto clean = WorldSaveService::read_chunk(save.path, chunk->get_coords(), indexed);
+    ASSERT_EQ(clean.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(clean.chunk, nullptr);
+    EXPECT_FALSE(clean.chunk->is_voxel_data_dirty());
+    EXPECT_TRUE(clean.chunk->same_water_state(*chunk));
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(save.path, {40, -40}, {}), digest);
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(PersistenceHardening, UnflaggedOwnedWaterIsRetainedAndReflagged) {
+    for (const std::string_view encoding : {"authority", "water_authority", "water_state"}) {
+        for (const std::uint8_t flags : {std::uint8_t{0}, std::uint8_t{2}}) {
+            for (const bool indexed : {false, true}) {
+                for (const bool initialized : {false, true})
+                    ExpectUnflaggedOwnedWaterIsRetainedAndReflagged(
+                        encoding, flags, indexed, initialized);
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, UnflaggedUnownedWaterRequiresExplicitLegacyUpgrade) {
+    for (const std::uint8_t flags : {std::uint8_t{0}, std::uint8_t{2}}) {
+        for (const bool indexed : {false, true}) {
+            SCOPED_TRACE(flags);
+            SCOPED_TRACE(indexed);
+            const TempSaveDir save("unflagged_unowned_water");
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+            chunk->mark_sdf_generated_current_params();
+            const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+            const WorldSaveService::ContainerRecord record{
+                chunk->get_id(), 0, flags, P::SerializeWorldStreamingStateSnapshotJson(original)};
+            if (indexed) {
+                P::SaveTransaction transaction(save.path, 1, {}, &WorldSaveService::member_digest);
+                ASSERT_TRUE(transaction.begin(nullptr));
+                ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+                ASSERT_TRUE(transaction.commit(nullptr));
+            } else {
+                ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
+            }
+            std::vector<std::shared_ptr<Chunk>> authoritative;
+            ASSERT_TRUE(WorldSaveService::read_authoritative_region_chunks(
+                region, 0, 31, 0, 31, authoritative));
+            EXPECT_TRUE(authoritative.empty());
+            WorldStreamingState ordinary;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(WorldSaveService{}.load_world(ordinary, save.path, errors));
+            ASSERT_NE(ordinary.find_chunk(chunk->get_id()), nullptr);
+            EXPECT_FALSE(ordinary.find_chunk(chunk->get_id())->has_water_authority());
+            const std::unordered_set<ChunkID> retain_none;
+            std::vector<IVec3> inventory;
+            WorldStreamingState upgraded;
+            ASSERT_TRUE(WorldSaveService{}.load_world(
+                upgraded, save.path, errors, {}, &retain_none, &inventory));
+            EXPECT_EQ(inventory.empty(), indexed);
+            EXPECT_EQ(upgraded.size(), indexed ? 0u : 1u);
+            if (!indexed) {
+                const auto promoted = upgraded.find_chunk(chunk->get_id());
+                ASSERT_NE(promoted, nullptr);
+                EXPECT_TRUE(promoted->has_water_authority());
+                EXPECT_TRUE(promoted->is_voxel_data_dirty());
+                EXPECT_EQ(promoted->water_depth_mm, chunk->water_depth_mm);
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority) {
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool saved : {false, true}) {
+            SCOPED_TRACE(terrain_edited);
+            SCOPED_TRACE(saved);
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            if (terrain_edited) {
+                chunk->mark_voxel_data_dirty();
+            }
+            chunk->mark_water_state_dirty();
+            chunk->set_water_authority();
+            if (saved) {
+                chunk->clear_voxel_data_dirty();
+            }
+            const auto depths = chunk->water_depth_mm;
+            const auto flux = chunk->water_edge_flux;
+            P::RegionContentHasher before;
+            before.append(*chunk);
+            chunk->mark_sdf_generated_current_params();
+            chunk->clear_voxel_data_dirty_after_generation();
+            EXPECT_TRUE(chunk->has_water_sim.load());
+            EXPECT_TRUE(chunk->has_water_authority());
+            EXPECT_TRUE(chunk->has_simulation_authority());
+            EXPECT_TRUE(chunk->needs_authority());
+            EXPECT_FALSE(chunk->has_terrain_authority());
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(chunk->water_depth_mm, depths);
+            EXPECT_EQ(chunk->water_edge_flux, flux);
+            P::RegionContentHasher after;
+            after.append(*chunk);
+            EXPECT_FALSE(after.empty());
+            EXPECT_EQ(after.water_value(), before.water_value());
+            const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+            const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
+            EXPECT_EQ(record["water_authority"], "generated");
+            EXPECT_EQ(record["authority"]["terrain_edited"], false);
+            EXPECT_EQ(record["authority"]["water_owned"], true);
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+            ASSERT_TRUE(errors.empty());
+            const auto loaded = restored.find_chunk(chunk->get_id());
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_TRUE(loaded->has_water_authority());
+            EXPECT_FALSE(loaded->has_terrain_authority());
+            EXPECT_TRUE(loaded->same_water_state(*chunk));
+            EXPECT_EQ(P::ComputeRegionContentHash(restored), P::ComputeRegionContentHash(original));
+            chunk->clear_water_data();
+            EXPECT_FALSE(chunk->has_water_authority());
+            EXPECT_FALSE(chunk->has_simulation_authority());
+            EXPECT_FALSE(chunk->needs_authority());
+        }
+    }
+}
+
+TEST(PersistenceHardening, AuthorityStampObservesSolverBookkeepingWithoutArrayRevision) {
+    Chunk chunk({0, 0, 0});
+    chunk.mark_water_data_dirty();
+    const auto revision = chunk.authority_hash_revision();
+    auto previous = chunk.authority_stamp();
+    const auto verify_change = [&] {
+        const auto current = chunk.authority_stamp();
+        EXPECT_NE(current, previous);
+        EXPECT_EQ(current.revision, revision);
+        previous = current;
+    };
+    chunk.has_water_sim.store(true);
+    verify_change();
+    chunk.is_water_sleeping.store(true);
+    verify_change();
+    chunk.current_water_resolution.store(4);
+    verify_change();
+    chunk.ticks_below_threshold = 3;
+    verify_change();
+    chunk.max_water_delta_last_tick = -0.0f;
+    verify_change();
+    EXPECT_EQ(previous.max_delta_bits, std::bit_cast<Luminumbra::u32>(-0.0f));
+    chunk.water_mesh_dirty_ticks = 7;
+    chunk.water_mesh_generated.store(true);
+    chunk.mesh_version.store(9u);
+    chunk.pending_lod.store(2);
+    EXPECT_EQ(chunk.authority_stamp(), previous);
+}
+
+TEST(PersistenceHardening, CompleteWaterStateBoundsResolutionArraysAndFiniteMirrors) {
+    WorldStreamingState world;
+    const auto chunk = AddCompleteWaterChunk(world, {0, 0, 0});
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    for (const int resolution : {4, 8, 16, 32}) {
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        chunk->current_water_resolution.store(resolution);
+        chunk->water_depth_mm.assign(cells, std::numeric_limits<std::int32_t>::max());
+        chunk->water_bed_mm.assign(cells, std::numeric_limits<std::int32_t>::min());
+        chunk->water_edge_flux.assign(2u * cells, std::numeric_limits<std::int32_t>::min());
+        chunk->water_level_data.assign(cells, 1.0f);
+        chunk->water_flow_data.assign(cells, Vec2(0.0f));
+        chunk->water_sim_terrain_height.assign(cells, -1.0f);
+        EXPECT_TRUE(chunk->has_complete_water_state());
+    }
+    const auto reject_change = [&](const auto& change) {
+        const auto changed = CloneChunk(*chunk);
+        ASSERT_TRUE(changed->has_complete_water_state());
+        change(*changed);
+        EXPECT_FALSE(changed->has_complete_water_state());
+    };
+    for (const int invalid :
+         {std::numeric_limits<int>::min(), -1, 0, 3, 64, std::numeric_limits<int>::max()}) {
+        reject_change(
+            [invalid](Chunk& changed) { changed.current_water_resolution.store(invalid); });
+    }
+    reject_change([](Chunk& changed) { changed.has_water_sim.store(false); });
+    reject_change([](Chunk& changed) { changed.water_depth_mm.pop_back(); });
+    reject_change([](Chunk& changed) { changed.water_depth_mm[0] = -1; });
+    reject_change([](Chunk& changed) { changed.water_bed_mm.pop_back(); });
+    reject_change([](Chunk& changed) { changed.water_edge_flux.pop_back(); });
+    reject_change([](Chunk& changed) { changed.water_level_data.clear(); });
+    reject_change([](Chunk& changed) { changed.water_flow_data.clear(); });
+    reject_change([](Chunk& changed) { changed.water_sim_terrain_height.clear(); });
+    reject_change([](Chunk& changed) { changed.water_rest_level = {1.0f}; });
+    reject_change([](Chunk& changed) { changed.ticks_below_threshold = -1; });
+    for (const float invalid :
+         {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        reject_change([invalid](Chunk& changed) { changed.max_water_delta_last_tick = invalid; });
+        reject_change([invalid](Chunk& changed) { changed.water_level_data[0] = invalid; });
+        reject_change([invalid](Chunk& changed) { changed.water_sim_terrain_height[0] = invalid; });
+        reject_change([invalid](Chunk& changed) { changed.water_flow_data[0].x = invalid; });
+        reject_change([invalid](Chunk& changed) { changed.water_flow_data[0].y = invalid; });
+        reject_change(
+            [invalid](Chunk& changed) { changed.water_rest_level.assign(1024, invalid); });
+    }
+}
+
+TEST(PersistenceHardening, WaterStateComparisonIncludesPersistedMirrorsAndSolverBookkeeping) {
+    WorldStreamingState world;
+    const auto chunk = AddCompleteWaterChunk(world, {0, 0, 0});
+    const auto reject_change = [&](const auto& change) {
+        const auto changed = CloneChunk(*chunk);
+        ASSERT_TRUE(chunk->same_water_state(*changed));
+        change(*changed);
+        EXPECT_FALSE(chunk->same_water_state(*changed));
+        EXPECT_FALSE(changed->same_water_state(*chunk));
+    };
+    reject_change([](Chunk& changed) { ++changed.water_depth_mm[0]; });
+    reject_change([](Chunk& changed) { ++changed.water_bed_mm[0]; });
+    reject_change([](Chunk& changed) { ++changed.water_edge_flux[0]; });
+    reject_change([](Chunk& changed) { changed.water_level_data[0] += 0.25f; });
+    reject_change([](Chunk& changed) { changed.water_flow_data[0].x += 0.25f; });
+    reject_change([](Chunk& changed) { changed.water_sim_terrain_height[0] += 0.25f; });
+    reject_change([](Chunk& changed) { changed.current_water_resolution.store(8); });
+    reject_change([](Chunk& changed) { changed.has_water_sim.store(false); });
+    reject_change([](Chunk& changed) { changed.is_water_sleeping.store(false); });
+    reject_change([](Chunk& changed) { ++changed.ticks_below_threshold; });
+    reject_change([](Chunk& changed) { changed.max_water_delta_last_tick += 0.25f; });
+    chunk->max_water_delta_last_tick = 0.0f;
+    reject_change([](Chunk& changed) { changed.max_water_delta_last_tick = -0.0f; });
+    const auto derived = CloneChunk(*chunk);
+    derived->water_src_mm.assign(16, 1);
+    derived->water_rest_level.assign(16, 5.0f);
+    derived->water_mesh_dirty_ticks = 99;
+    derived->water_mesh_vertices.clear();
+    derived->water_mesh_generated.store(false);
+    EXPECT_TRUE(chunk->same_water_state(*derived));
+}
+
+TEST(PersistenceHardening, AuthoritySnapshotsKeepTerrainWaterAndRegenerableOwnership) {
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool water_owned : {false, true}) {
+            SCOPED_TRACE(terrain_edited);
+            SCOPED_TRACE(water_owned);
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            if (terrain_edited) {
+                chunk->mark_voxel_data_dirty();
+            }
+            if (water_owned) {
+                chunk->mark_water_data_dirty();
+            }
+            for (const auto& snapshot :
+                 {P::SerializeChunkAuthoritySnapshotJson(*chunk),
+                  SerializeWorldStreamingStateSnapshotJson(original, true)}) {
+                WorldStreamingState loaded;
+                std::vector<std::string> errors;
+                // Explicit metadata overrides both legacy migration defaults.
+                ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(
+                    snapshot,
+                    loaded,
+                    errors,
+                    {.terrain_edited = true, .migrate_legacy_water = true}));
+                EXPECT_TRUE(errors.empty());
+                const auto restored = loaded.find_chunk(chunk->get_id());
+                ASSERT_NE(restored, nullptr);
+                EXPECT_EQ(restored->has_terrain_authority(), terrain_edited);
+                EXPECT_EQ(restored->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited,
+                          terrain_edited || water_owned);
+                EXPECT_EQ(restored->has_water_authority(), water_owned);
+                EXPECT_EQ(restored->has_simulation_authority(), terrain_edited || water_owned);
+                EXPECT_FALSE(restored->is_voxel_data_dirty());
+                EXPECT_TRUE(restored->has_complete_water_state());
+                EXPECT_TRUE(restored->same_water_state(*chunk));
+                EXPECT_EQ(restored->sdf_data, chunk->sdf_data);
+                EXPECT_EQ(P::ComputeRegionContentHash(loaded),
+                          P::ComputeRegionContentHash(original));
+                EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded, true), snapshot);
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, AuthorityMetadataIsOptInAndKeepsLegacyBytesAndCursorHashes) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_voxel_data_dirty();
+    chunk->mark_water_data_dirty();
+    const auto legacy = SerializeWorldStreamingStateSnapshotJson(original);
+    const auto legacy_world = ComputeWorldStreamingStateHash(original);
+    const auto legacy_sub = ComputeWorldStreamingStateSubHashes(original);
+    constexpr std::uint64_t cursor = (std::uint64_t{1} << 63) + 7u;
+    const auto scheduled_world = ComputeWorldStreamingStateHash(original, cursor);
+    const auto scheduled_sub = ComputeWorldStreamingStateSubHashes(original, cursor);
+    EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(original), legacy);
+    EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(original, false), legacy);
+    EXPECT_EQ(ComputeWorldStreamingStateHash(original), legacy_world);
+    EXPECT_EQ(ComputeWorldStreamingStateHash(original, 0u), legacy_world);
+    EXPECT_EQ(ComputeWorldStreamingStateSubHashes(original).water, legacy_sub.water);
+    EXPECT_EQ(ComputeWorldStreamingStateHash(original, cursor), scheduled_world);
+    EXPECT_EQ(ComputeWorldStreamingStateSubHashes(original, cursor).water, scheduled_sub.water);
+    EXPECT_NE(scheduled_world, legacy_world);
+    EXPECT_NE(scheduled_sub.water, legacy_sub.water);
+    const auto explicit_json = SerializeWorldStreamingStateSnapshotJson(original, true);
+    auto metadata = nlohmann::json::parse(explicit_json);
+    EXPECT_EQ(metadata["chunks"][0]["water_authority"], "edited");
+    metadata["chunks"][0].erase("water_authority");
+    metadata["chunks"][0].erase("authority");
+    EXPECT_EQ(metadata.dump(4) + '\n', legacy);
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(legacy, loaded, errors));
+    const auto restored = loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->has_simulation_authority());
+    EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded), legacy);
+}
+
+TEST(PersistenceHardening, LegacyAuthorityPolicyMigratesWaterOnlyWhenRequested) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    const auto legacy = SerializeWorldStreamingStateSnapshotJson(original);
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool migrate_water : {false, true}) {
+            WorldStreamingState loaded;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(
+                legacy,
+                loaded,
+                errors,
+                {.terrain_edited = terrain_edited, .migrate_legacy_water = migrate_water}));
+            const auto restored = loaded.find_chunk(chunk->get_id());
+            ASSERT_NE(restored, nullptr);
+            EXPECT_EQ(restored->has_terrain_authority(), terrain_edited);
+            EXPECT_EQ(restored->has_water_authority(), migrate_water);
+            EXPECT_FALSE(restored->is_voxel_data_dirty());
+            EXPECT_TRUE(restored->same_water_state(*chunk));
+            auto expected = nlohmann::json::parse(legacy);
+            if (migrate_water) {
+                expected["chunks"][0]["water_state"]["terrain_authoritative"] = terrain_edited;
+            }
+            EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(loaded), expected.dump(4) + '\n');
+        }
+    }
+    chunk->has_water_sim.store(false);
+    WorldStreamingState uninitialized;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(
+        LoadWorldStreamingStateSnapshotJson(SerializeWorldStreamingStateSnapshotJson(original),
+                                            uninitialized,
+                                            errors,
+                                            {.migrate_legacy_water = true}));
+    const auto restored = uninitialized.find_chunk(chunk->get_id());
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->has_water_authority());
+}
+
+TEST(PersistenceHardening, AuthorityLoadPolicyValidatesContainerOwnershipBeforePublishing) {
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool water_owned : {false, true}) {
+            WorldStreamingState original;
+            const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+            if (terrain_edited) {
+                chunk->mark_voxel_data_dirty();
+            }
+            if (water_owned) {
+                chunk->mark_water_data_dirty();
+            }
+            const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+            for (const bool header_edited : {false, true}) {
+                WorldStreamingState loaded;
+                loaded.get_or_create_chunk({1, 0, 0});
+                std::vector<std::string> errors;
+                const bool expected = header_edited == (terrain_edited || water_owned);
+                EXPECT_EQ(LoadWorldStreamingStateSnapshotJson(
+                              snapshot,
+                              loaded,
+                              errors,
+                              {.terrain_edited = header_edited, .validate_record_authority = true}),
+                          expected);
+                EXPECT_EQ(loaded.size(), expected ? 1u : 0u);
+                EXPECT_EQ(errors.empty(), expected);
+            }
+        }
+    }
+}
+
+void ExpectOwnershipEncodingFollowsRecordPolicy(std::string_view encoding, bool terrain_edited) {
+    SCOPED_TRACE(encoding);
+    SCOPED_TRACE(terrain_edited);
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    if (terrain_edited) {
+        chunk->mark_voxel_data_dirty();
+    }
+    chunk->mark_water_data_dirty();
+    auto payload = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    auto& object = payload["chunks"][0];
+    if (encoding != "authority")
+        object.erase("authority");
+    if (encoding != "water_authority")
+        object.erase("water_authority");
+    if (encoding != "water_state")
+        object["water_state"].erase("terrain_authoritative");
+    for (const bool header_edited : {false, true}) {
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        const bool loaded_ok = LoadWorldStreamingStateSnapshotJson(
+            payload.dump(),
+            loaded,
+            errors,
+            {.terrain_edited = header_edited, .validate_record_authority = true});
+        // Owned water always requires the record header to carry the edited flag.
+        EXPECT_EQ(loaded_ok, header_edited) << header_edited;
+        EXPECT_EQ(loaded.size(), header_edited ? 1u : 0u);
+    }
+}
+
+TEST(PersistenceHardening, EveryOwnershipEncodingIsCheckedAgainstTheRecordHeader) {
+    for (const std::string_view encoding : {"authority", "water_authority", "water_state"}) {
+        for (const bool terrain_edited : {false, true})
+            ExpectOwnershipEncodingFollowsRecordPolicy(encoding, terrain_edited);
+    }
+}
+
+TEST(PersistenceHardening, AuthorityStampAdvancesWhenGeneratedParamsReplaceTerrainAuthority) {
+    for (const bool water_owned : {false, true}) {
+        SCOPED_TRACE(water_owned);
+        Chunk chunk({0, 0, 0});
+        if (water_owned) {
+            chunk.mark_water_data_dirty();
+        }
+        chunk.mark_voxel_data_dirty();
+        const auto stamp = chunk.authority_stamp();
+        chunk.mark_sdf_generated_current_params();
+        EXPECT_FALSE(chunk.has_terrain_authority());
+        EXPECT_NE(chunk.authority_stamp(), stamp);
+    }
+}
+
+TEST(PersistenceHardening, AuthorityStampAdvancesOnlyWhenLoadedOrEditedClaimsTerrain) {
+    for (const bool water_owned : {false, true}) {
+        SCOPED_TRACE(water_owned);
+        Chunk chunk({0, 0, 0});
+        if (water_owned) {
+            chunk.mark_water_data_dirty();
+        }
+        const auto before = chunk.authority_stamp();
+        chunk.mark_sdf_loaded_or_edited();
+        EXPECT_TRUE(chunk.has_terrain_authority());
+        const auto claimed = chunk.authority_stamp();
+        EXPECT_NE(claimed, before);
+        chunk.mark_sdf_loaded_or_edited();
+        EXPECT_EQ(chunk.authority_stamp(), claimed);
+    }
+}
+
+TEST(PersistenceHardening, SaveAcknowledgementKeepsChunksMarkedAfterCapture) {
+    auto chunk = std::make_shared<Chunk>(IVec3{0, 0, 0});
+    chunk->mark_water_data_dirty();
+    const auto stale = WorldSaveService::chunk_save_acknowledgement({chunk});
+    chunk->mark_water_data_dirty();
+    stale();
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    const auto current = WorldSaveService::chunk_save_acknowledgement({chunk});
+    current();
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+}
+
+TEST(PersistenceHardening, MalformedAuthorityMetadataRefusesTheWholeSnapshot) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_voxel_data_dirty();
+    chunk->mark_water_data_dirty();
+    const auto later = AddCompleteWaterChunk(original, {1, 0, 0});
+    later->mark_voxel_data_dirty();
+    later->mark_water_data_dirty();
+    const auto valid =
+        nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original, true));
+    const auto reject_record = [&](const nlohmann::json& record) {
+        auto document = valid;
+        document["chunks"][1] = record;
+        WorldStreamingState loaded;
+        loaded.get_or_create_chunk({2, 0, 0});
+        std::vector<std::string> errors;
+        EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(document.dump(), loaded, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        errors.clear();
+        EXPECT_FALSE(P::ValidateWorldStreamingChunkFormatJson(record.dump(), errors));
+        EXPECT_FALSE(errors.empty());
+    };
+    const auto owned = valid["chunks"][1];
+    for (const auto& invalid :
+         {nlohmann::json(nullptr),
+          nlohmann::json("edited"),
+          nlohmann::json{{"terrain_edited", true}},
+          nlohmann::json{{"terrain_edited", 1}, {"water_owned", true}},
+          nlohmann::json{{"terrain_edited", true}, {"water_owned", "false"}},
+          nlohmann::json{{"terrain_edited", true}, {"water_owned", true}, {"extra", 0}}}) {
+        auto changed = owned;
+        changed["authority"] = invalid;
+        reject_record(changed);
+    }
+    for (const auto& invalid : {nlohmann::json("unknown"),
+                                nlohmann::json(nullptr),
+                                nlohmann::json(1),
+                                nlohmann::json::object()}) {
+        auto changed = owned;
+        changed["water_authority"] = invalid;
+        reject_record(changed);
+    }
+    auto inconsistent = owned;
+    inconsistent["water_authority"] = "generated";
+    reject_record(inconsistent);
+    inconsistent = owned;
+    inconsistent["authority"]["water_owned"] = false;
+    reject_record(inconsistent);
+    inconsistent = owned;
+    inconsistent["water_state"]["terrain_authoritative"] = "true";
+    reject_record(inconsistent);
+    inconsistent["water_state"]["terrain_authoritative"] = false;
+    reject_record(inconsistent);
+}
+
+TEST(PersistenceHardening, WaterAuthorityMetadataRejectsMalformedValuesForEitherTerrainState) {
+    for (const bool terrain_edited : {false, true}) {
+        SCOPED_TRACE(terrain_edited);
+        WorldStreamingState original;
+        const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+        if (terrain_edited) {
+            chunk->mark_voxel_data_dirty();
+        }
+        chunk->mark_water_data_dirty();
+        const auto plain = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+        auto compact = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
+        compact["chunks"][0]["authority"] = plain["chunks"][0]["authority"];
+        compact["chunks"][0]["water_authority"] = plain["chunks"][0]["water_authority"];
+        for (const auto& invalid : {nlohmann::json(nullptr),
+                                    nlohmann::json(false),
+                                    nlohmann::json(true),
+                                    nlohmann::json(1),
+                                    nlohmann::json(1.5),
+                                    nlohmann::json::object(),
+                                    nlohmann::json::array(),
+                                    nlohmann::json(""),
+                                    nlohmann::json("unknown")}) {
+            SCOPED_TRACE(invalid.dump());
+            for (auto document : {plain, compact}) {
+                document["chunks"][0]["water_authority"] = invalid;
+                WorldStreamingState restored;
+                restored.get_or_create_chunk({1, 0, 0});
+                std::vector<std::string> errors;
+                EXPECT_FALSE(
+                    LoadWorldStreamingStateSnapshotJson(document.dump(), restored, errors));
+                EXPECT_TRUE(restored.empty());
+                EXPECT_FALSE(errors.empty());
+                if (!document.contains("record_format")) {
+                    errors.clear();
+                    EXPECT_FALSE(P::ValidateWorldStreamingChunkFormatJson(
+                        document["chunks"][0].dump(), errors));
+                    EXPECT_FALSE(errors.empty());
+                }
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, WaterRetirementAndOmittedSnapshotPreserveTerrainAuthority) {
+    for (const bool terrain_edited : {false, true}) {
+        WorldStreamingState original;
+        const auto chunk = AddCompleteWaterChunk(original, {0, 1, 0});
+        if (terrain_edited) {
+            chunk->mark_voxel_data_dirty();
+        }
+        chunk->mark_water_data_dirty();
+        chunk->water_src_mm.assign(16, 1);
+        chunk->water_rest_level.assign(16, 2.0f);
+        const auto before = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+        const auto stamp = chunk->authority_stamp();
+        const auto voxel_version = chunk->voxel_revision();
+        const auto seed_generation = chunk->water_seed_edit_generation();
+        const auto omitted = P::SerializeChunkAuthoritySnapshotJson(*chunk, true);
+        EXPECT_EQ(P::SerializeChunkAuthoritySnapshotJson(*chunk), before);
+        EXPECT_EQ(chunk->authority_stamp(), stamp);
+        chunk->clear_voxel_data_dirty();
+        chunk->clear_water_data();
+        EXPECT_EQ(P::SerializeChunkAuthoritySnapshotJson(*chunk), omitted);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(chunk->has_water_authority());
+        EXPECT_EQ(chunk->has_simulation_authority(), terrain_edited);
+        EXPECT_EQ(chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited, terrain_edited);
+        EXPECT_EQ(chunk->voxel_revision(), voxel_version);
+        EXPECT_EQ(chunk->water_seed_edit_generation(), seed_generation);
+        EXPECT_EQ(chunk->authority_hash_revision(), stamp.revision + 1u);
+        EXPECT_TRUE(chunk->water_src_mm.empty());
+        EXPECT_TRUE(chunk->water_rest_level.empty());
+        EXPECT_FALSE(chunk->has_complete_water_state());
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(omitted, loaded, errors));
+        const auto restored = loaded.find_chunk(chunk->get_id());
+        ASSERT_NE(restored, nullptr);
+        EXPECT_TRUE(restored->same_water_state(*chunk));
+        EXPECT_EQ(restored->sdf_data, chunk->sdf_data);
+        EXPECT_EQ(restored->heightmap_data, chunk->heightmap_data);
+        EXPECT_EQ(restored->has_simulation_authority(), terrain_edited);
+    }
+}
+
+TEST(PersistenceHardening, AuthoritySnapshotOmitsWorkerArraysAndPendingResetKeepsLiveState) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_water_data_dirty();
+    chunk->pending_mesh_failed.store(true);
+    chunk->pending_promotion_ready.store(true);
+    chunk->pending_promotion_failed.store(true);
+    chunk->pending_generation_ready.store(true);
+    chunk->pending_sdf_data = {1.0f};
+    chunk->pending_heightmap_data = {2.0f};
+    chunk->pending_material_data = {3};
+    const auto stamp = chunk->authority_stamp();
+    auto full = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original, true));
+    const auto eviction = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    for (const char* field : {"pending_mesh_vertices",
+                              "pending_mesh_indices",
+                              "pending_water_mesh_vertices",
+                              "pending_water_mesh_indices"}) {
+        EXPECT_FALSE(full["chunks"][0][field].empty());
+        EXPECT_TRUE(eviction["chunks"][0][field].empty());
+        full["chunks"][0][field] = nlohmann::json::array();
+    }
+    EXPECT_EQ(eviction, full);
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(eviction.dump(), restored, errors));
+    const auto loaded = restored.find_chunk(chunk->get_id());
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_TRUE(loaded->has_water_authority());
+    EXPECT_TRUE(loaded->same_water_state(*chunk));
+    // Decoding itself keeps the legacy staging flags. Reset is an explicit
+    // adoption operation after the caller has drained outstanding workers.
+    EXPECT_EQ(loaded->pending_lod.load(), chunk->pending_lod.load());
+    EXPECT_TRUE(loaded->pending_mesh_ready.load());
+    EXPECT_TRUE(loaded->pending_mesh_failed.load());
+    chunk->reset_pending_jobs();
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_FALSE(chunk->pending_mesh_ready.load());
+    EXPECT_FALSE(chunk->pending_mesh_failed.load());
+    EXPECT_FALSE(chunk->pending_promotion_ready.load());
+    EXPECT_FALSE(chunk->pending_promotion_failed.load());
+    EXPECT_FALSE(chunk->pending_generation_ready.load());
+    EXPECT_TRUE(chunk->pending_sdf_data.empty());
+    EXPECT_TRUE(chunk->pending_heightmap_data.empty());
+    EXPECT_TRUE(chunk->pending_material_data.empty());
+    EXPECT_EQ(chunk->authority_stamp(), stamp);
+    full["chunks"][0]["pending_lod"] = -1;
+    full["chunks"][0]["pending_mesh_ready"] = false;
+    full["chunks"][0]["pending_mesh_failed"] = false;
+    EXPECT_EQ(nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original, true)),
+              full);
+}
+
+TEST(PersistenceHardening, AuthoritySnapshotKeepsWideWaterValuesAndLegacyFluxDefaults) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_water_data_dirty();
+    constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+    constexpr auto minimum = std::numeric_limits<std::int32_t>::min();
+    chunk->water_depth_mm[0] = maximum;
+    chunk->water_bed_mm[0] = maximum;
+    chunk->water_depth_mm[1] = 0;
+    chunk->water_bed_mm[1] = minimum;
+    chunk->water_edge_flux[0] = minimum;
+    chunk->water_edge_flux[1] = maximum;
+    const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+    const auto loaded = restored.find_chunk(chunk->get_id());
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_TRUE(loaded->has_complete_water_state());
+    EXPECT_TRUE(loaded->same_water_state(*chunk));
+    EXPECT_EQ(static_cast<std::int64_t>(loaded->water_depth_mm[0]) + loaded->water_bed_mm[0],
+              4294967294LL);
+    EXPECT_EQ(static_cast<std::int64_t>(loaded->water_depth_mm[1]) + loaded->water_bed_mm[1],
+              -2147483648LL);
+    EXPECT_EQ(P::SerializeChunkAuthoritySnapshotJson(*loaded), snapshot);
+    auto legacy = nlohmann::json::parse(snapshot);
+    legacy["chunks"][0].erase("water_edge_flux");
+    WorldStreamingState without_flux;
+    ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(legacy.dump(), without_flux, errors));
+    const auto migrated = without_flux.find_chunk(chunk->get_id());
+    ASSERT_NE(migrated, nullptr);
+    EXPECT_EQ(migrated->water_depth_mm, chunk->water_depth_mm);
+    EXPECT_EQ(migrated->water_bed_mm, chunk->water_bed_mm);
+    EXPECT_EQ(migrated->water_edge_flux, std::vector<std::int32_t>(32, 0));
+    EXPECT_TRUE(migrated->has_water_authority());
+    EXPECT_TRUE(migrated->has_complete_water_state());
+}
+
+TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSeparatesWater) {
+    WorldStreamingState original;
+    const auto first = AddCompleteWaterChunk(original, {0, 0, 0});
+    const auto second = AddCompleteWaterChunk(original, {1, 0, 0});
+    first->mark_voxel_data_dirty();
+    second->mark_water_data_dirty();
+    P::RegionContentHasher hasher;
+    EXPECT_TRUE(hasher.empty());
+    auto contents = nlohmann::json::array();
+    const auto verify = [&] {
+        const auto canonical =
+            nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", contents}};
+        std::ostringstream digest;
+        digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+        EXPECT_EQ(digest.str(), P::StableChecksum(canonical.dump(4) + '\n'));
+    };
+    verify();
+    for (const auto& chunk : {first, second}) {
+        const auto snapshot = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+        nlohmann::json projected;
+        for (const char* field : {"chunk_id",
+                                  "coords",
+                                  "sdf_data",
+                                  "heightmap_data",
+                                  "material_data",
+                                  "water_depth_mm",
+                                  "water_bed_mm",
+                                  "water_edge_flux",
+                                  "has_water_sim",
+                                  "current_water_resolution",
+                                  "is_water_sleeping",
+                                  "max_water_delta_last_tick",
+                                  "ticks_below_threshold"}) {
+            projected[field] = snapshot["chunks"][0].at(field);
+        }
+        if (!chunk->has_terrain_authority()) {
+            for (const char* field : {"sdf_data", "heightmap_data", "material_data"}) {
+                projected[field] = nlohmann::json::array();
+            }
+        }
+        contents.push_back(std::move(projected));
+        hasher.append(*chunk);
+        verify();
+    }
+    EXPECT_FALSE(hasher.empty());
+    std::ostringstream digest;
+    digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    EXPECT_EQ(P::ComputeRegionContentHash(original), digest.str());
+    const auto base = hasher.value();
+    Chunk regenerable({2, 0, 0});
+    hasher.append(regenerable);
+    EXPECT_EQ(hasher.value(), base);
+    EXPECT_THROW(hasher.append(*second), std::invalid_argument);
+    EXPECT_THROW(hasher.append(*first), std::invalid_argument);
+    EXPECT_EQ(hasher.value(), base);
+    ++second->water_depth_mm[0];
+    P::RegionContentHasher changed_water;
+    changed_water.append(*first);
+    changed_water.append(*second);
+    EXPECT_EQ(changed_water.terrain_value(), hasher.terrain_value());
+    EXPECT_NE(changed_water.water_value(), hasher.water_value());
+    EXPECT_NE(changed_water.value(), base);
+    first->sdf_data[0] += 0.5f;
+    P::RegionContentHasher changed_terrain;
+    changed_terrain.append(*first);
+    changed_terrain.append(*second);
+    EXPECT_NE(changed_terrain.terrain_value(), changed_water.terrain_value());
+    EXPECT_EQ(changed_terrain.water_value(), changed_water.water_value());
 }
 
 TEST(PersistenceHardening, AdversarialFloatPayloadSurvivesRoundTripBitExact) {

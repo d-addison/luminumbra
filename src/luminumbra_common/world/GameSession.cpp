@@ -531,7 +531,7 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
-std::uint32_t GameSession::TickSimulation(double frame_dt) {
+std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
@@ -1265,6 +1265,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(std::move(scheduled_fields));
             }
+            SettleWaterAuthority(defer_water_authority);
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
                 throw;
@@ -1885,12 +1886,8 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
-        // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
-        // probe.
-        if (m_worldSystem) {
+        if (m_worldSystem)
             m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
-            m_worldSystem->sync_water_authority();
-        }
         const auto anchors =
             m_replicatedSimulationAnchors
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -2647,6 +2644,11 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
     // Retain the effective settings when create/transient/reset clears region state.
     m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
+void GameSession::SettleWaterAuthority(bool deferred) {
+    if (m_worldSystem && !deferred)
+        m_worldSystem->sync_water_authority();
+}
+
 void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& message) {
     m_regionalFieldView = nullptr;
     if (m_regionFault)
@@ -2994,8 +2996,7 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
 }
 
 std::string GameSession::ComputeChunkStateHash() {
-    if (m_activeRegionsEnabled && m_worldSystem)
-        m_worldSystem->sync_water_authority();
+    // Ownership is settled by the host's completed tick, never by observing its hash.
     if (!m_worldSystem)
         return {};
     if (!m_activeRegionsEnabled) {
@@ -3427,10 +3428,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
-    if (m_activeRegionsEnabled) {
-        // After the quiesce: a finishing generation worker can no longer erase the obligation.
-        m_worldSystem->sync_water_authority();
-    }
+    // Saving can also run without a preceding tick (scripted edits, streaming, or a faulted tick).
+    // After quiescence, capture any such pending water ownership. Completed host ticks already
+    // drained this change queue, so their hashes cannot change here.
+    m_worldSystem->sync_water_authority();
     WorldStreamingState state;
     for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
                                                     : m_worldSystem->snapshot_streamed_chunks()) {
