@@ -481,6 +481,18 @@ std::vector<StrikeEvent> WeatherSystem::StrikesThisTick() const {
 
 namespace {
 
+bool SameStormProjection(const StormCell& a, const StormCell& b) {
+    return DeterministicMath::BitsOf(a.center_world.x) ==
+               DeterministicMath::BitsOf(b.center_world.x) &&
+           DeterministicMath::BitsOf(a.center_world.y) ==
+               DeterministicMath::BitsOf(b.center_world.y) &&
+           DeterministicMath::BitsOf(a.velocity.x) == DeterministicMath::BitsOf(b.velocity.x) &&
+           DeterministicMath::BitsOf(a.velocity.y) == DeterministicMath::BitsOf(b.velocity.y) &&
+           DeterministicMath::BitsOf(a.intensity) == DeterministicMath::BitsOf(b.intensity) &&
+           a.spawn_tick == b.spawn_tick && a.lifetime_ticks == b.lifetime_ticks &&
+           a.seed_salt == b.seed_salt;
+}
+
 template<typename Visitor>
 void VisitStormBins(const StormCell& storm, const Visitor& visit) {
     const auto& center = storm.center_world;
@@ -513,12 +525,42 @@ void WeatherSystem::PutRegionalStorm(const StormCell& storm) {
 
 void WeatherSystem::PutRegionalStormAt(StormIdentity identity, const StormCell& storm) {
     ++m_regionalProjectionWork;
-    EraseRegionalStorm(identity);
-    m_regionalStorms.emplace(identity, storm);
-    VisitStormBins(storm, [&](const StormBin& bin) {
+    const auto found = m_regionalStorms.find(identity);
+    if (found != m_regionalStorms.end() && SameStormProjection(found->second, storm)) {
+        return;
+    }
+    std::array<StormBin, 4> bins{};
+    std::size_t bin_count = 0;
+    VisitStormBins(storm, [&](const StormBin& bin) { bins[bin_count++] = bin; });
+    const std::span<const StormBin> next_bins(bins.data(), bin_count);
+    if (found != m_regionalStorms.end()) {
+        VisitStormBins(found->second, [&](const StormBin& bin) {
+            ++m_regionalProjectionWork;
+            if (std::find(next_bins.begin(), next_bins.end(), bin) != next_bins.end()) {
+                return;
+            }
+            const auto entry = m_regionalStormIndex.find(bin);
+            if (entry != m_regionalStormIndex.end()) {
+                m_regionalStormNodeChanges += entry->second.erase(identity);
+                if (entry->second.empty()) {
+                    m_regionalStormIndex.erase(entry);
+                    ++m_regionalStormNodeChanges;
+                }
+            }
+        });
+        found->second = storm;
+    } else {
+        m_regionalStorms.emplace(identity, storm);
+        ++m_regionalStormNodeChanges;
+    }
+    for (const auto& bin : next_bins) {
         ++m_regionalProjectionWork;
-        m_regionalStormIndex[bin].emplace(identity, storm);
-    });
+        const auto [entry, bin_inserted] = m_regionalStormIndex.try_emplace(bin);
+        const auto [member, inserted] = entry->second.insert_or_assign(identity, storm);
+        (void)member;
+        m_regionalStormNodeChanges +=
+            static_cast<std::size_t>(bin_inserted) + static_cast<std::size_t>(inserted);
+    }
     m_regionalStormCacheValid = false;
 }
 
@@ -532,13 +574,15 @@ void WeatherSystem::EraseRegionalStorm(StormIdentity identity) {
         ++m_regionalProjectionWork;
         const auto entry = m_regionalStormIndex.find(bin);
         if (entry != m_regionalStormIndex.end()) {
-            entry->second.erase(identity);
+            m_regionalStormNodeChanges += entry->second.erase(identity);
             if (entry->second.empty()) {
                 m_regionalStormIndex.erase(entry);
+                ++m_regionalStormNodeChanges;
             }
         }
     });
     m_regionalStorms.erase(found);
+    ++m_regionalStormNodeChanges;
     m_regionalStormCacheValid = false;
 }
 
@@ -692,7 +736,9 @@ void WeatherSystem::UpdateRegionalStorm(std::size_t index, const StormCell& stor
         return;
     }
     const auto previous = StormCells().at(index);
-    EraseRegionalStorm({previous.spawn_tick, previous.seed_salt});
+    if (previous.spawn_tick != storm.spawn_tick || previous.seed_salt != storm.seed_salt) {
+        EraseRegionalStorm({previous.spawn_tick, previous.seed_salt});
+    }
     PutRegionalStorm(storm);
 }
 

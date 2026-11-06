@@ -150,9 +150,15 @@ public:
     // Diagnostic work includes identity lookups and spatial-bin memberships touched.
     void ResetRegionalProjectionWork() {
         m_regionalProjectionWork = 0;
+        m_regionalStormNodeChanges = 0;
     }
     [[nodiscard]] std::size_t RegionalProjectionWork() const {
         return m_regionalProjectionWork;
+    }
+    // Observational insertions/erasures of identity, bin and membership nodes; never saved or
+    // hashed.
+    [[nodiscard]] std::size_t RegionalStormNodeChanges() const {
+        return m_regionalStormNodeChanges;
     }
     void PutRegionalStorm(const StormCell& storm);
     void EraseRegionalStorm(StormIdentity identity);
@@ -285,6 +291,7 @@ private:
     void RebuildRegionalStormIndex();
     bool m_regionalWeatherKeyed = false;
     std::size_t m_regionalProjectionWork = 0;
+    std::size_t m_regionalStormNodeChanges = 0;
     StormEntries m_regionalStorms;
     std::map<StrikeIdentity, StrikeEvent> m_regionalStrikes;
     std::optional<std::uint64_t> m_regionalStrikesDeliveredThrough;

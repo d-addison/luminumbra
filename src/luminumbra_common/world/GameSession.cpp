@@ -1982,6 +1982,55 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                     m_activeRegionsEnabled ? m_regionSchedule.due.size() : 0);
 }
 
+namespace {
+
+bool HasDueWeatherBoundary(RegionKey owner,
+                           const FieldPageState& fields,
+                           const std::map<RegionKey, ActiveRegionRecord>& records,
+                           const std::set<RegionKey>& scheduled_due,
+                           std::uint64_t tick,
+                           std::size_t& visits) {
+    const auto source = records.find(owner);
+    const auto* weather = fields.owner_weather(owner);
+    if (source == records.end() || source->second.state == RegionState::Frozen || !weather) {
+        return false;
+    }
+    for (const auto& storm : weather->storms) {
+        ++visits;
+        const float x = std::bit_cast<float>(storm.center_x) +
+                        std::bit_cast<float>(storm.velocity_x) * (1.0f / 30.0f);
+        const float z = std::bit_cast<float>(storm.center_z) +
+                        std::bit_cast<float>(storm.velocity_z) * (1.0f / 30.0f);
+        if (!std::isfinite(x) || !std::isfinite(z) || x < -16777216.0f || x >= 16777216.0f ||
+            z < -16777216.0f || z >= 16777216.0f) {
+            continue;
+        }
+        const RegionKey target{
+            static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+            static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+        if (target == owner || !scheduled_due.contains(target)) {
+            continue;
+        }
+        auto shift = source->second.cadence_shift;
+        bool eligible = true;
+        for (const auto witness :
+             {target, RegionKey{target.x, owner.z}, RegionKey{owner.x, target.z}}) {
+            const auto record = records.find(witness);
+            if (record == records.end() || record->second.state == RegionState::Frozen) {
+                eligible = false;
+                break;
+            }
+            shift = std::max(shift, record->second.cadence_shift);
+        }
+        if (eligible && shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint64_t tick) {
     m_regionalWeatherProjectionCount = 0;
     m_regionalWeatherScanCount = 0;
@@ -2014,7 +2063,29 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     const bool weather_due = std::any_of(due.begin(), due.end(), [this](RegionKey owner) {
         return m_fieldPages.owns_weather(owner);
     });
-    if (m_fieldPages.page_count() == 0 && !weather_due)
+    const bool boundary_due = [&] {
+        std::set<RegionKey> scheduled_due;
+        for (const auto& [shift, owners] : m_regionalWeatherBoundaryOwners) {
+            if (due.empty() || shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0) {
+                continue;
+            }
+            if (scheduled_due.empty()) {
+                scheduled_due.insert(due.begin(), due.end());
+            }
+            for (const auto owner : owners) {
+                if (HasDueWeatherBoundary(owner,
+                                          m_fieldPages,
+                                          records,
+                                          scheduled_due,
+                                          tick,
+                                          m_regionalWeatherScanCount)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }();
+    if (m_fieldPages.page_count() == 0 && !weather_due && !boundary_due)
         return std::nullopt;
     std::set<RegionKey> page_owners(due.begin(), due.end());
     for (const auto& [shift, owners] : m_regionalAmbientOwners) {
@@ -2026,7 +2097,7 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     const auto previous = m_fieldPages.page_count() == 0
                               ? FieldPageState{}
                               : m_fieldPages.scheduled_snapshot(page_participants);
-    if (previous.page_count() == 0 && !weather_due)
+    if (previous.page_count() == 0 && !weather_due && !boundary_due)
         return std::nullopt;
     // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
     // than the whole store. The live state stays untouched even if a later consumer or work
@@ -2035,7 +2106,7 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     const auto seed = static_cast<std::uint64_t>(m_numericSeed);
     const auto work = next.step_scheduled(records, due, seed, tick, &previous);
     // A shared physical page can contain only frozen cells. It contributes no candidate work.
-    if (work.empty() && !weather_due)
+    if (work.empty() && !weather_due && !boundary_due)
         return std::nullopt;
     next.begin_weather_update(m_fieldPages);
     for (const auto& [owner, updates] : work)
@@ -2153,6 +2224,13 @@ Systems::StormCell ProjectStorm(const RegionalStorm& storm) {
             storm.seed_salt};
 }
 
+bool SameStormProjection(const RegionalStorm& a, const RegionalStorm& b) {
+    return a.center_x == b.center_x && a.center_z == b.center_z && a.velocity_x == b.velocity_x &&
+           a.velocity_z == b.velocity_z && a.intensity == b.intensity &&
+           a.spawn_tick == b.spawn_tick && a.lifetime_ticks == b.lifetime_ticks &&
+           a.seed_salt == b.seed_salt;
+}
+
 Systems::StrikeEvent ProjectStrike(const RegionalStrike& strike) {
     return {strike.strike_tick,
             std::bit_cast<float>(strike.world_x),
@@ -2244,7 +2322,8 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
     if (work && m_regionalFieldView) {
         m_weatherSystem->RevealRegionalStrikeSchedule();
         const auto& changed = m_regionalFieldView->weather_owners();
-        // Remove old memberships first, so owner ordering cannot erase a transferred identity.
+        // Ownership and active age are absent from the projection. Retain identities across
+        // updates and handovers; remove only storms absent from the participating result.
         for (const auto& [owner, next] : changed) {
             const auto* previous = m_fieldPages.owner_weather(owner);
             if (!previous) {
@@ -2253,7 +2332,7 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
             m_regionalWeatherProjectionVisitCount +=
                 previous->storms.size() + previous->strikes.size();
             for (const auto& storm : previous->storms) {
-                if (std::find(next.storms.begin(), next.storms.end(), storm) == next.storms.end()) {
+                if (!m_regionalFieldView->has_storm_identity(storm.spawn_tick, storm.seed_salt)) {
                     m_weatherSystem->EraseRegionalStorm({storm.spawn_tick, storm.seed_salt});
                 }
             }
@@ -2268,9 +2347,11 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
             const auto* previous = m_fieldPages.owner_weather(owner);
             m_regionalWeatherProjectionVisitCount += next.storms.size() + next.strikes.size();
             for (const auto& storm : next.storms) {
-                if (!previous ||
-                    std::find(previous->storms.begin(), previous->storms.end(), storm) ==
-                        previous->storms.end()) {
+                if (!previous || std::none_of(previous->storms.begin(),
+                                              previous->storms.end(),
+                                              [&](const auto& old) {
+                                                  return SameStormProjection(old, storm);
+                                              })) {
                     m_weatherSystem->PutRegionalStorm(ProjectStorm(storm));
                     ++m_regionalWeatherProjectionCount;
                 }
@@ -2327,6 +2408,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
                                                                        std::uint64_t tick) {
     // All mutations stay in the tick candidate until completed work is admitted.
     const auto& records = m_activeRegionLedger.records();
+    const std::set<RegionKey> scheduled_due(m_regionSchedule.due.begin(),
+                                            m_regionSchedule.due.end());
     auto due_list = m_regionSchedule.due;
     std::erase_if(due_list, [this](RegionKey owner) {
         return !m_fieldPages.owns_weather(owner) &&
@@ -2383,7 +2466,14 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         }
         for (const auto owner : owners) {
             ++m_regionalWeatherScanCount;
-            fields.stage_weather_owner(owner);
+            if (HasDueWeatherBoundary(owner,
+                                      m_fieldPages,
+                                      records,
+                                      scheduled_due,
+                                      tick,
+                                      m_regionalWeatherScanCount)) {
+                fields.stage_weather_owner(owner);
+            }
         }
     }
     std::vector<RegionalStorm> previous_storms;
@@ -2459,7 +2549,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
         const bool valid_position = std::isfinite(px) && std::isfinite(pz) && px >= -16777216.0f &&
                                     px < 16777216.0f && pz >= -16777216.0f && pz < 16777216.0f;
         const auto destination = valid_position ? owner_of(px, pz) : source;
-        bool transfer = valid_position && destination != source && common(source, destination);
+        bool transfer = valid_position && destination != source &&
+                        scheduled_due.contains(destination) && common(source, destination);
         if (transfer && destination.x != source.x && destination.z != source.z)
             transfer = common(source, {destination.x, source.z}) &&
                        common(source, {source.x, destination.z});
