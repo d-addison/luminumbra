@@ -210,6 +210,21 @@ struct GameSession::LoadedWorldState {
     Ecs::EntityRegistrySnapshot plants;
     bool input_refused = false;
     std::optional<luminumbra::fields::EnergyFieldState> energy;
+    bool legacy_energy_cadence = false;
+};
+
+struct GameSession::RegionalEnergyStep {
+    explicit RegionalEnergyStep(luminumbra::fields::EnergyFieldState& value)
+        : live(value)
+        , state(value) {}
+    ~RegionalEnergyStep() {
+        if (projected)
+            live = std::move(state);
+    }
+    luminumbra::fields::EnergyFieldState& live;
+    luminumbra::fields::EnergyFieldState state;
+    ActiveRegionLedger::EnergyAges ages;
+    bool projected = false;
 };
 
 struct GameSession::WorldPreparation {
@@ -924,24 +939,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             budget.Next(Stage::Energy, [&] {
                 return m_energyFieldState ? m_energyFieldState->page_count() : 0ull;
             });
-            // 5a.: the STATEFUL energy layer ticks directly
-            // after the re-derivable field, anchored on the SAME replicated anchor
-            // quantized by the shared 24 m cell size (never camera state). Null
-            // unless sim.aether_state opted in — the canonical world skips this
-            // block entirely (byte-identical). Deposits are queued by emitters
-            // right below; Tick applies them sorted.
-            if (m_energyFieldState) {
-                const int anchor_cx = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-                const int anchor_cz = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
-                m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
-                // gather this tick's FieldEmitterComponent deposits
-                // (id-sorted, two-phase) into the layer before it ticks.
-                // Participant-gated: no emitter component, no deposits, no bytes.
-                Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
-                m_energyFieldState->Tick(current_tick);
-            }
+            auto scheduled_energy = AdvanceEnergy(current_tick);
 
             // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
             // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
@@ -1264,7 +1262,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                PublishRegionCompletedWork(std::move(scheduled_fields));
+                PublishRegionCompletedWork(std::move(scheduled_fields),
+                                           std::move(scheduled_energy));
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
@@ -1913,11 +1912,21 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     inputs.require_index = m_regionRequiresIndex;
                     inputs.ground_object_bytes = m_groundObjects.region_bytes(key);
                     inputs.field_page_bytes = m_fieldPages.region_bytes(key);
+                    if (m_energyFieldState)
+                        inputs.field_page_bytes += m_energyFieldState->RegionBytes(key);
+                    const auto age = m_activeRegionLedger.energy_ages().find(key);
+                    if (age != m_activeRegionLedger.energy_ages().end()) {
+                        inputs.field_page_bytes += "|energy_age:";
+                        for (int i = 0; i < 8; ++i)
+                            inputs.field_page_bytes.push_back(
+                                static_cast<char>((age->second >> (8 * i)) & 255));
+                    }
                     return digest_operation->digest(key, inputs);
                 },
                 // Later slices extend this probe with creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
-                    if (m_groundObjects.owns_region(key) || m_fieldPages.owns_region(key))
+                    if (m_groundObjects.owns_region(key) || m_fieldPages.owns_region(key) ||
+                        (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
                         return true;
                     if (!owned_regions) {
                         owned_regions.emplace();
@@ -1957,9 +1966,60 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     return next;
 }
 
-void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields) {
+std::unique_ptr<GameSession::RegionalEnergyStep> GameSession::AdvanceEnergy(std::uint64_t tick) {
+    if (!m_energyFieldState)
+        return nullptr;
+    if (!m_activeRegionsEnabled || m_legacyEnergyCadence) {
+        const int x =
+            static_cast<int>(std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+        const int z =
+            static_cast<int>(std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+        m_energyFieldState->SetAnchorCell(x, z);
+        Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
+        m_energyFieldState->Tick(tick);
+        return nullptr;
+    }
+    auto next = std::make_unique<RegionalEnergyStep>(*m_energyFieldState);
+    Systems::GatherFieldEmitterDeposits(m_registry, next->state);
+    auto due = m_regionSchedule.due;
+    std::sort(due.begin(), due.end());
+    auto ages = m_activeRegionLedger.energy_ages();
+    const bool unowned = ages.empty() && next->state.page_count() == 0;
+    if (unowned) {
+        // Until energy acquires authority, preserve the empty layer's absolute phase.
+        for (const auto owner : due)
+            ages.emplace(owner, (tick - 1) % luminumbra::fields::kEnergyCadenceTicks);
+    }
+    luminumbra::fields::EnergyFieldState::RegionalResult result;
+    if (!next->state.TickRegional(tick, m_activeRegionLedger, due, ages, result))
+        throw std::runtime_error("Regional energy tick refused");
+    if (unowned && next->state.page_count() == 0) {
+        next->state.ResetEmptyAtTick(tick);
+    } else {
+        next->ages = std::move(result.ages);
+        m_regionCompletedWork.insert(
+            m_regionCompletedWork.end(), result.work.begin(), result.work.end());
+    }
+    // Later consumers see this tick's values; a refused tick restores the prior state.
+    std::swap(*m_energyFieldState, next->state);
+    next->projected = true;
+    return next;
+}
+
+void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields,
+                                             std::unique_ptr<RegionalEnergyStep> energy) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
-    m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
+    static_assert(std::is_nothrow_move_assignable_v<luminumbra::fields::EnergyFieldState>);
+    if (energy) {
+        auto ledger = m_activeRegionLedger;
+        if (!ledger.set_energy_ages(energy->ages))
+            throw std::runtime_error("Regional energy ages refused");
+        ledger.publish_completed_work(m_regionCompletedWork);
+        m_activeRegionLedger = std::move(ledger);
+        energy->projected = false;
+    } else {
+        m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
+    }
     if (fields)
         m_fieldPages = std::move(*fields);
     m_regionCompletedWork.clear();
@@ -3153,17 +3213,23 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         try {
             auto energy_snapshot = *m_energyFieldState;
             const auto tick = GetSimulationTickCount();
-            if (energy_snapshot.page_count() == 0) {
-                const auto absent_remaining =
-                    m_activeRegionsEnabled ? luminumbra::fields::kEnergyCadenceTicks -
-                                                 tick % luminumbra::fields::kEnergyCadenceTicks
-                                           : luminumbra::fields::kEnergyCadenceTicks;
-                const auto next_fire = energy_snapshot.next_fire_tick();
-                // Absence reconstructs this phase. A legacy import can retain
-                // another phase, which still needs its header-only record.
-                remove_energy = next_fire > tick && next_fire - tick == absent_remaining;
+            if (m_activeRegionsEnabled && !m_legacyEnergyCadence) {
+                if (!energy_snapshot.ValidateRegionalOwners(m_activeRegionLedger.records(),
+                                                            m_activeRegionLedger.energy_ages()))
+                    throw std::length_error("Regional energy owners or ages do not match ledger");
+                energy_bytes = energy_snapshot.SerializeRegionalRecord();
+                remove_energy = energy_bytes.empty();
+            } else {
+                if (energy_snapshot.page_count() == 0) {
+                    const auto next_fire = energy_snapshot.next_fire_tick();
+                    const auto absent_remaining =
+                        m_activeRegionsEnabled ? luminumbra::fields::kEnergyCadenceTicks -
+                                                     tick % luminumbra::fields::kEnergyCadenceTicks
+                                               : luminumbra::fields::kEnergyCadenceTicks;
+                    remove_energy = next_fire > tick && next_fire - tick == absent_remaining;
+                }
+                energy_bytes = energy_snapshot.SerializeRecord(tick);
             }
-            energy_bytes = energy_snapshot.SerializeRecord(tick);
             prepared_energy = std::move(energy_snapshot);
         } catch (const std::length_error& error) {
             LUMINUMBRA_CORE_ERROR("{}", error.what());
@@ -3261,7 +3327,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                      ? Persistence::WorldSaveService::remove_file_and_staging(energy_path)
                      : Persistence::WorldSaveService::write_file_durably(energy_path, energy_bytes);
         }
-        if (ok && !remove_energy && (m_transientWorld || canonical_save)) {
+        if (ok && (!m_activeRegionsEnabled || m_legacyEnergyCadence) && !remove_energy &&
+            (m_transientWorld || canonical_save)) {
             if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
                 transaction->defer_until_commit([this, energy = *prepared_energy]() mutable {
                     *m_energyFieldState = std::move(energy);
@@ -3442,7 +3509,8 @@ bool GameSession::ReadPreparedWorldState(
                            options.active_regions ? &state.durable_inventory : nullptr);
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
-        state.input_refused = error.find("Saved-input admission refused:") == 0;
+        state.input_refused = error.find("Saved-input admission refused:") == 0 ||
+                              error.find("Corrupt regional energy record:") == 0;
         for (const std::string& diagnostic : errors)
             LUMINUMBRA_CORE_ERROR("World state load failed: {}", diagnostic);
         return false;
@@ -3502,6 +3570,12 @@ bool GameSession::ReadPreparedWorldState(
         }
     }
 
+    if (options.active_regions && !options.aether_state &&
+        !Persistence::SavedInputFile(save_dir / "aether_state.efs").missing()) {
+        state.input_refused = true;
+        error = "Incompatible configuration: regional energy state requires sim.aether_state.";
+        return false;
+    }
     if (options.aether_state) {
         if (cancelled())
             return false;
@@ -3519,14 +3593,37 @@ bool GameSession::ReadPreparedWorldState(
             state.energy->ResetEmptyAtTick(tick_base);
         } else {
             std::string record;
-            if (!Persistence::ReadSavedEnergy(input, record, stop) ||
-                !state.energy->DeserializeRecord(record, tick_base)) {
+            const auto maximum = options.active_regions && !state.ledger->energy_ages().empty()
+                                     ? luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes
+                                     : luminumbra::fields::kEnergyReadRecordBytes;
+            const bool readable = options.active_regions
+                                      ? input.read(record, maximum, stop)
+                                      : Persistence::ReadSavedEnergy(input, record, stop);
+            bool decoded = readable && options.active_regions &&
+                           state.energy->DeserializeRegionalRecord(record);
+            if (readable && !decoded &&
+                (!options.active_regions || state.ledger->energy_ages().empty())) {
+                decoded = state.energy->DeserializeRecord(record, tick_base);
+                state.legacy_energy_cadence = decoded && options.active_regions;
+            }
+            if (!decoded) {
                 state.input_refused = true;
-                error =
-                    "Saved-input admission refused: malformed energy record or compatibility limit "
-                    "(16 channels, 8192 pages, 360218644 bytes).";
+                error = options.active_regions ? "Corrupt regional energy record: expected EFS1 "
+                                                 "cadence offset 0 with matching ARL energy ages."
+                                               : "Saved-input admission refused: malformed energy "
+                                                 "record or compatibility limit "
+                                                 "(16 channels, 8192 pages, 360218644 bytes).";
                 return false;
             }
+        }
+        if (options.active_regions && !state.legacy_energy_cadence &&
+            !state.energy->ValidateRegionalOwners(state.ledger->records(),
+                                                  state.ledger->energy_ages())) {
+            state.input_refused = true;
+            error =
+                "Corrupt regional energy record: expected EFS1 cadence offset 0 with matching ARL "
+                "energy ages.";
+            return false;
         }
     }
 
@@ -3573,6 +3670,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);
+    m_legacyEnergyCadence = saved.legacy_energy_cadence;
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world
@@ -3932,6 +4030,7 @@ bool GameSession::HasPlantParticipants() const {
 }
 
 void GameSession::InitializeEnergyFieldState() {
+    m_legacyEnergyCadence = false;
     if (!m_aetherStateEnabled) {
         m_energyFieldState.reset();
         m_scriptState->set_energy_field(nullptr);
@@ -3950,7 +4049,9 @@ std::string GameSession::ComputeAetherStateSubHash() const {
     if (!m_energyFieldState) {
         return {};
     }
-    const std::string bytes = m_energyFieldState->CanonicalBytes();
+    const std::string bytes = m_activeRegionsEnabled && !m_legacyEnergyCadence
+                                  ? m_energyFieldState->CanonicalRegionalBytes()
+                                  : m_energyFieldState->CanonicalBytes();
     if (bytes.empty()) {
         return {}; // all-zero == absent (the scent/plant empty-neutral contract)
     }

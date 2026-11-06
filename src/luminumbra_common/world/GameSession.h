@@ -695,7 +695,10 @@ private:
     void AdvanceGroundObjects(std::uint64_t tick);
     // Stage existing field authority; publish only after the tick's consumers and work succeed.
     [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
-    void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
+    struct RegionalEnergyStep;
+    [[nodiscard]] std::unique_ptr<RegionalEnergyStep> AdvanceEnergy(std::uint64_t tick);
+    void PublishRegionCompletedWork(std::optional<FieldPageState> fields,
+                                    std::unique_ptr<RegionalEnergyStep> energy);
     void BindRegionalFieldQueries();
     [[nodiscard]] const FieldPageState& RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
@@ -745,6 +748,7 @@ private:
     // null — byte-identical). unique_ptr so this header only needs the
     // forward declaration.
     std::unique_ptr<luminumbra::fields::EnergyFieldState> m_energyFieldState;
+    bool m_legacyEnergyCadence = false;
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
     bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;

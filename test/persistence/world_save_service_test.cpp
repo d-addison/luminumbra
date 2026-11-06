@@ -3965,3 +3965,76 @@ TEST(WorldSaveService, StandaloneFieldLoadVerifiesCommittedPresenceSizeAndChecks
 TEST(WorldSaveService, NeverWrittenFieldMemberStaysUnlistedAndInjectedMemberIsRefused) {
     ExpectUnlistedFieldMemberRefused();
 }
+
+namespace {
+void CheckJointEnergyLedgerAdmission(bool present,
+                                     bool missing_age,
+                                     bool legacy_phase,
+                                     bool legacy_without_ages = false) {
+    using namespace Luminumbra::world;
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("joint_energy_ledger");
+    const WorldClock clock(31);
+    ActiveRegionLedger ledger({}, clock);
+    ledger.mark_edited({0, 0}, clock);
+    ledger.mark_edited({2, 0}, clock);
+    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 7));
+    ASSERT_TRUE(ledger.set_energy_age({2, 0}, 5)); // No EFS values belong to this owner.
+    if (legacy_without_ages) {
+        ledger.reset_energy_ages();
+    }
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    const std::string record =
+        legacy_without_ages ? "EFS1 2 3\nP 0 0 0:60000\n" : "EFS1 2 0\nP 0 0 0:60000\n";
+    {
+        WorldSaveService::SaveFactsScope facts(save.path());
+        P::SaveTransaction transaction(save.path(), 31, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save.path()));
+        if (present) {
+            ASSERT_TRUE(transaction.protect({"aether_state.efs"}, nullptr));
+            ASSERT_TRUE(
+                WorldSaveService::write_member_bytes(save.path(), "aether_state.efs", record));
+        }
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path()));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    ASSERT_TRUE(WorldSaveService::validate_save(save.path()));
+    ActiveRegionLedger restored;
+    ASSERT_TRUE(WorldSaveService::load_active_regions(restored, save.path()));
+    EXPECT_EQ(restored.energy_ages(), ledger.energy_ages());
+    if (missing_age) {
+        ledger.reset_energy_ages();
+        ASSERT_TRUE(ledger.set_energy_age({2, 0}, 5));
+        ASSERT_TRUE(WorldSaveService::write_file_durably(
+            WorldSaveService::active_regions_path(save.path()), ledger.encode()));
+    }
+    if (legacy_phase) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(save.path() / "aether_state.efs",
+                                                         "EFS1 2 3\nP 0 0 0:60000\n"));
+    }
+    std::vector<std::string> errors;
+    EXPECT_EQ(WorldSaveService::validate_save(save.path(), &errors), !missing_age && !legacy_phase);
+    if (missing_age || legacy_phase) {
+        EXPECT_NE(
+            JoinErrors(errors).find("expected EFS1 cadence offset 0 with matching ARL energy ages"),
+            std::string::npos)
+            << JoinErrors(errors);
+        P::MemberDigest digest;
+        std::string error;
+        EXPECT_FALSE(
+            WorldSaveService::member_digest(save.path(), "aether_state.efs", digest, error));
+        EXPECT_NE(error.find("matching ARL energy ages"), std::string::npos);
+    }
+}
+} // namespace
+
+TEST(WorldSaveService, RegionalEnergyAndLedgerAgesAreAdmittedTogether) {
+    ASSERT_NO_FATAL_FAILURE(CheckJointEnergyLedgerAdmission(false, false, false));
+    ASSERT_NO_FATAL_FAILURE(CheckJointEnergyLedgerAdmission(true, false, false));
+    ASSERT_NO_FATAL_FAILURE(CheckJointEnergyLedgerAdmission(true, true, false));
+    ASSERT_NO_FATAL_FAILURE(CheckJointEnergyLedgerAdmission(true, false, true));
+    ASSERT_NO_FATAL_FAILURE(CheckJointEnergyLedgerAdmission(true, false, false, true));
+}

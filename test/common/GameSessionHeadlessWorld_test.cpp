@@ -1806,6 +1806,22 @@ private:
     std::map<std::string, std::string> bytes;
 };
 
+void ApplySnapshotTestEnergy(GameSession& session, std::uint64_t tick) {
+    auto* energy = session.GetEnergyFieldState();
+    if (!session.ActiveRegionsEnabled()) {
+        energy->Tick(tick);
+        return;
+    }
+    auto& ledger =
+        const_cast<Luminumbra::world::ActiveRegionLedger&>(session.GetActiveRegionLedger());
+    const Luminumbra::world::RegionKey owner{0, 0};
+    ledger.pin(owner, true, session.GetWorldClock());
+    luminumbra::fields::EnergyFieldState::RegionalResult result;
+    ASSERT_TRUE(
+        energy->TickRegional(tick, ledger, std::array{owner}, ledger.energy_ages(), result));
+    ASSERT_TRUE(ledger.set_energy_ages(result.ages));
+}
+
 void PreparePendingSnapshot(GameSession& session,
                             std::shared_ptr<Luminumbra::Chunk>& chunk,
                             bool existing_snapshot) {
@@ -1825,7 +1841,7 @@ void PreparePendingSnapshot(GameSession& session,
     ASSERT_NE(energy, nullptr);
     energy->SetAnchorCell(0, 0);
     energy->QueueDeposit(1, 0, 0, 0, 60000);
-    energy->Tick(0);
+    ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(session, 0));
     if (existing_snapshot) {
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_FALSE(chunk->is_voxel_data_dirty());
@@ -1835,7 +1851,7 @@ void PreparePendingSnapshot(GameSession& session,
     chunk->mark_voxel_data_dirty();
     registry.get<C::PlantGrowthComponent>(plant).growth_points = 123;
     energy->QueueDeposit(2, 0, 0, 0, 1000);
-    energy->Tick(0);
+    ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(session, 0));
 }
 
 class PendingSnapshotState {
@@ -2890,9 +2906,8 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     ASSERT_FALSE(original.GetWeatherSystem()->StormCells().empty());
     // Exercise nonempty energy epoch restoration with a deposit on the last tick.
     for (auto* session : {&original, &control}) {
-        auto* energy = session->GetEnergyFieldState();
-        energy->QueueDeposit(1, 0, 0, 0, 60000);
-        energy->Tick(n);
+        session->GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
+        ApplySnapshotTestEnergy(*session, n);
     }
     ASSERT_FALSE(original.ComputeAetherStateSubHash().empty());
     const auto before_save = SessionWorldHash(original);
@@ -3560,7 +3575,8 @@ TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsI
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory) {
+namespace {
+void CheckEmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory() {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -3587,10 +3603,12 @@ TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutRep
     ASSERT_EQ(explicit_load.TickSimulation(dt), 1u);
     previous->QueueDeposit(2, 0, 0, 0, 1000);
     ASSERT_TRUE(explicit_load.LoadWorldStateFrom(save));
+    const auto empty_ages = control.GetActiveRegionLedger().energy_ages();
     for (auto* session : {&control, &loaded, &explicit_load}) {
         auto* energy = session->GetEnergyFieldState();
         ASSERT_EQ(energy->page_count(), 0u);
         EXPECT_EQ(energy->next_fire_tick(), 320u);
+        EXPECT_EQ(session->GetActiveRegionLedger().energy_ages(), empty_ages);
         const auto fires = energy->fires_completed();
         energy->QueueDeposit(1, 0, 0, 0, 60000);
         ASSERT_EQ(session->TickSimulation(dt), 1u);
@@ -3606,7 +3624,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutRep
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedCadence) {
+void CheckEmptyLegacyEnergySnapshotPreservesNonAlignedCadence() {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -3665,8 +3683,18 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
         EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
     }
 }
+} // namespace
 
-TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
+TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory) {
+    ASSERT_NO_FATAL_FAILURE(CheckEmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory());
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedCadence) {
+    ASSERT_NO_FATAL_FAILURE(CheckEmptyLegacyEnergySnapshotPreservesNonAlignedCadence());
+}
+
+namespace {
+void CheckEmptyAlignedEnergySaveRemovesStaleRecord() {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -3692,7 +3720,15 @@ TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
     ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
     EXPECT_EQ(loaded.GetEnergyFieldState()->total_raw(), 0u);
     EXPECT_EQ(loaded.GetEnergyFieldState()->next_fire_tick(), 16u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().energy_ages(),
+              original.GetActiveRegionLedger().energy_ages());
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
+    ASSERT_NO_FATAL_FAILURE(CheckEmptyAlignedEnergySaveRemovesStaleRecord());
 }
 
 TEST(GameSessionHeadlessWorldTest, TransientClockSnapshotRefusesBeforeWritingAnyMember) {
@@ -8800,7 +8836,8 @@ void LoadScheduledFieldFixture(GameSession& session,
                                const HeadlessRoot& root,
                                JobSystem& jobs,
                                const ActiveRegionLedger& ledger,
-                               const FieldPageState& fields) {
+                               const FieldPageState& fields,
+                               const std::optional<std::string>& energy = std::nullopt) {
     EnableSnapshotSession(session, root, jobs);
     ASSERT_TRUE(session.CreateWorld("Scheduled fields", "1337", "default"));
     const auto input = root.path() / "scheduled-field-input";
@@ -8817,6 +8854,12 @@ void LoadScheduledFieldFixture(GameSession& session,
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), saved_ledger, input, &errors));
         ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
+        if (energy && !energy->empty()) {
+            ASSERT_TRUE(transaction.protect({"aether_state.efs"}, &errors));
+            ASSERT_TRUE(P::WorldSaveService::write_member_bytes(
+                input, "aether_state.efs", *energy, &errors))
+                << ::testing::PrintToString(errors);
+        }
         ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
         ASSERT_TRUE(transaction.commit(&errors));
     }
@@ -9695,4 +9738,167 @@ TEST(GameSessionHeadlessWorldTest, RegionalAndLegacyScentKeepUngatedSolverArithm
 
 TEST(GameSessionHeadlessWorldTest, RegionalScentParticipantsWaitForTheirOwnersCadence) {
     ASSERT_NO_FATAL_FAILURE(CheckReducedSessionScentCadence());
+}
+
+namespace {
+void CheckRegionalEnergyContinuation() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const RegionKey active{0, 0}, empty{2, 0}, frozen{4, 0};
+    auto ledger = ScheduledFieldLedger(31,
+                                       {{active, RegionState::Active},
+                                        {empty, RegionState::Reduced},
+                                        {frozen, RegionState::Frozen}});
+    ledger.pin(active, false, WorldClock(31));
+    ASSERT_TRUE(ledger.set_energy_age(active, 6));
+    ASSERT_TRUE(ledger.set_energy_age(empty, 5));
+    ASSERT_TRUE(ledger.set_energy_age(frozen, 3));
+    FieldPageState fields;
+    ASSERT_TRUE(fields.activate_region(active, 1337, 0));
+    const std::string initial = "EFS1 2 0\nP 0 0 0:60000\nP 5 0 10:777\n";
+    ASSERT_NO_FATAL_FAILURE(
+        LoadScheduledFieldFixture(session, root, jobs, ledger, fields, initial));
+    TickOnce(session); // Active age 7; the reduced empty owner has offset 3, so is not due.
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetEnergyFieldState()->at_cell(0, 0), 60000u);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages().at(active), 7u);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages().at(empty), 5u);
+    const auto values = session.GetEnergyFieldState()->SerializeRegionalRecord();
+    const auto ages = session.GetActiveRegionLedger().energy_ages();
+    const auto hash = session.ComputeAetherStateSubHash();
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    auto disk = SavedPresetTestDiskBytes(save);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorldStateTo(root.path() / "energy-copy"));
+    auto resaved = SavedPresetTestDiskBytes(save);
+    disk.erase("chunks/region/snapshot.json");
+    resaved.erase("chunks/region/snapshot.json");
+    EXPECT_EQ(resaved, disk);
+    EXPECT_EQ(session.GetEnergyFieldState()->SerializeRegionalRecord(), values);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages(), ages);
+    EXPECT_EQ(session.ComputeAetherStateSubHash(), hash);
+    EXPECT_EQ(ReadClockTestFile(save / "aether_state.efs"), values);
+    EnableSnapshotSession(reopened, root, jobs);
+    reopened.SetAetherStateEnabled(true);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().energy_ages(), ages);
+    EXPECT_EQ(reopened.GetEnergyFieldState()->SerializeRegionalRecord(), values);
+    for (std::uint64_t tick = 33; tick <= 44; ++tick) {
+        SCOPED_TRACE(tick);
+        TickOnce(session);
+        TickOnce(reopened);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        EXPECT_EQ(reopened.GetEnergyFieldState()->SerializeRegionalRecord(),
+                  session.GetEnergyFieldState()->SerializeRegionalRecord());
+        EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+                  session.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+        EXPECT_EQ(reopened.ComputeAetherStateSubHash(), session.ComputeAetherStateSubHash());
+        if (tick == 33) {
+            EXPECT_LT(session.GetEnergyFieldState()->total_raw(), 60777u);
+        }
+        if (tick == 35) {
+            EXPECT_EQ(session.GetRegionSchedule().due, (std::vector<RegionKey>{empty, active}));
+        }
+    }
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages().at(active), 19u);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages().at(empty), 8u);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages().at(frozen), 3u);
+    EXPECT_EQ(session.GetEnergyFieldState()->at_cell(85, 0), 777u);
+}
+
+void CheckEmptyRegionalEnergyAge() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    ASSERT_TRUE(ledger.set_energy_age(kFieldOwner, 0));
+    ASSERT_NO_FATAL_FAILURE(
+        LoadScheduledFieldFixture(session, root, jobs, ledger, {}, std::string{}));
+    for (int tick = 0; tick < 7; ++tick) {
+        TickOnce(session);
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_TRUE(session.ComputeAetherStateSubHash().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    EXPECT_FALSE(fs::exists(save / "aether_state.efs"));
+    EnableSnapshotSession(reopened, root, jobs);
+    reopened.SetAetherStateEnabled(true);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    for (auto* current : {&session, &reopened}) {
+        EXPECT_EQ(current->GetActiveRegionLedger().energy_ages().at(kFieldOwner), 7u);
+        ASSERT_TRUE(current->GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
+        TickOnce(*current); // Age 8 fires, although the absolute tick is 39.
+        EXPECT_EQ(current->GetActiveRegionLedger().energy_ages().at(kFieldOwner), 8u);
+        EXPECT_LT(current->GetEnergyFieldState()->total_raw(), 60000u);
+        EXPECT_GT(current->GetEnergyFieldState()->total_raw(), 0u);
+    }
+    EXPECT_EQ(reopened.ComputeAetherStateSubHash(), session.ComputeAetherStateSubHash());
+    const auto values = session.GetEnergyFieldState()->SerializeRegionalRecord();
+    const auto ages = session.GetActiveRegionLedger().energy_ages();
+    session.GetSimulationEventBus().subscribe(
+        [](const auto&) { throw std::runtime_error("injected energy consumer fault"); });
+    session.GetSimulationEventBus().publish(40, "energy-test", "");
+    ASSERT_TRUE(session.GetEnergyFieldState()->QueueRegionalDeposit(2, 0, 0, 0, 1000));
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetEnergyFieldState()->SerializeRegionalRecord(), values);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages(), ages);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+}
+
+void CheckEnergyCompatibility(bool active_regions, bool energy_enabled) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(active_regions);
+    session.SetAetherStateEnabled(energy_enabled);
+    ASSERT_TRUE(session.CreateWorld("Energy compatibility", "1337", "default"));
+    TickOnce(session);
+    EXPECT_TRUE(session.ComputeAetherStateSubHash().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    auto disk = SavedPresetTestDiskBytes(save);
+    const auto hash = SessionWorldHash(session);
+    ASSERT_TRUE(session.SaveWorld());
+    auto resaved = SavedPresetTestDiskBytes(save);
+    disk.erase("chunks/region/snapshot.json");
+    resaved.erase("chunks/region/snapshot.json");
+    EXPECT_EQ(resaved, disk);
+    EXPECT_EQ(SessionWorldHash(session), hash);
+    if (!active_regions && energy_enabled) {
+        EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), "EFS1 2 7\n");
+    } else {
+        EXPECT_FALSE(fs::exists(save / "aether_state.efs"));
+    }
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, RegionalEnergySavesObserveAndReopenContinuesOwnerCadence) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalEnergyContinuation());
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyRegionalEnergyRetainsAgeForTheFirstDepositAfterReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckEmptyRegionalEnergyAge());
+}
+
+TEST(GameSessionHeadlessWorldTest, DisabledAndEmptyEnergyPreserveLiveAndSavedBytes) {
+    for (const bool active_regions : {false, true}) {
+        for (const bool energy_enabled : {false, true}) {
+            ASSERT_NO_FATAL_FAILURE(CheckEnergyCompatibility(active_regions, energy_enabled));
+        }
+    }
 }

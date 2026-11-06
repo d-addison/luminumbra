@@ -4719,6 +4719,40 @@ bool FieldPageOwnersRecorded(const Pages& pages,
     return true;
 }
 
+constexpr const char* kRegionalEnergyError =
+    "Corrupt regional energy record: expected EFS1 cadence offset 0 with matching ARL energy ages.";
+
+bool RegionalEnergyMatchesLedger(const std::string& bytes,
+                                 const world::ActiveRegionLedger& ledger) {
+    luminumbra::fields::EnergyFieldState energy;
+    if (bytes.empty() || energy.DeserializeRegionalRecord(bytes))
+        return energy.ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
+    // Legacy cadence is self-contained; regional ages make that phase ambiguous.
+    return ledger.energy_ages().empty() && energy.DeserializeRecord(bytes, 0) &&
+           energy.SerializeRecord(0) == bytes;
+}
+
+bool ValidateRegionalEnergy(const std::filesystem::path& save_dir,
+                            const world::ActiveRegionLedger& ledger,
+                            std::vector<std::string>* errors,
+                            const std::stop_token& stop) {
+    if (SavedInputFile(WorldSaveService::active_regions_path(save_dir)).missing())
+        return true;
+    const SavedInputFile input(save_dir / "aether_state.efs");
+    std::string bytes;
+    const auto maximum = ledger.energy_ages().empty()
+                             ? luminumbra::fields::kEnergyReadRecordBytes
+                             : luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
+    if ((!input.missing() && (!input.read(bytes, maximum, stop) || bytes.empty())) ||
+        !RegionalEnergyMatchesLedger(bytes, ledger)) {
+        AddError(errors,
+                 stop.stop_requested() ? "Saved-world validation cancelled."
+                                       : kRegionalEnergyError);
+        return false;
+    }
+    return true;
+}
+
 bool FieldPagesMatchLedger(const world::FieldPageState& state,
                            const world::ActiveRegionLedger& ledger) {
     const auto has_owner = [&ledger](world::RegionKey key) {
@@ -6081,30 +6115,39 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         } else if (relative == "aether_state.efs") {
             const auto& bytes = member_bytes;
-            std::istringstream header(bytes);
-            std::string magic;
-            int channels = 0;
-            // Bound channel allocation before invoking the legacy decoder. Indexed writers
-            // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
-            if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
-                channels > luminumbra::fields::kEnergyRecordChannels) {
-                error = "corrupt energy field record";
-                return false;
-            }
-            std::string line;
-            std::size_t pages = 0;
-            std::getline(header, line);
-            while (std::getline(header, line))
-                if (!line.empty() &&
-                    ++pages > (64u * 1024u * 1024u) / (256u * sizeof(std::uint16_t) *
-                                                       static_cast<std::size_t>(channels))) {
-                    error = "corrupt energy field record: decoded size limit";
+            if (!SavedInputFile(active_regions_path(save_dir)).missing()) {
+                world::ActiveRegionLedger ledger;
+                if (bytes.empty() || !load_active_regions(ledger, save_dir, &diagnostics) ||
+                    !RegionalEnergyMatchesLedger(bytes, ledger)) {
+                    error = kRegionalEnergyError;
                     return false;
                 }
-            luminumbra::fields::EnergyFieldState energy;
-            if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
-                error = "corrupt energy field record";
-                return false;
+            } else {
+                std::istringstream header(bytes);
+                std::string magic;
+                int channels = 0;
+                // Bound channel allocation before invoking the legacy decoder. Indexed writers
+                // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
+                if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
+                    channels > luminumbra::fields::kEnergyRecordChannels) {
+                    error = "corrupt energy field record";
+                    return false;
+                }
+                std::string line;
+                std::size_t pages = 0;
+                std::getline(header, line);
+                while (std::getline(header, line))
+                    if (!line.empty() &&
+                        ++pages > (64u * 1024u * 1024u) / (256u * sizeof(std::uint16_t) *
+                                                           static_cast<std::size_t>(channels))) {
+                        error = "corrupt energy field record: decoded size limit";
+                        return false;
+                    }
+                luminumbra::fields::EnergyFieldState energy;
+                if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
+                    error = "corrupt energy field record";
+                    return false;
+                }
             }
         } else if (relative == "chunks/region/active-regions.arl") {
             world::ActiveRegionLedger ledger;
@@ -6954,7 +6997,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     return reject(world::ActiveRegionLedger::kCorruptMessage);
             }
             if (!validate_ground_objects(save_dir, ledger, &errors, stop) ||
-                !validate_field_pages(save_dir, ledger, &errors, stop))
+                !validate_field_pages(save_dir, ledger, &errors, stop) ||
+                !ValidateRegionalEnergy(save_dir, ledger, &errors, stop))
                 return reject("");
         }
         Ecs::EntityRegistrySnapshot plants;
