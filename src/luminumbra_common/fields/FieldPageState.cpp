@@ -1357,17 +1357,18 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
         ++scent_count;
         return false;
     });
-    const auto clock = weather ? weather->clock : std::nullopt;
-    if (storm_count + strike_count + scent_count != 0 || clock.has_value()) {
+    const bool has_clock = weather != nullptr && weather->clock.has_value();
+    const std::uint64_t clock_value = has_clock ? *weather->clock : 0;
+    if (storm_count + strike_count + scent_count != 0 || has_clock) {
         out += "|evolution:v2:";
         AppendSection(out, 2, storm_count, storms);
         AppendSection(out, 3, strike_count, strikes);
         AppendSection(out, 4, scent_count, scent);
-        if (clock.has_value()) {
+        if (has_clock) {
             std::string age;
             AppendLe(age, static_cast<std::uint32_t>(key.x), 4);
             AppendLe(age, static_cast<std::uint32_t>(key.z), 4);
-            AppendLe(age, *clock, 8);
+            AppendLe(age, clock_value, 8);
             AppendSection(out, 7, 1, age);
         }
     }
