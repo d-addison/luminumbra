@@ -586,6 +586,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 if (m_regionFault)
                     return i + 1;
             }
+            auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
@@ -1296,8 +1297,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
-                m_regionCompletedWork.clear();
+                PublishRegionCompletedWork(std::move(scheduled_fields));
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
@@ -1945,11 +1945,12 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                                 : Persistence::RegionDigestInputs{};
                     inputs.require_index = m_regionRequiresIndex;
                     inputs.ground_object_bytes = m_groundObjects.region_bytes(key);
+                    inputs.field_page_bytes = m_fieldPages.region_bytes(key);
                     return digest_operation->digest(key, inputs);
                 },
-                // Later slices extend this probe with pages, creatures, plants and water debt.
+                // Later slices extend this probe with creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
-                    if (m_groundObjects.owns_region(key))
+                    if (m_groundObjects.owns_region(key) || m_fieldPages.owns_region(key))
                         return true;
                     if (!owned_regions) {
                         owned_regions.emplace();
@@ -1975,6 +1976,36 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     m_simBudgetTelemetry.RecordWork(SimWork::ActiveRegionDue,
                                     current_tick,
                                     m_activeRegionsEnabled ? m_regionSchedule.due.size() : 0);
+}
+
+std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint64_t tick) {
+    // Hosts without a world or ambient pages do no field work or allocation.
+    if (!m_activeRegionsEnabled || !m_worldSystem || m_fieldPages.page_count() == 0)
+        return std::nullopt;
+    const auto& records = m_activeRegionLedger.records();
+    const auto& due = m_regionSchedule.due;
+    const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
+    if (previous.page_count() == 0)
+        return std::nullopt;
+    // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
+    // than the whole store. The live state stays untouched even if a later consumer or work
+    // publication fails; publication assigns the stepped pages back without allocating.
+    auto next = previous;
+    const auto seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    const auto work = next.step_scheduled(records, due, seed, tick, &previous);
+    if (work.empty())
+        return std::nullopt;
+    for (const auto& [owner, updates] : work)
+        m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
+    return next;
+}
+
+void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields) {
+    m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
+    if (fields)
+        m_fieldPages.adopt_scheduled_pages(std::move(*fields));
+    m_regionCompletedWork.clear();
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
@@ -2381,7 +2412,8 @@ std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_has
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
                                              m_activeRegionLedger.canonical_bytes() +
                                              m_groundObjects.canonical_bytes() +
-                                             CaptureGroundNotifications().canonical_bytes())
+                                             CaptureGroundNotifications().canonical_bytes() +
+                                             m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 

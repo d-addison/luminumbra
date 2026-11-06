@@ -693,6 +693,9 @@ private:
     void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     void AdvanceGroundObjects(std::uint64_t tick);
+    // Stage existing field authority; publish only after the tick's consumers and work succeed.
+    [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
+    void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
     bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     bool m_regionRequiresIndex = false;

@@ -188,6 +188,12 @@ public:
                    std::uint64_t tick,
                    const FieldPageState* previous_tick = nullptr);
 
+    // Commits the stepped pages of a scheduled-step candidate built from scheduled_snapshot.
+    // Overwrites exactly the pages held by `staged` and leaves every other page and all
+    // evolution state untouched. Allocation-free and non-throwing: it only assigns values into
+    // pages that already exist.
+    void adopt_scheduled_pages(FieldPageState&& staged) noexcept;
+
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
     // Strict transactional parse; `out` is untouched and `error` set on any failure. Every

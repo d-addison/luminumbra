@@ -30,6 +30,25 @@ TEST(FoliageFieldPages, ExactUnitsAndInitializedBaselineSurviveTypedSave) {
     EXPECT_EQ(restored.ambient_bytes(31, true), ""); // ambient slots unchanged by foliage
     EXPECT_EQ(restored.region_bytes({-1, -1}), state.region_bytes({-1, -1}));
 }
+TEST(FoliageFieldPages, RegionOwnershipFollowsTheFiveHundredTwelveMetreBoundaries) {
+    FoliageFieldPages pages;
+    // Region 0 spans one-metre cells [0, 511]; region -1 spans [-512, -1].
+    ASSERT_TRUE(pages.set({511, 0}, 1, 1000000));
+    ASSERT_TRUE(pages.set({-512, -1}, 1, 1000000));
+    EXPECT_TRUE(pages.owns_region({0, 0}));
+    EXPECT_TRUE(pages.owns_region({-1, -1}));
+    EXPECT_FALSE(pages.owns_region({1, 0}));
+    EXPECT_FALSE(pages.owns_region({0, -1}));
+    EXPECT_FALSE(pages.owns_region({-1, 0}));
+    ASSERT_TRUE(pages.set({512, 512}, 1, 1000000));
+    ASSERT_TRUE(pages.set({-513, 0}, 1, 1000000));
+    EXPECT_TRUE(pages.owns_region({1, 1}));
+    EXPECT_TRUE(pages.owns_region({-2, 0}));
+    EXPECT_FALSE(pages.owns_region({1, 0}));
+    // Regions whose page range would overflow int32 own nothing.
+    EXPECT_FALSE(pages.owns_region({std::numeric_limits<std::int32_t>::max(), 0}));
+    EXPECT_FALSE(pages.owns_region({0, std::numeric_limits<std::int32_t>::min()}));
+}
 TEST(FoliageFieldPages, StrictRecordValidationLeavesDestinationUntouched) {
     FoliageFieldPages original;
     ASSERT_TRUE(original.set({0, 0}, 10, 1000000));
