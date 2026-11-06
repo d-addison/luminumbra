@@ -1358,7 +1358,7 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
         return false;
     });
     const bool has_clock = weather != nullptr && weather->clock.has_value();
-    const std::uint64_t clock_value = has_clock ? *weather->clock : 0;
+    const std::uint64_t clock_value = weather != nullptr ? weather->clock.value_or(0) : 0;
     if (storm_count + strike_count + scent_count != 0 || has_clock) {
         out += "|evolution:v2:";
         AppendSection(out, 2, storm_count, storms);
