@@ -551,3 +551,170 @@ TEST(ScentFieldGates, CreatureBrainSamplesOnlyDueUnfrozenOwners) {
     ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Reduced, false));
     ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Frozen, false));
 }
+
+namespace {
+constexpr std::array<std::pair<int, int>, 4> kScentDirections{
+    std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+void CheckBoundaryScentConsumers(const std::pair<int, int>& direction,
+                                 RegionState source_state,
+                                 bool source_due) {
+    namespace Comp = Luminumbra::Components;
+    const auto [dx, dz] = direction;
+    SCOPED_TRACE(testing::Message() << "direction=(" << dx << ',' << dz << ") state="
+                                    << static_cast<int>(source_state) << " due=" << source_due);
+    // The window starts at world cell 480; the owner boundary is at local cell 32.
+    const int x = dx == 0 ? 16 : (dx > 0 ? 31 : 32);
+    const int z = dz == 0 ? 16 : (dz > 0 ? 31 : 32);
+    LiveSchedule schedule({480, 480});
+    const auto source_owner = schedule.Owner(x + dx, z + dz);
+    schedule.Set(source_owner, source_state, std::uint8_t{2});
+    const auto due_tick = 32 + ActiveRegionLedger::phase(source_owner, 2);
+    schedule.Reschedule(source_due ? due_tick : due_tick + 1);
+    ASSERT_NE(schedule.Owner(x, z), source_owner);
+    ASSERT_TRUE(schedule.CellDue(x, z));
+    ASSERT_EQ(schedule.CellDue(x + dx, z + dz), source_due);
+
+    ScentField field(kCells, kCells);
+    field.RestoreCell(0, x + dx, z + dz, 8.0); // Only the neighbouring owner has scent.
+    field.BindDepositGate([&schedule](int cx, int cz) { return schedule.CellDue(cx, cz); });
+    float gx = 1.0f, gz = 1.0f;
+    const float confidence = field.GradientSteer(0, x, z, 1.0f, 1e-4f, 0.05f, gx, gz);
+    EXPECT_FLOAT_EQ(confidence, source_due ? 8.0f / 8.05f : 0.0f);
+    EXPECT_FLOAT_EQ(gx, source_due ? static_cast<float>(dx) : 0.0f);
+    EXPECT_FLOAT_EQ(gz, source_due ? static_cast<float>(dz) : 0.0f);
+
+    entt::registry sampled, cold;
+    const auto spawn = [x, z](entt::registry& registry) {
+        const auto entity = registry.create();
+        registry.emplace<Comp::TransformComponent>(entity).position = {
+            static_cast<float>(480 + x), 0.0f, static_cast<float>(480 + z)};
+        auto& creature = registry.emplace<Comp::CreatureComponent>(entity);
+        creature.is_predator = true;
+        creature.hunger = 0.95f;
+        return entity;
+    };
+    const auto animal = spawn(sampled);
+    const auto control = spawn(cold);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(sampled, 1.0f / 30.0f, {}, &field, 480, 480, 1);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(cold, 1.0f / 30.0f);
+    const auto& actual = sampled.get<Comp::CreatureComponent>(animal);
+    const auto& expected = cold.get<Comp::CreatureComponent>(control);
+    if (source_due) {
+        EXPECT_EQ(actual.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Hunt));
+        EXPECT_GT(actual.wish_x * static_cast<float>(dx) + actual.wish_z * static_cast<float>(dz),
+                  0.0f);
+        EXPECT_FLOAT_EQ(
+            actual.wish_x * static_cast<float>(dz) - actual.wish_z * static_cast<float>(dx), 0.0f);
+    } else {
+        EXPECT_EQ(actual.last_action, expected.last_action);
+        EXPECT_FLOAT_EQ(actual.wish_x, expected.wish_x);
+        EXPECT_FLOAT_EQ(actual.wish_z, expected.wish_z);
+        EXPECT_EQ(sampled.get<Comp::TransformComponent>(animal).position,
+                  cold.get<Comp::TransformComponent>(control).position);
+    }
+
+    // A fresh predator exercises the independent locomotion-intent consumer.
+    entt::registry steering;
+    const auto sniffer = spawn(steering);
+    steering.emplace<Comp::ScentSenseComponent>(sniffer).channel = 0;
+    steering.emplace<Comp::LocomotionProfile>(sniffer).move_speed = 2.0f;
+    steering.emplace<Comp::LocomotionIntentComponent>(sniffer).wish_xz = {0.0f, 0.0f};
+    const auto stats = luminumbra::ai::RunScentSteeringOnTick(steering, field, 480, 480, 1);
+    const auto& wish = steering.get<Comp::LocomotionIntentComponent>(sniffer).wish_xz;
+    EXPECT_EQ(stats.considered, 1u);
+    EXPECT_EQ(stats.steered, source_due ? 1u : 0u);
+    // Magnitude 8, default Weber k=1 and speed=2 give a bias of 16/9, below the cap.
+    EXPECT_FLOAT_EQ(wish.x, source_due ? static_cast<float>(dx) * (16.0f / 9.0f) : 0.0f);
+    EXPECT_FLOAT_EQ(wish.y, source_due ? static_cast<float>(dz) * (16.0f / 9.0f) : 0.0f);
+    EXPECT_DOUBLE_EQ(field.Sample(0, x + dx, z + dz), 8.0);
+}
+
+void CheckGradientCentreSubstitute(const std::pair<int, int>& direction) {
+    const auto [dx, dz] = direction;
+    SCOPED_TRACE(testing::Message() << "direction=(" << dx << ',' << dz << ')');
+    ScentField field(3, 3);
+    for (int z = 0; z < 3; ++z) {
+        for (int x = 0; x < 3; ++x) {
+            field.RestoreCell(0, x, z, 4.0);
+        }
+    }
+    field.RestoreCell(0, 1 + dx, 1 + dz, 20.0);
+    std::vector<std::pair<int, int>> visits;
+    field.BindDepositGate([&](int x, int z) {
+        visits.emplace_back(x, z);
+        return x != 1 + dx || z != 1 + dz;
+    });
+    float gx = 1.0f, gz = 1.0f;
+    EXPECT_DOUBLE_EQ(field.Gradient(0, 1, 1, gx, gz), 0.0);
+    EXPECT_FLOAT_EQ(gx, 0.0f);
+    EXPECT_FLOAT_EQ(gz, 0.0f);
+    // Exactly the four stencil neighbours are queried, independent of world size.
+    std::sort(visits.begin(), visits.end());
+    const std::vector<std::pair<int, int>> expected{{0, 1}, {1, 0}, {1, 2}, {2, 1}};
+    EXPECT_EQ(visits, expected);
+}
+
+void CheckOpenGradientBits(int width, int height) {
+    ScentField ungated(width, height, 2);
+    for (int ch = 0; ch < 2; ++ch) {
+        for (int z = 0; z < height; ++z) {
+            for (int x = 0; x < width; ++x) {
+                ungated.RestoreCell(ch, x, z, static_cast<double>(x * 17 + z * 31 + ch) / 37.0);
+            }
+        }
+    }
+    auto gated = ungated;
+    int queries = 0;
+    bool outside = false;
+    gated.BindDepositGate([&](int x, int z) {
+        ++queries;
+        outside = outside || !gated.in_bounds(x, z);
+        return gated.in_bounds(x, z);
+    });
+    for (int ch = -1; ch <= 2; ++ch) {
+        for (int z = -1; z <= height; ++z) {
+            for (int x = -1; x <= width; ++x) {
+                SCOPED_TRACE(testing::Message() << "size=(" << width << ',' << height << ") ch="
+                                                << ch << " cell=(" << x << ',' << z << ')');
+                float ux = 1.0f, uz = 1.0f, gx = 1.0f, gz = 1.0f;
+                const auto um = ungated.Gradient(ch, x, z, ux, uz);
+                const auto gm = gated.Gradient(ch, x, z, gx, gz);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(um), std::bit_cast<std::uint64_t>(gm));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(ux), std::bit_cast<std::uint32_t>(gx));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(uz), std::bit_cast<std::uint32_t>(gz));
+            }
+        }
+    }
+    EXPECT_FALSE(outside); // Eligibility is queried after the existing edge clamp.
+    EXPECT_EQ(queries, 2 * width * height * 4); // Invalid inputs do not consult the gate.
+}
+} // namespace
+
+TEST(ScentFieldGates, ConsumersIgnoreFrozenNeighbourScent) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(CheckBoundaryScentConsumers(direction, RegionState::Frozen, false));
+    }
+}
+
+TEST(ScentFieldGates, ConsumersFollowNeighbourScentOnlyWhenItsOwnerIsDue) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(
+            CheckBoundaryScentConsumers(direction, RegionState::Reduced, false));
+        ASSERT_NO_FATAL_FAILURE(CheckBoundaryScentConsumers(direction, RegionState::Reduced, true));
+    }
+}
+
+TEST(ScentFieldGates, BlockedGradientNeighboursUseCentreConcentrationWithBoundedQueries) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(CheckGradientCentreSubstitute(direction));
+    }
+}
+
+TEST(ScentFieldGates, OpenGradientMatchesUngatedBitsAtEdgesAndForInvalidInputs) {
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 3));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 3));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 1));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 1));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(0, 0));
+}

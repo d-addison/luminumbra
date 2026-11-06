@@ -250,7 +250,9 @@ public:
     // point UP-gradient — toward stronger scent (the source). A hunter steers
     // along +(gx,gz) to track prey; a prey flees along -(gx,gz). Returns the
     // gradient magnitude (0 when flat / out of bounds), so callers can gate on a
-    // minimum scent strength before committing to a heading.
+    // minimum scent strength before committing to a heading. Each edge-clamped
+    // neighbour must pass SimulationCellAllowed; a disallowed neighbour uses the
+    // centre cell's concentration, contributing no difference on that side.
     double Gradient(int ch, int x, int z, float& gx, float& gz) const {
         gx = 0.0f;
         gz = 0.0f;
@@ -260,6 +262,9 @@ public:
         auto sample = [&](int sx, int sz) -> double {
             const int cx = sx < 0 ? 0 : (sx >= m_w ? m_w - 1 : sx); // clamp at edges
             const int cz = sz < 0 ? 0 : (sz >= m_h ? m_h - 1 : sz);
+            if (!SimulationCellAllowed(cx, cz)) {
+                return f.at(static_cast<std::size_t>(x), static_cast<std::size_t>(z));
+            }
             return f.at(static_cast<std::size_t>(cx), static_cast<std::size_t>(cz));
         };
         const double dgx = sample(x + 1, z) - sample(x - 1, z);
