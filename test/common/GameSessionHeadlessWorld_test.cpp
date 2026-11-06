@@ -9793,12 +9793,15 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
     GameSession session;
     std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active}};
     FieldPageState fields;
-    if (work_kind == 0)
+    if (work_kind == 0) {
         ASSERT_TRUE(fields.set_soil({0, 0}, 100));
-    if (work_kind == 1)
+    }
+    if (work_kind == 1) {
         ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
-    if (work_kind == 2 || work_kind == 4)
+    }
+    if (work_kind == 2 || work_kind == 4) {
         ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 256, 256)}, {}));
+    }
     if (work_kind == 3)
         ASSERT_TRUE(fields.replace_weather({},
                                            {{kFieldOwner,
@@ -9823,8 +9826,9 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
         EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), work_kind == 4 ? 1u : 0u);
         EXPECT_EQ(session.GetRegionalWeatherProjectionCount(),
                   work_kind == 2 || work_kind == 4 ? 1u : 0u);
-        if (work_kind == 0)
+        if (work_kind == 0) {
             EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
+        }
         EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
     });
     session.GetSimulationEventBus().publish(32, "weather-work-test", "");
@@ -9932,8 +9936,9 @@ void CheckWeatherWithoutAmbientPages(int authority, bool clock) {
     } else {
         ASSERT_TRUE(fields.set_irrigation({0, 0}, 200));
     }
-    if (clock)
+    if (clock) {
         ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
+    }
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
