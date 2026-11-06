@@ -6079,6 +6079,28 @@ TEST(GameSessionHeadlessWorldTest, WaterOwnershipIsPromotedAtTheTickBoundaryWhen
     EXPECT_TRUE(chunk->has_water_authority());
 }
 
+TEST(GameSessionHeadlessWorldTest,
+     TickBoundaryWaterPromotionVisitsOnlyChangedChunksWhenRegionsAreOff) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(session, root, jobs));
+    const auto chunk = AdoptUnpromotedWaterChunk(session);
+    const auto fixed_dt = session.GetSimulationClock().fixed_dt();
+    const auto inputs_before = session.GetWorldSystem()->water_authority_input_items();
+    ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
+    const auto inputs_after_change = session.GetWorldSystem()->water_authority_input_items();
+    EXPECT_EQ(inputs_after_change - inputs_before, 1u);
+    // Nothing changed: later ticks must not revisit the resident chunk at all.
+    ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
+    ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
+    EXPECT_EQ(session.GetWorldSystem()->water_authority_input_items(), inputs_after_change);
+    chunk->mark_water_state_dirty();
+    ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
+    EXPECT_EQ(session.GetWorldSystem()->water_authority_input_items() - inputs_after_change, 1u);
+}
+
 TEST(GameSessionHeadlessWorldTest, WaterOnlySaveWithRegionsOffKeepsDigestThroughRegionsUpgrade) {
     const HeadlessRoot root;
     JobSystem jobs;
