@@ -1541,7 +1541,8 @@ void CheckBoundedScentHistory(bool floors) {
         candidate.reuse_scent_buffers(buffers);
         ScentWindowWork work;
         const auto before = source.serialize();
-        ASSERT_TRUE(candidate.stage_scent_window(source, origin, side, cells, work, true));
+        ASSERT_TRUE(candidate.stage_scent_window(
+            source, origin, side, cells, work, [](RegionKey) { return true; }));
         EXPECT_EQ(source.serialize(), before);
         // At capacity, each retired entry and any protected window entry is visited once.
         EXPECT_LE(candidate.scent_capture_visits(), cells.size() * 3);
@@ -1570,7 +1571,8 @@ void CheckBoundedScentHistory(bool floors) {
     // Returning to retired space remains a valid capture at either storage limit.
     FieldPageState returning;
     ScentWindowWork work;
-    ASSERT_TRUE(returning.stage_scent_window(restored, {0, 0}, side, cells, work, true));
+    ASSERT_TRUE(returning.stage_scent_window(
+        restored, {0, 0}, side, cells, work, [](RegionKey) { return true; }));
     restored.adopt_scent_state(returning);
     EXPECT_EQ(restored.scent_at({0, 0}), value);
 }
@@ -1591,7 +1593,8 @@ void CheckRetirementProtectsCurrentWindow() {
     FieldPageState candidate;
     const std::vector<ScentCell> cells(std::size_t{side} * side, one);
     ScentWindowWork work;
-    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, side, cells, work, true));
+    ASSERT_TRUE(candidate.stage_scent_window(
+        source, {0, 0}, side, cells, work, [](RegionKey) { return true; }));
     EXPECT_LE(candidate.scent_capture_visits(), cells.size() * 2);
     source.adopt_scent_state(candidate);
     EXPECT_EQ(source.scent_cells().size(), FieldPageState::kMaxScentCells);
@@ -1600,6 +1603,91 @@ void CheckRetirementProtectsCurrentWindow() {
             EXPECT_EQ(source.scent_at({x, z}), one);
         }
     }
+}
+
+void CheckFrozenScentCapacity(bool floors, bool mixed, bool thawed) {
+    SCOPED_TRACE(floors);
+    SCOPED_TRACE(mixed);
+    SCOPED_TRACE(thawed);
+    constexpr int side = 128;
+    const auto bits = std::bit_cast<std::uint64_t>(floors ? FieldPageState::kScentFloor : 1.0);
+    const ScentCell value{bits, bits, bits, bits};
+    const std::vector<ScentCell> cells(std::size_t{side} * side, value);
+    FieldPageState source;
+    std::map<RegionKey, std::uint64_t> counts;
+    // Fill exactly one owner's capacity: 256 x 256 explicit cells or 512 x 512 floor cells.
+    const int extent = floors ? 512 : 256;
+    for (int x = 0; x < extent; x += side) {
+        for (int z = 0; z < extent; z += side) {
+            ASSERT_TRUE(source.capture_scent_window({x, z}, side, cells, counts));
+        }
+    }
+    const RegionKey protected_owner = mixed ? RegionKey{-1, -1} : RegionKey{0, 0};
+    if (mixed) {
+        const int removed_side = floors ? 8 : 1;
+        const std::vector<ScentCell> zero(static_cast<std::size_t>(removed_side * removed_side));
+        ASSERT_TRUE(source.capture_scent_window({0, 0}, removed_side, zero, counts));
+        const std::array<ScentCell, 1> historical{value};
+        ASSERT_TRUE(source.capture_scent_window({-8, -8}, 1, historical, counts));
+    }
+    ActiveRegionLedger ledger({0, 1, 1});
+    ledger.mark_edited(protected_owner, WorldClock{});
+    ledger.schedule(WorldClock(1)); // Consume the activation wake.
+    const std::array pressure{RegionWork{protected_owner, 1, 0, 0, 0}};
+    const auto digest = [&source](RegionKey owner) {
+        return Fnv(source.region_bytes(owner));
+    };
+    ledger.schedule(WorldClock(2), {}, pressure, digest);
+    ledger.schedule(WorldClock(3), {}, pressure, digest);
+    ASSERT_EQ(ledger.records().at(protected_owner).state, RegionState::Frozen);
+    const auto protected_bytes = source.region_bytes(protected_owner);
+    const auto frozen_digest = ledger.records().at(protected_owner).frozen_digest;
+    ASSERT_EQ(frozen_digest, Fnv(protected_bytes));
+    if (mixed) {
+        ledger.activate_owned({0, 0}, WorldClock(3));
+    }
+    if (thawed) {
+        ledger.activate_owned(protected_owner, WorldClock(3));
+        ledger.schedule(WorldClock(4), {}, {}, digest);
+        ASSERT_EQ(ledger.records().at(protected_owner).state, RegionState::Active);
+        ASSERT_EQ(ledger.records().at(protected_owner).frozen_digest, frozen_digest);
+    }
+    std::size_t retirement_queries = 0;
+    const auto can_retire = [&ledger, &retirement_queries](RegionKey owner) {
+        ++retirement_queries;
+        const auto found = ledger.records().find(owner);
+        return found != ledger.records().end() && found->second.state != RegionState::Frozen &&
+               found->second.frozen_digest == 0;
+    };
+    FieldPageState candidate;
+    ScentWindowWork work;
+    work.add({9, 9});
+    const auto previous_work = work.entries;
+    const auto before = source.serialize();
+    const bool admitted =
+        candidate.stage_scent_window(source, {1024, 0}, side, cells, work, can_retire);
+    EXPECT_EQ(admitted, mixed);
+    EXPECT_LE(retirement_queries, cells.size() * 2);
+    EXPECT_EQ(source.serialize(), before);
+    if (!mixed) {
+        EXPECT_EQ(work.entries, previous_work);
+        EXPECT_EQ(work.count, 1u);
+        EXPECT_EQ(candidate.staged_scent_cells(), 0u);
+    }
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.region_bytes(protected_owner), protected_bytes);
+    EXPECT_EQ(Fnv(source.region_bytes(protected_owner)), frozen_digest);
+    EXPECT_EQ(ledger.records().at(protected_owner).frozen_digest, frozen_digest);
+    FieldPageState reopened;
+    ActiveRegionLedger reopened_ledger;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(source.serialize(), reopened, error)) << error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened_ledger, error)) << error;
+    EXPECT_EQ(reopened.serialize(), source.serialize());
+    EXPECT_EQ(reopened_ledger.canonical_bytes(), ledger.canonical_bytes());
+    EXPECT_EQ(reopened.region_bytes(protected_owner), protected_bytes);
+    EXPECT_EQ(Fnv(reopened.region_bytes(protected_owner)),
+              reopened_ledger.records().at(protected_owner).frozen_digest);
 }
 
 void CheckFloorEncodingRefusalsAndRollback() {
@@ -1646,7 +1734,8 @@ void CheckFloorEncodingRefusalsAndRollback() {
     const auto staged = candidate.staged_scent_cells();
     const auto completed = work.entries;
     changed[0][0] = std::bit_cast<std::uint64_t>(-0.0);
-    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 1, changed, work, true));
+    EXPECT_FALSE(candidate.stage_scent_window(
+        source, {0, 0}, 1, changed, work, [](RegionKey) { return true; }));
     EXPECT_EQ(source.serialize(), bytes);
     EXPECT_EQ(candidate.staged_scent_cells(), staged);
     EXPECT_EQ(work.entries, completed);
@@ -1676,4 +1765,12 @@ TEST(FieldPageStateTest, ScentHistoryRetiresOutsideTheCurrentWindowAtBothLimits)
 
 TEST(FieldPageStateTest, ScentFloorEncodingRefusalsLeaveAuthorityAndCandidateUntouched) {
     ASSERT_NO_FATAL_FAILURE(CheckFloorEncodingRefusalsAndRollback());
+}
+
+TEST(FieldPageStateTest, ScentCapacityPreservesFrozenOwnerBytesAndDigestAcrossReload) {
+    for (const bool floors : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, false, false));
+        ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, true, false));
+        ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, false, true));
+    }
 }

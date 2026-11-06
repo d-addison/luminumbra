@@ -1084,21 +1084,24 @@ bool ValidScentFloor(const std::map<ScentCellKey, ScentCell>& sparse,
     }
     return true;
 }
-// Only called at capacity. Visits are bounded by retired entries plus the participating
-// window; no historical scan occurs on ordinary captures.
+// Only called at capacity. A shared budget bounds scans even when every owner is protected.
 bool RetireScentHistory(const std::map<ScentCellKey, ScentCell>& source,
                         ScentCellKey origin,
                         int side,
                         int width,
                         std::size_t excess,
+                        const ActiveRegionLedger::OwnershipProbe& can_retire,
+                        std::size_t& budget,
                         std::vector<std::pair<ScentCellKey, ScentCell>>& changes,
                         std::size_t& visits) {
-    for (auto found = source.begin(); excess != 0 && found != source.end(); ++found) {
+    for (auto found = source.begin(); excess != 0 && budget != 0 && found != source.end();
+         ++found) {
+        --budget;
         ++visits;
         const auto key = found->first;
         const bool intersects = key.x < origin.x + side && key.z < origin.z + side &&
                                 key.x + width > origin.x && key.z + width > origin.z;
-        if (!intersects) {
+        if (!intersects && can_retire(FieldPageState::region_of_scent_cell(key))) {
             changes.emplace_back(key, ScentCell{});
             --excess;
         }
@@ -1181,7 +1184,7 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
                                         int side,
                                         std::span<const ScentCell> cells,
                                         ScentWindowWork& work,
-                                        bool retire_history) {
+                                        const ActiveRegionLedger::OwnershipProbe& can_retire) {
     if (side < 1 || side > 128 ||
         cells.size() != static_cast<std::size_t>(side) * static_cast<std::size_t>(side) ||
         origin.x > std::numeric_limits<std::int32_t>::max() - (side - 1) ||
@@ -1290,12 +1293,28 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
     const auto excess = size > kMaxScentCells ? size - kMaxScentCells : 0;
     const auto floor_excess =
         floor_size > kMaxScentFloorBlocks ? floor_size - kMaxScentFloorBlocks : 0;
-    if ((excess != 0 || floor_excess != 0) && !retire_history) {
+    if ((excess != 0 || floor_excess != 0) && !can_retire) {
         return false;
     }
-    if (!RetireScentHistory(source.m_scent, origin, side, 1, excess, changes, visits) ||
-        !RetireScentHistory(
-            source.m_scentFloors, origin, side, 8, floor_excess, floor_changes, visits)) {
+    auto retirement_budget = cells.size() * 2;
+    if (!RetireScentHistory(source.m_scent,
+                            origin,
+                            side,
+                            1,
+                            excess,
+                            can_retire,
+                            retirement_budget,
+                            changes,
+                            visits) ||
+        !RetireScentHistory(source.m_scentFloors,
+                            origin,
+                            side,
+                            8,
+                            floor_excess,
+                            can_retire,
+                            retirement_budget,
+                            floor_changes,
+                            visits)) {
         return false;
     }
     m_scentChanges.changes.swap(changes);

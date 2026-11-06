@@ -329,6 +329,7 @@ void GameSession::ResetWorldSystems() {
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionalFieldView = nullptr;
+    m_scentRecenterPending = false;
     m_regionalFieldsBound = false;
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
@@ -2087,6 +2088,10 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
         }
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
     }
+    if (std::exchange(m_scentRecenterPending, false)) {
+        // Event callbacks can move the spawn after capture; project the committed candidate.
+        RestoreRegionalScent();
+    }
     m_regionCompletedWork.clear();
     // Authority may first appear in a running world. Rebind only at a transition, after
     // publication has succeeded, and replace any legacy weather projection at that boundary.
@@ -3067,6 +3072,7 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 }
 
 void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
+    m_scentRecenterPending = false;
     RestoreRegionalScent();
     BindRegionalFieldQueries();
     if (m_regionalFieldsBound)
@@ -4181,6 +4187,7 @@ void GameSession::SetSpawnPoint(const Vec3& new_spawn) {
         RebaseForagingCells(dx, dz);
     }
     RestoreRegionalScent();
+    m_scentRecenterPending = m_scentRecenterPending || m_simulationBatchInProgress;
 }
 
 void GameSession::RestoreRegionalScent() {
@@ -4226,8 +4233,19 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                                     kScentFieldCells,
                                     cells,
                                     work,
-                                    true))
-        throw std::runtime_error("Regional scent admission failed");
+                                    [this](RegionKey owner) {
+                                        const auto& records = m_activeRegionLedger.records();
+                                        const auto found = records.find(owner);
+                                        return found != records.end() &&
+                                               found->second.state != RegionState::Frozen &&
+                                               found->second.frozen_digest == 0;
+                                    })) {
+        // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
+        // and retry on a later tick, preserving both frozen bytes and the live projection.
+        fields->reuse_scent_buffers(m_scentChangeBuffers);
+        RestoreRegionalScent();
+        return;
+    }
     for (const auto& [owner, updates] : work)
         m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
     m_regionalFieldView = &*fields;

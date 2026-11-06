@@ -77,8 +77,8 @@ public:
     static constexpr std::size_t kMaxPages = 16384;
     static constexpr std::size_t kMaxStorms = 65536, kMaxStrikes = 65536, kMaxScentCells = 65536;
     // Floor values use four 64-bit channel masks per aligned 8 x 8 block. Live captures
-    // retire lexicographically first entries outside the current window at either limit.
-    // This bounds historical scent without refusing a valid near-window simulation step.
+    // retire eligible entries outside the current window at either limit. Frozen authority
+    // is retained; bounded retirement can refuse growth without faulting the simulation.
     static constexpr std::size_t kMaxScentFloorBlocks = 4096;
     static constexpr double kScentFloor = 1.0e-9;
     static constexpr std::size_t kMaxOwnerStorms = 16, kMaxOwnerStrikes = 32;
@@ -229,14 +229,15 @@ public:
                             int side,
                             std::span<const ScentCell> cells,
                             std::map<RegionKey, std::uint64_t>& work);
-    // Runtime overload keeps counts in fixed storage. Retirement is only enabled by the
-    // live consumer; explicit sparse admissions retain their transactional capacity refusal.
+    // Runtime overload keeps counts in fixed storage. Only owners approved by can_retire
+    // may lose historical entries; the caller must exclude frozen/cached authority.
+    // At capacity, inspect at most twice the window's cell count across both stores.
     bool stage_scent_window(const FieldPageState& source,
                             ScentCellKey origin,
                             int side,
                             std::span<const ScentCell> cells,
                             ScentWindowWork& work,
-                            bool retire_history = false);
+                            const ActiveRegionLedger::OwnershipProbe& can_retire = {});
     // Commit preallocated nodes after completed-work admission; no full-store copy or allocation.
     void adopt_scent_state(FieldPageState& staged) noexcept;
     [[nodiscard]] std::size_t staged_scent_cells() const {

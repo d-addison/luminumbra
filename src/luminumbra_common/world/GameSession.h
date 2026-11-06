@@ -790,6 +790,7 @@ private:
     ScentChangeBuffers m_scentChangeBuffers;
     mutable luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
     mutable bool m_scentDueCacheValid = false;
+    bool m_scentRecenterPending = false;
     bool m_regionalWeatherParticipating = false;
     // Immutable species definitions shared with the captured dependency snapshot.
     // Only the forward declaration is needed for the header-only parsing registry.
