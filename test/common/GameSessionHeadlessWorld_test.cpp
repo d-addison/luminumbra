@@ -10749,6 +10749,64 @@ void CheckSessionScentOwnership(int kind, bool frozen_participant) {
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
 }
 
+void CheckSessionScentCandidate(bool ambient_pages, bool weather, bool fail_consumer) {
+    SCOPED_TRACE(ambient_pages);
+    SCOPED_TRACE(weather);
+    SCOPED_TRACE(fail_consumer);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey frozen{4, 0};
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
+    FieldPageState fields;
+    if (ambient_pages) {
+        ASSERT_TRUE(fields.activate_region(kFieldOwner, 1337, 31));
+    }
+    if (weather) {
+        ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
+    }
+    ASSERT_TRUE(fields.set_weather_age(frozen, 11));
+    ASSERT_TRUE(fields.replace_weather({SessionStorm(frozen, 2100, 108)}, {}));
+    ASSERT_TRUE(fields.set_scent({2048, 1}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    AddSessionScentParticipant(session, 0, 1);
+    const auto before = session.GetFieldPages().serialize();
+    const auto live_before = SessionScentBits(session);
+    if (fail_consumer) {
+        session.GetSimulationEventBus().subscribe(
+            [](const auto&) { throw std::runtime_error("injected scent candidate fault"); });
+        session.GetSimulationEventBus().publish(32, "scent-test", "");
+    }
+    TickOnce(session);
+    if (fail_consumer) {
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        EXPECT_EQ(SessionScentBits(session), live_before);
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        return;
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_GT(session.GetFieldPages().scent_cells().size(), fields.scent_cells().size());
+    EXPECT_EQ(session.GetFieldPages().region_bytes(frozen), fields.region_bytes(frozen));
+    EXPECT_EQ(session.GetFieldPages().weather_clocks().contains(kFieldOwner),
+              ambient_pages || weather);
+    if (weather) {
+        EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner), 8u);
+    }
+    if (ambient_pages) {
+        EXPECT_NE(session.GetFieldPages().pages(), fields.pages());
+    }
+    EXPECT_GT(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 0u);
+    const auto live = SessionScentBits(session);
+    const auto bytes = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+}
+
 void CheckReducedSessionScentCadence() {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -10884,4 +10942,15 @@ TEST(GameSessionHeadlessWorldTest, RegionalAndLegacyScentKeepUngatedSolverArithm
 
 TEST(GameSessionHeadlessWorldTest, RegionalScentParticipantsWaitForTheirOwnersCadence) {
     ASSERT_NO_FATAL_FAILURE(CheckReducedSessionScentCadence());
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentPublishesWithAmbientAndWeatherCandidates) {
+    for (const bool ambient_pages : {false, true}) {
+        for (const bool weather : {false, true}) {
+            for (const bool fail_consumer : {false, true}) {
+                ASSERT_NO_FATAL_FAILURE(
+                    CheckSessionScentCandidate(ambient_pages, weather, fail_consumer));
+            }
+        }
+    }
 }

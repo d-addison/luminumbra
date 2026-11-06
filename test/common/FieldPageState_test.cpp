@@ -124,6 +124,15 @@ void CheckColumnWindowPass(FieldPageState& store,
             ASSERT_TRUE(oracle.set_scent(key, values));
         }
     std::map<RegionKey, std::uint64_t> work;
+    FieldPageState staged;
+    const auto before = store.serialize();
+    ASSERT_TRUE(staged.stage_scent_window(store, origin, side, cells, work));
+    EXPECT_EQ(work, expected);
+    EXPECT_EQ(staged.scent_capture_visits(), cells.size());
+    EXPECT_EQ(store.serialize(), before);
+    auto published = store;
+    published.adopt_scent_state(staged);
+    EXPECT_EQ(published.serialize(), oracle.serialize());
     ASSERT_TRUE(store.capture_scent_window(origin, side, cells, work));
     EXPECT_EQ(work, expected);
     EXPECT_EQ(store.serialize(), oracle.serialize());
@@ -131,7 +140,105 @@ void CheckColumnWindowPass(FieldPageState& store,
     EXPECT_TRUE(work.empty());
 }
 
+void CheckStagedScentWindow(std::size_t unrelated) {
+    SCOPED_TRACE(unrelated);
+    FieldPageState source, candidate;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    const ScentCell two{std::bit_cast<std::uint64_t>(2.0), 0, 0, 0};
+    ASSERT_TRUE(source.set_scent({0, 0}, one));
+    ASSERT_TRUE(source.set_scent({0, 1}, one));
+    for (std::size_t i = 0; i < unrelated; ++i) {
+        ASSERT_TRUE(source.set_scent({900, static_cast<std::int32_t>(i)}, one));
+    }
+    ASSERT_TRUE(source.set_weather_age({4, 0}, 7));
+    ASSERT_TRUE(source.set_soil({0, 0}, 100));
+    const auto before = source.serialize();
+    // Replace, remove and insert together, including a full global store.
+    const std::array<ScentCell, 4> cells{two, ScentCell{}, one, ScentCell{}};
+    std::map<RegionKey, std::uint64_t> work;
+    for (int pass = 0; pass < 2; ++pass) {
+        ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 2, cells, work));
+        EXPECT_EQ(candidate.scent_capture_visits(), 4u);
+        EXPECT_EQ(candidate.staged_scent_cells(), 3u);
+        EXPECT_EQ(work, (std::map<RegionKey, std::uint64_t>{{{0, 0}, 3}}));
+        EXPECT_TRUE(candidate.scent_cells().empty());
+        EXPECT_TRUE(candidate.pages().empty());
+        EXPECT_TRUE(candidate.weather_clocks().empty());
+        EXPECT_EQ(source.serialize(), before);
+    }
+    {
+        FieldPageState discarded;
+        std::map<RegionKey, std::uint64_t> discarded_work;
+        ASSERT_TRUE(discarded.stage_scent_window(source, {0, 0}, 2, cells, discarded_work));
+    }
+    EXPECT_EQ(source.serialize(), before);
+    const auto expected_work = work;
+    auto invalid = cells;
+    invalid.back()[0] = std::bit_cast<std::uint64_t>(-0.0);
+    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 2, invalid, work));
+    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 0, {}, work));
+    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 129, cells, work));
+    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 2, {}, work));
+    EXPECT_FALSE(candidate.stage_scent_window(
+        source, {std::numeric_limits<std::int32_t>::max(), 0}, 2, cells, work));
+    EXPECT_FALSE(candidate.stage_scent_window(
+        source, {0, std::numeric_limits<std::int32_t>::max()}, 2, cells, work));
+    for (const ScentCellKey outside :
+         {ScentCellKey{16777216, 0}, {0, 16777216}, {-16777218, 0}, {0, -16777218}}) {
+        EXPECT_FALSE(candidate.stage_scent_window(source, outside, 2, cells, work));
+    }
+    if (unrelated == FieldPageState::kMaxScentCells - 2) {
+        const std::array<ScentCell, 4> overflow{two, one, one, one};
+        EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 2, overflow, work));
+    }
+    EXPECT_EQ(work, expected_work);
+    EXPECT_EQ(candidate.staged_scent_cells(), 3u);
+    EXPECT_EQ(candidate.scent_capture_visits(), 4u);
+    EXPECT_EQ(source.serialize(), before);
+    auto expected = source;
+    std::map<RegionKey, std::uint64_t> expected_capture;
+    ASSERT_TRUE(expected.capture_scent_window({0, 0}, 2, cells, expected_capture));
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.serialize(), expected.serialize());
+    EXPECT_EQ(candidate.staged_scent_cells(), 0u);
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.serialize(), expected.serialize());
+    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 2, cells, work));
+    EXPECT_TRUE(work.empty());
+    EXPECT_EQ(candidate.staged_scent_cells(), 0u);
+    EXPECT_EQ(candidate.scent_capture_visits(), 4u);
+    candidate.clear();
+    EXPECT_EQ(candidate.scent_capture_visits(), 0u);
+}
+
+void CheckStagedScentEdges() {
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    for (const ScentCellKey origin :
+         {ScentCellKey{16777215, 0}, {-16777217, 0}, {0, 16777215}, {0, -16777217}}) {
+        FieldPageState source, candidate, expected;
+        std::array<ScentCell, 4> cells{};
+        cells[origin.x < 0 ? 2u : origin.z < 0 ? 1u : 0u] = one;
+        std::map<RegionKey, std::uint64_t> work, expected_work;
+        ASSERT_TRUE(expected.capture_scent_window(origin, 2, cells, expected_work));
+        ASSERT_TRUE(candidate.stage_scent_window(source, origin, 2, cells, work));
+        EXPECT_EQ(work, expected_work);
+        source.adopt_scent_state(candidate);
+        EXPECT_EQ(source.serialize(), expected.serialize());
+    }
+}
+
 } // namespace
+
+TEST(FieldPageStateTest, StagedScentPublishesOnlyChangedCellsWithBoundedVisits) {
+    for (const std::size_t unrelated :
+         {std::size_t{0}, std::size_t{2048}, FieldPageState::kMaxScentCells - 2}) {
+        ASSERT_NO_FATAL_FAILURE(CheckStagedScentWindow(unrelated));
+    }
+}
+
+TEST(FieldPageStateTest, StagedScentPreservesDomainEdges) {
+    ASSERT_NO_FATAL_FAILURE(CheckStagedScentEdges());
+}
 
 TEST(FieldPageStateTest, RegionOfCellFloorsAndSplitsAtRegionEdges) {
     EXPECT_EQ(FieldPageState::region_of_cell(0, 0), (RegionKey{0, 0}));

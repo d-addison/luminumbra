@@ -2078,6 +2078,7 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
     m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
     if (fields) {
         m_fieldPages.adopt_weather_state(*fields);
+        m_fieldPages.adopt_scent_state(*fields);
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
     }
     m_regionCompletedWork.clear();
@@ -4139,20 +4140,21 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                 cells[static_cast<std::size_t>(x) * kScentFieldCells + static_cast<std::size_t>(z)]
                      [static_cast<std::size_t>(channel)] =
                          std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
-    if (!fields)
-        fields = m_fieldPages;
+    if (!fields) {
+        fields.emplace();
+        fields->begin_weather_update(m_fieldPages);
+    }
     std::map<RegionKey, std::uint64_t> work;
-    if (!fields->capture_scent_window({static_cast<std::int32_t>(ScentDomainOrigin(true)),
-                                       static_cast<std::int32_t>(ScentDomainOrigin(false))},
-                                      kScentFieldCells,
-                                      cells,
-                                      work))
+    if (!fields->stage_scent_window(m_fieldPages,
+                                    {static_cast<std::int32_t>(ScentDomainOrigin(true)),
+                                     static_cast<std::int32_t>(ScentDomainOrigin(false))},
+                                    kScentFieldCells,
+                                    cells,
+                                    work))
         throw std::runtime_error("Regional scent admission failed");
     for (const auto& [owner, updates] : work)
         m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
     m_regionalFieldView = &*fields;
-    if (!m_regionalFieldsBound)
-        BindRegionalFieldQueries();
 }
 
 bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {

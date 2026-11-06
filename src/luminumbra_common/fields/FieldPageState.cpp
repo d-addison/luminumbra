@@ -1095,6 +1095,74 @@ bool FieldPageState::capture_scent_window(ScentCellKey origin,
     work.swap(completed);
     return true;
 }
+bool FieldPageState::stage_scent_window(const FieldPageState& source,
+                                        ScentCellKey origin,
+                                        int side,
+                                        std::span<const ScentCell> cells,
+                                        std::map<RegionKey, std::uint64_t>& work) {
+    if (side < 1 || side > 128 ||
+        cells.size() != static_cast<std::size_t>(side) * static_cast<std::size_t>(side) ||
+        origin.x > std::numeric_limits<std::int32_t>::max() - (side - 1) ||
+        origin.z > std::numeric_limits<std::int32_t>::max() - (side - 1)) {
+        return false;
+    }
+    if (origin.x >= kScentLimit || origin.z >= kScentLimit ||
+        origin.x + (side - 1) < -kScentLimit || origin.z + (side - 1) < -kScentLimit) {
+        return false;
+    }
+    std::map<ScentCellKey, ScentCell> changes;
+    std::map<RegionKey, std::uint64_t> completed;
+    std::size_t added = 0, removed = 0, visits = 0;
+    for (int x = 0; x < side; ++x) {
+        auto found = source.m_scent.lower_bound({origin.x + x, origin.z});
+        for (int z = 0; z < side; ++z) {
+            ++visits;
+            const ScentCellKey key{origin.x + x, origin.z + z};
+            const auto& values =
+                cells[static_cast<std::size_t>(x) * static_cast<std::size_t>(side) +
+                      static_cast<std::size_t>(z)];
+            const bool exists = found != source.m_scent.end() && found->first == key;
+            const auto current = exists ? found++ : source.m_scent.end();
+            const bool zero =
+                std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+            if ((exists && current->second == values) || (!exists && zero)) {
+                continue;
+            }
+            if (!ValidScent(key, values)) {
+                return false;
+            }
+            added += static_cast<std::size_t>(!exists);
+            removed += static_cast<std::size_t>(zero);
+            changes.emplace_hint(changes.end(), key, values);
+            ++completed[region_of_scent_cell(key)];
+        }
+    }
+    if (added > kMaxScentCells - (source.m_scent.size() - removed)) {
+        return false;
+    }
+    m_scentUpdates.swap(changes);
+    m_scentCaptureVisits = visits;
+    work.swap(completed);
+    return true;
+}
+
+void FieldPageState::adopt_scent_state(FieldPageState& staged) noexcept {
+    for (auto change = staged.m_scentUpdates.begin(); change != staged.m_scentUpdates.end();) {
+        const auto current = change++;
+        const bool zero = std::all_of(
+            current->second.begin(), current->second.end(), [](auto bits) { return bits == 0; });
+        if (zero) {
+            m_scent.erase(current->first);
+            staged.m_scentUpdates.erase(current);
+        } else if (const auto found = m_scent.find(current->first); found != m_scent.end()) {
+            found->second = current->second;
+            staged.m_scentUpdates.erase(current);
+        } else {
+            m_scent.insert(staged.m_scentUpdates.extract(current));
+        }
+    }
+}
+
 RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
     return {static_cast<std::int32_t>(
                 FloorDiv(static_cast<std::int64_t>(key.x) * 1000 + 500, kRegionMm)),

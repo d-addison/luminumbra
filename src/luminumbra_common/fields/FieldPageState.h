@@ -99,6 +99,8 @@ public:
         m_stagedWeatherRecords = m_weatherValidationVisits = 0;
         invalidate_weather_cache();
         m_scent.clear();
+        m_scentUpdates.clear();
+        m_scentCaptureVisits = 0;
         m_soil = {};
         m_irrigation = {};
     }
@@ -179,6 +181,22 @@ public:
                               int side,
                               std::span<const ScentCell> cells,
                               std::map<RegionKey, std::uint64_t>& work);
+    // Stage only changed near-window cells against live authority, including zero removals.
+    // Refusal leaves the candidate and work untouched. Source scent must stay unchanged until
+    // commit.
+    bool stage_scent_window(const FieldPageState& source,
+                            ScentCellKey origin,
+                            int side,
+                            std::span<const ScentCell> cells,
+                            std::map<RegionKey, std::uint64_t>& work);
+    // Commit preallocated nodes after completed-work admission; no full-store copy or allocation.
+    void adopt_scent_state(FieldPageState& staged) noexcept;
+    [[nodiscard]] std::size_t staged_scent_cells() const {
+        return m_scentUpdates.size();
+    }
+    [[nodiscard]] std::size_t scent_capture_visits() const {
+        return m_scentCaptureVisits;
+    }
     [[nodiscard]] static RegionKey region_of_scent_cell(ScentCellKey key);
     [[nodiscard]] bool owns_evolution_state(RegionKey key) const;
 
@@ -268,6 +286,9 @@ private:
         m_weatherCacheValid = false;
     }
     std::map<ScentCellKey, ScentCell> m_scent;
+    // Runtime candidate changes, never serialized or included in authority hashes.
+    std::map<ScentCellKey, ScentCell> m_scentUpdates;
+    std::size_t m_scentCaptureVisits = 0;
     FoliageFieldPages m_soil, m_irrigation;
 };
 
