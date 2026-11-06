@@ -5343,6 +5343,9 @@ int main(int argc, char* argv[]) {
                                                               streaming_position,
                                                               gameSession->GetPhysicsSystem(),
                                                               advance_frame_simulation);
+                        // Water ran inside update(): publish its ownership now, so the next
+                        // tick's scheduler and any save or hash read see a settled frame.
+                        gameSession->GetWorldSystem()->sync_water_authority();
                     }
                     rb_stream_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - _rb_stream_t0)

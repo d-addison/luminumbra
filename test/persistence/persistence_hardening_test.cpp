@@ -1158,7 +1158,6 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
         std::ostringstream digest;
         digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
         EXPECT_EQ(digest.str(), P::StableChecksum(canonical.dump(4) + '\n'));
-        EXPECT_EQ(hasher.value(), hasher.value());
     };
     verify();
     for (const auto& chunk : {first, second}) {
