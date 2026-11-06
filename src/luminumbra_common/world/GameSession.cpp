@@ -104,6 +104,7 @@
 #include <system_error>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <bit>
 #include <chrono>
 
 #include <filesystem>
@@ -326,6 +327,8 @@ void GameSession::ResetWorldSystems() {
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_regionalFieldView = nullptr;
+    m_regionalFieldsBound = false;
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
@@ -358,7 +361,7 @@ luminumbra::sim::WeatherEventState GameSession::CurrentWeatherEvent() const {
     if (!m_weatherEventsEnabled) {
         return luminumbra::sim::WeatherEventState{};
     }
-    const std::uint64_t seed = static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)) + 25ull;
+    const std::uint64_t seed = static_cast<std::uint64_t>(m_numericSeed) + 25ull;
     return luminumbra::sim::WeatherEventAt(GetSimulationTickCount(), seed);
 }
 
@@ -587,6 +590,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     return i + 1;
             }
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
+            m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
@@ -867,7 +871,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     const auto repro = luminumbra::ai::RunMatingResolveOnTick(
                         m_registry,
                         current_tick,
-                        static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
+                        static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
                         m_speciesTable.get());
                     if (repro.born > 0) {
@@ -888,6 +892,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                            static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
                                Systems::kWeatherExtentCells;
                 });
+                StepRegionalWeather(scheduled_fields, current_tick);
                 m_weatherSystem->UpdateFromClock(
                     current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
             } else {
@@ -1294,6 +1299,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             else
                 m_simulationEventBus.drain(current_tick);
             budget.Finish();
+            m_regionalFieldView = nullptr;
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
@@ -1582,11 +1588,12 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
+    m_numericSeed = StringToSeed(m_metadata.seed);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
+    const int world_seed = static_cast<int>(m_numericSeed);
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
                          m_metadata.worldType,
                          params.height_offset,
@@ -1832,6 +1839,7 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved.preset_json);
     m_metadata = saved.metadata;
+    m_numericSeed = static_cast<std::uint32_t>(prepared.world_seed);
     m_renderCalendar = loaded.render_calendar;
     if (m_activeRegionsEnabled) {
         m_worldClock = loaded.clock;
@@ -1974,24 +1982,133 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                     m_activeRegionsEnabled ? m_regionSchedule.due.size() : 0);
 }
 
+namespace {
+
+bool HasDueWeatherBoundary(RegionKey owner,
+                           const FieldPageState& fields,
+                           const std::map<RegionKey, ActiveRegionRecord>& records,
+                           const std::set<RegionKey>& scheduled_due,
+                           std::uint64_t tick,
+                           std::size_t& visits) {
+    const auto source = records.find(owner);
+    const auto* weather = fields.owner_weather(owner);
+    if (source == records.end() || source->second.state == RegionState::Frozen || !weather) {
+        return false;
+    }
+    for (const auto& storm : weather->storms) {
+        ++visits;
+        const float x = std::bit_cast<float>(storm.center_x) +
+                        std::bit_cast<float>(storm.velocity_x) * (1.0f / 30.0f);
+        const float z = std::bit_cast<float>(storm.center_z) +
+                        std::bit_cast<float>(storm.velocity_z) * (1.0f / 30.0f);
+        if (!std::isfinite(x) || !std::isfinite(z) || x < -16777216.0f || x >= 16777216.0f ||
+            z < -16777216.0f || z >= 16777216.0f) {
+            continue;
+        }
+        const RegionKey target{
+            static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+            static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+        if (target == owner || !scheduled_due.contains(target)) {
+            continue;
+        }
+        auto shift = source->second.cadence_shift;
+        bool eligible = true;
+        for (const auto witness :
+             {target, RegionKey{target.x, owner.z}, RegionKey{owner.x, target.z}}) {
+            const auto record = records.find(witness);
+            if (record == records.end() || record->second.state == RegionState::Frozen) {
+                eligible = false;
+                break;
+            }
+            shift = std::max(shift, record->second.cadence_shift);
+        }
+        if (eligible && shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint64_t tick) {
-    // Hosts without a world or ambient pages do no field work or allocation.
-    if (!m_activeRegionsEnabled || !m_worldSystem || m_fieldPages.page_count() == 0)
+    m_regionalWeatherProjectionCount = 0;
+    m_regionalWeatherScanCount = 0;
+    m_regionalWeatherProjectionVisitCount = 0;
+    // Empty authority retains the legacy weather path, including its save bytes.
+    if (!m_activeRegionsEnabled || !m_worldSystem || m_fieldPages.empty())
         return std::nullopt;
     const auto& records = m_activeRegionLedger.records();
+    const auto refresh_boundary = [this](RegionKey changed) {
+        // Stored velocity is capped at 32 m/s, so only immediate neighbours can target it.
+        for (std::int32_t dz = -1; dz <= 1; ++dz) {
+            for (std::int32_t dx = -1; dx <= 1; ++dx) {
+                const RegionKey owner{changed.x + dx, changed.z + dz};
+                UpdateRegionalWeatherBoundaryOwner(owner, m_fieldPages);
+            }
+        }
+    };
+    for (const auto& transition : m_regionSchedule.transitions) {
+        refresh_boundary(transition.key);
+    }
     const auto& due = m_regionSchedule.due;
-    const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
-    if (previous.page_count() == 0)
+    for (const auto owner : due) {
+        // Newly admitted active records have no state transition. Admissions can occur at
+        // the preceding event boundary or while scheduling the current tick's anchors.
+        const auto found = records.find(owner);
+        if (found != records.end() && found->second.first_active >= tick - 1) {
+            refresh_boundary(owner);
+        }
+    }
+    const bool weather_due = std::any_of(due.begin(), due.end(), [this](RegionKey owner) {
+        return m_fieldPages.owns_weather(owner);
+    });
+    const bool boundary_due = [&] {
+        std::set<RegionKey> scheduled_due;
+        for (const auto& [shift, owners] : m_regionalWeatherBoundaryOwners) {
+            if (due.empty() || shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0) {
+                continue;
+            }
+            if (scheduled_due.empty()) {
+                scheduled_due.insert(due.begin(), due.end());
+            }
+            for (const auto owner : owners) {
+                if (HasDueWeatherBoundary(owner,
+                                          m_fieldPages,
+                                          records,
+                                          scheduled_due,
+                                          tick,
+                                          m_regionalWeatherScanCount)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }();
+    if (m_fieldPages.page_count() == 0 && !weather_due && !boundary_due)
+        return std::nullopt;
+    std::set<RegionKey> page_owners(due.begin(), due.end());
+    for (const auto& [shift, owners] : m_regionalAmbientOwners) {
+        if (shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0) {
+            page_owners.insert(owners.begin(), owners.end());
+        }
+    }
+    const std::vector<RegionKey> page_participants(page_owners.begin(), page_owners.end());
+    const auto previous = m_fieldPages.page_count() == 0
+                              ? FieldPageState{}
+                              : m_fieldPages.scheduled_snapshot(page_participants);
+    if (previous.page_count() == 0 && !weather_due && !boundary_due)
         return std::nullopt;
     // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
     // than the whole store. The live state stays untouched even if a later consumer or work
     // publication fails; publication assigns the stepped pages back without allocating.
     auto next = previous;
-    const auto seed =
-        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    const auto seed = static_cast<std::uint64_t>(m_numericSeed);
     const auto work = next.step_scheduled(records, due, seed, tick, &previous);
-    if (work.empty())
+    // A shared physical page can contain only frozen cells. It contributes no candidate work.
+    if (work.empty() && !weather_due && !boundary_due)
         return std::nullopt;
+    next.begin_weather_update(m_fieldPages);
     for (const auto& [owner, updates] : work)
         m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
     return next;
@@ -1999,9 +2116,550 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
 
 void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields) {
     m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
-    if (fields)
+    if (fields) {
+        m_fieldPages.adopt_weather_state(*fields);
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
+    }
     m_regionCompletedWork.clear();
+    // Authority may first appear in a running world. Rebind only at a transition, after
+    // publication has succeeded, and replace any legacy weather projection at that boundary.
+    if ((m_activeRegionsEnabled && !m_fieldPages.empty()) != m_regionalFieldsBound) {
+        BindRegionalFieldQueries();
+        ProjectRegionalWeather(m_worldClock.tick(), false);
+    }
+}
+
+FieldPageView GameSession::RegionalFields() const {
+    return {m_fieldPages, m_regionalFieldView};
+}
+
+std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& position) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.z) || position.x < -16777216.0f ||
+        position.x >= 16777216.0f || position.z < -16777216.0f || position.z >= 16777216.0f)
+        return 0;
+    const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(position.x) / 24.0));
+    const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(position.z) / 24.0));
+    std::uint16_t value = 0;
+    if (RegionalFields().sample(channel, x, z, value))
+        return value;
+    const auto seed = static_cast<std::uint64_t>(m_numericSeed);
+    return FieldPageState::seed_value(
+        seed, channel, x, z, m_worldClock.tick() / FieldPageState::kCadenceTicks);
+}
+
+std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather) const {
+    auto bytes = RegionalFields().ambient_bytes(channels, weather);
+    // Anchor diagnostics belong to the ambient slots, not the per-owner freeze digest.
+    bytes += "|ambient_anchor:";
+    for (const float coordinate : {m_ambientFieldAnchor.x, m_ambientFieldAnchor.z}) {
+        const auto bits = std::bit_cast<std::uint32_t>(coordinate);
+        for (int i = 0; i < 4; ++i)
+            bytes.push_back(static_cast<char>((bits >> (8 * i)) & 255));
+    }
+    return Persistence::StableChecksum(bytes);
+}
+
+void GameSession::BindRegionalFieldQueries() {
+    if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
+        return;
+    const bool regional = m_activeRegionsEnabled && !m_fieldPages.empty();
+    if (!regional) {
+        m_regionalWeatherBoundaryOwners.clear();
+        m_regionalWeatherBoundaryShifts.clear();
+        m_regionalAmbientOwners.clear();
+        m_windFieldSystem->BindRegionalBackend({}, {});
+        m_weatherSystem->BindRegionalBackend({}, {});
+        m_aetherFieldSystem->BindRegionalBackend({}, {});
+        m_regionalFieldsBound = false;
+        return;
+    }
+    m_regionalFieldsBound = true;
+    m_windFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position, Systems::WindLayer layer) {
+            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                                : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                                    : 4.0f;
+            return Vec2(static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+                            (scale / 1024.0f),
+                        static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+                            (scale / 1024.0f));
+        },
+        [this] { return RegionalAmbientHash(3, false); });
+    m_weatherSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            Systems::WeatherSample sample;
+            const auto moisture = SampleRegionalChannel(2, position);
+            const auto front = SampleRegionalChannel(3, position);
+            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                              : front < 26214 ? Systems::WeatherCategory::Overcast
+                              : front < 39321 ? Systems::WeatherCategory::Rain
+                              : front < 52428 ? Systems::WeatherCategory::Snow
+                                              : Systems::WeatherCategory::Fog;
+            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                              sample.category == Systems::WeatherCategory::Snow
+                                          ? static_cast<float>(moisture) / 65535.0f
+                                          : 0.0f;
+            sample.wind = m_windFieldSystem->SampleWind(position);
+            return sample;
+        },
+        [this] { return RegionalAmbientHash(12, true); });
+    m_aetherFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+        },
+        [this] { return RegionalAmbientHash(16, false); });
+}
+
+namespace {
+
+Systems::StormCell ProjectStorm(const RegionalStorm& storm) {
+    return {Vec2(std::bit_cast<float>(storm.center_x), std::bit_cast<float>(storm.center_z)),
+            Vec2(std::bit_cast<float>(storm.velocity_x), std::bit_cast<float>(storm.velocity_z)),
+            std::bit_cast<float>(storm.intensity),
+            storm.spawn_tick,
+            storm.lifetime_ticks,
+            storm.seed_salt};
+}
+
+bool SameStormProjection(const RegionalStorm& a, const RegionalStorm& b) {
+    return a.center_x == b.center_x && a.center_z == b.center_z && a.velocity_x == b.velocity_x &&
+           a.velocity_z == b.velocity_z && a.intensity == b.intensity &&
+           a.spawn_tick == b.spawn_tick && a.lifetime_ticks == b.lifetime_ticks &&
+           a.seed_salt == b.seed_salt;
+}
+
+Systems::StrikeEvent ProjectStrike(const RegionalStrike& strike) {
+    return {strike.strike_tick,
+            std::bit_cast<float>(strike.world_x),
+            std::bit_cast<float>(strike.world_z),
+            std::bit_cast<float>(strike.magnitude),
+            strike.storm_salt};
+}
+
+} // namespace
+
+void GameSession::UpdateRegionalWeatherBoundaryOwner(RegionKey owner,
+                                                     const FieldPageState& fields) {
+    if (const auto previous = m_regionalWeatherBoundaryShifts.find(owner);
+        previous != m_regionalWeatherBoundaryShifts.end()) {
+        const auto bucket = m_regionalWeatherBoundaryOwners.find(previous->second);
+        if (bucket != m_regionalWeatherBoundaryOwners.end()) {
+            bucket->second.erase(owner);
+            if (bucket->second.empty()) {
+                m_regionalWeatherBoundaryOwners.erase(bucket);
+            }
+        }
+        m_regionalWeatherBoundaryShifts.erase(previous);
+    }
+    const auto& records = m_activeRegionLedger.records();
+    const auto source = records.find(owner);
+    for (auto bucket = m_regionalAmbientOwners.begin(); bucket != m_regionalAmbientOwners.end();) {
+        bucket->second.erase(owner);
+        if (bucket->second.empty()) {
+            bucket = m_regionalAmbientOwners.erase(bucket);
+        } else {
+            ++bucket;
+        }
+    }
+    if (source == records.end() || source->second.state == RegionState::Frozen) {
+        return;
+    }
+    if (fields.owned_initialized_cells(owner) != 0) {
+        m_regionalAmbientOwners[source->second.cadence_shift].insert(owner);
+    }
+    const auto* weather = fields.owner_weather(owner);
+    if (!weather) {
+        return;
+    }
+    std::optional<std::uint8_t> first_shift;
+    for (const auto& storm : weather->storms) {
+        ++m_regionalWeatherScanCount;
+        const float x = std::bit_cast<float>(storm.center_x) +
+                        std::bit_cast<float>(storm.velocity_x) * (1.0f / 30.0f);
+        const float z = std::bit_cast<float>(storm.center_z) +
+                        std::bit_cast<float>(storm.velocity_z) * (1.0f / 30.0f);
+        if (!std::isfinite(x) || !std::isfinite(z) || x < -16777216.0f || x >= 16777216.0f ||
+            z < -16777216.0f || z >= 16777216.0f) {
+            continue;
+        }
+        const RegionKey target{
+            static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+            static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+        if (target == owner) {
+            continue;
+        }
+        auto shift = source->second.cadence_shift;
+        bool eligible = true;
+        // Cardinal witnesses also gate a diagonal handover.
+        for (const auto witness :
+             {target, RegionKey{target.x, owner.z}, RegionKey{owner.x, target.z}}) {
+            const auto record = records.find(witness);
+            if (record == records.end() || record->second.state == RegionState::Frozen) {
+                eligible = false;
+                break;
+            }
+            shift = std::max(shift, record->second.cadence_shift);
+        }
+        if (eligible && (!first_shift || shift < *first_shift)) {
+            first_shift = shift;
+        }
+    }
+    if (first_shift) {
+        m_regionalWeatherBoundaryOwners[*first_shift].insert(owner);
+        m_regionalWeatherBoundaryShifts.emplace(owner, *first_shift);
+    }
+}
+
+void GameSession::ProjectRegionalWeather(std::uint64_t tick,
+                                         bool restoring,
+                                         const std::map<RegionKey, std::uint64_t>* work) {
+    if (!m_regionalFieldsBound || !m_weatherSystem) {
+        return;
+    }
+    if (work && m_regionalFieldView) {
+        m_weatherSystem->RevealRegionalStrikeSchedule();
+        const auto& changed = m_regionalFieldView->weather_owners();
+        // Ownership and active age are absent from the projection. Retain identities across
+        // updates and handovers; remove only storms absent from the participating result.
+        for (const auto& [owner, next] : changed) {
+            const auto* previous = m_fieldPages.owner_weather(owner);
+            if (!previous) {
+                continue;
+            }
+            m_regionalWeatherProjectionVisitCount +=
+                previous->storms.size() + previous->strikes.size();
+            for (const auto& storm : previous->storms) {
+                if (!m_regionalFieldView->has_storm_identity(storm.spawn_tick, storm.seed_salt)) {
+                    m_weatherSystem->EraseRegionalStorm({storm.spawn_tick, storm.seed_salt});
+                }
+            }
+            for (const auto& strike : previous->strikes) {
+                if (std::find(next.strikes.begin(), next.strikes.end(), strike) ==
+                    next.strikes.end()) {
+                    m_weatherSystem->EraseRegionalStrike(ProjectStrike(strike));
+                }
+            }
+        }
+        for (const auto& [owner, next] : changed) {
+            const auto* previous = m_fieldPages.owner_weather(owner);
+            m_regionalWeatherProjectionVisitCount += next.storms.size() + next.strikes.size();
+            for (const auto& storm : next.storms) {
+                if (!previous || std::none_of(previous->storms.begin(),
+                                              previous->storms.end(),
+                                              [&](const auto& old) {
+                                                  return SameStormProjection(old, storm);
+                                              })) {
+                    m_weatherSystem->PutRegionalStorm(ProjectStorm(storm));
+                    ++m_regionalWeatherProjectionCount;
+                }
+            }
+            for (const auto& strike : next.strikes) {
+                if (!previous ||
+                    std::find(previous->strikes.begin(), previous->strikes.end(), strike) ==
+                        previous->strikes.end()) {
+                    m_weatherSystem->PutRegionalStrike(ProjectStrike(strike));
+                }
+            }
+        }
+        m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
+        return;
+    }
+    // Bootstrap, restore and fault recovery may flatten all authority outside advancement.
+    std::vector<Systems::StormCell> storms;
+    std::vector<Systems::StrikeEvent> strikes;
+    for (const auto& storm : RegionalFields().storms()) {
+        storms.push_back(ProjectStorm(storm));
+        ++m_regionalWeatherProjectionCount;
+    }
+    for (const auto& strike : RegionalFields().strikes()) {
+        strikes.push_back(ProjectStrike(strike));
+    }
+    m_weatherSystem->AdoptRegionalWeather(
+        tick, m_ambientFieldAnchor, std::move(storms), std::move(strikes), true, restoring);
+    m_regionalWeatherBoundaryOwners.clear();
+    m_regionalWeatherBoundaryShifts.clear();
+    m_regionalAmbientOwners.clear();
+    for (const auto& [owner, record] : m_activeRegionLedger.records()) {
+        (void)record;
+        UpdateRegionalWeatherBoundaryOwner(owner, m_fieldPages);
+    }
+}
+
+void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick) {
+    if (!fields) {
+        if (m_regionalFieldsBound && m_weatherSystem)
+            m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
+        return;
+    }
+    const auto work = AdvanceRegionalWeather(*fields, tick);
+    if (m_weatherSystem) {
+        m_weatherSystem->ResetRegionalProjectionWork();
+    }
+    ProjectRegionalWeather(tick, false, &work);
+    if (m_weatherSystem) {
+        m_regionalWeatherProjectionVisitCount += m_weatherSystem->RegionalProjectionWork();
+    }
+}
+
+std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPageState& fields,
+                                                                       std::uint64_t tick) {
+    // All mutations stay in the tick candidate until completed work is admitted.
+    const auto& records = m_activeRegionLedger.records();
+    const std::set<RegionKey> scheduled_due(m_regionSchedule.due.begin(),
+                                            m_regionSchedule.due.end());
+    auto due_list = m_regionSchedule.due;
+    std::erase_if(due_list, [this](RegionKey owner) {
+        return !m_fieldPages.owns_weather(owner) &&
+               m_fieldPages.owned_initialized_cells(owner) == 0;
+    });
+    std::sort(due_list.begin(), due_list.end());
+    const std::set<RegionKey> due(due_list.begin(), due_list.end());
+    const auto eligible = [&records](RegionKey owner) {
+        const auto found = records.find(owner);
+        return found != records.end() && found->second.state != RegionState::Frozen;
+    };
+    const auto common = [&records, &eligible, tick](RegionKey source, RegionKey destination) {
+        if (!eligible(source) || !eligible(destination))
+            return false;
+        const auto shift =
+            std::max(records.at(source).cadence_shift, records.at(destination).cadence_shift);
+        return shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0;
+    };
+    const auto owner_of = [](float x, float z) {
+        return RegionKey{static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+                         static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+    };
+    const auto mix = [](std::uint64_t value) {
+        value += 0x9e3779b97f4a7c15ull;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+        return value ^ (value >> 31);
+    };
+    const auto unit = [&mix](std::uint64_t key) {
+        return static_cast<float>(mix(key) >> 40) / 16777216.0f;
+    };
+    const auto seed = static_cast<std::uint64_t>(m_numericSeed);
+    std::map<RegionKey, std::uint64_t> work;
+    auto clock_count = fields.weather_clock_count();
+    for (const auto owner : due_list) {
+        ++m_regionalWeatherScanCount;
+        auto& weather = fields.stage_weather_owner(owner);
+        const auto age = weather.clock.value_or(0);
+        if (age + 1 >= WorldClock::kTickLimit ||
+            (!weather.clock && clock_count == FieldPageState::kMaxWeatherClocks)) {
+            throw std::overflow_error("Regional weather clock admission failed");
+        }
+        if (!weather.clock) {
+            ++clock_count;
+        }
+        weather.clock = age + 1;
+        ++work[owner];
+    }
+    // This index contains only non-frozen owners with stored outward displacement.
+    // The source common phase can open independently of its interior phase.
+    for (const auto& [shift, owners] : m_regionalWeatherBoundaryOwners) {
+        if (shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0) {
+            continue;
+        }
+        for (const auto owner : owners) {
+            ++m_regionalWeatherScanCount;
+            if (HasDueWeatherBoundary(owner,
+                                      m_fieldPages,
+                                      records,
+                                      scheduled_due,
+                                      tick,
+                                      m_regionalWeatherScanCount)) {
+                fields.stage_weather_owner(owner);
+            }
+        }
+    }
+    std::vector<RegionalStorm> previous_storms;
+    std::map<RegionKey, std::size_t> strike_counts, storm_counts;
+    auto storm_total = fields.storm_count();
+    auto strike_total = fields.strike_count();
+    for (const auto& [owner, old_weather] : fields.weather_owners()) {
+        (void)old_weather;
+        auto& weather = fields.stage_weather_owner(owner);
+        m_regionalWeatherScanCount += weather.storms.size();
+        for (const auto& storm : weather.storms) {
+            if (!due.contains(owner) || storm.active_age + 1 < storm.lifetime_ticks) {
+                ++storm_counts[owner];
+            } else {
+                --storm_total;
+            }
+        }
+        // Keep an explicit zero reservation for owners whose storms all expired.
+        storm_counts.try_emplace(owner, 0);
+        previous_storms.insert(previous_storms.end(), weather.storms.begin(), weather.storms.end());
+        weather.storms.clear();
+        if (due.contains(owner)) {
+            m_regionalWeatherScanCount += weather.strikes.size();
+            work[owner] += weather.strikes.size();
+            strike_total -= weather.strikes.size();
+            weather.strikes.clear();
+        }
+        strike_counts[owner] = weather.strikes.size();
+    }
+    const auto occupancy = [&fields](auto& counts, RegionKey owner, bool storm) -> std::size_t& {
+        const auto found = counts.find(owner);
+        if (found != counts.end()) {
+            return found->second;
+        }
+        const auto* weather = fields.owner_weather(owner);
+        const auto count = weather ? (storm ? weather->storms.size() : weather->strikes.size()) : 0;
+        return counts.emplace(owner, count).first->second;
+    };
+    std::sort(previous_storms.begin(), previous_storms.end(), [](const auto& a, const auto& b) {
+        return std::pair{a.spawn_tick, a.seed_salt} < std::pair{b.spawn_tick, b.seed_salt};
+    });
+    std::set<std::pair<std::uint64_t, std::uint32_t>> identities;
+    for (auto storm : previous_storms) {
+        ++m_regionalWeatherScanCount;
+        const auto source = storm.owner;
+        if (!eligible(source)) {
+            identities.emplace(storm.spawn_tick, storm.seed_salt);
+            fields.stage_weather_owner(source).storms.push_back(storm);
+            continue;
+        }
+        const bool interior_due = due.contains(source);
+        float x = std::bit_cast<float>(storm.center_x), z = std::bit_cast<float>(storm.center_z);
+        float vx = std::bit_cast<float>(storm.velocity_x),
+              vz = std::bit_cast<float>(storm.velocity_z);
+        if (interior_due) {
+            ++storm.active_age;
+            ++work[source];
+            if (storm.active_age >= storm.lifetime_ticks)
+                continue;
+            const auto wind =
+                m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+            vx = wind.x;
+            vz = wind.y;
+            storm.velocity_x = std::bit_cast<std::uint32_t>(vx);
+            storm.velocity_z = std::bit_cast<std::uint32_t>(vz);
+            const auto remaining = storm.lifetime_ticks - storm.active_age;
+            const float intensity =
+                std::min(1.0f, static_cast<float>(std::min(storm.active_age, remaining)) / 45.0f);
+            storm.intensity = std::bit_cast<std::uint32_t>(intensity);
+        }
+        float px = x + vx * (1.0f / 30.0f), pz = z + vz * (1.0f / 30.0f);
+        // Discard blocked displacement; no hidden accumulated motion. World limits are sealed.
+        const bool valid_position = std::isfinite(px) && std::isfinite(pz) && px >= -16777216.0f &&
+                                    px < 16777216.0f && pz >= -16777216.0f && pz < 16777216.0f;
+        const auto destination = valid_position ? owner_of(px, pz) : source;
+        bool transfer = valid_position && destination != source &&
+                        scheduled_due.contains(destination) && common(source, destination);
+        if (transfer && destination.x != source.x && destination.z != source.z)
+            transfer = common(source, {destination.x, source.z}) &&
+                       common(source, {source.x, destination.z});
+        transfer = transfer &&
+                   occupancy(storm_counts, destination, true) < FieldPageState::kMaxOwnerStorms;
+        if (transfer) {
+            --storm_counts[source];
+            ++storm_counts[destination];
+            storm.owner = destination;
+            ++work[source];
+            ++work[destination];
+        } else if (interior_due) {
+            const float low_x = static_cast<float>(source.x) * 512.0f;
+            const float low_z = static_cast<float>(source.z) * 512.0f;
+            px = valid_position ? std::clamp(px, low_x, std::nextafter(low_x + 512.0f, low_x)) : x;
+            pz = valid_position ? std::clamp(pz, low_z, std::nextafter(low_z + 512.0f, low_z)) : z;
+        } else {
+            px = x;
+            pz = z;
+        }
+        storm.center_x = std::bit_cast<std::uint32_t>(px);
+        storm.center_z = std::bit_cast<std::uint32_t>(pz);
+        // Strike cadence follows the storm's own active age, not elapsed absolute ticks.
+        const float intensity = std::bit_cast<float>(storm.intensity);
+        if (interior_due && storm.active_age % 18 == 0 && intensity >= 0.45f) {
+            auto key = mix((seed + 40) ^ 0x535452494b455300ull ^
+                           (static_cast<std::uint64_t>(storm.seed_salt) * 0x9e3779b97f4a7c15ull));
+            key = mix(key ^ ((storm.active_age / 18) * 0xff51afd7ed558ccdull));
+            if (unit(key) < 0.4f * intensity) {
+                const float sx = px + (unit(key ^ 0x1111222233334444ull) * 2.0f - 1.0f) * 180.0f;
+                const float sz = pz + (unit(key ^ 0x5555666677778888ull) * 2.0f - 1.0f) * 180.0f;
+                if (std::isfinite(sx) && std::isfinite(sz) && sx >= -16777216.0f &&
+                    sx < 16777216.0f && sz >= -16777216.0f && sz < 16777216.0f) {
+                    const auto target = owner_of(sx, sz);
+                    // A target already holding its strike maximum drops this strike
+                    // deterministically.
+                    if (eligible(target) &&
+                        (target == storm.owner || common(storm.owner, target)) &&
+                        occupancy(strike_counts, target, false) <
+                            FieldPageState::kMaxOwnerStrikes &&
+                        strike_total < FieldPageState::kMaxStrikes) {
+                        const float magnitude = std::min(
+                            1.0f, 0.55f * intensity + 0.45f * unit(key ^ 0x99990000aaaabbbbull));
+                        fields.stage_weather_owner(target).strikes.push_back(
+                            {target,
+                             tick,
+                             std::bit_cast<std::uint32_t>(sx),
+                             std::bit_cast<std::uint32_t>(sz),
+                             std::bit_cast<std::uint32_t>(magnitude),
+                             storm.seed_salt,
+                             0});
+                        ++strike_counts[target];
+                        ++strike_total;
+                        ++work[storm.owner];
+                        if (target != storm.owner)
+                            ++work[target];
+                    }
+                }
+            }
+        }
+        identities.emplace(storm.spawn_tick, storm.seed_salt);
+        fields.stage_weather_owner(storm.owner).storms.push_back(storm);
+    }
+    for (const auto owner : due_list) {
+        if (storm_counts[owner] >= FieldPageState::kMaxOwnerStorms ||
+            storm_total >= FieldPageState::kMaxStorms)
+            continue;
+        const auto age = fields.stage_weather_owner(owner).clock.value_or(0);
+        if (age % 45 != 0)
+            continue;
+        auto key = mix((seed + 40) ^ 0x535041574e000000ull ^ ((age / 45) * 0x100000001b3ull));
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.x)) * 0x9e3779b1u;
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.z)) * 0x85ebca77u;
+        if (unit(key) >= 0.55f)
+            continue;
+        const float x = static_cast<float>(owner.x) * 512.0f + 256.0f +
+                        (unit(key ^ 0xaaaa5555ull) * 2.0f - 1.0f) * 204.8f;
+        const float z = static_cast<float>(owner.z) * 512.0f + 256.0f +
+                        (unit(key ^ 0x5555aaaaull) * 2.0f - 1.0f) * 204.8f;
+        const auto wind = m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+        const auto salt = static_cast<std::uint32_t>(mix(key ^ 0xc0ffeeull));
+        if (fields.has_storm_identity(tick, salt) || !identities.emplace(tick, salt).second) {
+            continue;
+        }
+        fields.stage_weather_owner(owner).storms.push_back({owner,
+                                                            std::bit_cast<std::uint32_t>(x),
+                                                            std::bit_cast<std::uint32_t>(z),
+                                                            std::bit_cast<std::uint32_t>(wind.x),
+                                                            std::bit_cast<std::uint32_t>(wind.y),
+                                                            0,
+                                                            tick,
+                                                            240,
+                                                            salt,
+                                                            0});
+        ++storm_counts[owner];
+        ++storm_total;
+        ++work[owner];
+    }
+    if (!fields.prepare_weather_update()) {
+        throw std::runtime_error("Regional weather state admission failed");
+    }
+    m_regionalWeatherScanCount += fields.weather_validation_visits();
+    for (const auto& [owner, weather] : fields.weather_owners()) {
+        (void)weather;
+        UpdateRegionalWeatherBoundaryOwner(owner, fields);
+    }
+    for (const auto& [owner, updates] : work)
+        m_regionCompletedWork.push_back({owner, 0, 0, 0, updates});
+    return work;
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
@@ -2018,6 +2676,7 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
     m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
 void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& message) {
+    m_regionalFieldView = nullptr;
     if (m_regionFault)
         return; // first fault wins
     m_regionFault = RegionSchedulerFault{tick, message};
@@ -2435,6 +3094,9 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 }
 
 void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
+    BindRegionalFieldQueries();
+    if (m_regionalFieldsBound)
+        ProjectRegionalWeather(tick, true);
     if (m_weatherSystem && m_windFieldSystem)
         m_weatherSystem->RestoreAtTick(tick, m_ambientFieldAnchor, *m_windFieldSystem);
     if (m_aetherFieldSystem)
@@ -3292,6 +3954,7 @@ bool GameSession::ReadPreparedWorldState(
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
     // All refusing readers have passed; publish the staged state together.
     m_lastLoadedChunkCount = 0;
+    m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;
     if (saved.ledger) {
         m_ambientFieldAnchor = saved.ambient_anchor.value_or(m_metadata.spawnPoint);
@@ -3315,7 +3978,6 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);
-    m_fieldPages = std::move(saved.field_pages);
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world

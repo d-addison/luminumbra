@@ -9,8 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -79,8 +81,8 @@ public:
                                                   std::uint64_t epoch);
 
     [[nodiscard]] bool empty() const {
-        return m_pages.empty() && m_storms.empty() && m_strikes.empty() && m_scent.empty() &&
-               m_weatherClocks.empty() && m_soil.empty() && m_irrigation.empty();
+        return m_pages.empty() && storm_count() == 0 && strike_count() == 0 && m_scent.empty() &&
+               weather_clock_count() == 0 && m_soil.empty() && m_irrigation.empty();
     }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
@@ -90,28 +92,57 @@ public:
     }
     void clear() {
         m_pages.clear();
-        m_storms.clear();
-        m_strikes.clear();
-        m_ownerStorms.clear();
-        m_ownerStrikes.clear();
+        m_weatherOwners.clear();
+        m_stormIdentities.clear();
+        m_stormCount = m_strikeCount = m_clockCount = 0;
+        m_weatherBase = nullptr;
+        m_stagedWeatherRecords = m_weatherValidationVisits = 0;
+        invalidate_weather_cache();
         m_scent.clear();
-        m_weatherClocks.clear();
         m_soil = {};
         m_irrigation = {};
     }
 
-    [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
-        return m_storms;
-    }
-    [[nodiscard]] const std::vector<RegionalStrike>& strikes() const {
-        return m_strikes;
-    }
+    struct OwnerWeather {
+        std::vector<RegionalStorm> storms;
+        std::vector<RegionalStrike> strikes;
+        std::optional<std::uint64_t> clock;
+    };
+    using StormIdentity = std::tuple<std::uint64_t, std::uint32_t>;
+    // Flattening is a diagnostic/persistence operation; advancement uses owner_weather.
+    [[nodiscard]] const std::vector<RegionalStorm>& storms() const;
+    [[nodiscard]] const std::vector<RegionalStrike>& strikes() const;
+    [[nodiscard]] const std::map<RegionKey, std::uint64_t>& weather_clocks() const;
     [[nodiscard]] const std::map<ScentCellKey, ScentCell>& scent_cells() const {
         return m_scent;
     }
-    [[nodiscard]] const std::map<RegionKey, std::uint64_t>& weather_clocks() const {
-        return m_weatherClocks;
+    [[nodiscard]] const OwnerWeather* owner_weather(RegionKey owner) const;
+    [[nodiscard]] bool owns_weather(RegionKey owner) const;
+    [[nodiscard]] std::span<const std::size_t> storm_indices(RegionKey owner) const;
+    [[nodiscard]] std::size_t storm_count() const {
+        return m_stormCount;
     }
+    [[nodiscard]] std::size_t strike_count() const {
+        return m_strikeCount;
+    }
+    [[nodiscard]] std::size_t weather_clock_count() const {
+        return m_clockCount;
+    }
+    [[nodiscard]] std::size_t staged_weather_records() const {
+        return m_stagedWeatherRecords;
+    }
+    [[nodiscard]] std::size_t weather_validation_visits() const {
+        return m_weatherValidationVisits;
+    }
+    [[nodiscard]] const std::map<RegionKey, OwnerWeather>& weather_owners() const {
+        return m_weatherOwners;
+    }
+    // Begin on an empty weather candidate. The live source must outlive the candidate.
+    // All mutation/allocation precedes completed-work admission.
+    void begin_weather_update(const FieldPageState& source);
+    OwnerWeather& stage_weather_owner(RegionKey owner);
+    bool prepare_weather_update();
+    [[nodiscard]] bool has_storm_identity(std::uint64_t tick, std::uint32_t salt) const;
     static constexpr std::int32_t kSoilBaseline = 1000000, kIrrigationLimit = 4000000;
     [[nodiscard]] const FoliageFieldPages& soil() const {
         return m_soil;
@@ -131,10 +162,11 @@ public:
     }
     bool set_weather_age(RegionKey owner, std::uint64_t active_age);
     // Transactional admission, canonical ordering and bounded exact-state validation.
-    bool replace_weather(std::vector<RegionalStorm> storms, std::vector<RegionalStrike> strikes);
-    bool replace_weather(std::vector<RegionalStorm> storms,
-                         std::vector<RegionalStrike> strikes,
-                         std::map<RegionKey, std::uint64_t> clocks);
+    bool replace_weather(const std::vector<RegionalStorm>& storms,
+                         const std::vector<RegionalStrike>& strikes);
+    bool replace_weather(const std::vector<RegionalStorm>& storms,
+                         const std::vector<RegionalStrike>& strikes,
+                         const std::map<RegionKey, std::uint64_t>& clocks);
     bool set_scent(ScentCellKey key, const ScentCell& values);
     // Same admissions as set_scent, committed together. Keys must be strictly ordered by
     // (z, x), as in the near-domain capture. Only newly admitted cells allocate map nodes.
@@ -188,11 +220,18 @@ public:
                    std::uint64_t tick,
                    const FieldPageState* previous_tick = nullptr);
 
+    // Runtime callers supply indexed participating owners, avoiding a ledger-wide discovery pass.
+    [[nodiscard]] FieldPageState scheduled_snapshot(std::span<const RegionKey> participants) const;
+
     // Commits the stepped pages of a scheduled-step candidate built from scheduled_snapshot.
     // Overwrites exactly the pages held by `staged` and leaves every other page and all
     // evolution state untouched. Allocation-free and non-throwing: it only assigns values into
     // pages that already exist.
     void adopt_scheduled_pages(FieldPageState&& staged) noexcept;
+    // Full weather copy for diagnostic callers; advancement uses begin_weather_update.
+    void copy_weather_from(const FieldPageState& source);
+    // Commit validated candidate weather together with its indices, without allocating.
+    void adopt_weather_state(FieldPageState& staged) noexcept;
 
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
@@ -201,7 +240,9 @@ public:
     static bool parse(const std::string& bytes, FieldPageState& out, std::string& error);
     // "" when empty, otherwise "field_pages:v2:" + serialize().
     [[nodiscard]] std::string canonical_bytes() const;
-    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool weather = false) const;
+    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels,
+                                            bool weather = false,
+                                            const FieldPageState* overlay = nullptr) const;
     // For every owned initialized cell in cells_of_region order: i32 cell_x, i32 cell_z, then
     // kChannels u16 (all little endian). When the region owns storms, strikes, scent cells or a
     // weather clock, an "|evolution:v2:" suffix follows with those sections. "" only when the
@@ -211,14 +252,56 @@ public:
 
 private:
     std::map<FieldPageKey, FieldPage> m_pages;
-    std::vector<RegionalStorm> m_storms;
-    std::vector<RegionalStrike> m_strikes;
-    // Indices retain canonical vector order, bounded by kMaxStorms/kMaxStrikes in total and
-    // kMaxOwnerStorms/kMaxOwnerStrikes per owner. Rebuilt atomically with weather admission.
-    std::map<RegionKey, std::vector<std::size_t>> m_ownerStorms, m_ownerStrikes;
+    std::map<RegionKey, OwnerWeather> m_weatherOwners;
+    std::map<StormIdentity, RegionKey> m_stormIdentities;
+    std::size_t m_stormCount = 0, m_strikeCount = 0, m_clockCount = 0;
+    const FieldPageState* m_weatherBase = nullptr;
+    std::size_t m_stagedWeatherRecords = 0, m_weatherValidationVisits = 0;
+    // These caches are never authority and are never built during advancement.
+    mutable bool m_weatherCacheValid = false;
+    mutable std::vector<RegionalStorm> m_storms;
+    mutable std::vector<RegionalStrike> m_strikes;
+    mutable std::map<RegionKey, std::uint64_t> m_weatherClocks;
+    mutable std::map<RegionKey, std::vector<std::size_t>> m_ownerStorms;
+    void flatten_weather() const;
+    void invalidate_weather_cache() {
+        m_weatherCacheValid = false;
+    }
     std::map<ScentCellKey, ScentCell> m_scent;
-    std::map<RegionKey, std::uint64_t> m_weatherClocks;
     FoliageFieldPages m_soil, m_irrigation;
+};
+
+// Borrowed tick view: candidate pages and staged weather owners override live authority.
+// Neither store is copied or modified. The candidate must outlive the view.
+class FieldPageView {
+public:
+    FieldPageView(const FieldPageState& live, const FieldPageState* candidate)
+        : m_live(live)
+        , m_candidate(candidate) {}
+    [[nodiscard]] bool
+    sample(int channel, std::int32_t x, std::int32_t z, std::uint16_t& out) const {
+        return (m_candidate && m_candidate->sample(channel, x, z, out)) ||
+               m_live.sample(channel, x, z, out);
+    }
+    [[nodiscard]] const FieldPageState::OwnerWeather* owner_weather(RegionKey owner) const {
+        return weather().owner_weather(owner);
+    }
+    [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
+        return weather().storms();
+    }
+    [[nodiscard]] const std::vector<RegionalStrike>& strikes() const {
+        return weather().strikes();
+    }
+    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool include_weather) const {
+        return m_live.ambient_bytes(channels, include_weather, m_candidate);
+    }
+
+private:
+    [[nodiscard]] const FieldPageState& weather() const {
+        return m_candidate ? *m_candidate : m_live;
+    }
+    const FieldPageState& m_live;
+    const FieldPageState* m_candidate;
 };
 
 } // namespace Luminumbra::world

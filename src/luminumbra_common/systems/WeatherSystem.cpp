@@ -459,99 +459,359 @@ void WeatherSystem::StepStrikes(std::uint64_t tick) {
 
 std::vector<StrikeEvent> WeatherSystem::StrikesThisTick() const {
     std::vector<StrikeEvent> out;
-    for (const StrikeEvent& s : m_strikes) {
-        if (s.strike_tick == m_last_tick) {
-            out.push_back(s);
+    if (m_regionalWeatherKeyed) {
+        if (m_regionalStrikesDeliveredThrough &&
+            m_last_tick <= *m_regionalStrikesDeliveredThrough) {
+            return out;
+        }
+        auto event = m_regionalStrikes.lower_bound({m_last_tick, 0, 0, 0});
+        while (event != m_regionalStrikes.end() && std::get<0>(event->first) == m_last_tick) {
+            out.push_back(event->second);
+            ++event;
+        }
+    } else {
+        for (const auto& strike : m_strikes) {
+            if (strike.strike_tick == m_last_tick) {
+                out.push_back(strike);
+            }
         }
     }
     return out;
 }
 
-std::size_t WeatherSystem::StormBinHash::operator()(const StormBin& bin) const noexcept {
-    const auto x = std::hash<double>{}(bin[0]);
-    const auto z = std::hash<double>{}(bin[1]);
-    return x ^ (z + std::size_t{0x9e3779b9} + (x << 6) + (x >> 2));
+namespace {
+
+bool SameStormProjection(const StormCell& a, const StormCell& b) {
+    return DeterministicMath::BitsOf(a.center_world.x) ==
+               DeterministicMath::BitsOf(b.center_world.x) &&
+           DeterministicMath::BitsOf(a.center_world.y) ==
+               DeterministicMath::BitsOf(b.center_world.y) &&
+           DeterministicMath::BitsOf(a.velocity.x) == DeterministicMath::BitsOf(b.velocity.x) &&
+           DeterministicMath::BitsOf(a.velocity.y) == DeterministicMath::BitsOf(b.velocity.y) &&
+           DeterministicMath::BitsOf(a.intensity) == DeterministicMath::BitsOf(b.intensity) &&
+           a.spawn_tick == b.spawn_tick && a.lifetime_ticks == b.lifetime_ticks &&
+           a.seed_salt == b.seed_salt;
 }
 
-WeatherSystem::StormIndex
-WeatherSystem::BuildRegionalStormIndex(const std::span<const StormCell>& storms) {
-    StormIndex result;
-    for (std::size_t index = 0; index < storms.size(); ++index) {
-        const auto& center = storms[index].center_world;
-        if (!std::isfinite(center.x) || !std::isfinite(center.y))
+template<typename Visitor>
+void VisitStormBins(const StormCell& storm, const Visitor& visit) {
+    const auto& center = storm.center_world;
+    if (!std::isfinite(center.x) || !std::isfinite(center.y))
+        return;
+    // Double bin coordinates avoid integer conversion overflow even for extreme queries.
+    const std::array xs{
+        std::floor((static_cast<double>(center.x) - kStormRadiusM) / kStormBinSizeM),
+        std::floor((static_cast<double>(center.x) + kStormRadiusM) / kStormBinSizeM)};
+    const std::array zs{
+        std::floor((static_cast<double>(center.y) - kStormRadiusM) / kStormBinSizeM),
+        std::floor((static_cast<double>(center.y) + kStormRadiusM) / kStormBinSizeM)};
+    // Two endpoints per axis, at most four references per storm.
+    for (std::size_t x = 0; x < xs.size(); ++x) {
+        if (x == 1 && xs[0] == xs[1])
             continue;
-        // Double bin coordinates avoid integer conversion overflow even for extreme queries.
-        const std::array xs{
-            std::floor((static_cast<double>(center.x) - kStormRadiusM) / kStormBinSizeM),
-            std::floor((static_cast<double>(center.x) + kStormRadiusM) / kStormBinSizeM)};
-        const std::array zs{
-            std::floor((static_cast<double>(center.y) - kStormRadiusM) / kStormBinSizeM),
-            std::floor((static_cast<double>(center.y) + kStormRadiusM) / kStormBinSizeM)};
-        // Two endpoints per axis, at most four references per storm; never a world scan.
-        for (std::size_t x = 0; x < xs.size(); ++x) {
-            if (x == 1 && xs[0] == xs[1])
+        for (std::size_t z = 0; z < zs.size(); ++z) {
+            if (z == 1 && zs[0] == zs[1])
                 continue;
-            for (std::size_t z = 0; z < zs.size(); ++z) {
-                if (z == 1 && zs[0] == zs[1])
-                    continue;
-                result[{xs[x], zs[z]}].push_back(index);
-            }
+            visit(std::array{xs[x], zs[z]});
         }
     }
-    return result;
 }
 
-std::span<const std::size_t> WeatherSystem::RegionalStormIndices(const Vec3& world_pos) const {
-    if (!std::isfinite(world_pos.x) || !std::isfinite(world_pos.z))
-        return {};
+} // namespace
+
+void WeatherSystem::PutRegionalStorm(const StormCell& storm) {
+    PutRegionalStormAt({storm.spawn_tick, storm.seed_salt}, storm);
+}
+
+void WeatherSystem::PutRegionalStormAt(StormIdentity identity, const StormCell& storm) {
+    ++m_regionalProjectionWork;
+    const auto found = m_regionalStorms.find(identity);
+    if (found != m_regionalStorms.end() && SameStormProjection(found->second, storm)) {
+        return;
+    }
+    std::array<StormBin, 4> bins{};
+    std::size_t bin_count = 0;
+    VisitStormBins(storm, [&](const StormBin& bin) { bins[bin_count++] = bin; });
+    const std::span<const StormBin> next_bins(bins.data(), bin_count);
+    if (found != m_regionalStorms.end()) {
+        VisitStormBins(found->second, [&](const StormBin& bin) {
+            ++m_regionalProjectionWork;
+            if (std::find(next_bins.begin(), next_bins.end(), bin) != next_bins.end()) {
+                return;
+            }
+            const auto entry = m_regionalStormIndex.find(bin);
+            if (entry != m_regionalStormIndex.end()) {
+                m_regionalStormNodeChanges += entry->second.erase(identity);
+                if (entry->second.empty()) {
+                    m_regionalStormIndex.erase(entry);
+                    ++m_regionalStormNodeChanges;
+                }
+            }
+        });
+        found->second = storm;
+    } else {
+        m_regionalStorms.emplace(identity, storm);
+        ++m_regionalStormNodeChanges;
+    }
+    for (const auto& bin : next_bins) {
+        ++m_regionalProjectionWork;
+        const auto [entry, bin_inserted] = m_regionalStormIndex.try_emplace(bin);
+        const auto [member, inserted] = entry->second.insert_or_assign(identity, storm);
+        (void)member;
+        m_regionalStormNodeChanges +=
+            static_cast<std::size_t>(bin_inserted) + static_cast<std::size_t>(inserted);
+    }
+    m_regionalStormCacheValid = false;
+}
+
+void WeatherSystem::EraseRegionalStorm(StormIdentity identity) {
+    ++m_regionalProjectionWork;
+    const auto found = m_regionalStorms.find(identity);
+    if (found == m_regionalStorms.end()) {
+        return;
+    }
+    VisitStormBins(found->second, [&](const StormBin& bin) {
+        ++m_regionalProjectionWork;
+        const auto entry = m_regionalStormIndex.find(bin);
+        if (entry != m_regionalStormIndex.end()) {
+            m_regionalStormNodeChanges += entry->second.erase(identity);
+            if (entry->second.empty()) {
+                m_regionalStormIndex.erase(entry);
+                ++m_regionalStormNodeChanges;
+            }
+        }
+    });
+    m_regionalStorms.erase(found);
+    ++m_regionalStormNodeChanges;
+    m_regionalStormCacheValid = false;
+}
+
+void WeatherSystem::PutRegionalStrike(const StrikeEvent& strike) {
+    ++m_regionalProjectionWork;
+    const auto [entry, inserted] =
+        m_regionalStrikes.insert_or_assign({strike.strike_tick,
+                                            strike.storm_salt,
+                                            DeterministicMath::BitsOf(strike.world_x),
+                                            DeterministicMath::BitsOf(strike.world_z)},
+                                           strike);
+    (void)entry;
+    if (inserted && m_regionalStrikesDeliveredThrough &&
+        strike.strike_tick <= *m_regionalStrikesDeliveredThrough) {
+        ++m_hiddenRegionalStrikes;
+    }
+    m_regionalStrikeCacheValid = false;
+}
+void WeatherSystem::EraseRegionalStrike(const StrikeEvent& strike) {
+    ++m_regionalProjectionWork;
+    const auto removed = m_regionalStrikes.erase({strike.strike_tick,
+                                                  strike.storm_salt,
+                                                  DeterministicMath::BitsOf(strike.world_x),
+                                                  DeterministicMath::BitsOf(strike.world_z)});
+    if (removed != 0 && m_regionalStrikesDeliveredThrough &&
+        strike.strike_tick <= *m_regionalStrikesDeliveredThrough) {
+        --m_hiddenRegionalStrikes;
+    }
+    m_regionalStrikeCacheValid = false;
+}
+
+void WeatherSystem::RevealRegionalStrikeSchedule() {
+    m_regionalStrikesDeliveredThrough.reset();
+    m_hiddenRegionalStrikes = 0;
+    m_regionalStrikeCacheValid = false;
+}
+
+void WeatherSystem::RebuildRegionalStormIndex() {
+    m_regionalStormIndex.clear();
+    m_regionalStorms.clear();
+    for (std::size_t index = 0; index < m_storm_cells.size(); ++index) {
+        PutRegionalStormAt({index, 0}, m_storm_cells[index]);
+    }
+}
+
+void WeatherSystem::BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
+                                        std::function<std::string()> hash) {
+    if (static_cast<bool>(sample) != static_cast<bool>(hash)) {
+        throw std::invalid_argument("regional backend needs both a sampler and a hash");
+    }
+    if (!sample && m_regionalWeatherKeyed) {
+        m_storm_cells = StormCells();
+        m_strikes = StrikeSchedule();
+        m_regionalWeatherKeyed = false;
+    }
+    if (sample && !m_regionalWeatherKeyed) {
+        RebuildRegionalStormIndex();
+    }
+    m_regional_sample = std::move(sample);
+    m_regional_hash = std::move(hash);
+}
+
+void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
+                                         const Vec3& anchor,
+                                         std::vector<StormCell> storms,
+                                         std::vector<StrikeEvent> strikes,
+                                         bool identity_ordered,
+                                         bool restoring) {
+    m_regionalWeatherKeyed = identity_ordered;
+    m_regionalStormIndex.clear();
+    m_regionalStorms.clear();
+    m_regionalStrikes.clear();
+    m_regionalStrikesDeliveredThrough = restoring ? std::optional(tick) : std::nullopt;
+    m_hiddenRegionalStrikes = 0;
+    m_regionalStormCacheValid = m_regionalStrikeCacheValid = false;
+    if (identity_ordered) {
+        for (const auto& storm : storms) {
+            PutRegionalStorm(storm);
+        }
+        for (const auto& strike : strikes) {
+            PutRegionalStrike(strike);
+        }
+    } else {
+        m_storm_cells = std::move(storms);
+        m_strikes = std::move(strikes);
+        RebuildRegionalStormIndex();
+    }
+    RefreshRegionalWeather(tick, anchor);
+}
+
+const std::vector<StormCell>& WeatherSystem::StormCells() const {
+    if (!m_regionalWeatherKeyed) {
+        return m_storm_cells;
+    }
+    if (!m_regionalStormCacheValid) {
+        m_regionalStormCache.clear();
+        for (const auto& [identity, storm] : m_regionalStorms) {
+            (void)identity;
+            m_regionalStormCache.push_back(storm);
+        }
+        m_regionalStormCacheValid = true;
+    }
+    return m_regionalStormCache;
+}
+const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
+    if (!m_regionalWeatherKeyed) {
+        return m_strikes;
+    }
+    if (!m_regionalStrikeCacheValid) {
+        m_regionalStrikeCache.clear();
+        for (const auto& [identity, strike] : m_regionalStrikes) {
+            (void)identity;
+            if (!m_regionalStrikesDeliveredThrough ||
+                strike.strike_tick > *m_regionalStrikesDeliveredThrough) {
+                m_regionalStrikeCache.push_back(strike);
+            }
+        }
+        m_regionalStrikeCacheValid = true;
+    }
+    return m_regionalStrikeCache;
+}
+
+void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
+    m_last_tick = tick;
+    if (m_regional_sample) {
+        const auto sample = m_regional_sample(anchor);
+        m_anchor_category = sample.category;
+        m_anchor_wind = sample.wind;
+    }
+}
+
+void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick,
+                                           const Vec3& anchor,
+                                           std::vector<StrikeEvent> strikes) {
+    RefreshRegionalWeather(tick, anchor);
+    if (!m_regionalWeatherKeyed) {
+        m_strikes = std::move(strikes);
+        return;
+    }
+    m_regionalStrikes.clear();
+    RevealRegionalStrikeSchedule();
+    for (const auto& strike : strikes) {
+        PutRegionalStrike(strike);
+    }
+}
+
+void WeatherSystem::UpdateRegionalStorm(std::size_t index, const StormCell& storm) {
+    if (!m_regionalWeatherKeyed) {
+        m_storm_cells.at(index) = storm;
+        PutRegionalStormAt({index, 0}, storm);
+        return;
+    }
+    const auto previous = StormCells().at(index);
+    if (previous.spawn_tick != storm.spawn_tick || previous.seed_salt != storm.seed_salt) {
+        EraseRegionalStorm({previous.spawn_tick, previous.seed_salt});
+    }
+    PutRegionalStorm(storm);
+}
+
+const WeatherSystem::StormEntries* WeatherSystem::RegionalStormEntries(const Vec3& position) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.z)) {
+        return nullptr;
+    }
     const auto found =
-        m_regionalStormIndex.find({std::floor(static_cast<double>(world_pos.x) / kStormBinSizeM),
-                                   std::floor(static_cast<double>(world_pos.z) / kStormBinSizeM)});
-    return found == m_regionalStormIndex.end() ? std::span<const std::size_t>{} : found->second;
+        m_regionalStormIndex.find({std::floor(static_cast<double>(position.x) / kStormBinSizeM),
+                                   std::floor(static_cast<double>(position.z) / kStormBinSizeM)});
+    return found == m_regionalStormIndex.end() ? nullptr : &found->second;
 }
 
 std::size_t WeatherSystem::storm_candidates_at(const Vec3& world_pos) const {
-    return m_regional_sample ? RegionalStormIndices(world_pos).size() : m_storm_cells.size();
+    if (!m_regional_sample) {
+        return m_storm_cells.size();
+    }
+    const auto* entries = RegionalStormEntries(world_pos);
+    return entries ? entries->size() : 0;
 }
 
 float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
     float precip = 0.0f;
-    const auto candidates =
-        m_regional_sample ? RegionalStormIndices(world_pos) : std::span<const std::size_t>{};
-    const auto count = m_regional_sample ? candidates.size() : m_storm_cells.size();
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto& cell = m_storm_cells[m_regional_sample ? candidates[index] : index];
+    const auto add = [&world_pos, &precip](const StormCell& cell) {
         const float dx = world_pos.x - cell.center_world.x;
         const float dz = world_pos.z - cell.center_world.y;
         const float dist = DeterministicMath::Sqrt(dx * dx + dz * dz);
         if (dist >= kStormRadiusM) {
-            continue;
+            return;
         }
-        // Smooth falloff (1 - (d/r))^2, scaled by the cell intensity envelope.
         const float t = 1.0f - (dist / kStormRadiusM);
         const float falloff = t * t;
         precip += cell.intensity * falloff;
+    };
+    if (m_regional_sample) {
+        if (const auto* entries = RegionalStormEntries(world_pos)) {
+            for (const auto& [identity, cell] : *entries) {
+                (void)identity;
+                add(cell);
+            }
+        }
+    } else {
+        for (const auto& cell : m_storm_cells) {
+            add(cell);
+        }
     }
     return precip > 1.0f ? 1.0f : precip;
 }
 
 float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
     float best = 0.0f;
-    const auto candidates =
-        m_regional_sample ? RegionalStormIndices(world_pos) : std::span<const std::size_t>{};
-    const auto count = m_regional_sample ? candidates.size() : m_storm_cells.size();
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto& cell = m_storm_cells[m_regional_sample ? candidates[index] : index];
+    const auto add = [&world_pos, &best](const StormCell& cell) {
         const float dx = world_pos.x - cell.center_world.x;
         const float dz = world_pos.z - cell.center_world.y;
         const float dist = DeterministicMath::Sqrt(dx * dx + dz * dz);
-        if (dist >= kStormRadiusM) {
-            continue;
+        if (dist < kStormRadiusM) {
+            const float t = 1.0f - (dist / kStormRadiusM);
+            const float value = cell.intensity * t;
+            if (value > best) {
+                best = value;
+            }
         }
-        const float t = 1.0f - (dist / kStormRadiusM);
-        const float v = cell.intensity * t;
-        if (v > best) {
-            best = v;
+    };
+    if (m_regional_sample) {
+        if (const auto* entries = RegionalStormEntries(world_pos)) {
+            for (const auto& [identity, cell] : *entries) {
+                (void)identity;
+                add(cell);
+            }
+        }
+    } else {
+        for (const auto& cell : m_storm_cells) {
+            add(cell);
         }
     }
     return best;

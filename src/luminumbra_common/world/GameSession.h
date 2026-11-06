@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -522,6 +523,24 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Observational candidate size during a tick; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
+        return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
+    }
+    // Records copied from live owners during staging; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalWeatherCandidateRecordCount() const {
+        return m_regionalFieldView ? m_regionalFieldView->staged_weather_records() : 0;
+    }
+    // Observational storm conversions this tick; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalWeatherProjectionCount() const {
+        return m_regionalWeatherProjectionCount;
+    }
+    [[nodiscard]] std::size_t GetRegionalWeatherScanCount() const {
+        return m_regionalWeatherScanCount;
+    }
+    [[nodiscard]] std::size_t GetRegionalWeatherProjectionVisitCount() const {
+        return m_regionalWeatherProjectionVisitCount;
+    }
     // Observational nonempty advancement passes; never persisted or hashed.
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
         return m_groundObjectAdvanceCount;
@@ -632,6 +651,7 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint32_t m_numericSeed = 0; // Resolved once when session metadata is adopted.
     std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
@@ -696,10 +716,30 @@ private:
     // Stage existing field authority; publish only after the tick's consumers and work succeed.
     [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
     void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
+    void BindRegionalFieldQueries();
+    [[nodiscard]] FieldPageView RegionalFields() const;
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    void ProjectRegionalWeather(std::uint64_t tick,
+                                bool restoring = false,
+                                const std::map<RegionKey, std::uint64_t>* work = nullptr);
+    [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
+                                                                            std::uint64_t tick);
+    void StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick);
+    // Query-only view of this tick's candidate, cleared before publication or fault recovery.
+    const FieldPageState* m_regionalFieldView = nullptr;
+    bool m_regionalFieldsBound = false;
+    void UpdateRegionalWeatherBoundaryOwner(RegionKey owner, const FieldPageState& fields);
+    std::map<std::uint8_t, std::set<RegionKey>> m_regionalWeatherBoundaryOwners;
+    std::map<std::uint8_t, std::set<RegionKey>> m_regionalAmbientOwners;
+    std::map<RegionKey, std::uint8_t> m_regionalWeatherBoundaryShifts;
+    std::size_t m_regionalWeatherScanCount = 0;
+    std::size_t m_regionalWeatherProjectionVisitCount = 0;
+    std::size_t m_regionalWeatherProjectionCount = 0;
     bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     bool m_regionRequiresIndex = false;
-    // Stable only in the clock slice; world-anchored pages replace this grid in C4.
+    // Persisted anchor for ambient diagnostics and derived presentation grids.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
     // Exact canonical preset source, independent of dependency-content identity.
