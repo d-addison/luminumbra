@@ -1,3 +1,4 @@
+#include "../support/IndexedSaveFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/RenderConfiguration.h"
@@ -61,7 +62,52 @@ protected:
         const auto& record = session.GetActiveRegionLedger().records().at(kDistantRegion);
         ASSERT_EQ(record.state, Luminumbra::world::RegionState::Frozen);
     }
+
+    void CheckFieldSnapshotRestoration() {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.generic_string() + "/");
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Verified fields", "1337", "default"));
+        session.PinActiveRegion({0, 0}, true);
+        ASSERT_TRUE(session.SaveWorld());
+        const auto directory = session.GetWorldSaveDir();
+        Luminumbra::world::FieldPageState original, replacement;
+        ASSERT_TRUE(original.activate_region({0, 0}, 1337, 0));
+        ASSERT_TRUE(replacement.activate_region({0, 0}, 7331, 0));
+        ASSERT_NE(original.serialize(), replacement.serialize());
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(
+            directory, [&] { return WorldSaveService::save_field_pages(original, directory); }));
+        ASSERT_TRUE(session.LoadWorldState());
+        const auto id = session.GetMetadata().worldId;
+        const auto digest = Measurement::saved_world_digest(directory);
+        const Measurement::VerifiedSaveSnapshot snapshot(directory, digest, id);
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(
+            directory, [&] { return WorldSaveService::save_field_pages(replacement, directory); }));
+        ASSERT_TRUE(session.LoadWorldState());
+        EXPECT_EQ(session.GetFieldPages().serialize(), replacement.serialize());
+        ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
+        EXPECT_EQ(session.GetFieldPages().serialize(), original.serialize());
+        EXPECT_EQ(session.GetWorldSaveDir(), directory);
+        EXPECT_EQ(Measurement::saved_world_digest(snapshot.root() / "worlds/saves" / id), digest);
+        const auto exported = root / "field-export";
+        ASSERT_TRUE(session.SaveWorldStateTo(exported));
+        Luminumbra::world::FieldPageState saved;
+        ASSERT_TRUE(WorldSaveService::load_field_pages(saved, exported));
+        EXPECT_EQ(saved.serialize(), original.serialize());
+        ASSERT_TRUE(WorldSaveService::load_field_pages(saved, directory));
+        EXPECT_EQ(saved.serialize(), replacement.serialize());
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_TRUE(WorldSaveService::load_field_pages(saved, directory));
+        EXPECT_EQ(saved.serialize(), original.serialize());
+    }
 };
+
+TEST_F(VerifiedSnapshotRegion, FieldsRestoreFromVerifiedAuthorityAndExportWithTheWorld) {
+    ASSERT_NO_FATAL_FAILURE(CheckFieldSnapshotRestoration());
+}
 
 TEST_F(VerifiedSnapshotRegion, CancelledPreparationNeverMaterializesOrChangesSavedAuthority) {
     Luminumbra::JobSystem jobs;

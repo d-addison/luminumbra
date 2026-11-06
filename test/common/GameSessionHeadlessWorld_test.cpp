@@ -42,6 +42,7 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -8600,4 +8601,339 @@ TEST(GameSessionHeadlessWorldTest, GroundSettlingNeverReadsCommittedTerrain) {
     EXPECT_EQ(reads, 0u);
     EXPECT_TRUE(fault.empty());
     EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+}
+
+namespace {
+
+using Luminumbra::world::FieldPageState;
+constexpr Luminumbra::world::RegionKey kFieldOwner{0, 0};
+
+void PopulateSessionFieldFixture(FieldPageState& fields, std::uint64_t seed) {
+    ASSERT_TRUE(fields.activate_region(kFieldOwner, seed, 0));
+    ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
+    ASSERT_TRUE(fields.set_scent({1, 1}, {0x3ff0000000000000ULL, 0, 0, 0}));
+    ASSERT_TRUE(fields.set_soil({1, 1}, 123));
+    ASSERT_TRUE(fields.set_irrigation({1, 1}, 456));
+    ASSERT_FALSE(fields.empty());
+}
+
+void WriteSessionFieldInput(const GameSession& session,
+                            const fs::path& directory,
+                            const FieldPageState& fields) {
+    fs::create_directories(directory);
+    auto ledger = session.GetActiveRegionLedger();
+    ledger.mark_edited(kFieldOwner, session.GetWorldClock());
+    nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+    session.GetWorldClock().write_metadata(metadata);
+    // Field pages are indexed-envelope members, so the fixture is committed through a transaction.
+    P::WorldSaveService::SaveFactsScope facts(directory);
+    P::SaveTransaction transaction(directory, 0, {}, &P::WorldSaveService::member_digest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, directory, &errors));
+    ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, directory, &errors));
+    ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(directory, &errors));
+    ASSERT_TRUE(transaction.commit(&errors));
+}
+
+void LoadSessionFieldInput(GameSession& session,
+                           const fs::path& directory,
+                           const FieldPageState& fields) {
+    ASSERT_NO_FATAL_FAILURE(WriteSessionFieldInput(session, directory, fields));
+    ASSERT_TRUE(session.LoadWorldStateFrom(directory)) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+}
+
+void ExpectIndexedSessionFields(const fs::path& directory, const FieldPageState& fields) {
+    ASSERT_TRUE(P::WorldSaveService::validate_save(directory));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(directory, index, nullptr));
+    const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
+        return m.path == FieldPageState::kRelativePath;
+    });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_EQ(member->present, !fields.empty());
+    EXPECT_EQ(member->bytes, fields.serialize().size());
+    FieldPageState saved;
+    ASSERT_TRUE(P::WorldSaveService::load_field_pages(saved, directory));
+    EXPECT_EQ(saved.canonical_bytes(), fields.canonical_bytes());
+}
+
+void CheckSessionFieldRoundTrip(int save_path) {
+    SCOPED_TRACE(save_path);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    EnableSnapshotSession(owner, root, jobs);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Field roundtrip", "1337", "default"));
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_NO_FATAL_FAILURE(LoadSessionFieldInput(owner, root.path() / "field-input", fields));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {3.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    auto save = owner.GetWorldSaveDir();
+    if (save_path == 0) {
+        ASSERT_TRUE(owner.SaveWorld());
+    } else if (save_path == 1) {
+        ASSERT_TRUE(owner.SaveWorldState());
+    } else {
+        save = root.path() / "field-export";
+        ASSERT_TRUE(owner.SaveWorldStateTo(save));
+    }
+    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, fields));
+    EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 2);
+    ASSERT_TRUE(loaded.CreateTransientWorld("Field reader", "1337", "default"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
+    EXPECT_EQ(loaded.GetFieldPages().canonical_bytes(), fields.canonical_bytes());
+    EXPECT_EQ(loaded.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
+              owner.GetActiveRegionLedger().canonical_bytes());
+    if (save_path != 2) {
+        ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+        EXPECT_EQ(loaded.GetFieldPages().serialize(), fields.serialize());
+    }
+    ASSERT_TRUE(loaded.CreateTransientWorld("Field reset", "7331", "default"));
+    EXPECT_TRUE(loaded.GetFieldPages().empty());
+    EXPECT_TRUE(loaded.GetFieldPages().canonical_bytes().empty());
+}
+
+void CheckSessionFieldRollback(int transition) {
+    SCOPED_TRACE(transition);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Field rollback", "1337", "default"));
+    FieldPageState original, replacement;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(original, 1337));
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(replacement, 7331));
+    if (transition != 0) {
+        ASSERT_NO_FATAL_FAILURE(
+            LoadSessionFieldInput(session, root.path() / "original-input", original));
+    }
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto before = SavedPresetTestDiskBytes(save);
+    if (transition == 2)
+        replacement.clear();
+    ASSERT_NO_FATAL_FAILURE(
+        LoadSessionFieldInput(session, root.path() / "replacement-input", replacement));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    chunk->heightmap_data = {9.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    static fs::path observed_path;
+    static std::string observed_bytes;
+    observed_path = P::WorldSaveService::field_pages_path(save);
+    observed_bytes.clear();
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] {
+        observed_bytes = fs::exists(observed_path) ? ReadClockTestFile(observed_path) : "<absent>";
+        return false;
+    });
+    const bool saved = session.SaveWorld();
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(observed_bytes, replacement.empty() ? "<absent>" : replacement.serialize());
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), replacement.serialize());
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(P::journal_pending(save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, replacement));
+}
+
+void CheckPreparedFieldRefusal(int refusal) {
+    SCOPED_TRACE(refusal);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Prepared fields", "1337", "default"));
+    FieldPageState live, candidate;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(live, 1337));
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(candidate, 7331));
+    ASSERT_NO_FATAL_FAILURE(LoadSessionFieldInput(session, root.path() / "live-input", live));
+    const auto input = root.path() / "candidate-input";
+    ASSERT_NO_FATAL_FAILURE(WriteSessionFieldInput(session, input, candidate));
+    std::stop_source stop;
+    const auto prepared = GameSession::PrepareWorldState(
+        session.CaptureWorldPreparationOptions(), input, stop.get_token());
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    if (refusal == 0) {
+        stop.request_stop();
+    } else if (refusal == 1) {
+        session.SetAetherStateEnabled(false);
+    } else {
+        ASSERT_TRUE(session.CreateTransientWorld("New field owner", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(LoadSessionFieldInput(session, root.path() / "live-input", live));
+    }
+    const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+    const auto clock = session.GetWorldClock().canonical_bytes();
+    const auto revision = session.WorldRevision();
+    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(session.GetWorldOpenError(),
+              refusal == 0 ? "Saved-world validation cancelled."
+                           : "World preparation no longer matches session configuration.");
+    EXPECT_EQ(session.GetFieldPages().serialize(), live.serialize());
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(session.WorldRevision(), revision);
+}
+
+void CheckPendingRecoveryKeepsSessionFields(int load_path) {
+    SCOPED_TRACE(load_path);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Pending fields", "1337", "default"));
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_NO_FATAL_FAILURE(LoadSessionFieldInput(session, root.path() / "live-input", fields));
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto revision = session.WorldRevision();
+    const auto clock = session.GetWorldClock().canonical_bytes();
+    ASSERT_TRUE(fs::create_directories(P::journal_directory(save)));
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(P::journal_directory(save) / "txn.json",
+                                                        "{invalid journal"));
+    const auto before = SavedPresetTestDiskBytes(save);
+    if (load_path == 0) {
+        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    } else if (load_path == 1) {
+        EXPECT_FALSE(session.LoadWorld(session.GetMetadata().worldId));
+    } else if (load_path == 2) {
+        EXPECT_FALSE(session.LoadWorldFrom(session.GetMetadata().worldId, root.path()));
+    } else {
+        const auto prepared =
+            GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), save);
+        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    }
+    EXPECT_FALSE(session.GetWorldOpenError().empty());
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(session.WorldRevision(), revision);
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    EXPECT_TRUE(P::journal_pending(save));
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SessionFieldPagesSaveLoadAndResetThroughEverySavePath) {
+    for (const int save_path : {0, 1, 2}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionFieldRoundTrip(save_path));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, SessionFieldPagesJoinCompoundRollbackAndRetry) {
+    for (const int transition : {0, 1, 2}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionFieldRollback(transition));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RefusedPreparedFieldAdoptionPreservesLiveMembers) {
+    for (const int refusal : {0, 1, 2}) {
+        ASSERT_NO_FATAL_FAILURE(CheckPreparedFieldRefusal(refusal));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, PendingRecoveryRefusalPreservesSessionFieldPages) {
+    for (const int load_path : {0, 1, 2, 3}) {
+        ASSERT_NO_FATAL_FAILURE(CheckPendingRecoveryKeepsSessionFields(load_path));
+    }
+}
+
+namespace {
+
+void CheckCapturedFieldAdoptionAndMissingMember() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Captured fields", "1337", "default"));
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    const auto input = root.path() / "field-input";
+    ASSERT_NO_FATAL_FAILURE(WriteSessionFieldInput(session, input, fields));
+    const auto prepared =
+        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    ASSERT_TRUE(P::WorldSaveService::save_field_pages({}, input));
+    ASSERT_TRUE(session.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    ASSERT_TRUE(session.LoadWorldStateFrom(input));
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_TRUE(session.GetFieldPages().canonical_bytes().empty());
+}
+
+void CheckEmptySessionFieldCompatibility(bool active_regions) {
+    SCOPED_TRACE(active_regions);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(active_regions);
+    ASSERT_TRUE(session.CreateWorld("Empty fields", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto control = root.path() / "without-field-writer";
+    fs::copy(save, control, fs::copy_options::recursive);
+    const auto ecology = session.FoldClockIntoEcologyHash("ecology");
+    P::RegionDigestInputs inputs;
+    inputs.require_index = active_regions;
+    const auto digest = P::WorldSaveService::region_simulation_digest(save, kFieldOwner, inputs);
+    const auto metadata = ReadClockTestFile(save / "world_info.json");
+    // Reproduce the existing payload writers without adding a field member to the transaction.
+    if (active_regions) {
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(control, [&] {
+            return P::WorldSaveService::save_plant_entities({}, control) &&
+                   P::WorldSaveService::save_metadata_active_regions_and_ground_objects(
+                       metadata,
+                       session.GetActiveRegionLedger(),
+                       session.GetGroundObjects(),
+                       session.CaptureGroundNotifications(),
+                       control);
+        }));
+    }
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), SavedPresetTestDiskBytes(control));
+    EXPECT_EQ(session.FoldClockIntoEcologyHash("ecology"), ecology);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, kFieldOwner, inputs), digest);
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(save)));
+    if (active_regions) {
+        P::SnapshotIndex index;
+        ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+        EXPECT_TRUE(
+            std::none_of(index.members.begin(), index.members.end(), [](const auto& member) {
+                return member.path == FieldPageState::kRelativePath;
+            }));
+    }
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, PreparedFieldAdoptionUsesCapturedBytesAndMissingMemberClears) {
+    ASSERT_NO_FATAL_FAILURE(CheckCapturedFieldAdoptionAndMissingMember());
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptySessionFieldsPreserveSaveBytesAndDigests) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckEmptySessionFieldCompatibility(active_regions));
+    }
 }

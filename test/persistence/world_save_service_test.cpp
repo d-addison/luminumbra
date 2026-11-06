@@ -8,6 +8,7 @@
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "core/LogDispatcherSink.h"
+#include "fields/FieldPageState.h"
 #include "luminumbra/core/Types.h"
 #include "persistence/CreatedWorldArtifacts.h"
 #include "persistence/SaveTransaction.h"
@@ -22,9 +23,11 @@
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -35,6 +38,7 @@
 #include <ios>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -3536,4 +3540,428 @@ TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBy
     EXPECT_NE(with_first, plain);
     EXPECT_NE(with_second, plain);
     EXPECT_NE(with_first, with_second);
+}
+
+namespace {
+using Luminumbra::world::FieldPageState;
+enum class FieldSection {
+    Pages,
+    Storm,
+    Strike,
+    Scent,
+    Clock,
+    Soil,
+    Irrigation
+};
+
+void AddFieldSection(FieldPageState& state, FieldSection section) {
+    switch (section) {
+        case FieldSection::Pages:
+            EXPECT_TRUE(state.activate_region({0, 0}, 42, 16));
+            EXPECT_TRUE(state.activate_region({1, 0}, 42, 16));
+            break;
+        case FieldSection::Storm: {
+            Luminumbra::world::RegionalStorm storm;
+            storm.owner = {1, 0};
+            storm.center_x = std::bit_cast<std::uint32_t>(512.0f);
+            storm.lifetime_ticks = 100;
+            EXPECT_TRUE(state.replace_weather({storm}, {}));
+            break;
+        }
+        case FieldSection::Strike: {
+            Luminumbra::world::RegionalStrike strike;
+            strike.owner = {1, 0};
+            strike.world_x = std::bit_cast<std::uint32_t>(512.0f);
+            EXPECT_TRUE(state.replace_weather(state.storms(), {strike}));
+            break;
+        }
+        case FieldSection::Scent:
+            EXPECT_TRUE(state.set_scent({512, 0}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+            break;
+        case FieldSection::Clock:
+            EXPECT_TRUE(state.set_weather_age({1, 0}, 13));
+            break;
+        case FieldSection::Soil:
+            EXPECT_TRUE(state.set_soil({512, 0}, 999997));
+            break;
+        case FieldSection::Irrigation:
+            EXPECT_TRUE(state.set_irrigation({512, 0}, 3999999));
+            break;
+    }
+}
+
+void ExpectFieldMember(const std::filesystem::path& save_dir, const std::string& bytes) {
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir, index, nullptr));
+    const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
+        return m.path == FieldPageState::kRelativePath;
+    });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_EQ(member->present, !bytes.empty());
+    EXPECT_EQ(member->bytes, bytes.size());
+    EXPECT_EQ(member->fnv64,
+              bytes.empty() ? 0
+                            : Luminumbra::Persistence::fnv1a64_bytes(bytes.data(), bytes.size()));
+}
+
+void ExpectFieldRoundTrip() {
+    const TempSaveDir save_dir("field_roundtrip");
+    FieldPageState state;
+    for (const auto section : {FieldSection::Pages,
+                               FieldSection::Storm,
+                               FieldSection::Strike,
+                               FieldSection::Scent,
+                               FieldSection::Clock,
+                               FieldSection::Soil,
+                               FieldSection::Irrigation}) {
+        AddFieldSection(state, section);
+    }
+    const auto bytes = state.serialize();
+    ASSERT_FALSE(bytes.empty());
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, clock);
+    ledger.mark_edited({1, 0}, clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    {
+        WorldSaveService::SaveFactsScope facts(save_dir.path());
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path(), &errors))
+            << JoinErrors(errors);
+        WorldSaveService::PreparedFieldWrite prepared;
+        ASSERT_TRUE(prepared.prepare(state, &errors)) << JoinErrors(errors);
+        state.clear();
+        ASSERT_TRUE(prepared.publish(save_dir.path(), &errors)) << JoinErrors(errors);
+        FieldPageState staged;
+        ASSERT_TRUE(WorldSaveService::load_field_pages(staged, save_dir.path(), &errors));
+        EXPECT_EQ(staged.serialize(), bytes);
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save_dir.path(), &errors));
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::field_pages_path(save_dir.path())), bytes);
+    ExpectFieldMember(save_dir.path(), bytes);
+    FieldPageState loaded;
+    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_EQ(loaded.serialize(), bytes);
+    WorldStreamingState restored;
+    EXPECT_TRUE(WorldSaveService{}.load_world(restored, save_dir.path(), errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::save_field_pages(loaded, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_field_pages({}, save_dir.path(), &errors));
+        EXPECT_FALSE(std::filesystem::exists(WorldSaveService::field_pages_path(save_dir.path())));
+        ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+        EXPECT_TRUE(loaded.empty());
+        transaction.abort(&errors);
+    }
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::field_pages_path(save_dir.path())), bytes);
+    ExpectFieldMember(save_dir.path(), bytes);
+    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_EQ(loaded.serialize(), bytes);
+    ASSERT_TRUE(WorldSaveService::save_field_pages({}, save_dir.path(), &errors))
+        << JoinErrors(errors);
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::field_pages_path(save_dir.path())));
+    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_TRUE(loaded.empty());
+    ExpectFieldMember(save_dir.path(), "");
+    ASSERT_TRUE(WorldSaveService::save_field_pages({}, save_dir.path(), &errors));
+    ExpectFieldMember(save_dir.path(), "");
+}
+
+void ExpectBadFieldMember(bool oversized) {
+    const TempSaveDir save_dir(oversized ? "field_oversized" : "field_corrupt");
+    WorldStreamingState empty;
+    ASSERT_TRUE(WorldSaveService{}.save_world(empty, save_dir.path()));
+    const auto path = WorldSaveService::field_pages_path(save_dir.path());
+    ASSERT_TRUE(WorldSaveService::write_file_durably(path, "FPG1"));
+    if (oversized) {
+        std::filesystem::resize_file(path, FieldPageState::kMaxFileBytes + 1);
+    }
+    std::vector<std::string> errors;
+    Luminumbra::Persistence::SaveTransaction transaction(
+        save_dir.path(), 0, {}, WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+    FieldPageState loaded;
+    AddFieldSection(loaded, FieldSection::Pages);
+    const auto before = loaded.serialize();
+    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_EQ(loaded.serialize(), before);
+    EXPECT_NE(JoinErrors(errors).find(oversized ? "oversized file (64 MiB cap)"
+                                                : "Field pages load failed: field pages:"),
+              std::string::npos)
+        << JoinErrors(errors);
+    Luminumbra::Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(
+        save_dir.path(), FieldPageState::kRelativePath, digest, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_FALSE(WorldSaveService{}.load_world(empty, save_dir.path(), errors));
+}
+
+void ExpectOrphanFieldSection(FieldSection section, bool with_ledger) {
+    const TempSaveDir save_dir("field_orphan");
+    WorldStreamingState empty;
+    ASSERT_TRUE(WorldSaveService{}.save_world(empty, save_dir.path()));
+    Luminumbra::world::ActiveRegionLedger ledger;
+    const Luminumbra::world::WorldClock clock;
+    ledger.mark_edited({0, 0}, clock);
+    std::vector<std::string> errors;
+    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors));
+    if (with_ledger) {
+        ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path(), &errors));
+    }
+    FieldPageState state;
+    AddFieldSection(state, section);
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path(), &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save_dir.path(), &errors));
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    EXPECT_FALSE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors));
+    EXPECT_NE(JoinErrors(errors).find("corrupt field pages: orphaned owner"), std::string::npos);
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(empty, save_dir.path(), errors));
+    EXPECT_NE(JoinErrors(errors).find("corrupt field pages: orphaned owner"), std::string::npos);
+    if (with_ledger) {
+        ledger.mark_edited({1, 0}, clock);
+        errors.clear();
+        EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors))
+            << JoinErrors(errors);
+    }
+}
+
+void ExpectFieldDigest(bool ground_present, bool pages_present) {
+    using Luminumbra::Persistence::RegionDigestInputs;
+    using Luminumbra::Persistence::StableChecksum;
+    FieldPageState state;
+    AddFieldSection(state, FieldSection::Pages);
+    RegionDigestInputs inputs;
+    if (ground_present)
+        inputs.ground_object_bytes = "ground projection";
+    if (pages_present)
+        inputs.field_page_bytes = state.region_bytes({0, 0});
+    WorldStreamingState empty;
+    std::string expected = Luminumbra::Persistence::ComputeRegionContentHash(empty);
+    if (ground_present)
+        expected = StableChecksum(expected + "|ground:" + inputs.ground_object_bytes);
+    if (pages_present)
+        expected = StableChecksum(expected + "|pages:" + inputs.field_page_bytes);
+    const TempSaveDir save_dir("field_digest");
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save_dir.path()));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    Luminumbra::Persistence::RegionDigestOperation operation(save_dir.path(), true);
+    const auto value = std::stoull(expected, nullptr, 16);
+    EXPECT_EQ(operation.digest({0, 0}, inputs), value);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), value);
+    inputs.field_page_bytes += "changed";
+    EXPECT_NE(operation.digest({0, 0}, inputs), value);
+    EXPECT_EQ(operation.index_reads(), 1u);
+}
+
+void ExpectUnlistedFieldMemberRefused() {
+    const TempSaveDir save_dir("field_unlisted");
+    Luminumbra::world::ActiveRegionLedger ledger;
+    const Luminumbra::world::WorldClock clock;
+    ledger.mark_edited({0, 0}, clock);
+    ledger.mark_edited({1, 0}, clock);
+    ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path()));
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::save_field_pages({}, save_dir.path()));
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save_dir.path()));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, nullptr));
+    EXPECT_TRUE(std::none_of(index.members.begin(), index.members.end(), [](const auto& member) {
+        return member.path == FieldPageState::kRelativePath;
+    }));
+    FieldPageState state;
+    AddFieldSection(state, FieldSection::Pages);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        WorldSaveService::field_pages_path(save_dir.path()), state.serialize()));
+    FieldPageState loaded;
+    AddFieldSection(loaded, FieldSection::Clock);
+    const auto before = loaded.serialize();
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_EQ(loaded.serialize(), before);
+    EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot: chunks/region/field-pages.fpg"),
+              std::string::npos)
+        << JoinErrors(errors);
+    errors.clear();
+    WorldStreamingState restored;
+    EXPECT_FALSE(WorldSaveService{}.load_world(restored, save_dir.path(), errors));
+    EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot: chunks/region/field-pages.fpg"),
+              std::string::npos)
+        << JoinErrors(errors);
+}
+
+enum class FieldMemberDamage {
+    Deleted,
+    Checksum,
+    Size
+};
+
+void ExpectFieldSnapshotMismatch(FieldMemberDamage damage) {
+    const TempSaveDir save_dir("field_snapshot_mismatch");
+    FieldPageState state;
+    AddFieldSection(state, FieldSection::Clock);
+    std::vector<std::string> errors;
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path(), &errors));
+        ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save_dir.path(), &errors));
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    const auto path = WorldSaveService::field_pages_path(save_dir.path());
+    if (damage == FieldMemberDamage::Deleted) {
+        ASSERT_TRUE(std::filesystem::remove(path));
+    } else {
+        FieldPageState replacement = state;
+        ASSERT_TRUE(replacement.set_weather_age({1, 0}, 14));
+        if (damage == FieldMemberDamage::Size) {
+            AddFieldSection(replacement, FieldSection::Soil);
+            ASSERT_NE(replacement.serialize().size(), state.serialize().size());
+        } else {
+            ASSERT_EQ(replacement.serialize().size(), state.serialize().size());
+        }
+        ASSERT_TRUE(WorldSaveService::write_file_durably(path, replacement.serialize()));
+    }
+    FieldPageState loaded;
+    AddFieldSection(loaded, FieldSection::Pages);
+    const auto before = loaded.serialize();
+    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
+    EXPECT_EQ(loaded.serialize(), before);
+    EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot: chunks/region/field-pages.fpg"),
+              std::string::npos)
+        << JoinErrors(errors);
+}
+
+std::map<std::string, std::string> FieldSaveBytes(const std::filesystem::path& root) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file())
+            result.emplace(Luminumbra::Filesystem::GenericUtf8PathString(entry.path()),
+                           ReadFileBytes(entry.path()));
+    }
+    return result;
+}
+
+void ExpectEmptyFieldPreservesLegacyBytes() {
+    const TempSaveDir save_dir("field_legacy");
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save_dir.path()));
+    const auto before = FieldSaveBytes(save_dir.path());
+    ASSERT_FALSE(before.empty());
+    ASSERT_FALSE(Luminumbra::Persistence::snapshot_index_exists(save_dir.path()));
+    ASSERT_TRUE(WorldSaveService::save_field_pages({}, save_dir.path()));
+    EXPECT_EQ(FieldSaveBytes(save_dir.path()), before);
+    EXPECT_FALSE(Luminumbra::Persistence::snapshot_index_exists(save_dir.path()));
+}
+
+void ExpectLegacyFieldAuthorityRefused() {
+    const TempSaveDir save_dir("field_legacy_authority");
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, save_dir.path()));
+    ASSERT_FALSE(Luminumbra::Persistence::snapshot_index_exists(save_dir.path()));
+    const auto before = FieldSaveBytes(save_dir.path());
+    FieldPageState fields;
+    AddFieldSection(fields, FieldSection::Clock);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::save_field_pages(fields, save_dir.path(), &errors));
+    EXPECT_NE(JoinErrors(errors).find("nonempty state requires an indexed transaction"),
+              std::string::npos)
+        << JoinErrors(errors);
+    EXPECT_EQ(FieldSaveBytes(save_dir.path()), before);
+    EXPECT_FALSE(Luminumbra::Persistence::journal_pending(save_dir.path()));
+    EXPECT_FALSE(Luminumbra::Persistence::snapshot_index_exists(save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::field_pages_path(save_dir.path())));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        WorldSaveService::field_pages_path(save_dir.path()), fields.serialize()));
+    const auto field_bytes = fields.serialize();
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::load_field_pages(fields, save_dir.path(), &errors));
+    EXPECT_EQ(fields.serialize(), field_bytes);
+    EXPECT_NE(JoinErrors(errors).find("field authority without index"), std::string::npos);
+    errors.clear();
+    WorldStreamingState restored;
+    EXPECT_FALSE(WorldSaveService{}.load_world(restored, save_dir.path(), errors));
+    EXPECT_NE(JoinErrors(errors).find("field authority without index"), std::string::npos)
+        << JoinErrors(errors);
+}
+} // namespace
+
+TEST(WorldSaveService, FieldPagesPreparedRoundTripRollbackAndEmptyRemoval) {
+    ExpectFieldRoundTrip();
+}
+
+TEST(WorldSaveService, CorruptFieldPagesRefuseWithoutChangingOutput) {
+    ExpectBadFieldMember(false);
+}
+
+TEST(WorldSaveService, OversizedFieldPagesRefuseWithoutChangingOutput) {
+    ExpectBadFieldMember(true);
+}
+
+TEST(WorldSaveService, FieldPagesRequireLedgerAndEveryCellAndEvolutionOwner) {
+    ExpectOrphanFieldSection(FieldSection::Pages, false);
+    for (const auto section : {FieldSection::Pages,
+                               FieldSection::Storm,
+                               FieldSection::Strike,
+                               FieldSection::Scent,
+                               FieldSection::Clock,
+                               FieldSection::Soil,
+                               FieldSection::Irrigation}) {
+        ExpectOrphanFieldSection(section, true);
+    }
+}
+
+TEST(WorldSaveService, FieldPageDigestCompositionPreservesAbsentMember) {
+    ExpectFieldDigest(false, false);
+    ExpectFieldDigest(true, false);
+    ExpectFieldDigest(false, true);
+    ExpectFieldDigest(true, true);
+}
+
+TEST(WorldSaveService, EmptyFieldPagesPreserveLegacySaveBytes) {
+    ExpectEmptyFieldPreservesLegacyBytes();
+}
+
+TEST(WorldSaveService, LegacyFieldAuthorityRequiresAnIndexedTransaction) {
+    ExpectLegacyFieldAuthorityRefused();
+}
+
+TEST(WorldSaveService, StandaloneFieldLoadVerifiesCommittedPresenceSizeAndChecksum) {
+    ExpectFieldSnapshotMismatch(FieldMemberDamage::Deleted);
+    ExpectFieldSnapshotMismatch(FieldMemberDamage::Checksum);
+    ExpectFieldSnapshotMismatch(FieldMemberDamage::Size);
+}
+
+TEST(WorldSaveService, NeverWrittenFieldMemberStaysUnlistedAndInjectedMemberIsRefused) {
+    ExpectUnlistedFieldMemberRefused();
 }

@@ -9,6 +9,7 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
+#include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -518,6 +519,9 @@ public:
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
+    [[nodiscard]] const FieldPageState& GetFieldPages() const {
+        return m_fieldPages;
+    }
     // Observational nonempty advancement passes; never persisted or hashed.
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
         return m_groundObjectAdvanceCount;
@@ -681,6 +685,8 @@ private:
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Successful consumer work this tick.
     GroundObjectStore m_groundObjects;
+    // Authoritative field state, staged with the other saved-world members.
+    FieldPageState m_fieldPages;
     std::uint64_t m_groundObjectAdvanceCount = 0;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;

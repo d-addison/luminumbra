@@ -201,6 +201,7 @@ struct GameSession::LoadedWorldState {
     std::optional<ActiveRegionLedger> ledger;
     GroundObjectStore ground_objects;
     GroundNotifications ground_notifications;
+    FieldPageState field_pages;
     bool snapshot_present = false;
     bool requires_index = false;
     Ecs::EntityRegistrySnapshot plants;
@@ -324,6 +325,7 @@ void GameSession::ResetWorldSystems() {
     m_renderCalendar.reset();
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
+    m_fieldPages.clear();
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
@@ -1980,6 +1982,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
         throw std::logic_error("Set region scheduler configuration before creating a world");
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_groundObjects.clear();
+    m_fieldPages.clear();
     m_regionSchedulerOverride = config;
 }
 void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
@@ -2841,8 +2844,16 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     Persistence::WorldSaveService::PreparedWorldWrite prepared_chunks;
     std::string metadata_bytes;
     Persistence::WorldSaveService::PreparedPlantWrite prepared_plants;
+    Persistence::WorldSaveService::PreparedFieldWrite prepared_fields;
+    bool write_fields = m_activeRegionsEnabled && !m_fieldPages.empty();
+    if (m_activeRegionsEnabled && !write_fields) {
+        const Persistence::SavedInputFile input(
+            Persistence::WorldSaveService::field_pages_path(save_dir));
+        write_fields = !input.missing();
+    }
     if (!PrepareWorldMetadataTo(save_dir, write_metadata && !m_transientWorld, metadata_bytes) ||
         !prepared_plants.prepare(plant_snapshot, &errors) ||
+        (write_fields && !prepared_fields.prepare(m_fieldPages, &errors)) ||
         (write_chunks &&
          !prepared_chunks.prepare(state, save_dir, !full_snapshot && has_snapshot, &errors))) {
         for (const auto& error : errors)
@@ -2951,6 +2962,8 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     }
     if (ok)
         ok = prepared_plants.publish(save_dir, &errors);
+    if (ok && write_fields)
+        ok = prepared_fields.publish(save_dir, &errors);
     if (ok && prepared_energy.has_value()) {
         const auto energy_path = save_dir / "aether_state.efs";
         if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir)) {
@@ -3191,6 +3204,12 @@ bool GameSession::ReadPreparedWorldState(
             error = errors.empty() ? "Corrupt ground objects." : errors.front();
             return false;
         }
+        if (!Persistence::WorldSaveService::load_field_pages(
+                state.field_pages, save_dir, &errors, stop)) {
+            state.input_refused = true;
+            error = errors.empty() ? "Corrupt field pages." : errors.front();
+            return false;
+        }
         if (options.scheduler_override && state.ledger->config() != *options.scheduler_override) {
             error = "Incompatible configuration: persisted region scheduler differs "
                     "from explicit override.";
@@ -3268,6 +3287,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);
+    m_fieldPages = std::move(saved.field_pages);
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
         return; // legacy fresh world

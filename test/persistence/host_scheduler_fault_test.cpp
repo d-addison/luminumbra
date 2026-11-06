@@ -47,6 +47,24 @@ void WriteHostFile(const fs::path& path, const std::string& contents) {
     ASSERT_TRUE(output.good());
 }
 
+void InstallHostFields(GameSession& session, std::uint64_t seed) {
+    if (!session.ActiveRegionsEnabled())
+        return;
+    session.PinActiveRegion({0, 0}, true);
+    ASSERT_TRUE(session.SaveWorld());
+    Luminumbra::world::FieldPageState fields;
+    ASSERT_TRUE(fields.activate_region({0, 0}, seed, 0));
+    const auto directory = session.GetWorldSaveDir();
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(
+        directory, [&] { return WorldSaveService::save_field_pages(fields, directory); }));
+    ASSERT_TRUE(session.LoadWorldState());
+    ASSERT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+}
+
+void ExpectHostFields(const GameSession& session, const std::string& expected) {
+    EXPECT_EQ(session.GetFieldPages().canonical_bytes(), expected);
+}
+
 // Use the existing GameSession seam: pressure makes a pinned distant region
 // freeze, whose built-in digest provider throws on a corrupt durable region.
 // Reloading a valid ledger supplies the small test policy to an already booted
@@ -252,6 +270,9 @@ protected:
             WorldSaveService::load_active_regions(saved_ledger, directory, &errors, saved_clock));
         EXPECT_EQ(saved_ledger.header_tick(), kFaultTick);
         EXPECT_EQ(saved_ledger.records().at(kFaultRegion).last_save, kFaultTick);
+        Luminumbra::world::FieldPageState saved_fields;
+        ASSERT_TRUE(WorldSaveService::load_field_pages(saved_fields, directory, &errors));
+        EXPECT_TRUE(saved_fields.empty());
     }
 };
 
@@ -496,12 +517,16 @@ TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement
             session.SetRootPath(root.generic_string() + "/");
             session.SetActiveRegionsEnabled(active_regions);
             ASSERT_TRUE(session.CreateWorld("Snapshot original", "1337", "default"));
+            ASSERT_NO_FATAL_FAILURE(InstallHostFields(session, 1337));
             ASSERT_TRUE(session.SaveWorld());
             const auto directory = session.GetWorldSaveDir();
             const auto recorded = Measurement::saved_world_digest(directory);
             const auto id = session.GetMetadata().worldId;
             const auto authority = LiveAuthoritativeContents(session);
+            const auto fields = session.GetFieldPages().canonical_bytes();
             const Measurement::VerifiedSaveSnapshot snapshot(directory, recorded, id);
+            ASSERT_NO_FATAL_FAILURE(InstallHostFields(session, 7331));
+            const auto replacement_fields = session.GetFieldPages().canonical_bytes();
             const auto metadata_path = directory / "world_info.json";
             auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
             metadata["name"] = "Snapshot replaced";
@@ -512,10 +537,12 @@ TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement
             EXPECT_EQ(session.GetMetadata().name, "Snapshot original");
             EXPECT_EQ(session.GetWorldSaveDir(), directory);
             EXPECT_EQ(LiveAuthoritativeContents(session), authority);
+            ASSERT_NO_FATAL_FAILURE(ExpectHostFields(session, fields));
             EXPECT_EQ(ReadHostFile(metadata_path), replacement);
             // Normal callers still read the configured live root.
             ASSERT_TRUE(session.LoadWorld(id));
             EXPECT_EQ(session.GetMetadata().name, "Snapshot replaced");
+            ASSERT_NO_FATAL_FAILURE(ExpectHostFields(session, replacement_fields));
         }
         jobs.shutdown();
     }
