@@ -9349,9 +9349,9 @@ void CheckWeatherCorner(int blocked) {
     EXPECT_FLOAT_EQ(std::bit_cast<float>(after.center_z), blocked == 0 ? 512.75f : 511.75f);
     EXPECT_EQ(after.active_age, storm.active_age);
     const auto& work = session.GetActiveRegionLedger().completed_work();
-    if (blocked == 3)
+    if (blocked == 3) {
         EXPECT_TRUE(work.empty());
-    else {
+    } else {
         EXPECT_EQ(work.at(target), blocked == 0 ? 2u : 1u);
         EXPECT_EQ(work.contains(source), blocked == 0);
     }
@@ -9802,7 +9802,7 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
     if (work_kind == 2 || work_kind == 4) {
         ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 256, 256)}, {}));
     }
-    if (work_kind == 3)
+    if (work_kind == 3) {
         ASSERT_TRUE(fields.replace_weather({},
                                            {{kFieldOwner,
                                              31,
@@ -9811,8 +9811,10 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
                                              std::bit_cast<std::uint32_t>(0.5f),
                                              99,
                                              0}}));
-    if (work_kind == 4)
+    }
+    if (work_kind == 4) {
         AddWeatherOverlayCell(fields, 4, {1024, 64512, 32768, 32768, 16384});
+    }
     ASSERT_NO_FATAL_FAILURE(AddFrozenWeatherOwners(fields, owners, frozen_owners));
     if (shared_page && frozen_owners != 0)
         AddWeatherOverlayCell(fields, 21, {1024, 64512, 32768, 32768, 16384});
@@ -9943,11 +9945,12 @@ void CheckWeatherWithoutAmbientPages(int authority, bool clock) {
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetFieldPages().page_count(), 0u);
-    if (clock)
+    if (clock) {
         EXPECT_EQ(session.GetFieldPages().weather_clocks(),
                   (std::map<RegionKey, std::uint64_t>{{kFieldOwner, 8}}));
-    else
+    } else {
         EXPECT_TRUE(session.GetFieldPages().weather_clocks().empty());
+    }
     EXPECT_EQ(session.GetFieldPages().scent_cells(), fields.scent_cells());
     EXPECT_EQ(session.GetFieldPages().soil().pages(), fields.soil().pages());
     EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
