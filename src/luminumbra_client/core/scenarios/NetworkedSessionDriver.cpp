@@ -130,9 +130,12 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
     physics_system->update(static_cast<float>(ctx->fixed_dt));
-    const std::uint32_t ran = ctx->session->TickSimulation(ctx->fixed_dt);
+    const std::uint32_t ran =
+        ctx->session->TickSimulation(ctx->fixed_dt, /*defer_water_authority=*/true);
     world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
     world_system->wait_for_streaming_jobs();
+    // Water ran in update(); publish its ownership once the tick's last writer has finished.
+    world_system->sync_water_authority();
     return ran == 1;
 }
 

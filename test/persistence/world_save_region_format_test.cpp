@@ -2043,6 +2043,83 @@ TEST(WorldSaveRegionFormat, ColdValidationTransfersRetainedDecodesOnlyForExactRe
     EXPECT_EQ(loaded.size(), 0u);
 }
 
+namespace {
+
+// Writes one region record whose header flag and payload ownership are chosen independently.
+void WriteRecordWithOwnership(const std::filesystem::path& save_path,
+                              bool header_edited,
+                              bool terrain_edited,
+                              bool water_owned) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState source;
+    const auto chunk = source.get_or_create_chunk({7, 0, 9});
+    chunk->sdf_data.assign(17 * 17 * 17, -7.8125f);
+    if (terrain_edited) {
+        chunk->mark_voxel_data_dirty();
+    }
+    if (water_owned) {
+        chunk->mark_water_data_dirty();
+    }
+    WorldSaveService::ContainerRecord record;
+    record.id = chunk->get_id();
+    record.flags = header_edited ? 1u : 0u;
+    record.payload = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(save_path, 0, 0), {record}));
+}
+
+bool LoadOwnershipRecord(const std::filesystem::path& save_path,
+                         std::size_t& loaded_count,
+                         bool& water_authority) {
+    const WorldSaveService::WorldReadScope read_scope;
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    const std::unordered_set<Luminumbra::ChunkID> wanted{
+        Luminumbra::Chunk::calculate_id({7, 0, 9})};
+    const bool ok = WorldSaveService{}.load_world(loaded, save_path, errors, {}, &wanted);
+    loaded_count = loaded.size();
+    const auto chunk = loaded.find_chunk(*wanted.begin());
+    water_authority = chunk && chunk->has_water_authority();
+    return ok;
+}
+
+} // namespace
+
+TEST(WorldSaveRegionFormat, RecordHeaderRefusesTerrainOwnershipItDoesNotCarry) {
+    {
+        TempSaveDir save("record_terrain_contradiction");
+        WriteRecordWithOwnership(save.path, false, true, false);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path, &errors));
+        std::size_t loaded_count = 0;
+        bool water_authority = false;
+        EXPECT_FALSE(LoadOwnershipRecord(save.path, loaded_count, water_authority));
+        EXPECT_EQ(loaded_count, 0u);
+    }
+    {
+        TempSaveDir save("record_terrain_agreement");
+        WriteRecordWithOwnership(save.path, true, true, false);
+        std::vector<std::string> errors;
+        EXPECT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+        std::size_t loaded_count = 0;
+        bool water_authority = false;
+        EXPECT_TRUE(LoadOwnershipRecord(save.path, loaded_count, water_authority));
+        EXPECT_EQ(loaded_count, 1u);
+    }
+}
+
+TEST(WorldSaveRegionFormat, UnflaggedHeaderStillKeepsOwnedWater) {
+    TempSaveDir save("record_unflagged_water");
+    WriteRecordWithOwnership(save.path, false, false, true);
+    std::vector<std::string> errors;
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    std::size_t loaded_count = 0;
+    bool water_authority = false;
+    EXPECT_TRUE(LoadOwnershipRecord(save.path, loaded_count, water_authority));
+    EXPECT_EQ(loaded_count, 1u);
+    EXPECT_TRUE(water_authority);
+}
+
 TEST(WorldSaveRegionFormat, ColdValidationRetainsOnlyBoundedDecodesForTheAdoptingRead) {
     namespace P = Luminumbra::Persistence;
     struct RestoreLimit {

@@ -1217,6 +1217,19 @@ void ExpectRefusedWaterMirrors(const Chunk& chunk,
     EXPECT_EQ(chunk.water_mesh_dirty_ticks, 9);
 }
 
+void ExpectRejectedDisplacementIsInert(WaterSystem& water, Chunk& chunk, const Vec3& position) {
+    const auto revision = chunk.water_revision();
+    const auto authority_revision = chunk.authority_hash_revision();
+    const bool pending = chunk.is_water_state_dirty();
+    const bool save_dirty = chunk.is_voxel_data_dirty();
+    water.apply_displacement(position, 1.0f);
+    EXPECT_EQ(chunk.water_revision(), revision);
+    EXPECT_EQ(chunk.authority_hash_revision(), authority_revision);
+    EXPECT_EQ(chunk.is_water_state_dirty(), pending);
+    EXPECT_EQ(chunk.is_voxel_data_dirty(), save_dirty);
+    EXPECT_FALSE(chunk.has_water_authority());
+}
+
 TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits) {
     for (const int target : {8, 16}) {
         for (const std::size_t partial : {0u, 1u, 255u, 257u}) {
@@ -1267,7 +1280,7 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
                             Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
                             Vec3(8.0f, 0.0f, 8.0f);
                         EXPECT_FALSE(fixture.world().debug_water_grid_at(position.x, position.z));
-                        fixture.water().apply_displacement(position, 1.0f);
+                        ExpectRejectedDisplacementIsInert(fixture.water(), *chunk, position);
                         EXPECT_EQ(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
                         EXPECT_EQ(chunk->current_water_resolution.load(), 16);
                         EXPECT_EQ(chunk->water_bed_mm, beds.at(id));
@@ -1282,6 +1295,136 @@ TEST(WaterSeedInputs, RejectedAdjacentGridsNeverEnterSolverSeamsOrExternalEdits)
                 }
             }
         }
+    }
+}
+
+void ApplyRuntimeWaterMutation(SeedFixture& fixture,
+                               Chunk& chunk,
+                               std::string_view mutation,
+                               const Vec3& position,
+                               std::uint64_t revision) {
+    if (mutation == "displacement") {
+        const auto depth = chunk.water_depth_mm;
+        fixture.water().apply_displacement(position, 1.0f);
+        EXPECT_NE(chunk.water_depth_mm, depth);
+        EXPECT_TRUE(chunk.is_water_state_dirty());
+        EXPECT_FALSE(chunk.has_water_authority());
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+        EXPECT_EQ(chunk.authority_hash_revision(), revision);
+    } else if (mutation == "bed") {
+        ASSERT_GT(fixture.water().EditTerrainBed(position, -100, 4.0f), 0);
+    } else if (mutation == "rain") {
+        fixture.water().SetHydrology(true, 10, 0);
+        fixture.tick();
+    } else if (mutation == "source") {
+        entt::registry sources;
+        const auto entity = sources.create();
+        sources.emplace<Components::TransformComponent>(entity).position = position;
+        sources.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 1.0f;
+        fixture.water().update(sources, fixture.chunks());
+    } else if (mutation == "flux") {
+        chunk.water_edge_flux[0] = 57;
+        chunk.is_water_sleeping.store(false);
+        fixture.tick();
+    } else {
+        fixture.water().SetSimResolution(16);
+        ASSERT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 1u);
+    }
+}
+
+void ExpectOwnedBedEditInvalidatesAuthority(WaterSystem& water,
+                                            Chunk& chunk,
+                                            const Vec3& position,
+                                            std::uint64_t seed_generation) {
+    const auto owned_revision = chunk.authority_hash_revision();
+    const auto owned_voxel_revision = chunk.voxel_revision();
+    ASSERT_GT(water.EditTerrainBed(position, -1, 4.0f), 0);
+    EXPECT_TRUE(chunk.is_water_state_dirty());
+    EXPECT_TRUE(chunk.is_voxel_data_dirty());
+    EXPECT_TRUE(chunk.has_water_authority());
+    EXPECT_GT(chunk.authority_hash_revision(), owned_revision);
+    EXPECT_EQ(chunk.voxel_revision(), owned_voxel_revision);
+    EXPECT_EQ(chunk.water_seed_edit_generation(), seed_generation);
+}
+
+TEST(WaterSeedInputs, RuntimeMutationsEnterAuthoritySnapshotsAndRegionHashes) {
+    for (const std::string_view mutation :
+         {"displacement", "bed", "rain", "source", "flux", "resize"}) {
+        SCOPED_TRACE(mutation);
+        SeedFixture fixture;
+        const auto chunk = fixture.chunks().begin()->second;
+        chunk->set_state(ChunkState::Idle);
+        chunk->mark_sdf_generated_current_params();
+        chunk->is_water_sleeping.store(true);
+        fixture.water().SetSimResolution(8);
+        fixture.water().SetHydrology(true, 0, 0);
+        fixture.tick();
+        ASSERT_TRUE(chunk->has_water_sim.load());
+        ASSERT_FALSE(chunk->has_water_authority());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        ASSERT_EQ(chunk->current_water_resolution.load(), 8);
+        ASSERT_EQ(chunk->water_bed_mm.size(), 64u);
+        ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
+        ASSERT_EQ(chunk->water_edge_flux.size(), 128u);
+        ASSERT_EQ(chunk->water_level_data.size(), 64u);
+        ASSERT_EQ(chunk->water_flow_data.size(), 64u);
+        ASSERT_EQ(chunk->water_sim_terrain_height.size(), 64u);
+        ASSERT_EQ(chunk->water_rest_level.size(), 64u);
+        chunk->water_bed_mm.assign(64, 4000);
+        chunk->water_depth_mm.assign(64, 0);
+        chunk->water_edge_flux.assign(128, 0);
+        chunk->water_level_data.assign(64, 4.0f);
+        chunk->water_sim_terrain_height.assign(64, 4.0f);
+        const Vec3 position = Vec3(chunk->get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z)) +
+                              Vec3(8.0f, 0.0f, 8.0f);
+        WorldStreamingState original;
+        ASSERT_TRUE(original.insert_chunk(chunk));
+        const auto empty_hash = Persistence::ComputeRegionContentHash(original);
+        const auto revision = chunk->authority_hash_revision();
+        const auto voxel_revision = chunk->voxel_revision();
+        const auto seed_generation = chunk->water_seed_edit_generation();
+        (void)fixture.water().get_water_level_at(position.x, position.z);
+        (void)fixture.water().get_water_flow_at(position.x, position.z);
+        EXPECT_EQ(chunk->authority_hash_revision(), revision);
+        EXPECT_FALSE(chunk->has_water_authority());
+        ApplyRuntimeWaterMutation(fixture, *chunk, mutation, position, revision);
+        EXPECT_TRUE(chunk->is_water_state_dirty());
+        EXPECT_FALSE(chunk->has_water_authority());
+        EXPECT_EQ(chunk->authority_hash_revision(), revision);
+        EXPECT_EQ(chunk->voxel_revision(), voxel_revision);
+        fixture.world().sync_water_authority();
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->has_simulation_authority());
+        EXPECT_FALSE(chunk->has_terrain_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_GT(chunk->authority_hash_revision(), revision);
+        EXPECT_EQ(chunk->voxel_revision(), voxel_revision + 1u);
+        EXPECT_EQ(chunk->water_seed_edit_generation(), seed_generation);
+        Persistence::RegionContentHasher hasher;
+        hasher.append(*chunk);
+        EXPECT_FALSE(hasher.empty());
+        const auto hash = Persistence::ComputeRegionContentHash(original);
+        EXPECT_NE(hash, empty_hash);
+        const auto snapshot = Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
+        const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
+        EXPECT_EQ(record["authority"]["water_owned"], true);
+        EXPECT_EQ(record["water_authority"], "generated");
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(snapshot, restored, errors));
+        ASSERT_TRUE(errors.empty());
+        const auto loaded = restored.find_chunk(chunk->get_id());
+        ASSERT_NE(loaded, nullptr);
+        EXPECT_TRUE(loaded->has_water_authority());
+        EXPECT_FALSE(loaded->has_terrain_authority());
+        EXPECT_TRUE(loaded->same_water_state(*chunk));
+        EXPECT_EQ(Persistence::ComputeRegionContentHash(restored), hash);
+        chunk->clear_voxel_data_dirty();
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_EQ(Persistence::ComputeRegionContentHash(original), hash);
+        EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*chunk), snapshot);
+        ExpectOwnedBedEditInvalidatesAuthority(fixture.water(), *chunk, position, seed_generation);
     }
 }
 

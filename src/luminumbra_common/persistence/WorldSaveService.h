@@ -315,9 +315,9 @@ public:
                                    std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                    std::vector<std::string>* errors = nullptr);
 
-    // Bounded far-cache recovery variant: decodes only lod-0 records carrying
-    // the sticky edited/authoritative flag, avoiding decompression of pristine
-    // streamed chunks that cannot supersede FSD2 authority.
+    // Bounded far-cache recovery variant: flagged lod-0 records take the fast path.
+    // Unflagged records use cached admission facts to discover persisted water
+    // ownership missing its authoritative flag; pristine records stay excluded.
     static bool read_authoritative_region_chunks(const std::filesystem::path& region_file,
                                                  int min_chunk_x,
                                                  int max_chunk_x,

@@ -286,11 +286,20 @@ int PositiveMod(int value, int divisor) {
     return result < 0 ? result + divisor : result;
 }
 
+void MarkRuntimeWaterMutation(Chunk& chunk) {
+    if (chunk.has_water_authority())
+        chunk.mark_water_data_dirty();
+    else
+        chunk.mark_dirty_for_save();
+    chunk.mark_water_state_dirty();
+}
+
 // Sleep flags and the calm counter are saved only with water that is already durable.
 // They never make regenerable water authoritative.
 void MarkWaterBookkeeping(Chunk& chunk) {
-    if (chunk.needs_authority())
-        chunk.mark_water_state_dirty();
+    if (chunk.needs_authority()) {
+        MarkRuntimeWaterMutation(chunk);
+    }
 }
 
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
@@ -329,7 +338,7 @@ void StepChunkWaterFixed(Chunk& c,
     // the historical zero-momentum initialization, bounded to 2 * 32 * 32 entries.
     if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n)) {
         c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0);
-        c.mark_water_state_dirty();
+        MarkRuntimeWaterMutation(c);
     }
 
     std::vector<std::int32_t>& depth = c.water_depth_mm;
@@ -565,7 +574,7 @@ void StepChunkWaterFixed(Chunk& c,
         }
     }
     if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {
-        c.mark_water_state_dirty();
+        MarkRuntimeWaterMutation(c);
     }
 }
 
@@ -946,8 +955,9 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
         }
     }
     cp->has_water_sim.store(true);
-    if (cp->needs_authority())
-        cp->mark_water_state_dirty();
+    if (cp->needs_authority()) {
+        MarkRuntimeWaterMutation(*cp);
+    }
     m_water_activity_cache.erase(cp->get_id());
     cp->water_mesh_generated.store(false);
     cp->water_mesh_dirty_ticks = 0;
@@ -1113,7 +1123,7 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
-                chunk.mark_water_state_dirty();
+                MarkRuntimeWaterMutation(chunk);
                 m_water_activity_cache.erase(chunk.get_id());
             }
         }
@@ -1359,6 +1369,9 @@ void WaterSystem::update(entt::registry& registry,
             if (!HasCompleteIntegerWaterGrid(*B, res))
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
+            // Mutations are recorded once per chunk after the face pass, not per sample.
+            bool mutated_a = false;
+            bool mutated_b = false;
             for (int t = 0; t < res; ++t) {
                 std::size_t ai, bi, slot;
                 if (isX) {
@@ -1401,7 +1414,7 @@ void WaterSystem::update(entt::registry& registry,
                 const std::int32_t flux_prev = A->water_edge_flux[slot];
                 A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
                 if (A->water_edge_flux[slot] != flux_prev)
-                    A->mark_water_state_dirty();
+                    mutated_a = true;
                 AddWaterDepth(A->water_depth_mm[ai], -q);
                 AddWaterDepth(B->water_depth_mm[bi], q);
                 if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
@@ -1409,8 +1422,8 @@ void WaterSystem::update(entt::registry& registry,
                 if (q != 0) {
                     A->is_water_sleeping.store(false, std::memory_order_relaxed);
                     B->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    A->mark_water_state_dirty();
-                    B->mark_water_state_dirty();
+                    mutated_a = true;
+                    mutated_b = true;
                     if (have_mirror_A)
                         A->water_level_data[ai] =
                             static_cast<float>(static_cast<std::int64_t>(A->water_bed_mm[ai]) +
@@ -1423,6 +1436,10 @@ void WaterSystem::update(entt::registry& registry,
                             static_cast<float>(MM_PER_M);
                 }
             }
+            if (mutated_a)
+                MarkRuntimeWaterMutation(*A);
+            if (mutated_b)
+                MarkRuntimeWaterMutation(*B);
         };
         if (Chunk* east = find_in_window(Chunk::calculate_id(ac + IVec3(1, 0, 0))))
             step_face(east, true);
@@ -1653,7 +1670,7 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
-                    target_chunk.mark_water_state_dirty();
+                    MarkRuntimeWaterMutation(target_chunk);
                     m_water_activity_cache.erase(target_chunk.get_id());
                 }
             }
@@ -1704,7 +1721,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
         if (edited) {
             c.stage_water_seed_inputs({});
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
-            c.mark_water_state_dirty();
+            MarkRuntimeWaterMutation(c);
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
             m_water_activity_cache.erase(c.get_id());
@@ -1786,7 +1803,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
-        chunk.mark_water_state_dirty();
+        MarkRuntimeWaterMutation(chunk);
         return true;
     }
 
@@ -1949,7 +1966,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
 
     chunk.has_water_sim.store(true);
-    chunk.mark_water_state_dirty();
+    MarkRuntimeWaterMutation(chunk);
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     chunk.current_water_resolution.store(new_resolution);

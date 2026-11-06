@@ -569,6 +569,9 @@ bool ServerWorldRunner::Boot() {
         world_system->SetWaterBootPaused(false);
     }
 
+    // Boot settles water outside the counted ticks. Publish its ownership before any initial
+    // checkpoint or save; hash reads themselves only observe this completed boundary.
+    world_system->sync_water_authority();
     m_booted = true;
     return true;
 }
@@ -653,7 +656,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 anchors.push_back(avatar.position);
             m_session->SetReplicatedSimulationAnchors(std::move(anchors));
         }
-        report.ticks_executed += m_session->TickSimulation(fixed_dt);
+        report.ticks_executed +=
+            m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
         report.frames_executed += 1;
         if (const auto& fault = m_session->GetRegionSchedulerFault()) {
             report.region_fault = true;
@@ -745,6 +749,10 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)
                 .count();
         wait_samples.push_back(_wait_ms);
+        // Water runs in update(), after TickSimulation. Promote once, after activation has
+        // settled its writers and before autosave or any checkpoint can observe this tick.
+        // sync_water_authority visits only queued changes, never the resident chunk set.
+        world_system->sync_water_authority();
         if (budget.Enabled()) {
             // Include the complete update, including its final resident-chunk scan and
             // queue bookkeeping. Water has its own disjoint bracket; activation is separate.
@@ -970,6 +978,7 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
 }
 
 std::string ServerWorldRunner::ComputeWorldHash() {
+    // Boot and RunFixedTicks settle water authority before all three hash entry points.
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
         return {};
     }
