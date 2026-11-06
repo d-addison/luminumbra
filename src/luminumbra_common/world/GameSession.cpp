@@ -2251,11 +2251,15 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
     std::vector<RegionalStrike> strikes;
     // Same-tick events have already been delivered at the saved boundary. Frozen strikes stay
     // as stored and never re-emit because their absolute provenance tick is immutable.
-    for (const auto& strike : fields.strikes())
-        if (!due.contains(strike.owner))
+    std::map<RegionKey, std::size_t> strike_counts;
+    for (const auto& strike : fields.strikes()) {
+        if (!due.contains(strike.owner)) {
             strikes.push_back(strike);
-        else
+            ++strike_counts[strike.owner];
+        } else {
             ++work[strike.owner];
+        }
+    }
     // Reserve all surviving occupants before considering any handover. Expiry releases its
     // slot independently of identity order, and transfers reserve destinations immediately.
     std::map<RegionKey, std::size_t> storm_counts;
@@ -2328,8 +2332,11 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
                 if (std::isfinite(sx) && std::isfinite(sz) && sx >= -16777216.0f &&
                     sx < 16777216.0f && sz >= -16777216.0f && sz < 16777216.0f) {
                     const auto target = owner_of(sx, sz);
+                    // A target already holding its strike maximum drops this strike
+                    // deterministically.
                     if (eligible(target) &&
-                        (target == storm.owner || common(storm.owner, target))) {
+                        (target == storm.owner || common(storm.owner, target)) &&
+                        strike_counts[target] < FieldPageState::kMaxOwnerStrikes) {
                         const float magnitude = std::min(
                             1.0f, 0.55f * intensity + 0.45f * unit(key ^ 0x99990000aaaabbbbull));
                         if (strikes.size() == FieldPageState::kMaxStrikes)
@@ -2341,6 +2348,7 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
                                            std::bit_cast<std::uint32_t>(magnitude),
                                            storm.seed_salt,
                                            0});
+                        ++strike_counts[target];
                         ++work[storm.owner];
                         if (target != storm.owner)
                             ++work[target];

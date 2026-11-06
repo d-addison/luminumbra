@@ -9307,8 +9307,9 @@ void CheckWeatherTransferCapacity(std::size_t count,
         ASSERT_NE(found, after.end());
         EXPECT_EQ(found->owner, i < admitted ? target : source);
         EXPECT_EQ(found->active_age, incoming[i].active_age);
-        if (i >= admitted)
+        if (i >= admitted) {
             EXPECT_EQ(*found, incoming[i]);
+        }
     }
     EXPECT_EQ(std::count_if(after.begin(),
                             after.end(),
