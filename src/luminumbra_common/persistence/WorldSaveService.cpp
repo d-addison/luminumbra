@@ -4744,6 +4744,12 @@ bool FieldPagesMatchLedger(const world::FieldPageState& state,
                        state.scent_cells().end(),
                        [&has_owner, metre_owner](const auto& cell) {
                            return has_owner(metre_owner(cell.first));
+                       }) &&
+           std::all_of(state.scent_floors().begin(),
+                       state.scent_floors().end(),
+                       [&has_owner, metre_owner](const auto& block) {
+                           // Aligned 8 m blocks never cross a 512 m owner boundary.
+                           return has_owner(metre_owner(block.first));
                        });
 }
 } // namespace

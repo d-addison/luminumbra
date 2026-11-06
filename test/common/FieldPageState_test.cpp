@@ -218,8 +218,9 @@ void CheckDenseScentBufferReuse() {
     const ScentCell two{std::bit_cast<std::uint64_t>(2.0), 0, 0, 0};
     std::vector<ScentCell> cells(static_cast<std::size_t>(side) * side, one);
     FieldPageState source;
-    std::map<RegionKey, std::uint64_t> work;
-    ASSERT_TRUE(source.capture_scent_window({0, 0}, side, cells, work));
+    ScentWindowWork work;
+    std::map<RegionKey, std::uint64_t> initial_work;
+    ASSERT_TRUE(source.capture_scent_window({0, 0}, side, cells, initial_work));
     const auto* node = &source.scent_cells().begin()->second;
     Luminumbra::world::ScentChangeBuffers buffers;
     std::size_t capacity = 0;
@@ -231,6 +232,9 @@ void CheckDenseScentBufferReuse() {
         EXPECT_EQ(candidate.scent_capture_visits(), cells.size());
         EXPECT_EQ(candidate.staged_scent_cells(), cells.size());
         EXPECT_EQ(candidate.staged_scent_nodes(), 0u);
+        ASSERT_EQ(work.count, 1u);
+        EXPECT_EQ(work.entries[0].first, (RegionKey{0, 0}));
+        EXPECT_EQ(work.entries[0].second, cells.size());
         // Both alternating vectors have warmed after two captures.
         if (pass >= 2) {
             EXPECT_EQ(candidate.scent_change_capacity(), capacity);
@@ -1457,4 +1461,219 @@ TEST(FieldPageStateTest, OwnerWeatherReplacementBorrowsUntouchedAuthorityAndPres
 
 TEST(FieldPageStateTest, OwnerWeatherReplacementRefusesConflictsAndDiscardsUnpublishedChanges) {
     ASSERT_NO_FATAL_FAILURE(CheckOwnerWeatherRefusalAndRemoval());
+}
+
+namespace {
+void CheckCompactScentFloorWindow(ScentCellKey origin) {
+    constexpr int side = 128;
+    const auto floor = std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor);
+    const ScentCell uniform{floor, floor, floor, floor};
+    std::vector<ScentCell> cells(std::size_t{side} * side, uniform);
+    cells[1] = {std::bit_cast<std::uint64_t>(2.0), 0, floor, 1};
+    cells[2] = {};
+    FieldPageState source, candidate;
+    ScentWindowWork work;
+    ASSERT_TRUE(candidate.stage_scent_window(source, origin, side, cells, work));
+    EXPECT_TRUE(source.empty());
+    source.adopt_scent_state(candidate);
+    ASSERT_EQ(source.scent_cells().size(), 1u);
+    EXPECT_LE(source.scent_floor_blocks(), 17u * 17u);
+    EXPECT_FALSE(source.empty());
+    std::map<RegionKey, std::uint64_t> expected_work;
+    for (int x = 0; x < side; ++x) {
+        for (int z = 0; z < side; ++z) {
+            const ScentCellKey key{origin.x + x, origin.z + z};
+            const auto& expected =
+                cells[static_cast<std::size_t>(x) * side + static_cast<std::size_t>(z)];
+            EXPECT_EQ(source.scent_at(key), expected);
+            if (expected != ScentCell{}) {
+                ++expected_work[FieldPageState::region_of_scent_cell(key)];
+            }
+        }
+    }
+    EXPECT_EQ((std::map<RegionKey, std::uint64_t>(work.begin(), work.end())), expected_work);
+    EXPECT_EQ(source.scent_at({origin.x - 1, origin.z}), ScentCell{});
+    EXPECT_EQ(source.scent_at({origin.x, origin.z - 1}), ScentCell{});
+    const auto bytes = source.serialize();
+    EXPECT_EQ(ReadU(bytes, 4, 2), 3u);
+    EXPECT_LT(bytes.size(), 12000u);
+    EXPECT_EQ(source.canonical_bytes(), "field_pages:v3:" + bytes);
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+    EXPECT_EQ(restored.serialize(), bytes);
+    for (const auto& [owner, count] : expected_work) {
+        (void)count;
+        EXPECT_TRUE(restored.owns_evolution_state(owner));
+        EXPECT_EQ(restored.region_bytes(owner), source.region_bytes(owner));
+        EXPECT_FALSE(restored.region_bytes(owner).empty());
+    }
+    ASSERT_TRUE(candidate.stage_scent_window(source, origin, side, cells, work));
+    EXPECT_EQ(work.count, 0u);
+    EXPECT_EQ(candidate.staged_scent_cells(), 0u);
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.serialize(), bytes);
+    const ScentCellKey first{origin.x, origin.z};
+    ASSERT_TRUE(restored.set_scent(first, {}));
+    EXPECT_EQ(restored.scent_at(first), ScentCell{});
+    EXPECT_EQ(restored.scent_at({origin.x, origin.z + 3}), uniform);
+    const std::array<std::pair<ScentCellKey, ScentCell>, 1> updates{
+        std::pair{ScentCellKey{origin.x, origin.z + 3}, ScentCell{}}};
+    ASSERT_TRUE(restored.update_scent(updates));
+    EXPECT_EQ(restored.scent_at(updates.front().first), ScentCell{});
+    restored.clear();
+    EXPECT_TRUE(restored.empty());
+    EXPECT_EQ(restored.scent_floor_blocks(), 0u);
+}
+
+void CheckBoundedScentHistory(bool floors) {
+    constexpr int side = 128;
+    const auto bits = std::bit_cast<std::uint64_t>(floors ? FieldPageState::kScentFloor : 1.0);
+    const ScentCell value{bits, bits, bits, bits};
+    std::vector<ScentCell> cells(std::size_t{side} * side, value);
+    FieldPageState source;
+    ScentChangeBuffers buffers;
+    // Twenty disjoint windows exceed both retention limits, including the old fifth-window failure.
+    for (int window = 0; window < 20; ++window) {
+        SCOPED_TRACE(window);
+        const ScentCellKey origin{window * 1024, 0};
+        FieldPageState candidate;
+        candidate.reuse_scent_buffers(buffers);
+        ScentWindowWork work;
+        const auto before = source.serialize();
+        ASSERT_TRUE(candidate.stage_scent_window(source, origin, side, cells, work, true));
+        EXPECT_EQ(source.serialize(), before);
+        // At capacity, each retired entry and any protected window entry is visited once.
+        EXPECT_LE(candidate.scent_capture_visits(), cells.size() * 3);
+        source.adopt_scent_state(candidate);
+        candidate.reuse_scent_buffers(buffers);
+        EXPECT_EQ(source.scent_at(origin), value);
+        EXPECT_LE(source.scent_cells().size(), FieldPageState::kMaxScentCells);
+        EXPECT_LE(source.scent_floor_blocks(), FieldPageState::kMaxScentFloorBlocks);
+        if (floors) {
+            EXPECT_TRUE(source.scent_cells().empty());
+        }
+    }
+    EXPECT_EQ(source.scent_at({0, 0}), ScentCell{});
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(source.serialize(), restored, error)) << error;
+    EXPECT_EQ(restored.serialize(), source.serialize());
+    // Strict admissions still refuse at capacity and retain prior output counts.
+    FieldPageState strict;
+    ScentWindowWork refused_work;
+    refused_work.add({7, 7});
+    const auto refused_entries = refused_work.entries;
+    EXPECT_FALSE(strict.stage_scent_window(restored, {30000, 0}, side, cells, refused_work));
+    EXPECT_EQ(refused_work.entries, refused_entries);
+    EXPECT_EQ(strict.staged_scent_cells(), 0u);
+    // Returning to retired space remains a valid capture at either storage limit.
+    FieldPageState returning;
+    ScentWindowWork work;
+    ASSERT_TRUE(returning.stage_scent_window(restored, {0, 0}, side, cells, work, true));
+    restored.adopt_scent_state(returning);
+    EXPECT_EQ(restored.scent_at({0, 0}), value);
+}
+
+void CheckRetirementProtectsCurrentWindow() {
+    constexpr int side = 128;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    FieldPageState source;
+    for (int x = 0; x < side / 2; ++x) {
+        for (int z = 0; z < side; ++z) {
+            ASSERT_TRUE(source.set_scent({x, z}, one));
+        }
+    }
+    for (std::size_t count = source.scent_cells().size(); count < FieldPageState::kMaxScentCells;
+         ++count) {
+        ASSERT_TRUE(source.set_scent({900, static_cast<std::int32_t>(count)}, one));
+    }
+    FieldPageState candidate;
+    const std::vector<ScentCell> cells(std::size_t{side} * side, one);
+    ScentWindowWork work;
+    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, side, cells, work, true));
+    EXPECT_LE(candidate.scent_capture_visits(), cells.size() * 2);
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.scent_cells().size(), FieldPageState::kMaxScentCells);
+    for (int x = 0; x < side; ++x) {
+        for (int z = 0; z < side; ++z) {
+            EXPECT_EQ(source.scent_at({x, z}), one);
+        }
+    }
+}
+
+void CheckFloorEncodingRefusalsAndRollback() {
+    const auto floor = std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor);
+    const ScentCell value{floor, floor, floor, floor};
+    const std::array<ScentCell, 1> cells{value};
+    FieldPageState source, candidate;
+    ScentWindowWork work;
+    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 1, cells, work));
+    source.adopt_scent_state(candidate);
+    const auto bytes = source.serialize();
+    // The sole section is a 40-byte floor record: key then four masks.
+    EXPECT_EQ(ReadU(bytes, 12, 2), 8u);
+    for (const auto offset : {std::size_t{4}, std::size_t{22}, std::size_t{26}, std::size_t{30}}) {
+        auto corrupt = bytes;
+        if (offset == 4) {
+            WriteU(corrupt, offset, 2, 2); // Floor blocks require version 3.
+        } else if (offset == 30) {
+            for (std::size_t channel = 0; channel < 4; ++channel) {
+                WriteU(corrupt, offset + channel * 8, 0, 8); // No empty floor block records.
+            }
+        } else {
+            WriteU(corrupt, offset, 1, 4); // Unaligned block origin on either axis.
+        }
+        Reseal(corrupt);
+        EXPECT_TRUE(RefusedUntouched(corrupt));
+    }
+    auto excessive_count = bytes;
+    WriteU(excessive_count, 18, FieldPageState::kMaxScentFloorBlocks + 1, 4);
+    Reseal(excessive_count);
+    EXPECT_TRUE(RefusedUntouched(excessive_count));
+    FieldPageState mixed;
+    const std::array<ScentCell, 1> mixed_cells{
+        ScentCell{std::bit_cast<std::uint64_t>(1.0), floor, floor, floor}};
+    std::map<RegionKey, std::uint64_t> mixed_work;
+    ASSERT_TRUE(mixed.capture_scent_window({0, 0}, 1, mixed_cells, mixed_work));
+    auto conflict = mixed.serialize();
+    // Section 4 occupies bytes [12,62); section 8's first channel mask starts at 80.
+    WriteU(conflict, 80, 1, 8);
+    Reseal(conflict);
+    EXPECT_TRUE(RefusedUntouched(conflict));
+    std::array<ScentCell, 1> changed{ScentCell{}};
+    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 1, changed, work));
+    const auto staged = candidate.staged_scent_cells();
+    const auto completed = work.entries;
+    changed[0][0] = std::bit_cast<std::uint64_t>(-0.0);
+    EXPECT_FALSE(candidate.stage_scent_window(source, {0, 0}, 1, changed, work, true));
+    EXPECT_EQ(source.serialize(), bytes);
+    EXPECT_EQ(candidate.staged_scent_cells(), staged);
+    EXPECT_EQ(work.entries, completed);
+    source.adopt_scent_state(candidate);
+    EXPECT_TRUE(source.empty());
+    // Unchanged legacy floor cells keep their exact encoding, including in frozen authority.
+    ASSERT_TRUE(source.set_scent({0, 0}, value));
+    const auto legacy = source.serialize();
+    ASSERT_TRUE(candidate.stage_scent_window(source, {0, 0}, 1, cells, work));
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(work.count, 0u);
+    EXPECT_EQ(source.serialize(), legacy);
+}
+} // namespace
+
+TEST(FieldPageStateTest, CompactScentFloorsPreserveExactChannelsOwnersAndReopen) {
+    for (const ScentCellKey origin : {ScentCellKey{0, 0}, {-13, -67}, {448, 448}}) {
+        ASSERT_NO_FATAL_FAILURE(CheckCompactScentFloorWindow(origin));
+    }
+}
+
+TEST(FieldPageStateTest, ScentHistoryRetiresOutsideTheCurrentWindowAtBothLimits) {
+    ASSERT_NO_FATAL_FAILURE(CheckBoundedScentHistory(false));
+    ASSERT_NO_FATAL_FAILURE(CheckBoundedScentHistory(true));
+    ASSERT_NO_FATAL_FAILURE(CheckRetirementProtectsCurrentWindow());
+}
+
+TEST(FieldPageStateTest, ScentFloorEncodingRefusalsLeaveAuthorityAndCandidateUntouched) {
+    ASSERT_NO_FATAL_FAILURE(CheckFloorEncodingRefusalsAndRollback());
 }

@@ -47,9 +47,22 @@ struct RegionalStrike {
 };
 using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative binary64 concentrations
 
+// A near window intersects at most four owners. No nodes are allocated for work counts.
+struct ScentWindowWork {
+    std::array<std::pair<RegionKey, std::uint64_t>, 4> entries{};
+    std::size_t count = 0;
+    void add(RegionKey owner);
+    auto begin() const {
+        return entries.begin();
+    }
+    auto end() const {
+        return entries.begin() + static_cast<std::ptrdiff_t>(count);
+    }
+};
+
 // Reused runtime storage; never serialized or included in authority hashes.
 struct ScentChangeBuffers {
-    std::vector<std::pair<ScentCellKey, ScentCell>> changes, scratch;
+    std::vector<std::pair<ScentCellKey, ScentCell>> changes, scratch, floors, floor_scratch;
 };
 
 class FieldPageState {
@@ -63,6 +76,11 @@ public:
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
     static constexpr std::size_t kMaxStorms = 65536, kMaxStrikes = 65536, kMaxScentCells = 65536;
+    // Floor values use four 64-bit channel masks per aligned 8 x 8 block. Live captures
+    // retire lexicographically first entries outside the current window at either limit.
+    // This bounds historical scent without refusing a valid near-window simulation step.
+    static constexpr std::size_t kMaxScentFloorBlocks = 4096;
+    static constexpr double kScentFloor = 1.0e-9;
     static constexpr std::size_t kMaxOwnerStorms = 16, kMaxOwnerStrikes = 32;
     static constexpr std::size_t kMaxWeatherClocks = 65536;
     static constexpr std::size_t kMaxFileBytes = 64u * 1024u * 1024u;
@@ -87,7 +105,8 @@ public:
 
     [[nodiscard]] bool empty() const {
         return m_pages.empty() && storm_count() == 0 && strike_count() == 0 && m_scent.empty() &&
-               weather_clock_count() == 0 && m_soil.empty() && m_irrigation.empty();
+               m_scentFloors.empty() && weather_clock_count() == 0 && m_soil.empty() &&
+               m_irrigation.empty();
     }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
@@ -104,6 +123,10 @@ public:
         m_stagedWeatherRecords = m_weatherValidationVisits = 0;
         invalidate_weather_cache();
         m_scent.clear();
+        m_scentFloors.clear();
+        m_scentFloorUpdates.clear();
+        m_scentChanges.floors.clear();
+        m_scentChanges.floor_scratch.clear();
         m_scentUpdates.clear();
         m_scentChanges.changes.clear();
         m_scentChanges.scratch.clear();
@@ -176,6 +199,16 @@ public:
     bool replace_weather(const std::vector<RegionalStorm>& storms,
                          const std::vector<RegionalStrike>& strikes,
                          const std::map<RegionKey, std::uint64_t>& clocks);
+    [[nodiscard]] ScentCell scent_at(ScentCellKey key) const;
+    [[nodiscard]] const std::map<ScentCellKey, ScentCell>& scent_floors() const {
+        return m_scentFloors;
+    }
+    [[nodiscard]] std::size_t scent_floor_blocks() const {
+        return m_scentFloors.size();
+    }
+    [[nodiscard]] bool has_scent() const {
+        return !m_scent.empty() || !m_scentFloors.empty();
+    }
     bool set_scent(ScentCellKey key, const ScentCell& values);
     // Same admissions as set_scent, committed together. Keys must be strictly ordered by
     // (z, x), as in the near-domain capture. Only newly admitted cells allocate map nodes.
@@ -196,20 +229,30 @@ public:
                             int side,
                             std::span<const ScentCell> cells,
                             std::map<RegionKey, std::uint64_t>& work);
+    // Runtime overload keeps counts in fixed storage. Retirement is only enabled by the
+    // live consumer; explicit sparse admissions retain their transactional capacity refusal.
+    bool stage_scent_window(const FieldPageState& source,
+                            ScentCellKey origin,
+                            int side,
+                            std::span<const ScentCell> cells,
+                            ScentWindowWork& work,
+                            bool retire_history = false);
     // Commit preallocated nodes after completed-work admission; no full-store copy or allocation.
     void adopt_scent_state(FieldPageState& staged) noexcept;
     [[nodiscard]] std::size_t staged_scent_cells() const {
-        return m_scentUpdates.size() + m_scentChanges.changes.size();
+        return m_scentUpdates.size() + m_scentChanges.changes.size() + m_scentFloorUpdates.size() +
+               m_scentChanges.floors.size();
     }
     // Swap retained contiguous storage into/out of a short-lived tick candidate.
     void reuse_scent_buffers(ScentChangeBuffers& buffers) noexcept {
         std::swap(m_scentChanges, buffers);
     }
     [[nodiscard]] std::size_t staged_scent_nodes() const {
-        return m_scentUpdates.size();
+        return m_scentUpdates.size() + m_scentFloorUpdates.size();
     }
     [[nodiscard]] std::size_t scent_change_capacity() const {
-        return m_scentChanges.changes.capacity() + m_scentChanges.scratch.capacity();
+        return m_scentChanges.changes.capacity() + m_scentChanges.scratch.capacity() +
+               m_scentChanges.floors.capacity() + m_scentChanges.floor_scratch.capacity();
     }
     [[nodiscard]] std::size_t scent_capture_visits() const {
         return m_scentCaptureVisits;
@@ -273,14 +316,14 @@ public:
     // Strict transactional parse; `out` is untouched and `error` set on any failure. Every
     // initialized cell must lie in [kMinCell, kMaxCell] in both axes.
     static bool parse(const std::string& bytes, FieldPageState& out, std::string& error);
-    // "" when empty, otherwise "field_pages:v2:" + serialize().
+    // "" when empty; otherwise the v2/v3 tag matching the serialized format and its bytes.
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string ambient_bytes(std::uint8_t channels,
                                             bool weather = false,
                                             const FieldPageState* overlay = nullptr) const;
     // For every owned initialized cell in cells_of_region order: i32 cell_x, i32 cell_z, then
     // kChannels u16 (all little endian). When the region owns storms, strikes, scent cells or a
-    // weather clock, an "|evolution:v2:" suffix follows with those sections. "" only when the
+    // weather clock, an "|evolution:v2:" suffix follows (v3 with floor blocks). "" only when the
     // region owns neither initialized cells nor evolution state. Soil and irrigation
     // append a "|foliage:v1:" suffix containing their owned exact integer cells.
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
@@ -303,6 +346,9 @@ private:
         m_weatherCacheValid = false;
     }
     std::map<ScentCellKey, ScentCell> m_scent;
+    // Key is the aligned block origin; each channel has one bit per (x * 8 + z).
+    std::map<ScentCellKey, ScentCell> m_scentFloors;
+    std::map<ScentCellKey, ScentCell> m_scentFloorUpdates;
     // Runtime candidate changes, never serialized or included in authority hashes.
     std::map<ScentCellKey, ScentCell> m_scentUpdates; // New authority nodes only.
     ScentChangeBuffers m_scentChanges;

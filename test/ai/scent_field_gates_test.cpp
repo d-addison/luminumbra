@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/ForagingSystem.h"
 #include "luminumbra_common/ai/ScentDepositSystem.h"
 #include "luminumbra_common/ai/ScentFieldGates.h"
@@ -12,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -333,7 +335,20 @@ void CheckNearDueQueryCost(std::size_t unrelated) {
         due.push_back({static_cast<std::int32_t>(100 + i), 100});
     }
     luminumbra::ai::detail::NearScentDueCache<RegionKey> cache;
-    cache.Refresh(kCells, owner_of, due);
+    std::size_t lookups = 0;
+    const auto refresh = [&] {
+        const std::set<RegionKey> index(due.begin(), due.end());
+        const auto before = cache.query_visits();
+        lookups = 0;
+        cache.Refresh(kCells, owner_of, [&](RegionKey owner) {
+            ++lookups;
+            return index.contains(owner);
+        });
+        EXPECT_LE(lookups, 4u);
+        EXPECT_GT(cache.query_visits() - before, lookups);
+        EXPECT_LE(cache.query_visits() - before, 14u);
+    };
+    refresh();
     const auto queries = [&] {
         const auto before = cache.query_visits();
         for (int x = 0; x < kCells; ++x) {
@@ -348,19 +363,23 @@ void CheckNearDueQueryCost(std::size_t unrelated) {
     due.clear();
     // A changed global schedule cannot leak into queries until refresh.
     EXPECT_EQ(queries(), work);
-    cache.Refresh(kCells, owner_of, due);
+    refresh();
     EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
     due.push_back(schedule.Owner(kCells - 1, kCells - 1));
-    cache.Refresh(kCells, owner_of, due);
+    refresh();
     EXPECT_TRUE(cache.Allows(owner_of(kCells - 1, kCells - 1)));
     EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
     const auto shifted_owner = [](int, int) {
         return RegionKey{1000, -1000};
     };
-    cache.Refresh(kCells, shifted_owner, due);
+    const std::set<RegionKey> shifted_index(due.begin(), due.end());
+    cache.Refresh(
+        kCells, shifted_owner, [&](RegionKey owner) { return shifted_index.contains(owner); });
     EXPECT_FALSE(cache.Allows(shifted_owner(0, 0)));
     due.push_back(shifted_owner(0, 0));
-    cache.Refresh(kCells, shifted_owner, due);
+    const std::set<RegionKey> refreshed_index(due.begin(), due.end());
+    cache.Refresh(
+        kCells, shifted_owner, [&](RegionKey owner) { return refreshed_index.contains(owner); });
     EXPECT_TRUE(cache.Allows(shifted_owner(0, 0)));
     EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
 }
@@ -478,4 +497,57 @@ TEST(ScentFieldGates, ForagingCannotFollowAStrongTrailIntoAFrozenCell) {
     EXPECT_EQ(registry.get<Comp::ForagerComponent>(ant).cell_x, 3);
     EXPECT_EQ(registry.get<Comp::ForagerComponent>(ant).cell_z, 1);
     EXPECT_DOUBLE_EQ(field.Sample(luminumbra::ai::kFoodTrailChannel, 5, 1), 100.0);
+}
+
+namespace {
+void CheckBrainScentEligibility(RegionState state, bool due) {
+    namespace Comp = Luminumbra::Components;
+    LiveSchedule schedule({100, 100});
+    const auto owner = schedule.Owner(16, 16);
+    schedule.Set(owner, state, state == RegionState::Reduced ? std::uint8_t{2} : std::uint8_t{0});
+    const auto phase = ActiveRegionLedger::phase(owner, 2);
+    schedule.Reschedule(due ? 32 + phase : 33 + phase);
+    if (state == RegionState::Frozen) {
+        due = false;
+    }
+    ScentField field(kCells, kCells, 4);
+    for (int x = 0; x < kCells; ++x) {
+        for (int z = 0; z < kCells; ++z) {
+            field.RestoreCell(0, x, z, static_cast<double>(x + 1));
+        }
+    }
+    field.BindDepositGate([&](int x, int z) { return schedule.CellDue(x, z); });
+    entt::registry sampled, cold;
+    const auto spawn = [](entt::registry& registry) {
+        const auto entity = registry.create();
+        registry.emplace<Comp::TransformComponent>(entity).position = {116, 0, 116};
+        auto& creature = registry.emplace<Comp::CreatureComponent>(entity);
+        creature.is_predator = true;
+        creature.hunger = 0.95f;
+        return entity;
+    };
+    const auto animal = spawn(sampled);
+    const auto control = spawn(cold);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(sampled, 1.0f / 30.0f, {}, &field, 100, 100, 1);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(cold, 1.0f / 30.0f);
+    const auto& actual = sampled.get<Comp::CreatureComponent>(animal);
+    const auto& expected = cold.get<Comp::CreatureComponent>(control);
+    if (due) {
+        EXPECT_EQ(actual.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Hunt));
+        EXPECT_GT(actual.wish_x, 0.0f);
+    } else {
+        EXPECT_EQ(actual.last_action, expected.last_action);
+        EXPECT_FLOAT_EQ(actual.wish_x, expected.wish_x);
+        EXPECT_FLOAT_EQ(actual.wish_z, expected.wish_z);
+        EXPECT_EQ(sampled.get<Comp::TransformComponent>(animal).position,
+                  cold.get<Comp::TransformComponent>(control).position);
+    }
+}
+} // namespace
+
+TEST(ScentFieldGates, CreatureBrainSamplesOnlyDueUnfrozenOwners) {
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Active, true));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Reduced, false));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Frozen, false));
 }

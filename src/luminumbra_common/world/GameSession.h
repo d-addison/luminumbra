@@ -540,6 +540,9 @@ public:
     [[nodiscard]] std::size_t GetRegionalWeatherScanCount() const {
         return m_regionalWeatherScanCount;
     }
+    [[nodiscard]] std::size_t GetRegionalWeatherScheduleVisits() const {
+        return m_regionalWeatherScheduleVisits;
+    }
     [[nodiscard]] std::size_t GetRegionalWeatherProjectionVisitCount() const {
         return m_regionalWeatherProjectionVisitCount;
     }
@@ -735,7 +738,7 @@ private:
     std::map<std::uint8_t, std::set<RegionKey>> m_regionalWeatherBoundaryOwners;
     std::map<std::uint8_t, std::set<RegionKey>> m_regionalAmbientOwners;
     std::map<RegionKey, std::uint8_t> m_regionalWeatherBoundaryShifts;
-    std::size_t m_regionalWeatherScanCount = 0;
+    std::size_t m_regionalWeatherScanCount = 0, m_regionalWeatherScheduleVisits = 0;
     std::size_t m_regionalWeatherProjectionVisitCount = 0;
     std::size_t m_regionalWeatherProjectionCount = 0;
     bool ActivateGroundRegion(const GroundObject& object);
@@ -782,7 +785,9 @@ private:
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     std::vector<ScentCell> m_scentCapture;
     ScentChangeBuffers m_scentChangeBuffers;
-    luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
+    mutable luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
+    mutable bool m_scentDueCacheValid = false;
+    bool m_regionalWeatherParticipating = false;
     // Immutable species definitions shared with the captured dependency snapshot.
     // Only the forward declaration is needed for the header-only parsing registry.
     std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
@@ -823,7 +828,7 @@ private:
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
     [[nodiscard]] bool ScentCellDue(int x, int z) const;
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
-    void RefreshScentDueCache();
+    void RefreshScentDueCache() const;
     void RebaseForagingCells(int dx, int dz);
     void RestoreRegionalScent();
     void CaptureRegionalScent(std::optional<FieldPageState>& fields);
