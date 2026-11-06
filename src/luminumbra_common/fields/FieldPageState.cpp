@@ -662,10 +662,10 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
 }
 
 void FieldPageState::adopt_scheduled_pages(FieldPageState&& staged) noexcept {
-    for (auto& [key, page] : staged.m_pages) {
+    for (const auto& [key, page] : staged.m_pages) {
         const auto found = m_pages.find(key);
         if (found != m_pages.end())
-            found->second = std::move(page);
+            found->second = page;
     }
 }
 
