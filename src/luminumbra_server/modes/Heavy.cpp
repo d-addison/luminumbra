@@ -5,9 +5,11 @@
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
+using Luminumbra::Server::CaptureScentBits;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::Server::ScentDifference;
 
 namespace fs = std::filesystem;
 
@@ -32,6 +34,9 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     if (runner.Session()) {
         h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
         h.ground_notifications = runner.Session()->CaptureGroundNotifications().canonical_bytes();
+        if (const auto* field = runner.Session()->GetScentField()) {
+            h.scent_bits = CaptureScentBits(*field);
+        }
     }
     runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
@@ -60,6 +65,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
         {"world_hash", h.world_hash},
         {"ground_objects", std::move(ground_objects)},
         {"ground_notifications", h.ground_notifications},
+        {"scent_grid_values", h.scent_bits.size()},
         {"sub_hashes",
          {
              {"terrain", h.sub.terrain},
@@ -135,6 +141,10 @@ int RunHeavy(const ServerCliOptions& options) {
     // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
     const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: saved scent differs in {}", roundtrip_scent_difference);
+    }
     const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
     const std::string roundtrip_ground_difference =
         GroundObjectDifference(orig_at_save, loaded_at_load);
@@ -149,6 +159,10 @@ int RunHeavy(const ServerCliOptions& options) {
     const HeavyHashes loaded_final = CaptureHashes(loaded);
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
+    const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
+    if (!resim_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim scent differs in {}", resim_scent_difference);
+    }
     const bool resim_mesh_match = MeshEqual(orig_final, loaded_final);
     const std::string resim_ground_difference = GroundObjectDifference(orig_final, loaded_final);
     if (!resim_ground_difference.empty()) {
@@ -261,6 +275,7 @@ int RunHeavy(const ServerCliOptions& options) {
         {"loaded_at_load", HeavyHashJson(loaded_at_load)},
         {"roundtrip_match", roundtrip_ok},
         {"roundtrip_ground_difference", roundtrip_ground_difference},
+        {"roundtrip_scent_difference", roundtrip_scent_difference},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
         {"roundtrip_water_difference",
          orig_at_save.sub.water == loaded_at_load.sub.water
@@ -271,6 +286,7 @@ int RunHeavy(const ServerCliOptions& options) {
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
         {"resim_ground_difference", resim_ground_difference},
+        {"resim_scent_difference", resim_scent_difference},
         {"resim_mesh_match", resim_mesh_match},
         {"resim_water_difference",
          orig_final.sub.water == loaded_final.sub.water
