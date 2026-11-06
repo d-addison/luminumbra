@@ -733,6 +733,41 @@ TEST(FieldPageStateTest, ScheduledSnapshotMatchesFullSealedInputAndWork) {
     }
 }
 
+TEST(FieldPageStateTest, AdoptingScheduledPagesOverwritesOnlyTheStagedPages) {
+    FieldPageState live;
+    std::map<RegionKey, ActiveRegionRecord> records;
+    for (const RegionKey key : {RegionKey{0, 0}, RegionKey{1, 0}, RegionKey{20, 20}}) {
+        ASSERT_TRUE(live.activate_region(key, kSeed, 0));
+        records[key].state = RegionState::Active;
+        records[key].cadence_shift = 0;
+        records[key].cadence_phase = 0;
+    }
+    records[{20, 20}].state = RegionState::Frozen;
+    ASSERT_TRUE(live.set_scent({0, 0}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    ASSERT_TRUE(live.set_weather_age({0, 0}, 19));
+    const std::vector<RegionKey> due{{0, 0}, {1, 0}};
+    constexpr std::uint64_t tick = 8;
+
+    const auto previous = live.scheduled_snapshot(records, due, tick);
+    auto staged = previous;
+    const auto work = staged.step_scheduled(records, due, kSeed, tick, &previous);
+    ASSERT_FALSE(work.empty());
+    EXPECT_LT(staged.page_count(), live.page_count());
+
+    // Reference: the same step applied to the whole store.
+    auto reference = live;
+    ASSERT_EQ(reference.step_scheduled(records, due, kSeed, tick, &previous), work);
+
+    const auto frozen_bytes = live.region_bytes({20, 20});
+    const auto scent = live.scent_cells();
+    const auto clocks = live.weather_clocks();
+    live.adopt_scheduled_pages(std::move(staged));
+    EXPECT_EQ(live.serialize(), reference.serialize());
+    EXPECT_EQ(live.region_bytes({20, 20}), frozen_bytes);
+    EXPECT_EQ(live.scent_cells(), scent);
+    EXPECT_EQ(live.weather_clocks(), clocks);
+}
+
 TEST(FieldPageStateTest, ScentBatchMatchesOrderedAdmissionsAndRejectsAtomically) {
     auto store = ActivatedStore();
     const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};

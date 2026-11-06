@@ -3,6 +3,7 @@
 #include "FieldPageState.h"
 
 #include <bit>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -58,13 +59,26 @@ bool FoliageFieldPages::set(const ScentCellKey& cell, std::int32_t value, std::i
     return true;
 }
 bool FoliageFieldPages::owns_region(const RegionKey& owner) const {
-    for (const auto& [key, page] : m_pages)
-        for (unsigned i = 0; i < 256; ++i)
-            if (((page.mask[i / 64] >> (i % 64)) & 1) &&
-                FieldPageState::region_of_scent_cell({key.x * 16 + static_cast<int>(i % 16),
-                                                      key.z * 16 + static_cast<int>(i / 16)}) ==
-                    owner)
+    // A 512 m region covers exactly 512 one-metre cells per axis, which is 32 whole pages per
+    // axis, so ownership needs only the pages in that square rather than a scan of every page.
+    constexpr std::int64_t kPagesPerRegionAxis = 32;
+    const std::int64_t first_x = static_cast<std::int64_t>(owner.x) * kPagesPerRegionAxis;
+    const std::int64_t first_z = static_cast<std::int64_t>(owner.z) * kPagesPerRegionAxis;
+    if (first_x < std::numeric_limits<std::int32_t>::min() ||
+        first_x + kPagesPerRegionAxis - 1 > std::numeric_limits<std::int32_t>::max() ||
+        first_z < std::numeric_limits<std::int32_t>::min() ||
+        first_z + kPagesPerRegionAxis - 1 > std::numeric_limits<std::int32_t>::max())
+        return false;
+    for (auto page = m_pages.lower_bound(
+             {static_cast<std::int32_t>(first_x), std::numeric_limits<std::int32_t>::min()});
+         page != m_pages.end() && page->first.x < first_x + kPagesPerRegionAxis;
+         ++page) {
+        if (page->first.z < first_z || page->first.z >= first_z + kPagesPerRegionAxis)
+            continue;
+        for (const auto word : page->second.mask)
+            if (word != 0)
                 return true;
+    }
     return false;
 }
 std::string FoliageFieldPages::records() const {
