@@ -4074,6 +4074,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     const auto generation_limit =
         static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget);
     generate_now.reserve(generation_limit);
+    std::size_t restored = 0;
     if (generation_limit > 0) {
         const auto headroom =
             m_streaming_state.chunks.size() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
@@ -4087,7 +4088,6 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         for (std::size_t i = 0; i < generation_limit && candidate != to_create.end();
              ++i, ++candidate)
             prefix.push_back(*candidate);
-        std::size_t restored = 0;
         for (const auto& item : prefix) {
             if (restored + generate_now.size() >= headroom)
                 break;
@@ -4095,9 +4095,9 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 if (m_durable_read_failed)
                     return false;
                 ++restored;
-                continue;
+            } else {
+                generate_now.push_back({item.coords, generation_step(item.coords)});
             }
-            generate_now.push_back({item.coords, generation_step(item.coords)});
             if (item.surface)
                 ++m_last_streaming_budget_stats.surface_generation_scheduled;
             else
@@ -4105,11 +4105,17 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         }
     }
 
-    m_last_streaming_budget_stats.scheduled_generation = generate_now.size();
-    m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
+    m_last_streaming_budget_stats.scheduled_generation = restored + generate_now.size();
+    // Restoration removes entries from the pending index during admission.
+    // Use the original candidate count so each admitted chunk is charged once.
+    m_last_streaming_budget_stats.deferred_generation =
+        m_last_streaming_budget_stats.generation_candidates -
+        m_last_streaming_budget_stats.scheduled_generation;
     m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
+        if (m_durable_read_failed)
+            return false;
         for (const ChunkGenerationRequest& request : generate_now) {
             shadow_note_generation_dispatch(::Luminumbra::Chunk::calculate_id(request.coords));
         }
