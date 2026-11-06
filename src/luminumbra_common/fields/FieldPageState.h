@@ -193,6 +193,10 @@ public:
     // evolution state untouched. Allocation-free and non-throwing: it only assigns values into
     // pages that already exist.
     void adopt_scheduled_pages(FieldPageState&& staged) noexcept;
+    // Stage only weather authority and its owner indices; never copy unrelated pages or fields.
+    void copy_weather_from(const FieldPageState& source);
+    // Commit validated candidate weather together with its indices, without allocating.
+    void adopt_weather_state(FieldPageState& staged) noexcept;
 
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
@@ -201,7 +205,9 @@ public:
     static bool parse(const std::string& bytes, FieldPageState& out, std::string& error);
     // "" when empty, otherwise "field_pages:v2:" + serialize().
     [[nodiscard]] std::string canonical_bytes() const;
-    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool weather = false) const;
+    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels,
+                                            bool weather = false,
+                                            const FieldPageState* overlay = nullptr) const;
     // For every owned initialized cell in cells_of_region order: i32 cell_x, i32 cell_z, then
     // kChannels u16 (all little endian). When the region owns storms, strikes, scent cells or a
     // weather clock, an "|evolution:v2:" suffix follows with those sections. "" only when the
@@ -219,6 +225,36 @@ private:
     std::map<ScentCellKey, ScentCell> m_scent;
     std::map<RegionKey, std::uint64_t> m_weatherClocks;
     FoliageFieldPages m_soil, m_irrigation;
+};
+
+// Borrowed tick view: candidate pages override live pages, and candidate weather is authoritative.
+// Neither store is copied or modified. The candidate must outlive the view.
+class FieldPageView {
+public:
+    FieldPageView(const FieldPageState& live, const FieldPageState* candidate)
+        : m_live(live)
+        , m_candidate(candidate) {}
+    [[nodiscard]] bool
+    sample(int channel, std::int32_t x, std::int32_t z, std::uint16_t& out) const {
+        return (m_candidate && m_candidate->sample(channel, x, z, out)) ||
+               m_live.sample(channel, x, z, out);
+    }
+    [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
+        return weather().storms();
+    }
+    [[nodiscard]] const std::vector<RegionalStrike>& strikes() const {
+        return weather().strikes();
+    }
+    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool include_weather) const {
+        return m_live.ambient_bytes(channels, include_weather, m_candidate);
+    }
+
+private:
+    [[nodiscard]] const FieldPageState& weather() const {
+        return m_candidate ? *m_candidate : m_live;
+    }
+    const FieldPageState& m_live;
+    const FieldPageState* m_candidate;
 };
 
 } // namespace Luminumbra::world

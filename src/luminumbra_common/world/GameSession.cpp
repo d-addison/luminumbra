@@ -1987,12 +1987,11 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     const auto& records = m_activeRegionLedger.records();
     const auto& due = m_regionSchedule.due;
     const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
-    if (previous.page_count() == 0)
-        return std::nullopt;
     // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
     // than the whole store. The live state stays untouched even if a later consumer or work
     // publication fails; publication assigns the stepped pages back without allocating.
     auto next = previous;
+    next.copy_weather_from(m_fieldPages);
     const auto seed =
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     const auto work = next.step_scheduled(records, due, seed, tick, &previous);
@@ -2003,13 +2002,15 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
 
 void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields) {
     m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
-    if (fields)
+    if (fields) {
+        m_fieldPages.adopt_weather_state(*fields);
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
+    }
     m_regionCompletedWork.clear();
 }
 
-const FieldPageState& GameSession::RegionalFields() const {
-    return m_regionalFieldView ? *m_regionalFieldView : m_fieldPages;
+FieldPageView GameSession::RegionalFields() const {
+    return {m_fieldPages, m_regionalFieldView};
 }
 
 std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& position) const {
@@ -2128,7 +2129,7 @@ void GameSession::AdvanceRegionalWeather(FieldPageState& fields, std::uint64_t t
     auto clocks = fields.weather_clocks();
     const auto& records = m_activeRegionLedger.records();
     auto due_list = m_regionSchedule.due;
-    std::erase_if(due_list, [&fields](RegionKey owner) { return !fields.owns_region(owner); });
+    std::erase_if(due_list, [this](RegionKey owner) { return !m_fieldPages.owns_region(owner); });
     std::sort(due_list.begin(), due_list.end());
     const std::set<RegionKey> due(due_list.begin(), due_list.end());
     const auto eligible = [&records](RegionKey owner) {

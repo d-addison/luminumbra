@@ -669,6 +669,22 @@ void FieldPageState::adopt_scheduled_pages(FieldPageState&& staged) noexcept {
     }
 }
 
+void FieldPageState::copy_weather_from(const FieldPageState& source) {
+    m_storms = source.m_storms;
+    m_strikes = source.m_strikes;
+    m_weatherClocks = source.m_weatherClocks;
+    m_ownerStorms = source.m_ownerStorms;
+    m_ownerStrikes = source.m_ownerStrikes;
+}
+
+void FieldPageState::adopt_weather_state(FieldPageState& staged) noexcept {
+    m_storms.swap(staged.m_storms);
+    m_strikes.swap(staged.m_strikes);
+    m_weatherClocks.swap(staged.m_weatherClocks);
+    m_ownerStorms.swap(staged.m_ownerStorms);
+    m_ownerStrikes.swap(staged.m_ownerStrikes);
+}
+
 FieldPageState
 FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>& records,
                                    std::span<const RegionKey> due,
@@ -1054,34 +1070,43 @@ std::string FieldPageState::canonical_bytes() const {
     return "field_pages:v2:" + serialize();
 }
 
-std::string FieldPageState::ambient_bytes(std::uint8_t channels, bool weather) const {
+std::string FieldPageState::ambient_bytes(std::uint8_t channels,
+                                          bool weather,
+                                          const FieldPageState* overlay) const {
     std::string out;
-    for (const auto& [key, page] : m_pages) {
+    for (const auto& [key, live_page] : m_pages) {
+        const auto* page = &live_page;
+        if (overlay) {
+            const auto found = overlay->m_pages.find(key);
+            if (found != overlay->m_pages.end())
+                page = &found->second;
+        }
         AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
         AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
-        for (const auto mask : page.mask)
+        for (const auto mask : page->mask)
             AppendLe(out, mask, 8);
         for (int channel = 0; channel < kChannels; ++channel)
             if ((channels & (1u << channel)) != 0)
-                for (const auto word : page.cells[static_cast<std::size_t>(channel)])
+                for (const auto word : page->cells[static_cast<std::size_t>(channel)])
                     AppendLe(out, word, 2);
     }
     if (weather) {
+        const auto& fields = overlay ? *overlay : *this;
         std::string records;
-        for (const auto& storm : m_storms)
+        for (const auto& storm : fields.m_storms)
             AppendStorm(records, storm);
-        AppendSection(out, 2, m_storms.size(), records);
+        AppendSection(out, 2, fields.m_storms.size(), records);
         records.clear();
-        for (const auto& strike : m_strikes)
+        for (const auto& strike : fields.m_strikes)
             AppendStrike(records, strike);
-        AppendSection(out, 3, m_strikes.size(), records);
+        AppendSection(out, 3, fields.m_strikes.size(), records);
         records.clear();
-        for (const auto& [owner, age] : m_weatherClocks) {
+        for (const auto& [owner, age] : fields.m_weatherClocks) {
             AppendLe(records, static_cast<std::uint32_t>(owner.x), 4);
             AppendLe(records, static_cast<std::uint32_t>(owner.z), 4);
             AppendLe(records, age, 8);
         }
-        AppendSection(out, 7, m_weatherClocks.size(), records);
+        AppendSection(out, 7, fields.m_weatherClocks.size(), records);
     }
     return out;
 }

@@ -522,6 +522,10 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Observational candidate size during a tick; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
+        return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
+    }
     // Observational nonempty advancement passes; never persisted or hashed.
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
         return m_groundObjectAdvanceCount;
@@ -697,7 +701,7 @@ private:
     [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
     void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
     void BindRegionalFieldQueries();
-    [[nodiscard]] const FieldPageState& RegionalFields() const;
+    [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
     void ProjectRegionalWeather(std::uint64_t tick, bool restoring = false);
