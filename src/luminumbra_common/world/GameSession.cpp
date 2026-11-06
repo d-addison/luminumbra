@@ -2021,6 +2021,12 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
     }
     m_regionCompletedWork.clear();
+    // Authority may first appear in a running world. Rebind only at a transition, after
+    // publication has succeeded, and replace any legacy weather projection at that boundary.
+    if ((m_activeRegionsEnabled && !m_fieldPages.empty()) != m_regionalFieldsBound) {
+        BindRegionalFieldQueries();
+        ProjectRegionalWeather(m_worldClock.tick(), false);
+    }
 }
 
 FieldPageView GameSession::RegionalFields() const {
@@ -2210,7 +2216,10 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
     auto clocks = fields.take_weather_clocks();
     const auto& records = m_activeRegionLedger.records();
     auto due_list = m_regionSchedule.due;
-    std::erase_if(due_list, [this](RegionKey owner) { return !m_fieldPages.owns_region(owner); });
+    std::erase_if(due_list, [this](RegionKey owner) {
+        return !m_fieldPages.owns_weather(owner) &&
+               m_fieldPages.owned_initialized_cells(owner) == 0;
+    });
     std::sort(due_list.begin(), due_list.end());
     const std::set<RegionKey> due(due_list.begin(), due_list.end());
     const auto eligible = [&records](RegionKey owner) {
@@ -2336,11 +2345,10 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
                     // deterministically.
                     if (eligible(target) &&
                         (target == storm.owner || common(storm.owner, target)) &&
-                        strike_counts[target] < FieldPageState::kMaxOwnerStrikes) {
+                        strike_counts[target] < FieldPageState::kMaxOwnerStrikes &&
+                        strikes.size() < FieldPageState::kMaxStrikes) {
                         const float magnitude = std::min(
                             1.0f, 0.55f * intensity + 0.45f * unit(key ^ 0x99990000aaaabbbbull));
-                        if (strikes.size() == FieldPageState::kMaxStrikes)
-                            throw std::runtime_error("Regional strike capacity exhausted");
                         strikes.push_back({target,
                                            tick,
                                            std::bit_cast<std::uint32_t>(sx),
@@ -2360,7 +2368,8 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
     }
     std::set<std::pair<std::uint64_t, std::uint32_t>> identities;
     for (const auto owner : due_list) {
-        if (storm_counts[owner] >= FieldPageState::kMaxOwnerStorms)
+        if (storm_counts[owner] >= FieldPageState::kMaxOwnerStorms ||
+            storms.size() >= FieldPageState::kMaxStorms)
             continue;
         const auto age = clocks.at(owner);
         if (age % 45 != 0)
@@ -2381,8 +2390,6 @@ std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPage
                 identities.emplace(storm.spawn_tick, storm.seed_salt);
         if (!identities.emplace(tick, salt).second)
             continue;
-        if (storms.size() == FieldPageState::kMaxStorms)
-            throw std::runtime_error("Regional storm capacity exhausted");
         storms.push_back({owner,
                           std::bit_cast<std::uint32_t>(x),
                           std::bit_cast<std::uint32_t>(z),
