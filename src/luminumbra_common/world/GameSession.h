@@ -692,6 +692,8 @@ private:
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
     void LatchRegionFault(std::uint64_t tick, const std::string& message);
+    // Publishes the water ownership a completed tick established, unless the host defers it.
+    void SettleWaterAuthority(bool deferred);
     void RunRegionScheduler(std::uint64_t current_tick);
     void AdvanceGroundObjects(std::uint64_t tick);
     // Stage existing field authority; publish only after the tick's consumers and work succeed.

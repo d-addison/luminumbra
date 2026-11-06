@@ -1299,8 +1299,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(std::move(scheduled_fields));
             }
-            if (m_worldSystem && !defer_water_authority)
-                m_worldSystem->sync_water_authority();
+            SettleWaterAuthority(defer_water_authority);
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
                 throw;
@@ -2015,6 +2014,11 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
     // Retain the effective settings when create/transient/reset clears region state.
     m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
+void GameSession::SettleWaterAuthority(bool deferred) {
+    if (m_worldSystem && !deferred)
+        m_worldSystem->sync_water_authority();
+}
+
 void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& message) {
     if (m_regionFault)
         return; // first fault wins
