@@ -85,6 +85,7 @@ void EnergyFieldState::UnpackCellKey(std::int64_t key, int& cx, int& cz) noexcep
 
 void EnergyFieldState::SetAnchorCell(int cx, int cz) {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     // Center the window on the anchor, snapped to page boundaries so a page is
     // never split across the window seam (-9).
     const int half = kEnergyWindowCells / 2;
@@ -102,6 +103,8 @@ void EnergyFieldState::QueueDeposit(
     std::uint64_t emitter_id, int cx, int cz, int channel, std::uint32_t amount_raw) {
     if (channel < 0 || channel >= m_channels || amount_raw == 0)
         return;
+    if (m_regional_validation)
+        m_regional_queued_validation = std::move(m_regional_validation);
     m_regional_validation.reset();
     m_pending.push_back(PendingDeposit{PackCellKey(cx, cz), channel, emitter_id, amount_raw});
 }
@@ -120,6 +123,7 @@ std::uint16_t EnergyFieldState::DecaySteps(std::uint16_t v, std::uint64_t steps)
 
 EnergyFieldState::Page& EnergyFieldState::EnsurePage(int px, int pz) {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     const std::int64_t key = PackPageKey(px, pz);
     auto it = m_pages.find(key);
     if (it == m_pages.end()) {
@@ -136,6 +140,7 @@ EnergyFieldState::Page& EnergyFieldState::EnsurePage(int px, int pz) {
 
 void EnergyFieldState::CatchUpWindowPages() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     // Bring window pages current through every COMPLETED firing they missed
     // while frozen outside the window. A page stamped at firing N and caught
     // up at m_fires_completed == M receives exactly M - N decay steps — the
@@ -166,6 +171,7 @@ void EnergyFieldState::CatchUpWindowPages() {
 
 std::uint64_t EnergyFieldState::ApplyDeposits() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     if (m_pending.empty())
         return 0;
     //  sort by (cell, channel, emitter_id, amount) — the /
@@ -211,6 +217,7 @@ std::uint64_t EnergyFieldState::ApplyDeposits() {
 
 void EnergyFieldState::DecayAndDiffuseWindow() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     if (!m_anchored)
         return;
     const int n = kEnergyWindowCells;
@@ -338,6 +345,7 @@ void EnergyFieldState::DecayAndDiffuseWindow() {
 
 void EnergyFieldState::StampWindowPages() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     const int pages_per_side = kEnergyWindowCells / kEnergyPageCells;
     const int px0 = FloorDiv(m_window_ox, kEnergyPageCells);
     const int pz0 = FloorDiv(m_window_oz, kEnergyPageCells);
@@ -352,6 +360,7 @@ void EnergyFieldState::StampWindowPages() {
 
 void EnergyFieldState::DropZeroPages() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     for (auto it = m_pages.begin(); it != m_pages.end();) {
         if (it->second.all_zero()) {
             it = m_pages.erase(it);
@@ -363,6 +372,7 @@ void EnergyFieldState::DropZeroPages() {
 
 std::uint64_t EnergyFieldState::Tick(std::uint64_t tick) {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     // Pages re-entering the window catch up BEFORE deposits land on them.
     CatchUpWindowPages();
 
@@ -446,6 +456,7 @@ std::string EnergyFieldState::CanonicalBytes() const {
 
 void EnergyFieldState::NormalizeAllPages() {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     for (auto& [key, page] : m_pages) {
         if (page.last_step >= m_fires_completed)
             continue;
@@ -498,12 +509,14 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
     if (bytes.size() > kEnergyWriteRecordBytes)
         throw std::length_error("Saved-input admission refused: energy byte compatibility limit.");
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     m_pages = std::move(normalized.m_pages);
     return bytes;
 }
 
 void EnergyFieldState::ResetEmptyAtTick(std::uint64_t tick) {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     m_pages.clear();
     m_pending.clear();
     m_fires_completed = 0;
@@ -629,6 +642,7 @@ bool EnergyFieldState::DeserializeRecord(const std::string& record, std::uint64_
     if (remaining > std::numeric_limits<std::uint64_t>::max() - load_tick_base)
         return false;
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     m_channels = channels;
     m_pages = std::move(pages);
     m_pending.clear();
@@ -695,6 +709,8 @@ bool EnergyFieldState::QueueRegionalDeposit(
         !ValidEnergyOwner(OwnerOfCell(cx, cz)) || m_pending.size() >= kMaxRegionalDeposits)
         return false;
     if (amount_raw != 0) {
+        if (m_regional_validation)
+            m_regional_queued_validation = std::move(m_regional_validation);
         m_regional_validation.reset();
         m_pending.push_back({PackCellKey(cx, cz), channel, emitter_id, amount_raw});
     }
@@ -772,7 +788,12 @@ EnergyFieldState::Page::regional_facts(std::int64_t key, int channels) const {
         }
         return digits;
     };
-    const auto header_bytes = 3 + std::to_string(px).size() + std::to_string(pz).size();
+    const auto coordinate_width = [&width](int coordinate) {
+        const auto wide = static_cast<std::int64_t>(coordinate);
+        return width(static_cast<std::size_t>(wide < 0 ? -wide : wide)) +
+               (wide < 0 ? std::size_t{1} : std::size_t{0});
+    };
+    const auto header_bytes = 3 + coordinate_width(px) + coordinate_width(pz);
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (values[i] == 0)
             continue;
@@ -1046,6 +1067,7 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     if (!staged.RegionalRecordFits() || staged.SerializeRegionalRecord() != record)
         return false;
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     m_channels = channels;
     m_pages.swap(staged.m_pages);
     m_pending.clear();
@@ -1066,10 +1088,43 @@ EnergyFieldState::RegionalPageOwners(std::int64_t key) noexcept {
             OwnerOfCell(max_x, max_z)};
 }
 
+bool EnergyFieldState::MigrateLegacyCadence(Luminumbra::world::ActiveRegionLedger& ledger,
+                                            const Luminumbra::world::WorldClock& clock,
+                                            const Luminumbra::Vec3& anchor) const {
+    if (!ledger.energy_ages().empty() || m_next_fire_tick <= clock.tick() ||
+        m_next_fire_tick - clock.tick() > kEnergyCadenceTicks || !RegionalRecordFits())
+        return false;
+    const auto age = kEnergyCadenceTicks - (m_next_fire_tick - clock.tick());
+    std::set<RegionKey> owners;
+    for (const auto& [key, record] : ledger.records()) {
+        (void)record;
+        owners.insert(key);
+    }
+    for (const auto key : Luminumbra::world::ActiveRegionLedger::activation_regions(anchor))
+        owners.insert(key);
+    for (const auto& [key, page] : m_pages) {
+        const auto& facts = page.regional_facts(key, m_channels);
+        if (!facts.valid)
+            return false;
+        for (std::size_t i = 0; i < facts.owner_count; ++i)
+            owners.insert(facts.owners[i]);
+    }
+    for (const auto owner : owners) {
+        if (!ledger.can_activate(owner))
+            return false;
+        if (!ledger.records().contains(owner))
+            ledger.activate_owned(owner, clock);
+        if (!ledger.set_energy_age(owner, age))
+            return false;
+    }
+    return ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
+}
+
 bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const {
     // Full validation never trusts record provenance, a previous marker or page facts.
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     if (!ValidRegionalRecords(records))
         return false;
     return ValidateRegionalPages(records, ages);
@@ -1078,6 +1133,7 @@ bool EnergyFieldState::ValidateRegionalOwners(const RegionRecords& records,
 bool EnergyFieldState::ValidateRegionalPages(const RegionRecords& records,
                                              const EnergyAges& ages) const {
     m_regional_validation.reset();
+    m_regional_queued_validation.reset();
     if (m_channels < 1 || m_channels > 64 ||
         records.size() > Luminumbra::world::ActiveRegionLedger::kMaxRegions)
         return false;
@@ -1550,6 +1606,566 @@ bool EnergyFieldState::TickRegionalImpl(std::uint64_t tick,
     }
     m_pending.clear();
     out = std::move(result);
+    return true;
+}
+
+namespace {
+// Recycling tree nodes keeps lookups logarithmic without tick-local allocation.
+template<class Key, class Value>
+struct RegionalWorkingMap {
+    std::map<Key, Value> entries;
+    std::vector<typename std::map<Key, Value>::node_type> spare;
+    void clear(std::size_t& growths) {
+        if (spare.capacity() < spare.size() + entries.size()) {
+            spare.reserve((std::max)(spare.capacity() * 2, spare.size() + entries.size()));
+            ++growths;
+        }
+        while (!entries.empty())
+            spare.push_back(entries.extract(entries.begin()));
+    }
+    Value& get(const Key& key, std::size_t& growths) {
+        if (const auto found = entries.find(key); found != entries.end())
+            return found->second;
+        if (spare.empty()) {
+            ++growths;
+            return entries[key];
+        }
+        auto node = std::move(spare.back());
+        spare.pop_back();
+        node.key() = key;
+        node.mapped() = Value{};
+        return entries.insert(std::move(node)).position->second;
+    }
+};
+} // namespace
+
+// Buffers are indexed by participating keys; dormant pages never enter this journal.
+struct EnergyFieldState::RegionalTick::Storage {
+    struct Slot {
+        std::int64_t key = 0;
+        Page page;
+        std::vector<std::int32_t> next;
+        bool existed = false;
+        bool diffuse = false;
+    };
+    EnergyFieldState* live = nullptr;
+    EnergyFieldState gathered;
+    std::vector<Slot> slots;
+    std::size_t used = 0, growths = 0, visits = 0;
+    std::uint64_t tick = 0;
+    RegionalWorkingMap<std::int64_t, std::size_t> lookup;
+    RegionalWorkingMap<std::pair<RegionKey, std::int64_t>, bool> touched;
+    RegionalWorkingMap<RegionKey, std::uint64_t> counts;
+    std::vector<RegionKey> firing;
+    std::vector<std::pair<RegionKey, std::uint64_t>> ages;
+    std::vector<Luminumbra::world::RegionWork> work;
+    std::vector<PendingDeposit> pending, original_pending;
+    std::map<std::int64_t, Page> additions;
+    bool projected = false;
+    bool unowned = false;
+
+    template<class T>
+    void reserve(std::vector<T>& values, std::size_t size) {
+        if (values.capacity() < size) {
+            values.reserve((std::max)(size, values.capacity() * 2));
+            ++growths;
+        }
+    }
+    template<class T>
+    void append(std::vector<T>& values, const T& value) {
+        reserve(values, values.size() + 1);
+        values.push_back(value);
+    }
+    Slot* find(std::int64_t key) {
+        const auto found = lookup.entries.find(key);
+        return found == lookup.entries.end() ? nullptr : &slots[found->second];
+    }
+    void touch(RegionKey owner, std::int64_t page) {
+        auto& present = touched.get(std::pair{owner, page}, growths);
+        if (!present) {
+            present = true;
+            count(owner);
+        }
+    }
+    void count(RegionKey owner) {
+        ++counts.get(owner, growths);
+    }
+};
+
+EnergyFieldState::RegionalTick::RegionalTick()
+    : m_storage(std::make_unique<Storage>()) {}
+EnergyFieldState::RegionalTick::~RegionalTick() {
+    rollback();
+}
+EnergyFieldState& EnergyFieldState::RegionalTick::deposits(int channels) {
+    rollback();
+    m_storage->gathered.m_channels = channels;
+    m_storage->gathered.m_pending.clear();
+    return m_storage->gathered;
+}
+std::span<const std::pair<EnergyFieldState::RegionKey, std::uint64_t>>
+EnergyFieldState::RegionalTick::ages() const {
+    return m_storage->ages;
+}
+std::span<const Luminumbra::world::RegionWork> EnergyFieldState::RegionalTick::work() const {
+    return m_storage->work;
+}
+std::size_t EnergyFieldState::RegionalTick::participating_pages() const {
+    return m_storage->used;
+}
+std::size_t EnergyFieldState::RegionalTick::visited_pages() const {
+    return m_storage->visits;
+}
+std::size_t EnergyFieldState::RegionalTick::storage_growths() const {
+    return m_storage->growths;
+}
+void EnergyFieldState::RegionalTick::rollback() noexcept {
+    auto& storage = *m_storage;
+    if (!storage.projected)
+        return;
+    auto& live = *storage.live;
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        auto& slot = storage.slots[i];
+        auto found = live.m_pages.find(slot.key);
+        std::swap(found->second, slot.page);
+        if (!slot.existed)
+            live.m_pages.erase(found);
+    }
+    live.m_pending.swap(storage.original_pending);
+    storage.original_pending.clear();
+    // Only derived facts were prepared early; authority and pending input are restored.
+    live.m_regional_validation.reset();
+    live.m_regional_queued_validation.reset();
+    storage.projected = false;
+    storage.live = nullptr;
+}
+void EnergyFieldState::RegionalTick::commit() noexcept {
+    auto& storage = *m_storage;
+    if (!storage.projected)
+        return;
+    auto& live = *storage.live;
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        const auto key = storage.slots[i].key;
+        const auto found = live.m_pages.find(key);
+        if (found->second.all_zero())
+            live.m_pages.erase(found);
+    }
+    storage.original_pending.clear();
+    if (storage.unowned && live.m_pages.empty()) {
+        storage.ages.clear();
+        storage.work.clear();
+        live.m_fires_completed = 0;
+        live.m_next_fire_tick =
+            storage.tick + (kEnergyCadenceTicks - storage.tick % kEnergyCadenceTicks);
+    }
+    storage.projected = false;
+    storage.live = nullptr;
+}
+
+bool EnergyFieldState::BeginRegionalTick(std::uint64_t tick,
+                                         const Luminumbra::world::ActiveRegionLedger& ledger,
+                                         std::span<const RegionKey> complete_due,
+                                         RegionalTick& transaction) {
+    auto& storage = *transaction.m_storage;
+    transaction.rollback();
+    storage.live = this;
+    storage.used = 0;
+    storage.visits = 0;
+    storage.ages.clear();
+    storage.firing.clear();
+    storage.touched.clear(storage.growths);
+    storage.lookup.clear(storage.growths);
+    storage.counts.clear(storage.growths);
+    storage.tick = tick;
+    storage.work.clear();
+    storage.additions.clear();
+    try {
+        if (!PrepareRegionalTick(tick, ledger, complete_due, storage) ||
+            !DiffuseRegionalTick(tick, ledger.records(), storage) ||
+            !ProjectRegionalTick(ledger, storage)) {
+            m_regional_validation.reset();
+            m_regional_queued_validation.reset();
+            return false;
+        }
+    } catch (...) {
+        transaction.rollback();
+        // Preparation may have updated only the derived capacity index.
+        m_regional_validation.reset();
+        m_regional_queued_validation.reset();
+        throw;
+    }
+    return true;
+}
+
+bool EnergyFieldState::PrepareRegionalTick(std::uint64_t tick,
+                                           const Luminumbra::world::ActiveRegionLedger& ledger,
+                                           std::span<const RegionKey> due,
+                                           RegionalTick::Storage& storage) {
+    using Luminumbra::world::WorldClock;
+    const auto& records = ledger.records();
+    const auto& ages = ledger.energy_ages();
+    if (tick == 0 || tick >= WorldClock::kTickLimit || m_channels < 1 || m_channels > 64 ||
+        m_pending.size() > kMaxRegionalDeposits ||
+        storage.gathered.m_pending.size() > kMaxRegionalDeposits - m_pending.size())
+        return false;
+    if (!m_regional_validation && m_regional_queued_validation) {
+        m_regional_validation = std::move(m_regional_queued_validation);
+        m_regional_queued_validation.reset();
+    }
+    if (!m_regional_validation) {
+        storage.visits += m_pages.size();
+        if (!ValidateRegionalPages(records, ages))
+            return false;
+    }
+    storage.unowned = ages.empty() && m_pages.empty();
+    std::optional<RegionKey> previous;
+    for (const auto owner : due) {
+        const auto record = records.find(owner);
+        if (!ValidEnergyOwner(owner) || record == records.end() ||
+            !RegionalOwnerScheduled(tick, record->second) ||
+            (previous && owner <= previous.value_or(RegionKey{})))
+            return false;
+        std::uint64_t age = storage.unowned ? (tick - 1) % kEnergyCadenceTicks : 0;
+        ledger.energy_age(owner, age);
+        if (age >= WorldClock::kTickLimit - 1)
+            return false;
+        storage.append(storage.ages, std::pair{owner, age + 1});
+        if ((age + 1) % kEnergyCadenceTicks == 0)
+            storage.append(storage.firing, owner);
+        previous = owner;
+    }
+    const auto max_pages =
+        kMaxRegionalValueBytes / (std::size_t{kEnergyPageCells} * kEnergyPageCells *
+                                  static_cast<std::size_t>(m_channels) * sizeof(std::uint16_t));
+    auto stored_pages = m_pages.size();
+    if (stored_pages > max_pages)
+        return false;
+    const auto stage = [&](std::int64_t key, bool diffuse, bool create) {
+        if (auto* existing = storage.find(key)) {
+            existing->diffuse = existing->diffuse || diffuse;
+            return true;
+        }
+        const auto original = m_pages.find(key);
+        if (!create && (original == m_pages.end() || original->second.all_zero()))
+            return true;
+        if (original == m_pages.end()) {
+            if (stored_pages == max_pages)
+                return false;
+            ++stored_pages;
+        }
+        if (storage.used == storage.slots.size()) {
+            storage.reserve(storage.slots, storage.used + 1);
+            storage.slots.emplace_back();
+        }
+        storage.lookup.get(key, storage.growths) = storage.used;
+        auto& slot = storage.slots[storage.used++];
+        slot.key = key;
+        slot.existed = original != m_pages.end();
+        slot.diffuse = diffuse;
+        const auto size =
+            std::size_t{kEnergyPageCells} * kEnergyPageCells * static_cast<std::size_t>(m_channels);
+        storage.reserve(slot.page.values, size);
+        slot.page.values.resize(size);
+        if (slot.existed) {
+            ++storage.visits;
+            std::copy(original->second.values.begin(),
+                      original->second.values.end(),
+                      slot.page.values.begin());
+        } else {
+            std::fill(slot.page.values.begin(), slot.page.values.end(), 0);
+        }
+        slot.page.last_step = 0;
+        slot.page.regional_summary.reset();
+        return true;
+    };
+    storage.reserve(storage.pending, m_pending.size() + storage.gathered.m_pending.size());
+    storage.pending.assign(m_pending.begin(), m_pending.end());
+    storage.pending.insert(storage.pending.end(),
+                           storage.gathered.m_pending.begin(),
+                           storage.gathered.m_pending.end());
+    std::sort(storage.pending.begin(), storage.pending.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.cell_key, a.channel, a.emitter_id, a.amount) <
+               std::tie(b.cell_key, b.channel, b.emitter_id, b.amount);
+    });
+    for (const auto& deposit : storage.pending) {
+        int cx = 0, cz = 0;
+        UnpackCellKey(deposit.cell_key, cx, cz);
+        const auto owner = OwnerOfCell(cx, cz);
+        if (!ValidEnergyOwner(owner) || deposit.channel < 0 || deposit.channel >= m_channels)
+            return false;
+        if (!std::binary_search(due.begin(), due.end(), owner))
+            continue;
+        const int px = FloorDiv(cx, kEnergyPageCells), pz = FloorDiv(cz, kEnergyPageCells);
+        const auto key = PackPageKey(px, pz);
+        if (!stage(key, false, true))
+            return false;
+        auto& page = storage.find(key)->page;
+        const auto index =
+            (static_cast<std::size_t>(cz - pz * kEnergyPageCells) * kEnergyPageCells +
+             static_cast<std::size_t>(cx - px * kEnergyPageCells)) *
+                static_cast<std::size_t>(m_channels) +
+            static_cast<std::size_t>(deposit.channel);
+        page.values[index] = static_cast<std::uint16_t>(
+            (std::min)(std::uint64_t{page.values[index]} + deposit.amount, std::uint64_t{65535}));
+        storage.touch(owner, key);
+    }
+    for (const auto owner : storage.firing) {
+        const auto [min_x, end_x] = RegionalCellRange(owner.x);
+        const auto [min_z, end_z] = RegionalCellRange(owner.z);
+        for (int px = FloorDiv(min_x, kEnergyPageCells);
+             px <= FloorDiv(end_x - 1, kEnergyPageCells);
+             ++px)
+            for (int pz = FloorDiv(min_z, kEnergyPageCells);
+                 pz <= FloorDiv(end_z - 1, kEnergyPageCells);
+                 ++pz)
+                (void)stage(PackPageKey(px, pz), true, false);
+    }
+    const auto present = [&](std::int64_t key) {
+        if (auto* slot = storage.find(key))
+            return !slot->page.all_zero();
+        const auto found = m_pages.find(key);
+        return found != m_pages.end() && !found->second.all_zero();
+    };
+    // The session supplies every scheduler due owner, including both ends of a
+    // common border. No dormant-owner index or full-ledger scan is needed here.
+    for (const auto owner : due) {
+        const auto [min_x, end_x] = RegionalCellRange(owner.x);
+        const auto [min_z, end_z] = RegionalCellRange(owner.z);
+        for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+            const auto neighbor = records.find({owner.x + dx, owner.z + dz});
+            if (neighbor == records.end() ||
+                !RegionalBorderScheduled(tick, records.at(owner), neighbor->second))
+                continue;
+            const int lo = dx != 0 ? min_z : min_x, end = dx != 0 ? end_z : end_x;
+            for (int along = FloorDiv(lo, kEnergyPageCells);
+                 along <= FloorDiv(end - 1, kEnergyPageCells);
+                 ++along) {
+                const int px = dx != 0 ? FloorDiv(end_x - 1, kEnergyPageCells) : along;
+                const int pz = dz != 0 ? FloorDiv(end_z - 1, kEnergyPageCells) : along;
+                const auto a = PackPageKey(px, pz);
+                const auto b = PackPageKey(dx != 0 ? FloorDiv(end_x, kEnergyPageCells) : px,
+                                           dz != 0 ? FloorDiv(end_z, kEnergyPageCells) : pz);
+                if (present(a) && present(b)) {
+                    (void)stage(a, true, false);
+                    (void)stage(b, true, false);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool EnergyFieldState::DiffuseRegionalTick(std::uint64_t tick,
+                                           const RegionRecords& records,
+                                           RegionalTick::Storage& storage) {
+    const auto firing = [&](RegionKey owner) {
+        return std::binary_search(storage.firing.begin(), storage.firing.end(), owner);
+    };
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        auto& slot = storage.slots[i];
+        if (!slot.diffuse)
+            continue;
+        int px = 0, pz = 0;
+        UnpackCellKey(slot.key, px, pz);
+        storage.reserve(slot.next, slot.page.values.size());
+        slot.next.resize(slot.page.values.size());
+        for (int z = 0; z < kEnergyPageCells; ++z)
+            for (int x = 0; x < kEnergyPageCells; ++x) {
+                const auto owner =
+                    OwnerOfCell(px * kEnergyPageCells + x, pz * kEnergyPageCells + z);
+                if (!firing(owner))
+                    continue;
+                storage.touch(owner, slot.key);
+                for (int ch = 0; ch < m_channels; ++ch) {
+                    const auto index =
+                        static_cast<std::size_t>((z * kEnergyPageCells + x) * m_channels + ch);
+                    slot.page.values[index] = DecayOnce(slot.page.values[index]);
+                }
+            }
+    }
+    for (int iteration = 0; iteration < kEnergyDiffuseIterations; ++iteration) {
+        for (std::size_t i = 0; i < storage.used; ++i) {
+            auto& slot = storage.slots[i];
+            if (slot.diffuse)
+                std::copy(slot.page.values.begin(), slot.page.values.end(), slot.next.begin());
+        }
+        for (std::size_t i = 0; i < storage.used; ++i) {
+            auto& slot = storage.slots[i];
+            if (!slot.diffuse)
+                continue;
+            int px = 0, pz = 0;
+            UnpackCellKey(slot.key, px, pz);
+            for (int z = 0; z < kEnergyPageCells; ++z)
+                for (int x = 0; x < kEnergyPageCells; ++x) {
+                    const int cx = px * kEnergyPageCells + x, cz = pz * kEnergyPageCells + z;
+                    const auto owner_a = OwnerOfCell(cx, cz);
+                    const auto a = records.find(owner_a);
+                    if (a == records.end() ||
+                        a->second.state == Luminumbra::world::RegionState::Frozen)
+                        continue;
+                    for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+                        const int nx = cx + dx, nz = cz + dz;
+                        const auto owner_b = OwnerOfCell(nx, nz);
+                        const auto b = records.find(owner_b);
+                        if (b == records.end() ||
+                            b->second.state == Luminumbra::world::RegionState::Frozen ||
+                            (owner_a == owner_b
+                                 ? !firing(owner_a)
+                                 : !RegionalBorderScheduled(tick, a->second, b->second)))
+                            continue;
+                        const int npx = FloorDiv(nx, kEnergyPageCells),
+                                  npz = FloorDiv(nz, kEnergyPageCells);
+                        auto* neighbor = storage.find(PackPageKey(npx, npz));
+                        if (!neighbor || !neighbor->diffuse)
+                            continue;
+                        const auto base_a =
+                            static_cast<std::size_t>((z * kEnergyPageCells + x) * m_channels);
+                        const auto base_b = static_cast<std::size_t>(
+                            ((nz - npz * kEnergyPageCells) * kEnergyPageCells + nx -
+                             npx * kEnergyPageCells) *
+                            m_channels);
+                        bool processed = false;
+                        for (int ch = 0; ch < m_channels; ++ch) {
+                            const auto channel = static_cast<std::size_t>(ch);
+                            const auto va = slot.page.values[base_a + channel];
+                            const auto vb = neighbor->page.values[base_b + channel];
+                            const auto flux = static_cast<std::int32_t>(va >> kEnergyDiffuseShift) -
+                                              static_cast<std::int32_t>(vb >> kEnergyDiffuseShift);
+                            slot.next[base_a + channel] -= flux;
+                            neighbor->next[base_b + channel] += flux;
+                            processed = processed || va != 0 || vb != 0;
+                        }
+                        if (processed) {
+                            storage.touch(owner_a, slot.key);
+                            storage.touch(owner_b, neighbor->key);
+                        }
+                    }
+                }
+        }
+        for (std::size_t i = 0; i < storage.used; ++i) {
+            auto& slot = storage.slots[i];
+            if (!slot.diffuse)
+                continue;
+            for (std::size_t cell = 0; cell < slot.next.size(); ++cell) {
+                if (slot.next[cell] < 0 || slot.next[cell] > 65535)
+                    return false;
+                slot.page.values[cell] = static_cast<std::uint16_t>(slot.next[cell]);
+            }
+        }
+    }
+    return true;
+}
+
+bool EnergyFieldState::ProjectRegionalTick(const Luminumbra::world::ActiveRegionLedger& ledger,
+                                           RegionalTick::Storage& storage) {
+    if (!m_regional_validation)
+        return false;
+    auto& validation = *m_regional_validation;
+    auto bytes = validation.record_bytes;
+    auto pages = m_pages.size();
+    const auto age_known = [&](RegionKey owner) {
+        return ledger.energy_ages().contains(owner) ||
+               std::binary_search(storage.ages.begin(),
+                                  storage.ages.end(),
+                                  std::pair{owner, std::uint64_t{0}},
+                                  [](const auto& a, const auto& b) { return a.first < b.first; });
+    };
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        auto& slot = storage.slots[i];
+        slot.page.regional_summary.reset();
+        const auto& facts = slot.page.regional_facts(slot.key, m_channels);
+        if (!facts.valid)
+            return false;
+        for (std::size_t j = 0; j < facts.owner_count; ++j)
+            if (!ledger.records().contains(facts.owners[j]) || !age_known(facts.owners[j]))
+                return false;
+        if (slot.existed)
+            bytes -= m_pages.at(slot.key).regional_facts(slot.key, m_channels).record_bytes;
+        else
+            ++pages;
+        bytes += facts.record_bytes;
+    }
+    const auto max_pages =
+        kMaxRegionalValueBytes / (std::size_t{kEnergyPageCells} * kEnergyPageCells *
+                                  static_cast<std::size_t>(m_channels) * sizeof(std::uint16_t));
+    if (bytes > kMaxRegionalRecordBytes || pages > max_pages)
+        return false;
+    if (storage.unowned && pages == 0) {
+        storage.ages.clear();
+    }
+    for (const auto& [owner, age] : storage.ages) {
+        (void)age;
+        storage.count(owner);
+    }
+    storage.reserve(storage.work, storage.counts.entries.size());
+    for (const auto& [owner, count] : storage.counts.entries)
+        storage.work.push_back({owner, 0, 0, 0, count});
+    // Allocate genuinely new authority before any values become observable.
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        const auto& slot = storage.slots[i];
+        if (!slot.existed) {
+            storage.additions.try_emplace(slot.key);
+            ++storage.growths;
+        }
+    }
+    // Prepare all new index nodes before publication. Existing counts are then
+    // adjusted in place, so a stable owner/page roster allocates nothing.
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        const auto& slot = storage.slots[i];
+        const auto& facts = slot.page.regional_facts(slot.key, m_channels);
+        for (std::size_t j = 0; j < facts.owner_count; ++j)
+            if (validation.owner_pages.try_emplace(facts.owners[j], 0).second)
+                ++storage.growths;
+        if (facts.any)
+            for (const auto owner : RegionalPageOwners(slot.key))
+                if (ValidEnergyOwner(owner) &&
+                    validation.border_owners.try_emplace(owner, 0).second)
+                    ++storage.growths;
+    }
+    const auto adjust = [&](std::int64_t key, const RegionalPageFacts& facts, bool add) {
+        for (std::size_t j = 0; j < facts.owner_count; ++j) {
+            auto& count = validation.owner_pages.at(facts.owners[j]);
+            add ? ++count : --count;
+        }
+        if (facts.any)
+            for (const auto owner : RegionalPageOwners(key))
+                if (ValidEnergyOwner(owner)) {
+                    auto& count = validation.border_owners.at(owner);
+                    add ? ++count : --count;
+                }
+    };
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        auto& slot = storage.slots[i];
+        if (slot.existed)
+            adjust(slot.key, m_pages.at(slot.key).regional_facts(slot.key, m_channels), false);
+        adjust(slot.key, slot.page.regional_facts(slot.key, m_channels), true);
+    }
+    // Remove only the keys that may have lost their final page.
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        const auto& slot = storage.slots[i];
+        if (!slot.existed)
+            continue;
+        const auto& old = m_pages.at(slot.key).regional_facts(slot.key, m_channels);
+        for (std::size_t j = 0; j < old.owner_count; ++j) {
+            const auto found = validation.owner_pages.find(old.owners[j]);
+            if (found != validation.owner_pages.end() && found->second == 0)
+                validation.owner_pages.erase(found);
+        }
+        for (const auto owner : RegionalPageOwners(slot.key)) {
+            const auto found = validation.border_owners.find(owner);
+            if (found != validation.border_owners.end() && found->second == 0)
+                validation.border_owners.erase(found);
+        }
+    }
+    validation.record_bytes = bytes;
+    while (!storage.additions.empty())
+        m_pages.insert(storage.additions.extract(storage.additions.begin()));
+    for (std::size_t i = 0; i < storage.used; ++i) {
+        auto& slot = storage.slots[i];
+        std::swap(m_pages.at(slot.key), slot.page);
+    }
+    m_pending.swap(storage.original_pending);
+    storage.projected = true;
     return true;
 }
 
