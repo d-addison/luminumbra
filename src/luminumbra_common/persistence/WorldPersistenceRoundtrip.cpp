@@ -758,8 +758,12 @@ void ApplyChunkFields(const nlohmann::json& value,
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
     // Every accepted ownership encoding must agree with the region record header.
     const auto require_record_agreement = [&policy](bool terrain_edited, bool water_owned) {
-        if (policy.validate_record_authority &&
-            policy.terrain_edited != (terrain_edited || water_owned))
+        if (!policy.validate_record_authority)
+            return;
+        const bool disagrees = policy.allow_unflagged_water
+                                   ? terrain_edited && !policy.terrain_edited
+                                   : policy.terrain_edited != (terrain_edited || water_owned);
+        if (disagrees)
             throw std::invalid_argument("Chunk authority disagrees with region record");
     };
     if (const auto ownership = value.find("authority"); ownership != value.end()) {

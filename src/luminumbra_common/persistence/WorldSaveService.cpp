@@ -2619,7 +2619,14 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
 
     WorldStreamingState single;
     std::vector<std::string> load_errors;
-    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors)) {
+    // The header's edited flag is the durable terrain authority bit: a payload may not claim
+    // terrain ownership the header lacks. Owned water under an unflagged header is the one
+    // accepted disagreement; the flag repair below keeps it.
+    const ChunkAuthorityLoadPolicy record_policy{.terrain_edited =
+                                                     (record.flags & kRecordFlagEdited) != 0u,
+                                                 .validate_record_authority = true,
+                                                 .allow_unflagged_water = true};
+    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors, record_policy)) {
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
         }
