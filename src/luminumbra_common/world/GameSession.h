@@ -526,6 +526,17 @@ public:
     [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
         return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
     }
+    // Observational staged authority size; distinguishes an idle borrowed view from a copy.
+    [[nodiscard]] std::size_t GetRegionalWeatherCandidateRecordCount() const {
+        return m_regionalFieldView
+                   ? m_regionalFieldView->storms().size() + m_regionalFieldView->strikes().size() +
+                         m_regionalFieldView->weather_clocks().size()
+                   : 0;
+    }
+    // Observational storm conversions this tick; never persisted or hashed.
+    [[nodiscard]] std::size_t GetRegionalWeatherProjectionCount() const {
+        return m_regionalWeatherProjectionCount;
+    }
     // Observational nonempty advancement passes; never persisted or hashed.
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
         return m_groundObjectAdvanceCount;
@@ -636,6 +647,7 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint32_t m_numericSeed = 0; // Resolved once when session metadata is adopted.
     std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
@@ -704,12 +716,16 @@ private:
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
-    void ProjectRegionalWeather(std::uint64_t tick, bool restoring = false);
-    void AdvanceRegionalWeather(FieldPageState& fields, std::uint64_t tick);
+    void ProjectRegionalWeather(std::uint64_t tick,
+                                bool restoring = false,
+                                const std::map<RegionKey, std::uint64_t>* work = nullptr);
+    [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
+                                                                            std::uint64_t tick);
     void StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick);
     // Query-only view of this tick's candidate, cleared before publication or fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     bool m_regionalFieldsBound = false;
+    std::size_t m_regionalWeatherProjectionCount = 0;
     bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     bool m_regionRequiresIndex = false;

@@ -473,32 +473,75 @@ std::size_t WeatherSystem::StormBinHash::operator()(const StormBin& bin) const n
     return x ^ (z + std::size_t{0x9e3779b9} + (x << 6) + (x >> 2));
 }
 
+namespace {
+
+template<typename Visitor>
+void VisitStormBins(const StormCell& storm, const Visitor& visit) {
+    const auto& center = storm.center_world;
+    if (!std::isfinite(center.x) || !std::isfinite(center.y))
+        return;
+    // Double bin coordinates avoid integer conversion overflow even for extreme queries.
+    const std::array xs{
+        std::floor((static_cast<double>(center.x) - kStormRadiusM) / kStormBinSizeM),
+        std::floor((static_cast<double>(center.x) + kStormRadiusM) / kStormBinSizeM)};
+    const std::array zs{
+        std::floor((static_cast<double>(center.y) - kStormRadiusM) / kStormBinSizeM),
+        std::floor((static_cast<double>(center.y) + kStormRadiusM) / kStormBinSizeM)};
+    // Two endpoints per axis, at most four references per storm.
+    for (std::size_t x = 0; x < xs.size(); ++x) {
+        if (x == 1 && xs[0] == xs[1])
+            continue;
+        for (std::size_t z = 0; z < zs.size(); ++z) {
+            if (z == 1 && zs[0] == zs[1])
+                continue;
+            visit(std::array{xs[x], zs[z]});
+        }
+    }
+}
+
+} // namespace
+
 WeatherSystem::StormIndex
 WeatherSystem::BuildRegionalStormIndex(const std::span<const StormCell>& storms) {
     StormIndex result;
-    for (std::size_t index = 0; index < storms.size(); ++index) {
-        const auto& center = storms[index].center_world;
-        if (!std::isfinite(center.x) || !std::isfinite(center.y))
-            continue;
-        // Double bin coordinates avoid integer conversion overflow even for extreme queries.
-        const std::array xs{
-            std::floor((static_cast<double>(center.x) - kStormRadiusM) / kStormBinSizeM),
-            std::floor((static_cast<double>(center.x) + kStormRadiusM) / kStormBinSizeM)};
-        const std::array zs{
-            std::floor((static_cast<double>(center.y) - kStormRadiusM) / kStormBinSizeM),
-            std::floor((static_cast<double>(center.y) + kStormRadiusM) / kStormBinSizeM)};
-        // Two endpoints per axis, at most four references per storm; never a world scan.
-        for (std::size_t x = 0; x < xs.size(); ++x) {
-            if (x == 1 && xs[0] == xs[1])
-                continue;
-            for (std::size_t z = 0; z < zs.size(); ++z) {
-                if (z == 1 && zs[0] == zs[1])
-                    continue;
-                result[{xs[x], zs[z]}].push_back(index);
-            }
-        }
-    }
+    for (std::size_t index = 0; index < storms.size(); ++index)
+        VisitStormBins(storms[index], [&](const StormBin& bin) { result[bin].push_back(index); });
     return result;
+}
+
+void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
+    m_last_tick = tick;
+    if (m_regional_sample) {
+        const auto sample = m_regional_sample(anchor);
+        m_anchor_category = sample.category;
+        m_anchor_wind = sample.wind;
+    }
+}
+
+void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick,
+                                           const Vec3& anchor,
+                                           std::vector<StrikeEvent> strikes) {
+    RefreshRegionalWeather(tick, anchor);
+    m_strikes = std::move(strikes);
+}
+
+void WeatherSystem::UpdateRegionalStorm(std::size_t index, const StormCell& storm) {
+    const auto& previous = m_storm_cells.at(index);
+    if (previous.center_world != storm.center_world) {
+        VisitStormBins(previous, [&](const StormBin& bin) {
+            const auto found = m_regionalStormIndex.find(bin);
+            if (found == m_regionalStormIndex.end())
+                return;
+            std::erase(found->second, index);
+            if (found->second.empty())
+                m_regionalStormIndex.erase(found);
+        });
+        VisitStormBins(storm, [&](const StormBin& bin) {
+            auto& indices = m_regionalStormIndex[bin];
+            indices.insert(std::lower_bound(indices.begin(), indices.end(), index), index);
+        });
+    }
+    m_storm_cells[index] = storm;
 }
 
 std::span<const std::size_t> WeatherSystem::RegionalStormIndices(const Vec3& world_pos) const {

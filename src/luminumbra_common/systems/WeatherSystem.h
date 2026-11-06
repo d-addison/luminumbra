@@ -153,16 +153,19 @@ public:
                               std::vector<StormCell> storms,
                               std::vector<StrikeEvent> strikes) {
         auto storm_index = BuildRegionalStormIndex(storms);
-        m_last_tick = tick;
-        if (m_regional_sample) {
-            const auto sample = m_regional_sample(anchor);
-            m_anchor_category = sample.category;
-            m_anchor_wind = sample.wind;
-        }
+        RefreshRegionalWeather(tick, anchor, std::move(strikes));
         m_storm_cells = std::move(storms);
-        m_strikes = std::move(strikes);
         m_regionalStormIndex.swap(storm_index);
     }
+
+    // Retain all projections on idle ticks; only refresh the anchor sample and clock.
+    void RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor);
+    // Retain the projected storms and their spatial index on clock-only work.
+    void RefreshRegionalWeather(std::uint64_t tick,
+                                const Vec3& anchor,
+                                std::vector<StrikeEvent> strikes);
+    // Offsets remain stable when the canonical identity sequence is unchanged.
+    void UpdateRegionalStorm(std::size_t index, const StormCell& storm);
 
     // Advance weather to `tick` anchored on the streamed region around
     // `region_anchor` (world-space; the spawn/stream anchor). Pure function of

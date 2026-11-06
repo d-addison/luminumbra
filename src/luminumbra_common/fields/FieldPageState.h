@@ -112,6 +112,19 @@ public:
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& weather_clocks() const {
         return m_weatherClocks;
     }
+    // Indexed authority probes avoid traversing frozen owners on idle ticks.
+    [[nodiscard]] bool owns_weather(RegionKey owner) const {
+        return m_weatherClocks.contains(owner) || m_ownerStorms.contains(owner) ||
+               m_ownerStrikes.contains(owner);
+    }
+    [[nodiscard]] std::span<const std::size_t> storm_indices(RegionKey owner) const {
+        const auto found = m_ownerStorms.find(owner);
+        return found == m_ownerStorms.end() ? std::span<const std::size_t>{} : found->second;
+    }
+    // Transfer the already staged map into advancement; do not copy it again.
+    [[nodiscard]] std::map<RegionKey, std::uint64_t> take_weather_clocks() noexcept {
+        return std::move(m_weatherClocks);
+    }
     static constexpr std::int32_t kSoilBaseline = 1000000, kIrrigationLimit = 4000000;
     [[nodiscard]] const FoliageFieldPages& soil() const {
         return m_soil;

@@ -190,6 +190,53 @@ TEST(WeatherSystem, RegionalStormQueriesBoundWorkAndPreserveCanonicalAccumulatio
     EXPECT_EQ(weather.ComputeWeatherSubHash(), "regional hash");
 }
 
+void ExpectRegionalProjectionMatches(const WeatherSystem& actual, const WeatherSystem& reference) {
+    for (const float z : {-512.0f, -220.0f, 0.0f, 220.0f, 512.0f, 732.0f}) {
+        for (const float x : {-512.0f, -220.0f, 0.0f, 220.0f, 512.0f, 732.0f}) {
+            const Vec3 position{x, 0, z};
+            EXPECT_EQ(actual.storm_candidates_at(position),
+                      reference.storm_candidates_at(position));
+            const auto sample = actual.SampleAt(position);
+            const auto expected = reference.SampleAt(position);
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(sample.precip_intensity),
+                      std::bit_cast<std::uint32_t>(expected.precip_intensity));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(sample.storm_intensity),
+                      std::bit_cast<std::uint32_t>(expected.storm_intensity));
+        }
+    }
+}
+
+void CheckRegionalProjectionUpdates() {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    WeatherSystem weather(kSeed), reference(kSeed);
+    const auto sample = [](const Vec3&) {
+        return Luminumbra::Systems::WeatherSample{};
+    };
+    const auto hash = [] {
+        return std::string{};
+    };
+    weather.BindRegionalBackend(sample, hash);
+    reference.BindRegionalBackend(sample, hash);
+    std::vector<StormCell> storms{{.center_world = Vec2(0), .intensity = 0.25f},
+                                  {.center_world = Vec2(0), .intensity = 1.0e-8f},
+                                  {.center_world = Vec2(0), .intensity = 1.0e-8f}};
+    weather.AdoptRegionalWeather(1, kAnchor, storms, {});
+    // Move across bins, revisit a populated bin in identity order, and update in place.
+    for (const Vec2 center : {Vec2(512, 512), Vec2(-220, -220), Vec2(0), Vec2(0)}) {
+        storms[1].center_world = center;
+        storms[1].intensity = center == Vec2(0) ? 1.0e-8f : 0.5f;
+        weather.UpdateRegionalStorm(1, storms[1]);
+        weather.RefreshRegionalWeather(2, kAnchor, {});
+        reference.AdoptRegionalWeather(2, kAnchor, storms, {});
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalProjectionMatches(weather, reference));
+    }
+}
+
+TEST(WeatherSystem, RegionalStormUpdatesMatchCompleteProjection) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalProjectionUpdates());
+}
+
 TEST(WeatherSystem, RegionalStormIndexHandlesExtremeAndNonfiniteCoordinates) {
     using Luminumbra::Vec2;
     using Luminumbra::Systems::StormCell;

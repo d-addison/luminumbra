@@ -452,6 +452,47 @@ private:
     std::size_t m_at;
 };
 
+using WeatherOwnerIndices = std::map<RegionKey, std::vector<std::size_t>>;
+
+// Reuse every owner whose vector offsets are unchanged. Parsing starts with records but no
+// indices; that case admits all owners. Temporary nodes reserve any new owners before commit.
+template<typename Record>
+WeatherOwnerIndices ChangedWeatherIndices(const std::vector<Record>& previous,
+                                          const std::vector<Record>& next,
+                                          const WeatherOwnerIndices& indices) {
+    WeatherOwnerIndices changed;
+    for (std::size_t i = 0; i < std::max(previous.size(), next.size()); ++i) {
+        if (!indices.empty() && i < previous.size() && i < next.size() &&
+            previous[i].owner == next[i].owner)
+            continue;
+        if (i < previous.size())
+            changed.try_emplace(previous[i].owner);
+        if (i < next.size())
+            changed.try_emplace(next[i].owner);
+    }
+    for (std::size_t i = 0; i < next.size(); ++i) {
+        const auto found = changed.find(next[i].owner);
+        if (found != changed.end())
+            found->second.push_back(i);
+    }
+    return changed;
+}
+
+void CommitWeatherIndices(WeatherOwnerIndices& indices, WeatherOwnerIndices& changed) noexcept {
+    while (!changed.empty()) {
+        auto node = changed.extract(changed.begin());
+        const auto found = indices.find(node.key());
+        if (node.mapped().empty()) {
+            if (found != indices.end())
+                indices.erase(found);
+        } else if (found != indices.end()) {
+            found->second.swap(node.mapped());
+        } else {
+            indices.insert(std::move(node));
+        }
+    }
+}
+
 } // namespace
 
 RegionKey FieldPageState::region_of_cell(std::int32_t cell_x, std::int32_t cell_z) {
@@ -742,15 +783,12 @@ bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
     for (std::size_t i = 1; i < strikes.size(); ++i)
         if (StrikeOrder(strikes[i - 1]) == StrikeOrder(strikes[i]))
             return false;
-    std::map<RegionKey, std::vector<std::size_t>> owner_storms_index, owner_strikes_index;
-    for (std::size_t i = 0; i < storms.size(); ++i)
-        owner_storms_index[storms[i].owner].push_back(i);
-    for (std::size_t i = 0; i < strikes.size(); ++i)
-        owner_strikes_index[strikes[i].owner].push_back(i);
+    auto storm_indices = ChangedWeatherIndices(m_storms, storms, m_ownerStorms);
+    auto strike_indices = ChangedWeatherIndices(m_strikes, strikes, m_ownerStrikes);
     m_storms = std::move(storms);
     m_strikes = std::move(strikes);
-    m_ownerStorms.swap(owner_storms_index);
-    m_ownerStrikes.swap(owner_strikes_index);
+    CommitWeatherIndices(m_ownerStorms, storm_indices);
+    CommitWeatherIndices(m_ownerStrikes, strike_indices);
     return true;
 }
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
