@@ -452,47 +452,6 @@ private:
     std::size_t m_at;
 };
 
-using WeatherOwnerIndices = std::map<RegionKey, std::vector<std::size_t>>;
-
-// Reuse every owner whose vector offsets are unchanged. Parsing starts with records but no
-// indices; that case admits all owners. Temporary nodes reserve any new owners before commit.
-template<typename Record>
-WeatherOwnerIndices ChangedWeatherIndices(const std::vector<Record>& previous,
-                                          const std::vector<Record>& next,
-                                          const WeatherOwnerIndices& indices) {
-    WeatherOwnerIndices changed;
-    for (std::size_t i = 0; i < std::max(previous.size(), next.size()); ++i) {
-        if (!indices.empty() && i < previous.size() && i < next.size() &&
-            previous[i].owner == next[i].owner)
-            continue;
-        if (i < previous.size())
-            changed.try_emplace(previous[i].owner);
-        if (i < next.size())
-            changed.try_emplace(next[i].owner);
-    }
-    for (std::size_t i = 0; i < next.size(); ++i) {
-        const auto found = changed.find(next[i].owner);
-        if (found != changed.end())
-            found->second.push_back(i);
-    }
-    return changed;
-}
-
-void CommitWeatherIndices(WeatherOwnerIndices& indices, WeatherOwnerIndices& changed) noexcept {
-    while (!changed.empty()) {
-        auto node = changed.extract(changed.begin());
-        const auto found = indices.find(node.key());
-        if (node.mapped().empty()) {
-            if (found != indices.end())
-                indices.erase(found);
-        } else if (found != indices.end()) {
-            found->second.swap(node.mapped());
-        } else {
-            indices.insert(std::move(node));
-        }
-    }
-}
-
 } // namespace
 
 RegionKey FieldPageState::region_of_cell(std::int32_t cell_x, std::int32_t cell_z) {
@@ -710,20 +669,229 @@ void FieldPageState::adopt_scheduled_pages(FieldPageState&& staged) noexcept {
     }
 }
 
+const FieldPageState::OwnerWeather* FieldPageState::owner_weather(RegionKey owner) const {
+    const auto found = m_weatherOwners.find(owner);
+    if (found != m_weatherOwners.end()) {
+        return &found->second;
+    }
+    return m_weatherBase ? m_weatherBase->owner_weather(owner) : nullptr;
+}
+
+bool FieldPageState::owns_weather(RegionKey owner) const {
+    const auto* weather = owner_weather(owner);
+    return weather && (weather->clock || !weather->storms.empty() || !weather->strikes.empty());
+}
+
+void FieldPageState::flatten_weather() const {
+    if (m_weatherCacheValid) {
+        return;
+    }
+    m_storms.clear();
+    m_strikes.clear();
+    m_weatherClocks.clear();
+    m_ownerStorms.clear();
+    const auto append = [this](RegionKey owner, const OwnerWeather& weather) {
+        m_storms.insert(m_storms.end(), weather.storms.begin(), weather.storms.end());
+        m_strikes.insert(m_strikes.end(), weather.strikes.begin(), weather.strikes.end());
+        if (weather.clock) {
+            m_weatherClocks.emplace(owner, *weather.clock);
+        }
+    };
+    if (m_weatherBase) {
+        for (const auto& [owner, weather] : m_weatherBase->m_weatherOwners) {
+            if (!m_weatherOwners.contains(owner)) {
+                append(owner, weather);
+            }
+        }
+    }
+    for (const auto& [owner, weather] : m_weatherOwners) {
+        append(owner, weather);
+    }
+    std::sort(m_storms.begin(), m_storms.end(), [](const auto& a, const auto& b) {
+        return StormOrder(a) < StormOrder(b);
+    });
+    std::sort(m_strikes.begin(), m_strikes.end(), [](const auto& a, const auto& b) {
+        return StrikeOrder(a) < StrikeOrder(b);
+    });
+    for (std::size_t i = 0; i < m_storms.size(); ++i) {
+        m_ownerStorms[m_storms[i].owner].push_back(i);
+    }
+    m_weatherCacheValid = true;
+}
+
+const std::vector<RegionalStorm>& FieldPageState::storms() const {
+    flatten_weather();
+    return m_storms;
+}
+const std::vector<RegionalStrike>& FieldPageState::strikes() const {
+    flatten_weather();
+    return m_strikes;
+}
+const std::map<RegionKey, std::uint64_t>& FieldPageState::weather_clocks() const {
+    flatten_weather();
+    return m_weatherClocks;
+}
+std::span<const std::size_t> FieldPageState::storm_indices(RegionKey owner) const {
+    flatten_weather();
+    const auto found = m_ownerStorms.find(owner);
+    return found == m_ownerStorms.end() ? std::span<const std::size_t>{} : found->second;
+}
+
 void FieldPageState::copy_weather_from(const FieldPageState& source) {
-    m_storms = source.m_storms;
-    m_strikes = source.m_strikes;
-    m_weatherClocks = source.m_weatherClocks;
-    m_ownerStorms = source.m_ownerStorms;
-    m_ownerStrikes = source.m_ownerStrikes;
+    m_weatherOwners = source.m_weatherOwners;
+    m_stormIdentities = source.m_stormIdentities;
+    m_stormCount = source.m_stormCount;
+    m_strikeCount = source.m_strikeCount;
+    m_clockCount = source.m_clockCount;
+    m_weatherBase = nullptr;
+    invalidate_weather_cache();
+}
+
+void FieldPageState::begin_weather_update(const FieldPageState& source) {
+    m_weatherBase = &source;
+    m_stagedWeatherRecords = 0;
+    m_stormCount = source.m_stormCount;
+    m_strikeCount = source.m_strikeCount;
+    m_clockCount = source.m_clockCount;
+    invalidate_weather_cache();
+}
+
+FieldPageState::OwnerWeather& FieldPageState::stage_weather_owner(RegionKey owner) {
+    invalidate_weather_cache();
+    const auto found = m_weatherOwners.find(owner);
+    if (found != m_weatherOwners.end()) {
+        return found->second;
+    }
+    OwnerWeather weather;
+    if (m_weatherBase) {
+        if (const auto* previous = m_weatherBase->owner_weather(owner)) {
+            weather = *previous;
+        }
+    }
+    m_stagedWeatherRecords += weather.storms.size() + weather.strikes.size() +
+                              static_cast<std::size_t>(weather.clock.has_value());
+    invalidate_weather_cache();
+    return m_weatherOwners.emplace(owner, std::move(weather)).first->second;
+}
+
+bool FieldPageState::has_storm_identity(std::uint64_t tick, std::uint32_t salt) const {
+    const StormIdentity identity{tick, salt};
+    if (m_stormIdentities.contains(identity)) {
+        return true;
+    }
+    if (!m_weatherBase) {
+        return false;
+    }
+    const auto found = m_weatherBase->m_stormIdentities.find(identity);
+    if (found == m_weatherBase->m_stormIdentities.end()) {
+        return false;
+    }
+    const auto replacement = m_weatherOwners.find(found->second);
+    if (replacement == m_weatherOwners.end()) {
+        return true;
+    }
+    return std::any_of(replacement->second.storms.begin(),
+                       replacement->second.storms.end(),
+                       [&identity](const auto& storm) { return StormOrder(storm) == identity; });
+}
+
+bool FieldPageState::prepare_weather_update() {
+    m_weatherValidationVisits = 0;
+    auto storms = m_weatherBase ? m_weatherBase->storm_count() : 0;
+    auto strikes = m_weatherBase ? m_weatherBase->strike_count() : 0;
+    auto clocks = m_weatherBase ? m_weatherBase->weather_clock_count() : 0;
+    std::map<StormIdentity, RegionKey> identities;
+    for (auto& [owner, weather] : m_weatherOwners) {
+        m_weatherValidationVisits += weather.storms.size() + weather.strikes.size() +
+                                     static_cast<std::size_t>(weather.clock.has_value());
+        if (!ValidOwner(owner) || weather.storms.size() > kMaxOwnerStorms ||
+            weather.strikes.size() > kMaxOwnerStrikes ||
+            (weather.clock && *weather.clock >= WorldClock::kTickLimit)) {
+            return false;
+        }
+        if (m_weatherBase) {
+            if (const auto* previous = m_weatherBase->owner_weather(owner)) {
+                storms -= previous->storms.size();
+                strikes -= previous->strikes.size();
+                clocks -= static_cast<std::size_t>(previous->clock.has_value());
+            }
+        }
+        storms += weather.storms.size();
+        strikes += weather.strikes.size();
+        clocks += static_cast<std::size_t>(weather.clock.has_value());
+        std::sort(weather.storms.begin(), weather.storms.end(), [](const auto& a, const auto& b) {
+            return StormOrder(a) < StormOrder(b);
+        });
+        std::sort(weather.strikes.begin(), weather.strikes.end(), [](const auto& a, const auto& b) {
+            return StrikeOrder(a) < StrikeOrder(b);
+        });
+        for (const auto& storm : weather.storms) {
+            const auto identity = StormOrder(storm);
+            if (storm.owner != owner || !ValidStorm(storm) ||
+                !identities.emplace(identity, owner).second) {
+                return false;
+            }
+            if (m_weatherBase) {
+                const auto existing = m_weatherBase->m_stormIdentities.find(identity);
+                if (existing != m_weatherBase->m_stormIdentities.end() &&
+                    !m_weatherOwners.contains(existing->second)) {
+                    return false;
+                }
+            }
+        }
+        for (std::size_t i = 0; i < weather.strikes.size(); ++i) {
+            const auto& strike = weather.strikes[i];
+            if (strike.owner != owner || !ValidStrike(strike) ||
+                (i != 0 && StrikeOrder(weather.strikes[i - 1]) == StrikeOrder(strike))) {
+                return false;
+            }
+        }
+    }
+    if (storms > kMaxStorms || strikes > kMaxStrikes || clocks > kMaxWeatherClocks) {
+        return false;
+    }
+    m_stormIdentities.swap(identities);
+    m_stormCount = storms;
+    m_strikeCount = strikes;
+    m_clockCount = clocks;
+    invalidate_weather_cache();
+    return true;
 }
 
 void FieldPageState::adopt_weather_state(FieldPageState& staged) noexcept {
-    m_storms.swap(staged.m_storms);
-    m_strikes.swap(staged.m_strikes);
-    m_weatherClocks.swap(staged.m_weatherClocks);
-    m_ownerStorms.swap(staged.m_ownerStorms);
-    m_ownerStrikes.swap(staged.m_ownerStrikes);
+    if (!staged.m_weatherBase) {
+        m_weatherBase = nullptr;
+        m_weatherOwners.swap(staged.m_weatherOwners);
+        m_stormIdentities.swap(staged.m_stormIdentities);
+    } else {
+        // Nodes and vectors were allocated and validated before ledger admission.
+        for (const auto& [owner, weather] : staged.m_weatherOwners) {
+            (void)weather;
+            const auto previous = m_weatherOwners.find(owner);
+            if (previous != m_weatherOwners.end()) {
+                for (const auto& storm : previous->second.storms) {
+                    m_stormIdentities.erase(StormOrder(storm));
+                }
+                m_weatherOwners.erase(previous);
+            }
+        }
+        // Empty replacements remove an owner rather than accumulating vacant authority nodes.
+        for (auto owner = staged.m_weatherOwners.begin(); owner != staged.m_weatherOwners.end();) {
+            if (owner->second.storms.empty() && owner->second.strikes.empty() &&
+                !owner->second.clock) {
+                owner = staged.m_weatherOwners.erase(owner);
+            } else {
+                ++owner;
+            }
+        }
+        m_weatherOwners.merge(staged.m_weatherOwners);
+        m_stormIdentities.merge(staged.m_stormIdentities);
+    }
+    m_stormCount = staged.m_stormCount;
+    m_strikeCount = staged.m_strikeCount;
+    m_clockCount = staged.m_clockCount;
+    staged.m_weatherBase = nullptr;
+    invalidate_weather_cache();
 }
 
 FieldPageState
@@ -731,16 +899,23 @@ FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>
                                    std::span<const RegionKey> due,
                                    std::uint64_t tick) const {
     const std::set<RegionKey> due_keys(due.begin(), due.end());
-    std::set<FieldPageKey> keys;
+    std::vector<RegionKey> participants;
     for (const auto& [owner, record] : records) {
-        if (record.state == RegionState::Frozen)
+        if (record.state == RegionState::Frozen) {
             continue;
-        // A cross-owner edge opens only on the common phase at the maximum shift.
-        // If this owner's own common phase is closed, none of its edges can open.
+        }
         const bool common = record.cadence_shift < 63 &&
                             (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == 0;
-        if (!due_keys.contains(owner) && !common)
-            continue;
+        if (due_keys.contains(owner) || common) {
+            participants.push_back(owner);
+        }
+    }
+    return scheduled_snapshot(participants);
+}
+
+FieldPageState FieldPageState::scheduled_snapshot(std::span<const RegionKey> participants) const {
+    std::set<FieldPageKey> keys;
+    for (const auto owner : participants) {
         const auto x = AxisCellRange(owner.x), z = AxisCellRange(owner.z);
         if (x.lo > x.hi || z.lo > z.hi)
             continue;
@@ -757,51 +932,42 @@ FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>
     return snapshot;
 }
 
-bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
-                                     std::vector<RegionalStrike> strikes) {
-    if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes)
+bool FieldPageState::replace_weather(const std::vector<RegionalStorm>& storms,
+                                     const std::vector<RegionalStrike>& strikes) {
+    if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes) {
         return false;
-    std::map<RegionKey, std::size_t> owner_storms, owner_strikes;
-    for (const auto& storm : storms)
-        if (++owner_storms[storm.owner] > kMaxOwnerStorms)
+    }
+    FieldPageState next;
+    for (const auto& [owner, age] : weather_clocks()) {
+        if (!next.set_weather_age(owner, age)) {
             return false;
-    for (const auto& strike : strikes)
-        if (++owner_strikes[strike.owner] > kMaxOwnerStrikes)
-            return false;
-    if (!std::all_of(storms.begin(), storms.end(), ValidStorm) ||
-        !std::all_of(strikes.begin(), strikes.end(), ValidStrike))
+        }
+    }
+    for (const auto& storm : storms) {
+        next.m_weatherOwners[storm.owner].storms.push_back(storm);
+    }
+    for (const auto& strike : strikes) {
+        next.m_weatherOwners[strike.owner].strikes.push_back(strike);
+    }
+    if (!next.prepare_weather_update()) {
         return false;
-    std::sort(storms.begin(), storms.end(), [](const auto& a, const auto& b) {
-        return StormOrder(a) < StormOrder(b);
-    });
-    std::sort(strikes.begin(), strikes.end(), [](const auto& a, const auto& b) {
-        return StrikeOrder(a) < StrikeOrder(b);
-    });
-    for (std::size_t i = 1; i < storms.size(); ++i)
-        if (StormOrder(storms[i - 1]) == StormOrder(storms[i]))
-            return false;
-    for (std::size_t i = 1; i < strikes.size(); ++i)
-        if (StrikeOrder(strikes[i - 1]) == StrikeOrder(strikes[i]))
-            return false;
-    auto storm_indices = ChangedWeatherIndices(m_storms, storms, m_ownerStorms);
-    auto strike_indices = ChangedWeatherIndices(m_strikes, strikes, m_ownerStrikes);
-    m_storms = std::move(storms);
-    m_strikes = std::move(strikes);
-    CommitWeatherIndices(m_ownerStorms, storm_indices);
-    CommitWeatherIndices(m_ownerStrikes, strike_indices);
+    }
+    adopt_weather_state(next);
     return true;
 }
-bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
-                                     std::vector<RegionalStrike> strikes,
-                                     std::map<RegionKey, std::uint64_t> clocks) {
-    if (clocks.size() > kMaxWeatherClocks)
-        return false;
-    for (const auto& [owner, age] : clocks)
-        if (!ValidOwner(owner) || age >= WorldClock::kTickLimit)
+bool FieldPageState::replace_weather(const std::vector<RegionalStorm>& storms,
+                                     const std::vector<RegionalStrike>& strikes,
+                                     const std::map<RegionKey, std::uint64_t>& clocks) {
+    FieldPageState next;
+    for (const auto& [owner, age] : clocks) {
+        if (!next.set_weather_age(owner, age)) {
             return false;
-    if (!replace_weather(std::move(storms), std::move(strikes)))
+        }
+    }
+    if (!next.replace_weather(storms, strikes)) {
         return false;
-    m_weatherClocks.swap(clocks);
+    }
+    adopt_weather_state(next);
     return true;
 }
 bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
@@ -938,19 +1104,26 @@ RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
 bool FieldPageState::owns_evolution_state(RegionKey key) const {
     if (m_soil.owns_region(key) || m_irrigation.owns_region(key))
         return true;
-    if (m_weatherClocks.contains(key) || m_ownerStorms.contains(key) ||
-        m_ownerStrikes.contains(key))
+    if (owns_weather(key))
         return true;
     return VisitRegionScent(m_scent, key, [](ScentCellKey, const ScentCell&) { return true; });
 }
 bool FieldPageState::set_weather_age(RegionKey owner, std::uint64_t active_age) {
+    const auto* previous = owner_weather(owner);
+    const bool exists = previous && previous->clock.has_value();
     if (!ValidOwner(owner) || active_age >= WorldClock::kTickLimit ||
-        (!m_weatherClocks.contains(owner) && m_weatherClocks.size() == kMaxWeatherClocks))
+        (!exists && m_clockCount == kMaxWeatherClocks)) {
         return false;
-    m_weatherClocks[owner] = active_age;
+    }
+    stage_weather_owner(owner).clock = active_age;
+    if (!exists) {
+        ++m_clockCount;
+    }
+    invalidate_weather_cache();
     return true;
 }
 std::string FieldPageState::serialize() const {
+    flatten_weather();
     if (empty())
         return {};
     std::string out = kMagic;
@@ -1005,6 +1178,8 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
         if (sections == 0 || sections > 7)
             return false;
         FieldPageState temporary;
+        std::vector<RegionalStorm> storms;
+        std::vector<RegionalStrike> strikes;
         std::size_t at = kHeaderBytes;
         std::uint64_t previous = 0;
         for (std::uint64_t section = 0; section < sections; ++section) {
@@ -1062,7 +1237,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                         storm.lifetime_ticks = reader.word();
                         storm.seed_salt = reader.word();
                         storm.active_age = reader.word();
-                        temporary.m_storms.push_back(storm);
+                        storms.push_back(storm);
                     } else if (type == 3) {
                         RegionalStrike strike;
                         strike.owner = reader.owner();
@@ -1072,7 +1247,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                         strike.magnitude = reader.word();
                         strike.storm_salt = reader.word();
                         strike.active_age = reader.word();
-                        temporary.m_strikes.push_back(strike);
+                        strikes.push_back(strike);
                     } else if (type == 7) {
                         const RegionKey owner = reader.owner();
                         const auto age = reader.read(8);
@@ -1091,7 +1266,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
             }
             at += 6 + static_cast<std::size_t>(length);
         }
-        if (at != footer || !temporary.replace_weather(temporary.m_storms, temporary.m_strikes) ||
+        if (at != footer || !temporary.replace_weather(storms, strikes) ||
             temporary.serialize() != bytes)
             return false;
         out = std::move(temporary);
@@ -1130,6 +1305,7 @@ std::string FieldPageState::ambient_bytes(std::uint8_t channels,
     }
     if (weather) {
         const auto& fields = overlay ? *overlay : *this;
+        fields.flatten_weather();
         std::string records;
         for (const auto& storm : fields.m_storms)
             AppendStorm(records, storm);
@@ -1165,32 +1341,33 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
     }
     std::string storms, strikes, scent;
     std::size_t storm_count = 0, strike_count = 0, scent_count = 0;
-    if (const auto owned = m_ownerStorms.find(key); owned != m_ownerStorms.end())
-        for (const auto index : owned->second) {
-            AppendStorm(storms, m_storms[index]);
+    const auto* weather = owner_weather(key);
+    if (weather) {
+        for (const auto& storm : weather->storms) {
+            AppendStorm(storms, storm);
             ++storm_count;
         }
-    if (const auto owned = m_ownerStrikes.find(key); owned != m_ownerStrikes.end())
-        for (const auto index : owned->second) {
-            AppendStrike(strikes, m_strikes[index]);
+        for (const auto& strike : weather->strikes) {
+            AppendStrike(strikes, strike);
             ++strike_count;
         }
+    }
     VisitRegionScent(m_scent, key, [&](ScentCellKey cell, const ScentCell& values) {
         AppendScent(scent, cell, values);
         ++scent_count;
         return false;
     });
-    const auto clock = m_weatherClocks.find(key);
-    if (storm_count + strike_count + scent_count != 0 || clock != m_weatherClocks.end()) {
+    const auto clock = weather ? weather->clock : std::nullopt;
+    if (storm_count + strike_count + scent_count != 0 || clock.has_value()) {
         out += "|evolution:v2:";
         AppendSection(out, 2, storm_count, storms);
         AppendSection(out, 3, strike_count, strikes);
         AppendSection(out, 4, scent_count, scent);
-        if (clock != m_weatherClocks.end()) {
+        if (clock.has_value()) {
             std::string age;
             AppendLe(age, static_cast<std::uint32_t>(key.x), 4);
             AppendLe(age, static_cast<std::uint32_t>(key.z), 4);
-            AppendLe(age, clock->second, 8);
+            AppendLe(age, *clock, 8);
             AppendSection(out, 7, 1, age);
         }
     }

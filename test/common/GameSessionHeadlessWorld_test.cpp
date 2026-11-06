@@ -9198,6 +9198,37 @@ void CheckWeatherHandover() {
     ASSERT_NO_FATAL_FAILURE(ExpectWeatherContinuation(session, reopened));
 }
 
+void CheckWeatherBoundaryTargetAdmission(bool frozen_target) {
+    SCOPED_TRACE(frozen_target);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey source{0, -1}, target{1, -1}, due_owner{4, -1};
+    std::map<RegionKey, RegionState> owners{{source, RegionState::Reduced},
+                                            {due_owner, RegionState::Active}};
+    if (frozen_target) {
+        owners.emplace(target, RegionState::Frozen);
+    }
+    const auto ledger = ScheduledFieldLedger(1003, owners);
+    FieldPageState fields;
+    const auto storm = SessionStorm(source, 511.75f, -256, 30, 0);
+    ASSERT_TRUE(fields.replace_weather({storm}, {}));
+    ASSERT_TRUE(fields.set_weather_age(due_owner, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.PinActiveRegion(target, true);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    auto expected = storm;
+    expected.owner = target;
+    expected.center_x = std::bit_cast<std::uint32_t>(512.75f);
+    EXPECT_EQ(session.GetFieldPages().storms().front(), expected);
+    EXPECT_FALSE(session.GetFieldPages().weather_clocks().contains(target));
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
+              (std::map<RegionKey, std::uint64_t>{{source, 1}, {target, 1}, {due_owner, 1}}));
+}
+
 void CheckWeatherWithoutDueAuthority() {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -9766,7 +9797,7 @@ void AddFrozenWeatherOwners(FieldPageState& fields,
                            static_cast<std::uint32_t>(100 + 16 * i),
                            0});
     }
-    ASSERT_TRUE(fields.replace_weather(std::move(storms), std::move(strikes)));
+    ASSERT_TRUE(fields.replace_weather(storms, strikes));
 }
 
 void ExpectFrozenWeatherUnchanged(const GameSession& session,
@@ -9783,7 +9814,10 @@ void ExpectFrozenWeatherUnchanged(const GameSession& session,
     }
 }
 
-void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool shared_page = false) {
+void CheckFrozenWeatherWork(std::size_t frozen_owners,
+                            int work_kind,
+                            bool shared_page = false,
+                            std::array<std::size_t, 3>* measured = nullptr) {
     SCOPED_TRACE(shared_page);
     SCOPED_TRACE(frozen_owners);
     SCOPED_TRACE(work_kind);
@@ -9820,6 +9854,8 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
         AddWeatherOverlayCell(fields, 21, {1024, 64512, 32768, 32768, 16384});
     const auto ledger = ScheduledFieldLedger(31, owners);
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    EXPECT_EQ(session.GetWeatherSystem()->live_strike_count(), 0);
+    EXPECT_TRUE(session.GetWeatherSystem()->StrikeSchedule().empty());
     int observations = 0;
     session.GetSimulationEventBus().subscribe([&](const auto& event) {
         if (event.topic != "weather-work-test")
@@ -9830,6 +9866,13 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
                   work_kind == 2 || work_kind == 4 ? 1u : 0u);
         if (work_kind == 0) {
             EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
+        }
+        const auto staged = session.GetRegionalWeatherCandidateRecordCount();
+        EXPECT_LE(staged, 1u);
+        if (measured) {
+            *measured = {staged,
+                         session.GetRegionalWeatherScanCount(),
+                         session.GetRegionalWeatherProjectionVisitCount()};
         }
         EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
     });
@@ -9847,6 +9890,8 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners, int work_kind, bool share
     } else {
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner),
                   work_kind == 1 ? 8u : 1u);
+        EXPECT_EQ(weather->StrikeSchedule().size(), frozen_owners);
+        EXPECT_EQ(weather->live_strike_count(), static_cast<int>(frozen_owners));
     }
     ASSERT_NO_FATAL_FAILURE(ExpectFrozenWeatherUnchanged(session, fields, owners));
 }
@@ -9922,6 +9967,63 @@ void CheckSynchronizedWeatherSpawns() {
     EXPECT_EQ(decoded.storms(), storms);
 }
 
+void CheckTransferredStormReservesSpawnIdentity() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession control, session;
+    const RegionKey target{0, -1};
+    std::map<RegionKey, RegionState> owners{{target, RegionState::Active}};
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_weather_age(target, 44));
+    const auto control_ledger = ScheduledFieldLedger(1003, owners);
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(control, root, jobs, control_ledger, fields));
+    TickOnce(control);
+    ASSERT_FALSE(control.GetRegionSchedulerFault());
+    ASSERT_EQ(control.GetFieldPages().storms().size(), 1u);
+    const auto drawn = control.GetFieldPages().storms().front();
+    // Select a neighbouring source whose interior is closed at the common boundary.
+    std::optional<RegionKey> source;
+    for (std::int32_t dx = -1; dx <= 1; ++dx) {
+        for (std::int32_t dz = -1; dz <= 1; ++dz) {
+            const RegionKey neighbour{target.x + dx, target.z + dz};
+            if (neighbour == target) {
+                continue;
+            }
+            owners.emplace(neighbour, RegionState::Reduced);
+            if (!source && ActiveRegionLedger::phase(neighbour, 2) != 0) {
+                source = neighbour;
+            }
+        }
+    }
+    ASSERT_TRUE(source.has_value());
+    if (!source) {
+        return;
+    }
+    const auto crossing = [](std::int32_t from, std::int32_t to) {
+        const float low = static_cast<float>(to) * 512.0f;
+        return from < to   ? std::pair{low - 0.25f, 30.0f}
+               : from > to ? std::pair{low + 512.25f, -30.0f}
+                           : std::pair{low + 256.0f, 0.0f};
+    };
+    const auto [x, vx] = crossing(source->x, target.x);
+    const auto [z, vz] = crossing(source->z, target.z);
+    auto incoming = SessionStorm(*source, x, z, vx, vz);
+    incoming.spawn_tick = drawn.spawn_tick;
+    incoming.seed_salt = drawn.seed_salt;
+    ASSERT_TRUE(fields.replace_weather({incoming}, {}));
+    const auto ledger = ScheduledFieldLedger(1003, owners);
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetFieldPages().storms().size(), 1u);
+    const auto& moved = session.GetFieldPages().storms().front();
+    EXPECT_EQ(moved.owner, target);
+    EXPECT_EQ(moved.spawn_tick, drawn.spawn_tick);
+    EXPECT_EQ(moved.seed_salt, drawn.seed_salt);
+    EXPECT_EQ(moved.active_age, incoming.active_age);
+}
+
 void CheckWeatherWithoutAmbientPages(int authority, bool clock) {
     SCOPED_TRACE(clock);
     SCOPED_TRACE(authority);
@@ -9987,8 +10089,29 @@ void CheckUnrelatedFieldOwnerWeather(int authority) {
     }
 }
 
-void ExpectNewWorldRegionalWeather(GameSession& session) {
-    ASSERT_NO_FATAL_FAILURE(ExpectWeatherOverlaySample(session, session.GetFieldPages(), 4));
+void CheckWeatherOwnerWorkBound(int kind) {
+    SCOPED_TRACE(kind);
+    std::array<std::size_t, 3> baseline{};
+    ASSERT_NO_FATAL_FAILURE(CheckFrozenWeatherWork(0, kind, false, &baseline));
+    for (const std::size_t owners : {std::size_t{16}, std::size_t{128}, std::size_t{1024}}) {
+        std::array<std::size_t, 3> measured{};
+        ASSERT_NO_FATAL_FAILURE(CheckFrozenWeatherWork(owners, kind, false, &measured));
+        EXPECT_EQ(measured, baseline);
+    }
+}
+
+void ExpectNewWorldRegionalWeather(GameSession& session, GameSession& restored) {
+    const Luminumbra::Vec3 position{108, 0, 108};
+    const auto actual = session.GetWeatherSystem()->SampleAt(position);
+    const auto expected = restored.GetWeatherSystem()->SampleAt(position);
+    EXPECT_EQ(actual.category, expected.category);
+    EXPECT_EQ(actual.precip_intensity, expected.precip_intensity);
+    EXPECT_EQ(actual.storm_intensity, expected.storm_intensity);
+    EXPECT_EQ(actual.wind, expected.wind);
+    EXPECT_EQ(session.GetWindFieldSystem()->SampleWind(position),
+              restored.GetWindFieldSystem()->SampleWind(position));
+    EXPECT_EQ(session.GetAetherFieldSystem()->SampleAether(position),
+              restored.GetAetherFieldSystem()->SampleAether(position));
     const auto& storms = session.GetFieldPages().storms();
     const auto& projected = session.GetWeatherSystem()->StormCells();
     ASSERT_EQ(storms.size(), 1u);
@@ -10026,17 +10149,17 @@ void CheckNewWorldRegionalBinding() {
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(adoptions, 1);
-    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session));
-    TickOnce(session);
-    ASSERT_FALSE(session.GetRegionSchedulerFault());
-    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session));
     ASSERT_NO_FATAL_FAILURE(ReopenSessionWeather(session, reopened, root, jobs));
-    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(reopened));
+    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session, reopened));
+    TickOnce(session);
+    TickOnce(reopened);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_NO_FATAL_FAILURE(ExpectWeatherContinuation(session, reopened));
+    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session, reopened));
     TickOnce(session);
     TickOnce(reopened);
     ASSERT_NO_FATAL_FAILURE(ExpectWeatherContinuation(session, reopened));
-    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session));
-    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(reopened));
+    ASSERT_NO_FATAL_FAILURE(ExpectNewWorldRegionalWeather(session, reopened));
 }
 
 void FillGlobalStormCapacity(std::vector<RegionalStorm>& storms,
@@ -10117,7 +10240,18 @@ void CheckGlobalStormTransferCapacity() {
     ASSERT_TRUE(fields.set_weather_age(target, 0));
     const auto ledger = ScheduledFieldLedger(1003, owners);
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    int observations = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic == "weather-transfer-work") {
+            ++observations;
+            EXPECT_LE(session.GetRegionalWeatherCandidateRecordCount(), 2u);
+            EXPECT_LT(session.GetRegionalWeatherScanCount(), 64u);
+            EXPECT_LT(session.GetRegionalWeatherProjectionVisitCount(), 64u);
+        }
+    });
+    session.GetSimulationEventBus().publish(1004, "weather-transfer-work", "");
     TickOnce(session);
+    EXPECT_EQ(observations, 1);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     ASSERT_EQ(session.GetFieldPages().storms().size(), FieldPageState::kMaxStorms);
     const auto& moved = session.GetFieldPages().storms().front();
@@ -10255,6 +10389,12 @@ TEST(GameSessionHeadlessWorldTest, RegionalWeatherHandoverUsesCommonPhaseWithout
     ASSERT_NO_FATAL_FAILURE(CheckWeatherHandover());
 }
 
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherHandoverTracksNewAndAwakenedTargets) {
+    for (const bool frozen : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckWeatherBoundaryTargetAdmission(frozen));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherCornerRequiresBothCardinalOwners) {
     for (const int blocked : {0, 1, 2, 3}) {
         ASSERT_NO_FATAL_FAILURE(CheckWeatherCorner(blocked));
@@ -10306,6 +10446,12 @@ TEST(GameSessionHeadlessWorldTest, RegionalWeatherProjectionWorkStaysFixedWithFr
             ASSERT_NO_FATAL_FAILURE(CheckFrozenWeatherWork(owners, work));
 }
 
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherOwnerWorkIsIndependentOfFrozenAuthority) {
+    for (const int kind : {1, 2, 3, 4}) {
+        ASSERT_NO_FATAL_FAILURE(CheckWeatherOwnerWorkBound(kind));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherResolvesNumericAndTextSeedsAcrossAdoption) {
     for (const auto* seed : {"1337", "regional-weather"})
         ASSERT_NO_FATAL_FAILURE(CheckWeatherSeedAdoption(seed));
@@ -10313,6 +10459,10 @@ TEST(GameSessionHeadlessWorldTest, RegionalWeatherResolvesNumericAndTextSeedsAcr
 
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherAdmitsUniqueSynchronizedSpawns) {
     ASSERT_NO_FATAL_FAILURE(CheckSynchronizedWeatherSpawns());
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherTransferredStormReservesSpawnIdentity) {
+    ASSERT_NO_FATAL_FAILURE(CheckTransferredStormReservesSpawnIdentity());
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherSkipsCandidatesWithoutDueAuthority) {

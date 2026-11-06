@@ -607,3 +607,95 @@ TEST(WeatherSystem, StrikeFieldsAreReplayableWorldEvents) {
 }
 
 } // namespace
+
+namespace {
+
+void CheckRegionalIdentityMembershipChanges() {
+    using Luminumbra::Vec2;
+    using Luminumbra::Systems::StormCell;
+    using Luminumbra::Systems::StrikeEvent;
+    WeatherSystem weather(kSeed), reference(kSeed);
+    const auto sample = [](const Vec3&) {
+        return Luminumbra::Systems::WeatherSample{};
+    };
+    const auto hash = [] {
+        return std::string("owner weather");
+    };
+    weather.BindRegionalBackend(sample, hash);
+    reference.BindRegionalBackend(sample, hash);
+    std::vector<StormCell> storms{
+        {.center_world = Vec2(0), .intensity = 0.25f, .spawn_tick = 1, .seed_salt = 1},
+        {.center_world = Vec2(0), .intensity = 1.0e-8f, .spawn_tick = 2, .seed_salt = 2},
+        {.center_world = Vec2(512), .intensity = 0.5f, .spawn_tick = 3, .seed_salt = 3}};
+    const StrikeEvent retained{10, 0, 0, 0.5f, 1};
+    const StrikeEvent retired{9, 512, 512, 0.75f, 2};
+    const StrikeEvent generated{10, -512, 0, 0.25f, 3};
+    weather.AdoptRegionalWeather(9, kAnchor, storms, {retired, retained}, true);
+    weather.ResetRegionalProjectionWork();
+    // Removing an earlier identity must not shift any spatial reference to the survivors.
+    weather.EraseRegionalStorm({1, 1});
+    storms.erase(storms.begin());
+    storms.front().center_world = Vec2(-220, 0);
+    weather.PutRegionalStorm(storms.front());
+    storms.push_back(
+        {.center_world = Vec2(0), .intensity = 0.125f, .spawn_tick = 4, .seed_salt = 4});
+    weather.PutRegionalStorm(storms.back());
+    weather.EraseRegionalStrike(retired);
+    weather.PutRegionalStrike(generated);
+    weather.RefreshRegionalWeather(10, kAnchor);
+    reference.AdoptRegionalWeather(10, kAnchor, storms, {retained, generated});
+    ASSERT_NO_FATAL_FAILURE(ExpectRegionalProjectionMatches(weather, reference));
+    ASSERT_EQ(weather.StormCells().size(), storms.size());
+    for (std::size_t i = 0; i < storms.size(); ++i) {
+        EXPECT_EQ(weather.StormCells()[i].spawn_tick, storms[i].spawn_tick);
+        EXPECT_EQ(weather.StormCells()[i].center_world, storms[i].center_world);
+    }
+    const auto strikes = weather.StrikesThisTick();
+    ASSERT_EQ(strikes.size(), 2u);
+    EXPECT_EQ(strikes[0].storm_salt, retained.storm_salt);
+    EXPECT_EQ(strikes[1].storm_salt, generated.storm_salt);
+    EXPECT_EQ(weather.live_strike_count(), 2);
+    EXPECT_EQ(weather.StrikeSchedule().size(), 2u);
+    EXPECT_GT(weather.RegionalProjectionWork(), 0u);
+    EXPECT_LT(weather.RegionalProjectionWork(), 64u);
+    weather.RefreshRegionalWeather(11, kAnchor);
+    EXPECT_TRUE(weather.StrikesThisTick().empty());
+    EXPECT_EQ(weather.StrikeSchedule().size(), 2u);
+}
+
+void CheckRegionalRestoredStrikeVisibility() {
+    using Luminumbra::Systems::StrikeEvent;
+    WeatherSystem weather(kSeed);
+    weather.BindRegionalBackend([](const Vec3&) { return Luminumbra::Systems::WeatherSample{}; },
+                                [] { return std::string("restored weather"); });
+    const StrikeEvent past{9, 0, 0, 0.5f, 1};
+    const StrikeEvent delivered{10, 512, 0, 0.75f, 2};
+    const StrikeEvent future{11, 0, 512, 0.25f, 3};
+    weather.AdoptRegionalWeather(10, kAnchor, {}, {past, delivered, future}, true, true);
+    EXPECT_EQ(weather.live_strike_count(), 1);
+    ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+    EXPECT_EQ(weather.StrikeSchedule().front().storm_salt, future.storm_salt);
+    EXPECT_TRUE(weather.StrikesThisTick().empty());
+    weather.ResetRegionalProjectionWork();
+    weather.RefreshRegionalWeather(11, kAnchor);
+    ASSERT_EQ(weather.StrikesThisTick().size(), 1u);
+    EXPECT_EQ(weather.StrikeSchedule().size(), 1u);
+    weather.RevealRegionalStrikeSchedule();
+    EXPECT_EQ(weather.live_strike_count(), 3);
+    EXPECT_EQ(weather.StrikeSchedule().size(), 3u);
+    EXPECT_EQ(weather.StrikesThisTick().size(), 1u);
+    EXPECT_EQ(weather.RegionalProjectionWork(), 0u);
+    weather.EraseRegionalStrike(delivered);
+    EXPECT_EQ(weather.live_strike_count(), 2);
+    EXPECT_EQ(weather.StrikeSchedule().size(), 2u);
+}
+
+} // namespace
+
+TEST(WeatherSystem, RegionalIdentityMembershipChangesPreserveSamplesAndStrikeOrdering) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalIdentityMembershipChanges());
+}
+
+TEST(WeatherSystem, RegionalRestoredStrikesStayHiddenUntilParticipatingReplacement) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalRestoredStrikeVisibility());
+}

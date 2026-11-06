@@ -36,10 +36,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -136,27 +138,28 @@ public:
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
-                             std::function<std::string()> hash) {
-        if (static_cast<bool>(sample) != static_cast<bool>(hash))
-            throw std::invalid_argument("regional backend needs both a sampler and a hash");
-        if (sample) {
-            // Legacy updates may have moved or removed storms since the last binding.
-            auto storm_index = BuildRegionalStormIndex(m_storm_cells);
-            m_regionalStormIndex.swap(storm_index);
-        }
-        m_regional_sample = std::move(sample);
-        m_regional_hash = std::move(hash);
-    }
+                             std::function<std::string()> hash);
     // Pure query projections adopted from FPG authority; this does not advance evolution.
     void AdoptRegionalWeather(std::uint64_t tick,
                               const Vec3& anchor,
                               std::vector<StormCell> storms,
-                              std::vector<StrikeEvent> strikes) {
-        auto storm_index = BuildRegionalStormIndex(storms);
-        RefreshRegionalWeather(tick, anchor, std::move(strikes));
-        m_storm_cells = std::move(storms);
-        m_regionalStormIndex.swap(storm_index);
+                              std::vector<StrikeEvent> strikes,
+                              bool identity_ordered = false,
+                              bool restoring = false);
+    using StormIdentity = std::pair<std::uint64_t, std::uint32_t>;
+    // Diagnostic work includes identity lookups and spatial-bin memberships touched.
+    void ResetRegionalProjectionWork() {
+        m_regionalProjectionWork = 0;
     }
+    [[nodiscard]] std::size_t RegionalProjectionWork() const {
+        return m_regionalProjectionWork;
+    }
+    void PutRegionalStorm(const StormCell& storm);
+    void EraseRegionalStorm(StormIdentity identity);
+    void PutRegionalStrike(const StrikeEvent& strike);
+    void EraseRegionalStrike(const StrikeEvent& strike);
+    // Restore hides delivered events until the first participating replacement.
+    void RevealRegionalStrikeSchedule();
 
     // Retain all projections on idle ticks; only refresh the anchor sample and clock.
     void RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor);
@@ -200,11 +203,10 @@ public:
 
     // The active storm cells (canonical order: spawn order, stable across the
     // tick). Consumed by  (strike schedule) +  (precip emitters).
-    [[nodiscard]] const std::vector<StormCell>& StormCells() const noexcept {
-        return m_storm_cells;
-    }
+    [[nodiscard]] const std::vector<StormCell>& StormCells() const;
     [[nodiscard]] int active_storm_count() const noexcept {
-        return static_cast<int>(m_storm_cells.size());
+        return static_cast<int>(m_regionalWeatherKeyed ? m_regionalStorms.size()
+                                                       : m_storm_cells.size());
     }
     // Const work diagnostic: storms examined by each precipitation/intensity query.
     [[nodiscard]] std::size_t storm_candidates_at(const Vec3& world_pos) const;
@@ -214,11 +216,11 @@ public:
     // into the `weather` world_hash sub-hash. The RENDER side reads strikes whose
     // strike_tick == the current tick to fire bolt/pulse/scorch/thunder (one-way,
     // ). Bounded: <= kMaxLiveStrikes entries.
-    [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const noexcept {
-        return m_strikes;
-    }
+    [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const;
     [[nodiscard]] int live_strike_count() const noexcept {
-        return static_cast<int>(m_strikes.size());
+        return static_cast<int>(m_regionalWeatherKeyed
+                                    ? m_regionalStrikes.size() - m_hiddenRegionalStrikes
+                                    : m_strikes.size());
     }
     // Strikes whose strike_tick == the LAST updated tick (the bolts that land THIS
     // tick). A convenience for the render/audio hook; pure read of current state.
@@ -275,17 +277,23 @@ private:
     [[nodiscard]] float StormPrecipAt(const Vec3& world_pos) const;
     // Nearest-storm intensity at a world position [0, 1] (for the render sample).
     [[nodiscard]] float StormIntensityAt(const Vec3& world_pos) const;
-    [[nodiscard]] std::span<const std::size_t> RegionalStormIndices(const Vec3& world_pos) const;
     using StormBin = std::array<double, 2>;
-    struct StormBinHash {
-        std::size_t operator()(const StormBin& bin) const noexcept;
-    };
-    using StormIndex = std::unordered_map<StormBin, std::vector<std::size_t>, StormBinHash>;
-    [[nodiscard]] static StormIndex
-    BuildRegionalStormIndex(const std::span<const StormCell>& storms);
-    // Each admitted FPG storm (<= 65,536) intersects at most four 512 m bins.
-    // Vectors preserve projection order; hash-table iteration never affects samples.
-    StormIndex m_regionalStormIndex;
+    using StormEntries = std::map<StormIdentity, StormCell>;
+    using StrikeIdentity = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>;
+    [[nodiscard]] const StormEntries* RegionalStormEntries(const Vec3& position) const;
+    void PutRegionalStormAt(StormIdentity identity, const StormCell& storm);
+    void RebuildRegionalStormIndex();
+    bool m_regionalWeatherKeyed = false;
+    std::size_t m_regionalProjectionWork = 0;
+    StormEntries m_regionalStorms;
+    std::map<StrikeIdentity, StrikeEvent> m_regionalStrikes;
+    std::optional<std::uint64_t> m_regionalStrikesDeliveredThrough;
+    std::size_t m_hiddenRegionalStrikes = 0;
+    // Each identity occurs in at most four bins. Identity order preserves float addition order.
+    std::map<StormBin, StormEntries> m_regionalStormIndex;
+    mutable std::vector<StormCell> m_regionalStormCache;
+    mutable std::vector<StrikeEvent> m_regionalStrikeCache;
+    mutable bool m_regionalStormCacheValid = false, m_regionalStrikeCacheValid = false;
 
     int m_weather_seed = 0;   // world seed + 12 (weather noise/storm schedule)
     int m_lightning_seed = 0; // world seed + 13 (lightning strike schedule)

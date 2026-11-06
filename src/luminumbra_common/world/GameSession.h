@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -526,16 +527,19 @@ public:
     [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
         return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
     }
-    // Observational staged authority size; distinguishes an idle borrowed view from a copy.
+    // Records copied from live owners during staging; never persisted or hashed.
     [[nodiscard]] std::size_t GetRegionalWeatherCandidateRecordCount() const {
-        return m_regionalFieldView
-                   ? m_regionalFieldView->storms().size() + m_regionalFieldView->strikes().size() +
-                         m_regionalFieldView->weather_clocks().size()
-                   : 0;
+        return m_regionalFieldView ? m_regionalFieldView->staged_weather_records() : 0;
     }
     // Observational storm conversions this tick; never persisted or hashed.
     [[nodiscard]] std::size_t GetRegionalWeatherProjectionCount() const {
         return m_regionalWeatherProjectionCount;
+    }
+    [[nodiscard]] std::size_t GetRegionalWeatherScanCount() const {
+        return m_regionalWeatherScanCount;
+    }
+    [[nodiscard]] std::size_t GetRegionalWeatherProjectionVisitCount() const {
+        return m_regionalWeatherProjectionVisitCount;
     }
     // Observational nonempty advancement passes; never persisted or hashed.
     [[nodiscard]] std::uint64_t GetGroundObjectAdvanceCount() const {
@@ -725,6 +729,12 @@ private:
     // Query-only view of this tick's candidate, cleared before publication or fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     bool m_regionalFieldsBound = false;
+    void UpdateRegionalWeatherBoundaryOwner(RegionKey owner, const FieldPageState& fields);
+    std::map<std::uint8_t, std::set<RegionKey>> m_regionalWeatherBoundaryOwners;
+    std::map<std::uint8_t, std::set<RegionKey>> m_regionalAmbientOwners;
+    std::map<RegionKey, std::uint8_t> m_regionalWeatherBoundaryShifts;
+    std::size_t m_regionalWeatherScanCount = 0;
+    std::size_t m_regionalWeatherProjectionVisitCount = 0;
     std::size_t m_regionalWeatherProjectionCount = 0;
     bool ActivateGroundRegion(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;

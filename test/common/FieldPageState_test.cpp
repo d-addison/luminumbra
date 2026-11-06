@@ -1201,3 +1201,116 @@ TEST(FieldPageStateTest, AllSevenSectionsRoundTripAndFoliageCorruptionRefusesAto
     }
     refuses(8, 8, 4);
 }
+
+namespace {
+
+FieldPageState OwnerWeatherFixture() {
+    FieldPageState fields;
+    const RegionalStorm source{
+        {0, 0}, std::bit_cast<std::uint32_t>(256.0f), 0, 0, 0, 0, 1, 240, 1, 0};
+    auto frozen = source;
+    frozen.owner = {2, 0};
+    frozen.center_x = std::bit_cast<std::uint32_t>(1280.0f);
+    frozen.seed_salt = 2;
+    const RegionalStrike strike{{0, 0}, 2, source.center_x, 0, 0, 1, 0};
+    EXPECT_TRUE(fields.replace_weather({frozen, source}, {strike}));
+    EXPECT_TRUE(fields.set_weather_age(source.owner, 7));
+    EXPECT_TRUE(fields.set_weather_age(frozen.owner, 19));
+    return fields;
+}
+
+void CheckOwnerWeatherReplacement() {
+    auto fields = OwnerWeatherFixture();
+    const auto before = fields.serialize();
+    const auto* frozen = fields.owner_weather({2, 0});
+    FieldPageState candidate;
+    candidate.begin_weather_update(fields);
+    auto& source = candidate.stage_weather_owner({0, 0});
+    ASSERT_EQ(source.storms.size(), 1u);
+    auto transferred = source.storms.front();
+    transferred.owner = {1, 0};
+    transferred.center_x = std::bit_cast<std::uint32_t>(600.0f);
+    source.storms.clear();
+    source.strikes.clear();
+    source.clock = 8;
+    auto& target = candidate.stage_weather_owner(transferred.owner);
+    target.storms.push_back(transferred);
+    ASSERT_TRUE(candidate.prepare_weather_update());
+    EXPECT_EQ(candidate.staged_weather_records(), 3u);
+    auto expected = fields;
+    auto storms = fields.storms();
+    storms.front() = transferred;
+    ASSERT_TRUE(expected.replace_weather(storms, {}));
+    ASSERT_TRUE(expected.set_weather_age({0, 0}, 8));
+    const FieldPageView view(fields, &candidate);
+    EXPECT_EQ(view.owner_weather({2, 0}), frozen);
+    EXPECT_EQ(view.owner_weather({1, 0}), &target);
+    EXPECT_EQ(view.storms(), expected.storms());
+    EXPECT_EQ(view.strikes(), expected.strikes());
+    EXPECT_EQ(view.ambient_bytes(31, true), expected.ambient_bytes(31, true));
+    EXPECT_EQ(fields.serialize(), before);
+    fields.adopt_weather_state(candidate);
+    EXPECT_EQ(fields.owner_weather({1, 0}), &target);
+    EXPECT_EQ(fields.owner_weather({2, 0}), frozen);
+    EXPECT_EQ(fields.storm_count(), expected.storms().size());
+    EXPECT_EQ(fields.strike_count(), expected.strikes().size());
+    EXPECT_EQ(fields.weather_clock_count(), expected.weather_clocks().size());
+    EXPECT_EQ(fields.serialize(), expected.serialize());
+    FieldPageState parsed;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(fields.serialize(), parsed, error)) << error;
+    EXPECT_EQ(parsed.serialize(), expected.serialize());
+}
+
+void CheckOwnerWeatherRefusalAndRemoval() {
+    auto fields = OwnerWeatherFixture();
+    const auto before = fields.serialize();
+    for (const int refusal : {0, 1, 2, 3}) {
+        FieldPageState candidate;
+        candidate.begin_weather_update(fields);
+        auto& source = candidate.stage_weather_owner({0, 0});
+        if (refusal == 0) {
+            source.storms.front().seed_salt = 2; // collision with an untouched owner
+        } else if (refusal == 1) {
+            const auto storm = source.storms.front();
+            source.storms.resize(FieldPageState::kMaxOwnerStorms + 1, storm);
+        } else if (refusal == 2) {
+            source.clock = WorldClock::kTickLimit;
+        } else {
+            source.strikes.push_back(source.strikes.front());
+        }
+        EXPECT_FALSE(candidate.prepare_weather_update());
+        EXPECT_EQ(fields.serialize(), before);
+    }
+    {
+        FieldPageState discarded;
+        discarded.begin_weather_update(fields);
+        discarded.stage_weather_owner({0, 0}) = {};
+        ASSERT_TRUE(discarded.prepare_weather_update());
+        const FieldPageView view(fields, &discarded);
+        ASSERT_NE(view.owner_weather({0, 0}), nullptr);
+        EXPECT_TRUE(view.owner_weather({0, 0})->storms.empty());
+        EXPECT_FALSE(discarded.owns_weather({0, 0}));
+    }
+    EXPECT_EQ(fields.serialize(), before);
+    FieldPageState candidate;
+    candidate.begin_weather_update(fields);
+    candidate.stage_weather_owner({0, 0}) = {};
+    ASSERT_TRUE(candidate.prepare_weather_update());
+    fields.adopt_weather_state(candidate);
+    EXPECT_FALSE(fields.owns_weather({0, 0}));
+    EXPECT_EQ(fields.owner_weather({0, 0}), nullptr);
+    EXPECT_EQ(fields.storm_count(), 1u);
+    EXPECT_EQ(fields.strike_count(), 0u);
+    EXPECT_EQ(fields.weather_clock_count(), 1u);
+}
+
+} // namespace
+
+TEST(FieldPageStateTest, OwnerWeatherReplacementBorrowsUntouchedAuthorityAndPreservesBytes) {
+    ASSERT_NO_FATAL_FAILURE(CheckOwnerWeatherReplacement());
+}
+
+TEST(FieldPageStateTest, OwnerWeatherReplacementRefusesConflictsAndDiscardsUnpublishedChanges) {
+    ASSERT_NO_FATAL_FAILURE(CheckOwnerWeatherRefusalAndRemoval());
+}
