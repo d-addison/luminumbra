@@ -300,6 +300,7 @@ public:
         std::size_t generation_candidates = 0;
         std::size_t surface_generation_candidates = 0;
         std::size_t vertical_generation_candidates = 0;
+        // Admission work includes durable restorations and new terrain generation.
         std::size_t scheduled_generation = 0;
         std::size_t surface_generation_scheduled = 0;
         std::size_t vertical_generation_scheduled = 0;
