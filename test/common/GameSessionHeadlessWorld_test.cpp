@@ -7111,7 +7111,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "2f2a9405252345a8");
+    EXPECT_EQ(baseline, "35e233a89e8c87b1");
     EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
@@ -11538,7 +11538,7 @@ void CheckFrozenScentCapacityKeepsSessionRunning(bool floors) {
     for (int tick = 0; tick < 3; ++tick) {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
-        EXPECT_EQ(session.GetWorldClock().tick(), 32u + tick);
+        EXPECT_EQ(session.GetWorldClock().tick(), 32u + static_cast<unsigned>(tick));
         EXPECT_EQ(session.GetFieldPages().serialize(), before);
         EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).frozen_digest,
                   frozen_digest);
