@@ -581,8 +581,9 @@ public:
     // the produced fixed ticks (clamped to the clock's catch-up limit). Per
     // fixed tick executes the deterministic system order, then the ordered event
     // bus drains every event published for that tick. Returns the number of
-    // fixed ticks executed this frame.
-    std::uint32_t TickSimulation(double frame_dt);
+    // fixed ticks executed this frame. A host that updates water afterwards defers authority
+    // promotion and calls sync_water_authority() once after its final water/streaming update.
+    std::uint32_t TickSimulation(double frame_dt, bool defer_water_authority = false);
 
     // Opt-in observation; never part of persistent or hashed session state.
     void SetSimBudgetTelemetryEnabled(bool enabled) {

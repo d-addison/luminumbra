@@ -6962,7 +6962,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     if (repaired_only && authoritative_inventory) {
                         staged_repair_bytes += record.uncompressed_size;
                         if (staged_repair_bytes > kMaxStagedRepairBytes)
-                            return reject("Saved world exceeds the flag repair staging budget");
+                            return reject("Saved-input admission refused: world exceeds the flag "
+                                          "repair staging budget");
                     }
                     if (retain || (promoted && (promote_legacy_water || authoritative_inventory)))
                         state.insert_chunk(chunk);

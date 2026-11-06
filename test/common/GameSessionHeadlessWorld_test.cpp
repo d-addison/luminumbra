@@ -6019,7 +6019,8 @@ TEST(GameSessionHeadlessWorldTest, SimulatedWaterIsPromotedBeforeSaveWhenRegions
 
 namespace {
 
-std::shared_ptr<Luminumbra::Chunk> AdoptUnpromotedWaterChunk(GameSession& session) {
+std::shared_ptr<Luminumbra::Chunk> AdoptUnpromotedWaterChunk(GameSession& session,
+                                                             bool changed = true) {
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     chunk->set_state(Luminumbra::ChunkState::Idle);
     chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
@@ -6034,8 +6035,10 @@ std::shared_ptr<Luminumbra::Chunk> AdoptUnpromotedWaterChunk(GameSession& sessio
     chunk->water_rest_level.assign(64, 0.077f);
     chunk->has_water_sim.store(true);
     EXPECT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    chunk->mark_dirty_for_save();
-    chunk->mark_water_state_dirty();
+    if (changed) {
+        chunk->mark_dirty_for_save();
+        chunk->mark_water_state_dirty();
+    }
     return chunk;
 }
 
@@ -6045,6 +6048,25 @@ void CreateRegionsOffWaterSession(GameSession& session, const HeadlessRoot& root
     session.SetJobSystem(&jobs);
     session.SetWaterHighResEnabled(false);
     ASSERT_TRUE(session.CreateWorld("Regions off hash timing", "1337", "default"));
+}
+
+void MutateWaterOnTick(GameSession& session, const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+    session.GetSimulationEventBus().subscribe([chunk](const auto&) {
+        EXPECT_FALSE(chunk->has_water_authority());
+        ++chunk->water_depth_mm.front();
+        chunk->mark_water_state_dirty();
+    });
+    session.GetSimulationEventBus().publish(1, "water.change", "");
+}
+
+void ExpectWaterHashReadsLeavePendingChange(GameSession& session,
+                                            const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+    const auto inputs = session.GetWorldSystem()->water_authority_input_items();
+    const auto hash = session.ComputeChunkStateHash();
+    EXPECT_EQ(session.ComputeChunkStateHash(), hash);
+    EXPECT_FALSE(chunk->has_water_authority());
+    EXPECT_TRUE(chunk->is_water_state_dirty());
+    EXPECT_EQ(session.GetWorldSystem()->water_authority_input_items(), inputs);
 }
 
 } // namespace
@@ -6058,12 +6080,22 @@ TEST(GameSessionHeadlessWorldTest, WaterOwnershipHashDoesNotDependOnSaveTimingWh
     GameSession unsaved;
     ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(saved, root_a, jobs));
     ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(unsaved, root_b, jobs));
-    const auto saved_chunk = AdoptUnpromotedWaterChunk(saved);
-    const auto unsaved_chunk = AdoptUnpromotedWaterChunk(unsaved);
+    const auto saved_chunk = AdoptUnpromotedWaterChunk(saved, false);
+    const auto unsaved_chunk = AdoptUnpromotedWaterChunk(unsaved, false);
+    MutateWaterOnTick(saved, saved_chunk);
+    MutateWaterOnTick(unsaved, unsaved_chunk);
+    ASSERT_EQ(saved.TickSimulation(saved.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_EQ(unsaved.TickSimulation(unsaved.GetSimulationClock().fixed_dt()), 1u);
+    // Read the raw world projection first: no hash API may repair the tick boundary.
+    const auto world_before_save = SessionWorldHash(saved);
     const auto before_save = saved.ComputeChunkStateHash();
+    const auto inputs = saved.GetWorldSystem()->water_authority_input_items();
     ASSERT_TRUE(saved.SaveWorldState());
     EXPECT_EQ(saved.ComputeChunkStateHash(), before_save);
     EXPECT_EQ(unsaved.ComputeChunkStateHash(), before_save);
+    EXPECT_EQ(SessionWorldHash(saved), world_before_save);
+    EXPECT_EQ(SessionWorldHash(unsaved), world_before_save);
+    EXPECT_EQ(saved.GetWorldSystem()->water_authority_input_items(), inputs);
     EXPECT_TRUE(saved_chunk->has_water_authority());
     EXPECT_TRUE(unsaved_chunk->has_water_authority());
 }
@@ -6074,9 +6106,24 @@ TEST(GameSessionHeadlessWorldTest, WaterOwnershipIsPromotedAtTheTickBoundaryWhen
     jobs.startup(1);
     GameSession session;
     ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(session, root, jobs));
-    const auto chunk = AdoptUnpromotedWaterChunk(session);
+    const auto chunk = AdoptUnpromotedWaterChunk(session, false);
+    MutateWaterOnTick(session, chunk);
     ASSERT_FALSE(chunk->has_water_authority());
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_TRUE(chunk->has_water_authority());
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterHashReadsDoNotPromoteChangesOutsideTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(session, root, jobs));
+    const auto chunk = AdoptUnpromotedWaterChunk(session);
+    ASSERT_EQ(session.TickSimulation(0.0), 0u);
+    ExpectWaterHashReadsLeavePendingChange(session, chunk);
+    // Persistence also supports edits made outside a tick and must own the saved water.
+    ASSERT_TRUE(session.SaveWorldState());
     EXPECT_TRUE(chunk->has_water_authority());
 }
 
@@ -6088,6 +6135,13 @@ TEST(GameSessionHeadlessWorldTest,
     GameSession session;
     ASSERT_NO_FATAL_FAILURE(CreateRegionsOffWaterSession(session, root, jobs));
     const auto chunk = AdoptUnpromotedWaterChunk(session);
+    // Clean resident chunks must not enter the authority queue on any tick.
+    for (int x = 1; x <= 24; ++x) {
+        auto clean = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
+        clean->set_state(Luminumbra::ChunkState::Idle);
+        clean->mark_sdf_generated_current_params();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(clean));
+    }
     const auto fixed_dt = session.GetSimulationClock().fixed_dt();
     const auto inputs_before = session.GetWorldSystem()->water_authority_input_items();
     ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
@@ -6097,6 +6151,7 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
     ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
     EXPECT_EQ(session.GetWorldSystem()->water_authority_input_items(), inputs_after_change);
+    chunk->mark_water_state_dirty();
     chunk->mark_water_state_dirty();
     ASSERT_EQ(session.TickSimulation(fixed_dt), 1u);
     EXPECT_EQ(session.GetWorldSystem()->water_authority_input_items() - inputs_after_change, 1u);
@@ -6468,6 +6523,9 @@ void FreezeRegionalWaterFixture(RegionalWaterScenario& scenario,
         ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
         ASSERT_FALSE(chunk->has_water_authority());
     }
+    // This fixture drives WaterSystem directly, outside TickSimulation. Complete that writer's
+    // boundary before asking the scheduler to freeze or retain the resulting ownership.
+    session.GetWorldSystem()->sync_water_authority();
     session.SetReplicatedSimulationAnchors({});
     session.RecordActiveRegionWork({work_region, 1, 0, 0, 0});
     ASSERT_EQ(session.TickSimulation(dt), 1u);
@@ -6747,6 +6805,11 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionWaterChangeHashesCurrentAuthority
     // Resident water keeps evolving after the freeze; the frozen digest must not hide it.
     chunk->water_depth_mm.front() += 7;
     chunk->mark_water_state_dirty();
+    EXPECT_EQ(session.ComputeChunkStateHash(), frozen_hash);
+    EXPECT_TRUE(chunk->is_water_state_dirty());
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().at(water_region).wake_pending);
+    // The water writer above ran outside a tick; explicitly complete its ownership boundary.
+    session.GetWorldSystem()->sync_water_authority();
     const auto changed_hash = session.ComputeChunkStateHash();
     EXPECT_NE(changed_hash, frozen_hash);
     EXPECT_FALSE(chunk->is_water_state_dirty());
@@ -6874,6 +6937,8 @@ TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved)
     chunk->water_depth_mm = {123};
     chunk->mark_water_state_dirty();
     ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    // Hash reads observe the last completed boundary; settle it as a finished tick would.
+    owner.GetWorldSystem()->sync_water_authority();
     const auto before = owner.ComputeChunkStateHash();
     ASSERT_TRUE(owner.SaveWorldState());
     EXPECT_EQ(owner.ComputeChunkStateHash(), before);

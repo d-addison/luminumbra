@@ -25,6 +25,7 @@
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
@@ -1973,6 +1974,140 @@ void BootSnapshotRunner(Server::ServerWorldRunner& runner, bool active_regions) 
     ASSERT_NE(session, nullptr);
     ASSERT_EQ(session->ActiveRegionsEnabled(), active_regions);
     session->GetWorldSystem()->clear_world(session->GetPhysicsSystem());
+}
+
+struct ServerWaterHashes {
+    std::string world, chunk, checkpoint;
+    Persistence::WorldStreamingStateSubHashes sub, checkpoint_sub;
+};
+
+ServerWaterHashes ReadServerWaterHashes(Server::ServerWorldRunner& runner) {
+    ServerWaterHashes hashes;
+    hashes.world = runner.ComputeWorldHash();
+    hashes.sub = runner.ComputeWorldSubHashes();
+    runner.ComputeWorldHashAndSubHashes(hashes.checkpoint, hashes.checkpoint_sub);
+    hashes.chunk = runner.Session()->ComputeChunkStateHash();
+    return hashes;
+}
+
+void ExpectSameServerSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
+                               const Persistence::WorldStreamingStateSubHashes& expected) {
+    EXPECT_EQ(actual.terrain, expected.terrain);
+    EXPECT_EQ(actual.mesh, expected.mesh);
+    EXPECT_EQ(actual.water, expected.water);
+    EXPECT_EQ(actual.entities, expected.entities);
+    EXPECT_EQ(actual.wind, expected.wind);
+    EXPECT_EQ(actual.weather, expected.weather);
+    EXPECT_EQ(actual.aether, expected.aether);
+    EXPECT_EQ(actual.aether_state, expected.aether_state);
+}
+
+void ExpectSameServerWaterHashes(const ServerWaterHashes& actual,
+                                 const ServerWaterHashes& expected) {
+    EXPECT_EQ(actual.world, expected.world);
+    EXPECT_EQ(actual.chunk, expected.chunk);
+    EXPECT_EQ(actual.checkpoint, expected.checkpoint);
+    EXPECT_EQ(actual.checkpoint, actual.world);
+    ExpectSameServerSubHashes(actual.sub, expected.sub);
+    ExpectSameServerSubHashes(actual.checkpoint_sub, expected.checkpoint_sub);
+    ExpectSameServerSubHashes(actual.checkpoint_sub, actual.sub);
+}
+
+std::shared_ptr<Chunk> PrepareServerWaterChange(GameSession& session) {
+    const int resolution = session.GetWorldSystem()->debug_water_sim_resolution();
+    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->set_state(ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->current_water_resolution.store(resolution);
+    chunk->water_depth_mm.assign(cells, 77);
+    chunk->water_bed_mm.assign(cells, 0);
+    chunk->water_edge_flux.assign(2 * cells, 0);
+    chunk->water_level_data.assign(cells, 0.077f);
+    chunk->water_flow_data.assign(cells, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(cells, 0.0f);
+    chunk->water_rest_level.assign(cells, 0.077f);
+    chunk->has_water_sim.store(true);
+    EXPECT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    return chunk;
+}
+
+void TickServerWithWaterChange(Server::ServerWorldRunner& runner,
+                               const std::shared_ptr<Chunk>& chunk) {
+    auto* session = runner.Session();
+    struct PromotionObservation {
+        std::vector<std::int32_t> depth, flux;
+        std::size_t count = 0;
+    };
+    const auto observed = std::make_shared<PromotionObservation>();
+    session->GetWorldSystem()->SetWaterAuthorityObserver([observed, chunk](const IVec3& coords) {
+        if (coords == chunk->get_coords()) {
+            ++observed->count;
+            observed->depth = chunk->water_depth_mm;
+            observed->flux = chunk->water_edge_flux;
+        }
+    });
+    session->GetSimulationEventBus().subscribe([chunk](const auto&) {
+        EXPECT_FALSE(chunk->has_water_authority());
+        chunk->water_depth_mm.front() += 1000;
+        chunk->mark_water_state_dirty();
+    });
+    session->GetSimulationEventBus().publish(1, "water.change", "");
+    const auto report = runner.RunFixedTicks(1);
+    session->GetWorldSystem()->SetWaterAuthorityObserver({});
+    ASSERT_EQ(report.ticks_executed, 1u);
+    EXPECT_GT(session->GetWaterSystem()->cells_stepped_last_update(), 0u);
+    EXPECT_EQ(observed->count, 1u);
+    EXPECT_EQ(observed->depth, chunk->water_depth_mm);
+    EXPECT_EQ(observed->flux, chunk->water_edge_flux);
+    EXPECT_TRUE(chunk->has_water_authority());
+    EXPECT_FALSE(chunk->is_water_state_dirty());
+}
+
+TEST_F(WorldOpenRefusal, ServerWaterHashesAreIndependentOfSaveTimingWithoutRegions) {
+    for (const bool full_snapshot : {false, true}) {
+        SCOPED_TRACE(full_snapshot);
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), false));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
+        auto* session = runner.Session();
+        const auto chunk = PrepareServerWaterChange(*session);
+        ASSERT_NO_FATAL_FAILURE(TickServerWithWaterChange(runner, chunk));
+        const auto inputs = session->GetWorldSystem()->water_authority_input_items();
+        const auto before = ReadServerWaterHashes(runner);
+        ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
+        if (full_snapshot)
+            ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+        else
+            ASSERT_TRUE(session->SaveWorldState());
+        ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
+        // Hashes and saves must find the water queue already drained by the host tick.
+        EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
+    }
+}
+
+TEST_F(WorldOpenRefusal, ServerWaterHashReadsLeaveOutsideTickChangesPending) {
+    Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), false));
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
+    auto* session = runner.Session();
+    const auto chunk = PrepareServerWaterChange(*session);
+    chunk->mark_water_state_dirty();
+    const auto inputs = session->GetWorldSystem()->water_authority_input_items();
+    const auto before = ReadServerWaterHashes(runner);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
+    EXPECT_FALSE(chunk->has_water_authority());
+    EXPECT_TRUE(chunk->is_water_state_dirty());
+    EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
+}
+
+TEST_F(WorldOpenRefusal, ServerBootWaterHashesRemainStableThroughSaveWithoutTicking) {
+    Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), false));
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    const auto inputs = runner.Session()->GetWorldSystem()->water_authority_input_items();
+    const auto before = ReadServerWaterHashes(runner);
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
+    EXPECT_EQ(runner.Session()->GetWorldSystem()->water_authority_input_items(), inputs);
 }
 
 void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
