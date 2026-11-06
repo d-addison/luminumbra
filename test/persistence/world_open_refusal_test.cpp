@@ -2015,7 +2015,8 @@ void ExpectSameServerWaterHashes(const ServerWaterHashes& actual,
 
 std::shared_ptr<Chunk> PrepareServerWaterChange(GameSession& session) {
     const int resolution = session.GetWorldSystem()->debug_water_sim_resolution();
-    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    const auto side = static_cast<std::size_t>(resolution);
+    const auto cells = side * side;
     auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
     chunk->set_state(ChunkState::Idle);
     chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -4.0f);
