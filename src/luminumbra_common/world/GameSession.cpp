@@ -117,7 +117,6 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1988,7 +1987,12 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     const auto& records = m_activeRegionLedger.records();
     const auto& due = m_regionSchedule.due;
     const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
-    auto next = m_fieldPages;
+    if (previous.page_count() == 0)
+        return std::nullopt;
+    // The candidate holds only the participating pages, so a tick copies a bounded snapshot rather
+    // than the whole store. The live state stays untouched even if a later consumer or work
+    // publication fails; publication assigns the stepped pages back without allocating.
+    auto next = previous;
     const auto seed =
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     const auto work = next.step_scheduled(records, due, seed, tick, &previous);
@@ -1998,10 +2002,9 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
 }
 
 void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields) {
-    static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
     m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
     if (fields)
-        m_fieldPages = std::move(*fields);
+        m_fieldPages.adopt_scheduled_pages(std::move(*fields));
     m_regionCompletedWork.clear();
 }
 
