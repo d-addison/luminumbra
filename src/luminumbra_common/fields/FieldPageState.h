@@ -108,6 +108,10 @@ public:
                m_scentFloors.empty() && weather_clock_count() == 0 && m_soil.empty() &&
                m_irrigation.empty();
     }
+    [[nodiscard]] bool has_ambient() const {
+        return !m_pages.empty() || storm_count() != 0 || strike_count() != 0 ||
+               weather_clock_count() != 0;
+    }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
     }

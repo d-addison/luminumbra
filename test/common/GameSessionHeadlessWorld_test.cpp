@@ -11228,6 +11228,55 @@ void CheckHistoricalSessionScent() {
     EXPECT_EQ(reopened.GetFieldPages().scent_cells(), scent);
 }
 
+void CheckProceduralWeatherWithScent(GameSession& session, GameSession& control) {
+    AddSessionScentParticipant(session, 0, 1);
+    bool saw_storm = false;
+    for (int tick = 0; tick < 340; ++tick) {
+        SCOPED_TRACE(session.GetWorldClock().tick());
+        TickOnce(session);
+        TickOnce(control);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(control.GetRegionSchedulerFault());
+        ASSERT_EQ(WeatherOverlayHashes(session), WeatherOverlayHashes(control));
+        saw_storm = saw_storm || !control.GetWeatherSystem()->StormCells().empty();
+        EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+    }
+    EXPECT_TRUE(saw_storm);
+    EXPECT_TRUE(session.GetFieldPages().has_scent());
+    EXPECT_FALSE(session.GetFieldPages().has_ambient());
+}
+
+void CheckScentOnlyWeatherContinuation(bool stored_scent) {
+    SCOPED_TRACE(stored_scent);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, control, reopened, control_reopened;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    if (stored_scent) {
+        ASSERT_TRUE(fields.set_scent({1, 1}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(control, root, jobs, ledger, {}));
+    ASSERT_EQ(WeatherOverlayHashes(session), WeatherOverlayHashes(control));
+    ASSERT_NO_FATAL_FAILURE(CheckProceduralWeatherWithScent(session, control));
+    const auto scent = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(control.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    EnableSnapshotSession(control_reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(control_reopened.LoadWorld(control.GetMetadata().worldId))
+        << control_reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    control_reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), scent);
+    ASSERT_EQ(WeatherOverlayHashes(reopened), WeatherOverlayHashes(session));
+    ASSERT_EQ(WeatherOverlayHashes(reopened), WeatherOverlayHashes(control_reopened));
+    ASSERT_NO_FATAL_FAILURE(CheckProceduralWeatherWithScent(reopened, control_reopened));
+}
+
 void CheckSessionScentOwnership(int kind, bool frozen_participant) {
     SCOPED_TRACE(kind);
     SCOPED_TRACE(frozen_participant);
@@ -11509,8 +11558,9 @@ void CheckScentCallbackSpawnMove(float offset) {
               session.GetActiveRegionLedger().completed_work());
 }
 
-void CheckFrozenScentCapacityKeepsSessionRunning(bool floors) {
+void CheckSessionScentCapacityRetention(bool floors, RegionState historical_state) {
     SCOPED_TRACE(floors);
+    SCOPED_TRACE(static_cast<int>(historical_state));
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -11525,9 +11575,20 @@ void CheckFrozenScentCapacityKeepsSessionRunning(bool floors) {
             ASSERT_TRUE(fields.capture_scent_window({1024 + x, z}, 128, cells, work));
         }
     }
+    ASSERT_EQ(floors ? fields.scent_floor_blocks() : fields.scent_cells().size(),
+              floors ? FieldPageState::kMaxScentFloorBlocks : FieldPageState::kMaxScentCells);
     const RegionKey frozen_owner{2, 0};
-    const auto ledger = ScheduledFieldLedger(
+    auto ledger = ScheduledFieldLedger(
         31, {{kFieldOwner, RegionState::Active}, {frozen_owner, RegionState::Frozen}});
+    if (historical_state != RegionState::Frozen) {
+        // Typed thaw fixture: the ledger retains the previous freeze's digest and timestamp.
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(frozen_owner);
+        record.state = historical_state;
+        record.cadence_shift =
+            historical_state == RegionState::Active ? std::uint8_t{0} : std::uint8_t{2};
+        record.cadence_phase = ActiveRegionLedger::phase(frozen_owner, record.cadence_shift);
+    }
     GameSession session;
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
     session.SetSpawnPoint({128, 0, 128});
@@ -11539,14 +11600,25 @@ void CheckFrozenScentCapacityKeepsSessionRunning(bool floors) {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetWorldClock().tick(), 32u + static_cast<unsigned>(tick));
-        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        if (historical_state == RegionState::Frozen) {
+            EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        } else {
+            EXPECT_NE(session.GetFieldPages().region_bytes(frozen_owner),
+                      fields.region_bytes(frozen_owner));
+            EXPECT_GT(session.GetScentField()->Sample(0, 65, 65), FieldPageState::kScentFloor);
+            EXPECT_GT(session.GetFieldPages().scent_at({129, 129})[0],
+                      std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor));
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).state,
+                  historical_state);
         EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).frozen_digest,
                   frozen_digest);
         ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
     }
+    const auto saved = session.GetFieldPages().serialize();
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
-    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(session.GetFieldPages().serialize(), saved);
     EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).frozen_digest,
               frozen_digest);
     ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
@@ -11642,6 +11714,14 @@ TEST(GameSessionHeadlessWorldTest, HistoricalScentSurvivesEmitterRemovalAndReope
     ASSERT_NO_FATAL_FAILURE(CheckHistoricalSessionScent());
 }
 
+TEST(GameSessionHeadlessWorldTest, ScentOnlyPublicationPreservesProceduralWeatherAcrossReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckScentOnlyWeatherContinuation(false));
+}
+
+TEST(GameSessionHeadlessWorldTest, ScentOnlyRestorePreservesProceduralWeatherAcrossReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckScentOnlyWeatherContinuation(true));
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionalScentEmittersAndConsumersRespectFrozenOwners) {
     for (const int kind : {0, 1, 2}) {
         ASSERT_NO_FATAL_FAILURE(CheckSessionScentOwnership(kind, false));
@@ -11698,6 +11778,16 @@ TEST(GameSessionHeadlessWorldTest, CallbackSpawnMovePublishesMatchingLiveAndSave
 
 TEST(GameSessionHeadlessWorldTest, FrozenScentCapacityRefusalKeepsSimulationAdvancing) {
     for (const bool floors : {false, true}) {
-        ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacityKeepsSessionRunning(floors));
+        ASSERT_NO_FATAL_FAILURE(
+            CheckSessionScentCapacityRetention(floors, Luminumbra::world::RegionState::Frozen));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ThawedScentHistoryRetiresAtCapacityDespiteHistoricalDigest) {
+    for (const auto state :
+         {Luminumbra::world::RegionState::Active, Luminumbra::world::RegionState::Reduced}) {
+        for (const bool floors : {false, true}) {
+            ASSERT_NO_FATAL_FAILURE(CheckSessionScentCapacityRetention(floors, state));
+        }
     }
 }

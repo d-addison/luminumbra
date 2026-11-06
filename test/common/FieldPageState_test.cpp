@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -956,6 +957,39 @@ TEST(FieldPageStateTest, WeatherClockBatchRefusesBeforeChangingAnyAuthority) {
     EXPECT_EQ(store.serialize(), expected.serialize());
 }
 
+TEST(FieldPageStateTest, AmbientAuthorityExcludesScentAndFoliageAcrossPersistence) {
+    std::array<Luminumbra::world::FieldPageState, 9> stores;
+    ASSERT_TRUE(stores[1].set_scent({1, 1}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    const std::array<Luminumbra::world::ScentCell, 1> floor{Luminumbra::world::ScentCell{
+        std::bit_cast<std::uint64_t>(Luminumbra::world::FieldPageState::kScentFloor), 0, 0, 0}};
+    std::map<Luminumbra::world::RegionKey, std::uint64_t> work;
+    ASSERT_TRUE(stores[2].capture_scent_window({1, 1}, 1, floor, work));
+    ASSERT_TRUE(stores[3].set_soil({1, 1}, 999997));
+    ASSERT_TRUE(stores[4].set_irrigation({1, 1}, 1));
+    ASSERT_TRUE(stores[5].activate_region({0, 0}, 1337, 0));
+    ASSERT_TRUE(stores[6].set_weather_age({0, 0}, 0));
+    Luminumbra::world::RegionalStorm storm;
+    storm.lifetime_ticks = 100;
+    ASSERT_TRUE(stores[7].replace_weather({storm}, {}));
+    ASSERT_TRUE(stores[8].replace_weather({}, {Luminumbra::world::RegionalStrike{}}));
+    for (std::size_t index = 0; index < stores.size(); ++index) {
+        SCOPED_TRACE(index);
+        auto& store = stores[index];
+        EXPECT_EQ(store.has_ambient(), index >= 5);
+        EXPECT_EQ(store.empty(), index == 0);
+        if (!store.empty()) {
+            Luminumbra::world::FieldPageState restored;
+            std::string error;
+            ASSERT_TRUE(
+                Luminumbra::world::FieldPageState::parse(store.serialize(), restored, error))
+                << error;
+            EXPECT_EQ(restored.has_ambient(), index >= 5);
+        }
+        store.clear();
+        EXPECT_FALSE(store.has_ambient());
+    }
+}
+
 TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
     FieldPageState store;
     std::vector<RegionalStorm> storms;
@@ -1656,8 +1690,7 @@ void CheckFrozenScentCapacity(bool floors, bool mixed, bool thawed) {
     const auto can_retire = [&ledger, &retirement_queries](RegionKey owner) {
         ++retirement_queries;
         const auto found = ledger.records().find(owner);
-        return found != ledger.records().end() && found->second.state != RegionState::Frozen &&
-               found->second.frozen_digest == 0;
+        return found != ledger.records().end() && found->second.state != RegionState::Frozen;
     };
     FieldPageState candidate;
     ScentWindowWork work;
@@ -1666,17 +1699,21 @@ void CheckFrozenScentCapacity(bool floors, bool mixed, bool thawed) {
     const auto before = source.serialize();
     const bool admitted =
         candidate.stage_scent_window(source, {1024, 0}, side, cells, work, can_retire);
-    EXPECT_EQ(admitted, mixed);
+    EXPECT_EQ(admitted, mixed || thawed);
     EXPECT_LE(retirement_queries, cells.size() * 2);
     EXPECT_EQ(source.serialize(), before);
-    if (!mixed) {
+    if (!mixed && !thawed) {
         EXPECT_EQ(work.entries, previous_work);
         EXPECT_EQ(work.count, 1u);
         EXPECT_EQ(candidate.staged_scent_cells(), 0u);
     }
     source.adopt_scent_state(candidate);
-    EXPECT_EQ(source.region_bytes(protected_owner), protected_bytes);
-    EXPECT_EQ(Fnv(source.region_bytes(protected_owner)), frozen_digest);
+    if (thawed) {
+        EXPECT_NE(source.region_bytes(protected_owner), protected_bytes);
+    } else {
+        EXPECT_EQ(source.region_bytes(protected_owner), protected_bytes);
+        EXPECT_EQ(Fnv(source.region_bytes(protected_owner)), frozen_digest);
+    }
     EXPECT_EQ(ledger.records().at(protected_owner).frozen_digest, frozen_digest);
     FieldPageState reopened;
     ActiveRegionLedger reopened_ledger;
@@ -1685,9 +1722,12 @@ void CheckFrozenScentCapacity(bool floors, bool mixed, bool thawed) {
     ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened_ledger, error)) << error;
     EXPECT_EQ(reopened.serialize(), source.serialize());
     EXPECT_EQ(reopened_ledger.canonical_bytes(), ledger.canonical_bytes());
-    EXPECT_EQ(reopened.region_bytes(protected_owner), protected_bytes);
-    EXPECT_EQ(Fnv(reopened.region_bytes(protected_owner)),
-              reopened_ledger.records().at(protected_owner).frozen_digest);
+    EXPECT_EQ(reopened.region_bytes(protected_owner), source.region_bytes(protected_owner));
+    EXPECT_EQ(reopened_ledger.records().at(protected_owner).frozen_digest, frozen_digest);
+    if (!thawed) {
+        EXPECT_EQ(Fnv(reopened.region_bytes(protected_owner)),
+                  reopened_ledger.records().at(protected_owner).frozen_digest);
+    }
 }
 
 void CheckFloorEncodingRefusalsAndRollback() {
@@ -1771,6 +1811,13 @@ TEST(FieldPageStateTest, ScentCapacityPreservesFrozenOwnerBytesAndDigestAcrossRe
     for (const bool floors : {false, true}) {
         ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, false, false));
         ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, true, false));
-        ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, false, true));
+    }
+}
+
+TEST(FieldPageStateTest, ScentCapacityRetiresThawedOwnerHistoryAcrossReload) {
+    for (const bool floors : {false, true}) {
+        for (const bool mixed : {false, true}) {
+            ASSERT_NO_FATAL_FAILURE(CheckFrozenScentCapacity(floors, mixed, true));
+        }
     }
 }

@@ -674,7 +674,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
-                        (HasScentParticipants() ||
+                        (HasScentParticipants(false) ||
                          SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
                            ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
                                  kScentFieldChannels
@@ -1997,9 +1997,7 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     m_regionalWeatherScheduleVisits = 0;
     m_regionalWeatherProjectionVisitCount = 0;
     // Empty authority retains the legacy weather path, including its save bytes.
-    if (!m_activeRegionsEnabled || !m_worldSystem ||
-        (m_fieldPages.page_count() == 0 && m_fieldPages.weather_clock_count() == 0 &&
-         m_fieldPages.storm_count() == 0 && m_fieldPages.strike_count() == 0))
+    if (!m_activeRegionsEnabled || !m_worldSystem || !m_fieldPages.has_ambient())
         return std::nullopt;
     const auto& records = m_activeRegionLedger.records();
     const auto refresh_boundary = [this](RegionKey changed) {
@@ -2095,7 +2093,7 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
     m_regionCompletedWork.clear();
     // Authority may first appear in a running world. Rebind only at a transition, after
     // publication has succeeded, and replace any legacy weather projection at that boundary.
-    if ((m_activeRegionsEnabled && !m_fieldPages.empty()) != m_regionalFieldsBound) {
+    if ((m_activeRegionsEnabled && m_fieldPages.has_ambient()) != m_regionalFieldsBound) {
         BindRegionalFieldQueries();
         ProjectRegionalWeather(m_worldClock.tick(), false);
     }
@@ -2134,7 +2132,7 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
-    const bool regional = m_activeRegionsEnabled && !m_fieldPages.empty();
+    const bool regional = m_activeRegionsEnabled && m_fieldPages.has_ambient();
     if (!regional) {
         m_regionalWeatherBoundaryOwners.clear();
         m_regionalWeatherBoundaryShifts.clear();
@@ -4236,9 +4234,10 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                                     [this](RegionKey owner) {
                                         const auto& records = m_activeRegionLedger.records();
                                         const auto found = records.find(owner);
+                                        // Thawed owners retain historical digests; only Frozen
+                                        // owners still use them as authority.
                                         return found != records.end() &&
-                                               found->second.state != RegionState::Frozen &&
-                                               found->second.frozen_digest == 0;
+                                               found->second.state != RegionState::Frozen;
                                     })) {
         // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
         // and retry on a later tick, preserving both frozen bytes and the live projection.
