@@ -592,6 +592,50 @@ TEST(DeterministicWorkBudget, SessionRegionCountersLeaveCanonicalIdentityUnchang
     }
 }
 
+void StepRegionOnlyFieldHost(world::GameSession& session, std::uint64_t tick) {
+    const world::RegionKey owner{40, -40};
+    session.RecordActiveRegionWork({owner, 5, 0, 0, 0});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_EQ(session.GetFieldPages().page_count(), 0u);
+    EXPECT_TRUE(session.GetGroundObjects().empty());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetRegionSchedule().work, 5u);
+    EXPECT_EQ(session.GetWorldClock().tick(), tick);
+    const auto state = session.GetActiveRegionLedger().records().at(owner).state;
+    constexpr std::array states{
+        world::RegionState::Active, world::RegionState::Reduced, world::RegionState::Frozen};
+    EXPECT_EQ(state, states.at(static_cast<std::size_t>(tick - 1)));
+}
+
+void CheckRegionOnlyFieldTick(world::GameSession& first,
+                              world::GameSession& second,
+                              std::uint64_t tick) {
+    ASSERT_NO_FATAL_FAILURE(StepRegionOnlyFieldHost(first, tick));
+    ASSERT_NO_FATAL_FAILURE(StepRegionOnlyFieldHost(second, tick));
+    EXPECT_EQ(first.GetRegionSchedule(), second.GetRegionSchedule());
+    EXPECT_EQ(first.GetActiveRegionLedger().canonical_bytes(),
+              second.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(first.FoldClockIntoEcologyHash("ecology"),
+              second.FoldClockIntoEcologyHash("ecology"));
+}
+
+TEST(DeterministicWorkBudget, RegionOnlyHostsFreezeWithoutCreatingOrChargingFields) {
+    world::GameSession first, second;
+    for (auto* session : {&first, &second}) {
+        session->SetActiveRegionsEnabled(true);
+        session->SetRegionSchedulerConfig({1, 1, 1});
+        session->PinActiveRegion({40, -40}, true);
+        session->SetReplicatedSimulationAnchors({});
+    }
+    second.SetSimBudgetTelemetryEnabled(true);
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(CheckRegionOnlyFieldTick(first, second, tick));
+    }
+}
+
 TEST(DeterministicWorkBudget, WorkTraceIsDiagnosticAndRejectsCounterOrTickDrift) {
     SimBudgetTelemetry first;
     SimBudgetTelemetry replay;

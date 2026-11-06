@@ -8682,6 +8682,11 @@ void CheckEmptySessionFieldCompatibility(bool active_regions) {
     EnableSnapshotSession(session, root, jobs);
     session.SetActiveRegionsEnabled(active_regions);
     ASSERT_TRUE(session.CreateWorld("Empty fields", "1337", "default"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetRegionSchedule().work, 0u);
     ASSERT_TRUE(session.SaveWorld());
     const auto save = session.GetWorldSaveDir();
     const auto control = root.path() / "without-field-writer";
@@ -8729,4 +8734,308 @@ TEST(GameSessionHeadlessWorldTest, EmptySessionFieldsPreserveSaveBytesAndDigests
     for (const bool active_regions : {false, true}) {
         ASSERT_NO_FATAL_FAILURE(CheckEmptySessionFieldCompatibility(active_regions));
     }
+}
+
+namespace {
+
+using Luminumbra::world::ActiveRegionLedger;
+using Luminumbra::world::ActiveRegionRecord;
+using Luminumbra::world::RegionKey;
+using Luminumbra::world::RegionState;
+using Luminumbra::world::WorldClock;
+
+ActiveRegionLedger ScheduledFieldLedger(std::uint64_t tick,
+                                        const std::map<RegionKey, RegionState>& owners,
+                                        Luminumbra::world::RegionSchedulerConfig config = {
+                                            std::numeric_limits<std::uint64_t>::max(), 10000, 2}) {
+    const WorldClock clock(tick);
+    ActiveRegionLedger ledger(config, clock);
+    for (const auto& [key, state] : owners) {
+        ledger.pin(key, true, clock);
+        // Construct a typed fixture locally, then admit it through the production codecs.
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(key);
+        record.wake_pending = false;
+        record.state = state;
+        record.cadence_shift =
+            state == RegionState::Active ? std::uint8_t{0} : config.reduced_shift;
+        record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+        if (state == RegionState::Frozen) {
+            record.frozen_at = tick;
+            record.frozen_digest = 123;
+        }
+    }
+    return ledger;
+}
+
+void LoadScheduledFieldFixture(GameSession& session,
+                               const HeadlessRoot& root,
+                               JobSystem& jobs,
+                               const ActiveRegionLedger& ledger,
+                               const FieldPageState& fields) {
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Scheduled fields", "1337", "default"));
+    const auto input = root.path() / "scheduled-field-input";
+    fs::create_directories(input);
+    nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+    WorldClock(ledger.tick()).write_metadata(metadata);
+    {
+        P::WorldSaveService::SaveFactsScope facts(input);
+        P::SaveTransaction transaction(
+            input, ledger.tick(), {}, &P::WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        auto saved_ledger = ledger;
+        ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), saved_ledger, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    ASSERT_TRUE(session.LoadWorldStateFrom(input)) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    session.SetReplicatedSimulationAnchors({});
+}
+
+void CheckScheduledFieldOrderAndCompletedWork() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const RegionKey left{0, 0}, right{1, 0};
+    auto ledger =
+        ScheduledFieldLedger(31, {{left, RegionState::Active}, {right, RegionState::Active}});
+    ledger.pin(left, false, WorldClock(31));
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_TRUE(fields.activate_region(right, 1337, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto expected_schedule =
+        ledger.schedule(WorldClock(32), std::span<const Luminumbra::Vec3>{});
+    // A pinned higher key precedes the lower key. Consumers must retain this order.
+    ASSERT_EQ(expected_schedule.due, (std::vector<RegionKey>{right, left}));
+    const auto previous = fields;
+    const auto work =
+        fields.step_scheduled(ledger.records(), expected_schedule.due, 1337, 32, &previous);
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_NE(fields.serialize(), previous.serialize());
+    // Left: 441 cells + 2*840 interior edges + 21 shared edges. Right has 462 cells.
+    EXPECT_EQ(work.at(left), 2142u);
+    EXPECT_EQ(work.at(right), 2245u);
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
+    EXPECT_EQ(session.GetRegionSchedule().work, 0u);
+    EXPECT_EQ(session.GetFieldPages().weather_clocks(), previous.weather_clocks());
+    EXPECT_EQ(session.GetFieldPages().scent_cells(), previous.scent_cells());
+    EXPECT_EQ(session.GetFieldPages().soil().pages(), previous.soil().pages());
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), previous.irrigation().pages());
+
+    const auto save = root.path() / "scheduled-field-continuation";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.CreateTransientWorld("Field continuation", "1337", "default"));
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetActiveRegionLedger().completed_work(), work);
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_EQ(reopened.TickSimulation(reopened.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule().work, 4387u);
+    EXPECT_EQ(reopened.GetRegionSchedule(), session.GetRegionSchedule());
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+              session.GetActiveRegionLedger().canonical_bytes());
+}
+
+void CheckFrozenSessionFieldOwner() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey left{0, 0}, right{1, 0};
+    const auto ledger =
+        ScheduledFieldLedger(31, {{left, RegionState::Active}, {right, RegionState::Frozen}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.activate_region(left, 1337, 0));
+    ASSERT_TRUE(fields.activate_region(right, 1337, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule().due, (std::vector<RegionKey>{left}));
+    EXPECT_EQ(session.GetFieldPages().region_bytes(right), fields.region_bytes(right));
+    EXPECT_NE(session.GetFieldPages().region_bytes(left), fields.region_bytes(left));
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
+              (std::map<RegionKey, std::uint64_t>{{left, 2121}}));
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(right).frozen_digest, 123u);
+}
+
+void CheckSessionFieldCommonBorders() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey left{2, 0}, right{3, 0};
+    const auto ledger =
+        ScheduledFieldLedger(31, {{left, RegionState::Reduced}, {right, RegionState::Reduced}});
+    ASSERT_EQ(ledger.records().at(left).cadence_phase, 3u);
+    ASSERT_EQ(ledger.records().at(right).cadence_phase, 2u);
+    FieldPageState fields;
+    ASSERT_TRUE(fields.activate_region(left, 1337, 0));
+    ASSERT_TRUE(fields.activate_region(right, 1337, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto before = fields;
+    const auto work = fields.step_scheduled(ledger.records(), {}, 1337, 32, &before);
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_EQ(work, (std::map<RegionKey, std::uint64_t>{{left, 21}, {right, 21}}));
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_NE(fields.region_bytes(left), before.region_bytes(left));
+    EXPECT_NE(fields.region_bytes(right), before.region_bytes(right));
+    // Tick 33 is neither owner's interior phase nor the common border phase.
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_EQ(session.GetRegionSchedule().work, 42u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+}
+
+void CheckScheduledFieldFaultRollback(bool standard_exception) {
+    SCOPED_TRACE(standard_exception);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto bytes = fields.serialize();
+    EXPECT_EQ(session.TickSimulation(0), 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    int calls = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        ++calls;
+        if (standard_exception)
+            throw std::runtime_error("injected scheduled-field consumer fault");
+        throw 7;
+    });
+    session.GetSimulationEventBus().publish(32, "field-test", "");
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(calls, 1);
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        EXPECT_EQ(fault->tick, 32u);
+        EXPECT_EQ(fault->message,
+                  standard_exception ? "injected scheduled-field consumer fault"
+                                     : "Unknown simulation consumer fault");
+    }
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    const auto save = root.path() / "faulted-field-state";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, fields));
+}
+
+void CheckScheduledFieldFreeze(bool corrupt_digest) {
+    SCOPED_TRACE(corrupt_digest);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Reduced}}, {0, 1, 2});
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto input = root.path() / "scheduled-field-input";
+    if (corrupt_digest) {
+        const auto path = P::WorldSaveService::region_file_path(input, 0, 0);
+        fs::create_directories(path.parent_path());
+        std::ofstream(path, std::ios::binary) << "not a region file";
+    }
+    session.RecordActiveRegionWork({kFieldOwner, 1, 0, 0, 0});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetRegionSchedulerFault().has_value(), corrupt_digest);
+    if (corrupt_digest) {
+        const auto fault = session.GetRegionSchedulerFault();
+        ASSERT_TRUE(fault.has_value());
+        if (fault.has_value()) {
+            EXPECT_FALSE(fault->message.empty());
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().tick(), 31u);
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    } else {
+        const auto& record = session.GetActiveRegionLedger().records().at(kFieldOwner);
+        EXPECT_EQ(record.state, RegionState::Frozen);
+        auto inputs = session.GetWorldSystem()->region_digest_inputs(0, 0);
+        inputs.require_index = true;
+        inputs.field_page_bytes = fields.region_bytes(kFieldOwner);
+        EXPECT_EQ(record.frozen_digest,
+                  P::WorldSaveService::region_simulation_digest(input, kFieldOwner, inputs));
+    }
+}
+
+void CheckSessionFieldOwnershipRetention() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey unowned{1, 0};
+    const auto tick = ActiveRegionLedger::kIdleEvictionTicks;
+    auto ledger = ScheduledFieldLedger(
+        tick, {{kFieldOwner, RegionState::Frozen}, {unowned, RegionState::Active}});
+    ledger.pin(kFieldOwner, false, WorldClock(tick));
+    ledger.pin(unowned, false, WorldClock(tick));
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 1u);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(kFieldOwner));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, ScheduledFieldsPreserveOrderAndCompletedWorkAcrossReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckScheduledFieldOrderAndCompletedWork());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScheduledFieldsLeaveFrozenOwnersAndTheirBordersUnchanged) {
+    ASSERT_NO_FATAL_FAILURE(CheckFrozenSessionFieldOwner());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScheduledFieldsExchangeOnCommonPhaseWithoutDueInteriors) {
+    ASSERT_NO_FATAL_FAILURE(CheckSessionFieldCommonBorders());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScheduledFieldsRemainUnchangedWhenTheTickFaults) {
+    for (const bool standard_exception : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckScheduledFieldFaultRollback(standard_exception));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ScheduledFieldFreezeIncludesPagesAndRefusalPreservesState) {
+    for (const bool corrupt_digest : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckScheduledFieldFreeze(corrupt_digest));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldEvolutionOwnersSurviveIdleLedgerRetention) {
+    ASSERT_NO_FATAL_FAILURE(CheckSessionFieldOwnershipRetention());
 }
