@@ -2390,25 +2390,53 @@ struct ChunkEncodeWork {
     std::exception_ptr exception{};
 };
 
+// Matches the budget of the admitted-record cache that receives the retained inputs.
+constexpr std::size_t kEncodeRetainedInputBytes = std::size_t{64} * 1024 * 1024;
+
 void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
     const auto hook = detail::ChunkEncodeHookForTesting().load(std::memory_order_acquire);
-    const auto encode = [&work, hook](std::size_t index) noexcept {
-        auto& item = work[index];
-        try {
-            if (hook)
-                hook(index);
-            const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
-            if (!CompressPayload(payload, item.record, &item.errors))
-                return;
-            // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
-            item.has_null = payload.find(":null") != std::string::npos ||
-                            payload.find("[null") != std::string::npos ||
-                            payload.find(",null") != std::string::npos;
-            item.success = true;
-        } catch (...) {
-            item.exception = std::current_exception();
-        }
+    // Records after the lowest failed index are never inspected by the merge, so workers stop
+    // claiming them once an earlier one has failed.
+    std::atomic<std::size_t> first_failure{std::numeric_limits<std::size_t>::max()};
+    std::atomic<std::size_t> retained_inputs{0};
+    const auto note_failure = [&first_failure](std::size_t index) noexcept {
+        auto seen = first_failure.load(std::memory_order_relaxed);
+        while (index < seen &&
+               !first_failure.compare_exchange_weak(seen, index, std::memory_order_relaxed)) {}
     };
+    const auto encode =
+        [&work, hook, &first_failure, &retained_inputs, &note_failure](std::size_t index) noexcept {
+            if (index > first_failure.load(std::memory_order_relaxed))
+                return;
+            auto& item = work[index];
+            try {
+                if (hook)
+                    hook(index);
+                // Captured as the record is claimed, so only the records being encoded hold a copy
+                // and a failing save never stages the rest of the region.
+                item.inputs = ChunkSnapshotInputBytes(*item.chunk);
+                const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
+                if (!CompressPayload(payload, item.record, &item.errors)) {
+                    note_failure(index);
+                    return;
+                }
+                // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
+                item.has_null = payload.find(":null") != std::string::npos ||
+                                payload.find("[null") != std::string::npos ||
+                                payload.find(",null") != std::string::npos;
+                // Inputs beyond the cache budget would be dropped by the cache anyway.
+                if (retained_inputs.fetch_add(item.inputs.size(), std::memory_order_relaxed) +
+                        item.inputs.size() >
+                    kEncodeRetainedInputBytes) {
+                    retained_inputs.fetch_sub(item.inputs.size(), std::memory_order_relaxed);
+                    std::string().swap(item.inputs);
+                }
+                item.success = true;
+            } catch (...) {
+                item.exception = std::current_exception();
+                note_failure(index);
+            }
+        };
 
     unsigned workers = 1;
     if (work.size() >= 128) {
@@ -7253,13 +7281,13 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 }
                 record.flags = ChunkRecordFlags(*chunk, previous_flags);
 
-                auto inputs = ChunkSnapshotInputBytes(*chunk);
                 if (existing != record_index.end() && record.flags == previous_flags &&
                     AdmittedChunkRecordCache().matches_serialized(
-                        ChunkRecordKeyOf(records[existing->second]), inputs))
+                        ChunkRecordKeyOf(records[existing->second]),
+                        ChunkSnapshotInputBytes(*chunk)))
                     continue;
                 const bool water_authority = chunk->has_water_authority();
-                work.push_back({chunk, std::move(record), std::move(inputs), water_authority});
+                work.push_back({chunk, std::move(record), std::string{}, water_authority});
             }
 
             EncodeChunkRecords(work);
@@ -7280,10 +7308,11 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 // authority change leaves the encoded field unknown. Both stay with a real decode.
                 if (water_authority == chunk->has_water_authority() && !item.has_null) {
                     // The cache takes the captured bytes themselves, so the merge never holds a
-                    // second copy of a region's inputs.
-                    std::string cached = inputs == ChunkSnapshotInputBytes(*chunk)
-                                             ? std::move(inputs)
-                                             : std::string{};
+                    // second copy of a region's inputs. Inputs released for the budget stay empty.
+                    std::string cached =
+                        !inputs.empty() && inputs == ChunkSnapshotInputBytes(*chunk)
+                            ? std::move(inputs)
+                            : std::string{};
                     encoded.push_back(
                         {existing != record_index.end() ? existing->second : records.size(),
                          ChunkRecordFacts{chunk->get_coords(),
