@@ -3657,15 +3657,23 @@ void CheckEmptyLegacyEnergySnapshotPreservesCadence(bool aligned) {
     ASSERT_EQ(control.GetEnergyFieldState()->total_raw(), aligned ? 0u : 1u);
     const Luminumbra::world::RegionKey owner{0, 0};
     const std::uint64_t initial_age = aligned ? 0u : 5u;
-    ASSERT_EQ(control.GetActiveRegionLedger().energy_ages().at(owner), initial_age);
+    if (aligned) {
+        // An aligned empty snapshot carries no cadence to migrate: the regional schedule starts
+        // clean.
+        ASSERT_TRUE(control.GetActiveRegionLedger().energy_ages().empty());
+    } else {
+        ASSERT_EQ(control.GetActiveRegionLedger().energy_ages().at(owner), initial_age);
+    }
     const int save_tick = aligned ? 8 : 7;
     const std::uint64_t next_fire = aligned ? 16u : 11u;
     for (int i = 0; i < save_tick; ++i) {
         ASSERT_EQ(control.TickSimulation(dt), 1u);
     }
     ASSERT_EQ(control.GetEnergyFieldState()->page_count(), 0u);
-    ASSERT_EQ(control.GetActiveRegionLedger().energy_ages().at(owner),
-              initial_age + static_cast<std::uint64_t>(save_tick));
+    if (!aligned) {
+        ASSERT_EQ(control.GetActiveRegionLedger().energy_ages().at(owner),
+                  initial_age + static_cast<std::uint64_t>(save_tick));
+    }
     const auto explicit_save = root.path() / "empty-offset-snapshot";
     ASSERT_TRUE(control.SaveWorldStateTo(explicit_save));
     EXPECT_FALSE(fs::exists(explicit_save / "aether_state.efs"));
@@ -3677,8 +3685,10 @@ void CheckEmptyLegacyEnergySnapshotPreservesCadence(bool aligned) {
     for (auto* session : {&control, &loaded, &explicit_load}) {
         auto* energy = session->GetEnergyFieldState();
         ASSERT_EQ(energy->page_count(), 0u);
-        EXPECT_EQ(session->GetActiveRegionLedger().energy_ages().at(owner),
-                  initial_age + static_cast<std::uint64_t>(save_tick));
+        if (!aligned) {
+            EXPECT_EQ(session->GetActiveRegionLedger().energy_ages().at(owner),
+                      initial_age + static_cast<std::uint64_t>(save_tick));
+        }
         ASSERT_TRUE(energy->QueueRegionalDeposit(1, 0, 0, 0, 60000));
     }
     for (int tick = save_tick + 1; tick <= save_tick + 18; ++tick) {
@@ -12081,36 +12091,28 @@ TEST(GameSessionHeadlessWorldTest, DisabledAndEmptyEnergyPreserveLiveAndSavedByt
 namespace {
 using EnergyState = luminumbra::fields::EnergyFieldState;
 
-std::string LegacyEnergyCapacityRecord(std::size_t bytes,
+std::string LegacyEnergyCapacityRecord(std::size_t pages,
+                                       int channels,
+                                       bool dense,
                                        std::map<RegionKey, RegionState>& owners) {
-    std::string record = "EFS1 16 8\n";
-    for (int page = 1000;; page += 4) {
-        std::string row = "P " + std::to_string(page) + " 0";
-        std::size_t index = 0;
-        for (; index < 256u * 16u; ++index) {
-            const auto token = " " + std::to_string(index) + ":1";
-            if (record.size() + row.size() + token.size() + 1 > bytes) {
-                break;
-            }
-            row += token;
-        }
-        if (index != 0) {
-            record += row + '\n';
-            for (const int dx : {0, 15}) {
-                owners.emplace(EnergyState::OwnerOfCell(page * 16 + dx, 0), RegionState::Frozen);
-            }
-        }
-        if (index != 256u * 16u) {
-            break;
-        }
+    std::string cells;
+    const auto values = dense ? 256u * static_cast<std::size_t>(channels) : 1u;
+    for (std::size_t index = 0; index < values; ++index) {
+        cells += " " + std::to_string(index) + (dense ? ":65535" : ":1");
     }
-    // Lengthen early values (at most five digits) to hit the exact byte boundary.
-    std::size_t position = 0;
-    while (record.size() < bytes) {
-        position = record.find(":1", position) + 2;
-        const auto extra = (std::min)(std::size_t{4}, bytes - record.size());
-        record.insert(position, extra, '1');
-        position += extra;
+    std::string record = "EFS1 " + std::to_string(channels) + " 8\n";
+    record.reserve(record.size() + pages * (cells.size() + 16));
+    for (std::size_t index = 0; index < pages; ++index) {
+        const int page = index == 0 ? 0 : 1000 + 4 * static_cast<int>(index - 1);
+        record += "P ";
+        record += std::to_string(page);
+        record += " 0";
+        record += cells;
+        record += '\n';
+        // Dense pages can straddle two owners; sparse pages own just their first cell.
+        for (const int dx : {0, dense ? 15 : 0}) {
+            owners.try_emplace(EnergyState::OwnerOfCell(page * 16 + dx, 0), RegionState::Frozen);
+        }
     }
     return record;
 }
@@ -12128,11 +12130,10 @@ void CheckLegacyEnergyCapacityAdmission(bool oversized) {
     const auto live_registers = session.GetActiveRegionLedger().encode();
     const auto live_tick = session.GetWorldClock().tick();
     std::map<RegionKey, RegionState> owners{{{-1, 0}, RegionState::Active}};
-    auto record = LegacyEnergyCapacityRecord(
-        EnergyState::kMaxRegionalRecordBytes + static_cast<std::size_t>(oversized), owners);
-    ASSERT_EQ(record.size(),
-              EnergyState::kMaxRegionalRecordBytes + static_cast<std::size_t>(oversized));
-    // Every value owner is frozen, so the boundary record survives even a cadence fire.
+    const auto pages = luminumbra::fields::kEnergyReadPages + static_cast<std::size_t>(oversized);
+    auto record = LegacyEnergyCapacityRecord(pages, 16, false, owners);
+    // Exercise the full decoded legacy reader capacity with a small text fixture.
+    // Every value owner is frozen, so it survives even a cadence fire.
     const auto ledger = ScheduledFieldLedger(31, owners);
     const auto input = root.path() / "legacy-energy-capacity";
     fs::create_directories(input);
@@ -12162,7 +12163,75 @@ void CheckLegacyEnergyCapacityAdmission(bool oversized) {
         EXPECT_EQ(session.GetEnergyFieldState()->SerializeRegionalRecord(), record);
         ASSERT_TRUE(session.SaveWorld());
         EXPECT_EQ(ReadClockTestFile(session.GetWorldSaveDir() / "aether_state.efs"), record);
+        GameSession reopened;
+        EnableSnapshotSession(reopened, root, jobs);
+        reopened.SetAetherStateEnabled(true);
+        ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId))
+            << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetEnergyFieldState()->page_count(), pages);
+        EXPECT_EQ(reopened.GetEnergyFieldState()->SerializeRegionalRecord(), record);
+        EXPECT_EQ(reopened.GetActiveRegionLedger().energy_ages(),
+                  session.GetActiveRegionLedger().energy_ages());
     }
+}
+
+void CheckDenseLegacyEnergyContinuation() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession control, reopened;
+    std::map<RegionKey, RegionState> owners{{{0, 0}, RegionState::Active}};
+    auto record =
+        LegacyEnergyCapacityRecord(luminumbra::fields::kEnergyWritePages, 2, true, owners);
+    // 512 entries per page: 5010 cell-token bytes plus coordinates and newlines.
+    ASSERT_EQ(record.size(), 20559675u);
+    ASSERT_GT(record.size(), 16u * 1024u * 1024u);
+    {
+        EnergyState legacy(2);
+        ASSERT_TRUE(legacy.DeserializeRecord(record, 31));
+        EXPECT_TRUE(legacy.SerializeRecord(31) == record);
+    }
+    // One remaining tick means age 7 at tick 31, then a fire at tick 32.
+    record.replace(7, 1, "1");
+    const auto ledger = ScheduledFieldLedger(31, owners);
+    {
+        const std::optional<std::string> input{std::move(record)};
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(control, root, jobs, ledger, {}, input));
+    }
+    EXPECT_EQ(control.GetEnergyFieldState()->page_count(), 4096u);
+    EXPECT_EQ(control.GetActiveRegionLedger().energy_ages().at({0, 0}), 7u);
+    TickOnce(control);
+    ASSERT_FALSE(control.GetRegionSchedulerFault());
+    EXPECT_EQ(control.GetWorldClock().tick(), 32u);
+    EXPECT_EQ(control.GetEnergyFieldState()->at_cell(0, 0, 0), 65023u);
+    EXPECT_EQ(control.GetEnergyFieldState()->at_cell(0, 0, 1), 65023u);
+    EXPECT_EQ(control.GetEnergyFieldState()->at_cell(16000, 0, 1), 65535u);
+    ASSERT_TRUE(control.SaveWorld());
+    const auto save = control.GetWorldSaveDir();
+    {
+        const auto expected = control.GetEnergyFieldState()->SerializeRegionalRecord();
+        EXPECT_TRUE(ReadClockTestFile(save / "aether_state.efs") == expected);
+        EnableSnapshotSession(reopened, root, jobs);
+        reopened.SetAetherStateEnabled(true);
+        ASSERT_TRUE(reopened.LoadWorld(control.GetMetadata().worldId))
+            << reopened.GetWorldOpenError();
+        reopened.SetReplicatedSimulationAnchors({});
+        EXPECT_TRUE(reopened.GetEnergyFieldState()->SerializeRegionalRecord() == expected);
+    }
+    for (int tick = 0; tick < 8; ++tick) {
+        TickOnce(control);
+        TickOnce(reopened);
+        ASSERT_FALSE(control.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+    }
+    EXPECT_EQ(control.GetEnergyFieldState()->at_cell(0, 0, 0), 64515u);
+    EXPECT_TRUE(reopened.GetEnergyFieldState()->SerializeRegionalRecord() ==
+                control.GetEnergyFieldState()->SerializeRegionalRecord());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().encode(), control.GetActiveRegionLedger().encode());
+    EXPECT_EQ(reopened.ComputeAetherStateSubHash(), control.ComputeAetherStateSubHash());
+    ASSERT_TRUE(reopened.SaveWorld());
+    EXPECT_TRUE(ReadClockTestFile(save / "aether_state.efs") ==
+                control.GetEnergyFieldState()->SerializeRegionalRecord());
 }
 
 void CheckEnergyPublicationCopy(bool assignment, bool prepared) {
@@ -12207,6 +12276,10 @@ void CheckEnergyPublicationCopy(bool assignment, bool prepared) {
     EXPECT_EQ(a.completed_work().at(owner), 2u);
 }
 
+void ReactivateEnergyPublicationSource(ActiveRegionLedger& source, const RegionKey& owner) {
+    source.activate_owned(owner, WorldClock(31));
+}
+
 void CheckEnergyPublicationMove(bool assignment) {
     const RegionKey owner{0, 0};
     auto source = ScheduledFieldLedger(31, {{owner, RegionState::Active}});
@@ -12226,7 +12299,7 @@ void CheckEnergyPublicationMove(bool assignment) {
     }
     EXPECT_EQ(moved.encode(), before);
     // Reusing the moved-from ledger must not alter the transferred preparation.
-    source.activate_owned(owner, WorldClock(31));
+    ReactivateEnergyPublicationSource(source, owner);
     ASSERT_TRUE(source.prepare_energy_work(ages_b, work_b));
     moved.commit_energy_work();
     EXPECT_EQ(moved.energy_ages().at(owner), 7u);
@@ -12651,6 +12724,10 @@ TEST(GameSessionHeadlessWorldTest, LegacyEnergyCapacityAdmissionPreservesLiveSta
     for (const bool oversized : {true, false}) {
         ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyCapacityAdmission(oversized));
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, DenseLegacyEnergyContinuesAcrossRegionalSaveAndReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckDenseLegacyEnergyContinuation());
 }
 
 TEST(GameSessionHeadlessWorldTest, EnergyPublicationCopiesKeepIndependentPreparations) {

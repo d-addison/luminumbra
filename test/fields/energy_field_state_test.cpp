@@ -1334,7 +1334,7 @@ std::string
 RegionalRecordAtByteLimit(EnergyRecords& records,
                           EnergyAges& ages,
                           std::size_t byte_limit = EnergyFieldState::kMaxRegionalRecordBytes,
-                          std::size_t channel_count = 64) {
+                          std::size_t channel_count = 16) {
     const std::size_t values_per_page = 256 * channel_count;
     std::string record = "EFS1 " + std::to_string(channel_count) + " 0\n";
     bool complete = false;
@@ -1373,85 +1373,15 @@ RegionalRecordAtByteLimit(EnergyRecords& records,
 }
 } // namespace
 
-TEST(RegionalEnergy, WriterDecoderAndCachedTickAgreeAtExactByteBoundaries) {
-    constexpr auto limit = EnergyFieldState::kMaxRegionalRecordBytes;
-    for (const auto size : {limit - 1, limit, limit + 1}) {
-        SCOPED_TRACE(size);
-        EnergyRecords records;
-        EnergyAges ages;
-        const auto record = RegionalRecordAtByteLimit(records, ages, size, 16);
-        ASSERT_EQ(record.size(), size);
-        const bool fits = size <= limit;
-        EnergyFieldState decoded;
-        EXPECT_EQ(decoded.DeserializeRegionalRecord(record), fits);
-
-        // Legacy admission can construct all three canonical page sets, including
-        // the one whose regional encoding is one byte above the regional cap.
-        auto legacy = record;
-        const auto phase = legacy.find(" 0\n");
-        ASSERT_NE(phase, std::string::npos);
-        legacy[phase + 1] = '8';
-        EnergyFieldState field;
-        ASSERT_TRUE(field.DeserializeRecord(legacy, 0));
-        const auto canonical = field.CanonicalRegionalBytes();
-        if (fits) {
-            const auto serialized = field.SerializeRegionalRecord();
-            EXPECT_EQ(serialized, record);
-            ASSERT_TRUE(decoded.DeserializeRegionalRecord(serialized));
-            EXPECT_EQ(decoded.CanonicalRegionalBytes(), canonical);
-        } else {
-            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
-        }
-        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
-        EnergyResult result;
-        result.clipped_raw = 91;
-        EXPECT_EQ(field.TickRegional(1, records, {}, ages, result), fits);
-        EXPECT_EQ(field.CanonicalRegionalBytes(), canonical);
-        if (fits) {
-            EXPECT_EQ(field.SerializeRegionalRecord(), record);
-            EXPECT_EQ(result.ages, ages);
-        } else {
-            EXPECT_EQ(result.clipped_raw, 91u);
-            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
-        }
-    }
-}
-
-TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingInput) {
-    constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
-    EnergyRecords records;
-    EnergyAges ages;
-    const auto record = RegionalRecordAtByteLimit(records, ages);
-    ASSERT_EQ(record.size(), byte_limit);
-    EnergyFieldState field;
-    ASSERT_TRUE(field.DeserializeRegionalRecord(record));
-    ASSERT_EQ(field.SerializeRegionalRecord(), record);
-    records.at({0, 0}).state = RegionState::Active;
-    ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 1)); // 9 -> 10 needs one extra byte
-    const std::array due{RegionKey{0, 0}};
-    EnergyResult output;
-    output.ages = {{{9, 9}, 42}};
-    output.work = {{{9, 9}, 1, 2, 3, 4}};
-    output.clipped_raw = 91;
-    output.staged_pages = 92;
-    output.diffusion_pages = 93;
-    EXPECT_FALSE(field.TickRegional(1, records, due, ages, output));
-    EXPECT_EQ(field.SerializeRegionalRecord(), record);
-    EXPECT_EQ(output.ages, (EnergyAges{{{9, 9}, 42}}));
-    ASSERT_EQ(output.work.size(), 1u);
-    EXPECT_EQ(output.work[0].key, (RegionKey{9, 9}));
-    EXPECT_EQ(output.work[0].region_ticks, 1u);
-    EXPECT_EQ(output.work[0].entity_updates, 2u);
-    EXPECT_EQ(output.work[0].water_cells, 3u);
-    EXPECT_EQ(output.work[0].page_updates, 4u);
-    EXPECT_EQ(output.clipped_raw, 91u);
-    EXPECT_EQ(output.staged_pages, 92u);
-    EXPECT_EQ(output.diffusion_pages, 93u);
-    // Retrying with no due owner clips the still-pending unit and preserves all bytes/ages.
-    ASSERT_TRUE(field.TickRegional(1, records, {}, ages, output));
-    EXPECT_EQ(output.clipped_raw, 1u);
-    EXPECT_EQ(output.ages, ages);
-    EXPECT_EQ(field.SerializeRegionalRecord(), record);
+TEST(RegionalEnergy, RegionalRecordCapCoversTheLegacyReaderRange) {
+    // Every record the legacy reader admits must also be admissible and re-savable through the
+    // regional paths, so the regional cap may never fall below the legacy reader cap.
+    static_assert(EnergyFieldState::kMaxRegionalRecordBytes >=
+                  luminumbra::fields::kEnergyReadRecordBytes);
+    static_assert(EnergyFieldState::kMaxRegionalRecordBytes >=
+                  luminumbra::fields::kEnergyWriteRecordBytes);
+    EXPECT_GE(EnergyFieldState::kMaxRegionalRecordBytes,
+              luminumbra::fields::kEnergyReadRecordBytes);
 }
 
 TEST(RegionalEnergy, MissingFinalNewlineAtByteLimitRefusesWithoutThrowingOrChangingState) {

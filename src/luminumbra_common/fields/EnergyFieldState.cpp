@@ -527,9 +527,21 @@ namespace {
 // from_chars requires the entire token and never accepts signs for unsigned
 // values. No substrings, locale conversion, or proportional temporary buffers.
 template<typename T>
-bool ReadEnergyNumber(std::string_view token, T& result) {
+bool ReadEnergyNumber(std::string_view token, T& result, bool canonical = false) {
     const auto parsed = std::from_chars(token.data(), token.data() + token.size(), result);
-    return parsed.ec == std::errc{} && parsed.ptr == token.data() + token.size();
+    if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size())
+        return false;
+    if (!canonical || token == "0")
+        return true;
+    if (token.starts_with('-'))
+        token.remove_prefix(1);
+    return !token.starts_with('0');
+}
+
+bool CanonicalEnergyLine(std::string_view line) {
+    return !line.empty() && !line.starts_with(' ') && !line.ends_with(' ') &&
+           line.find("  ") == std::string_view::npos &&
+           line.find_first_of("\t\r") == std::string_view::npos;
 }
 
 bool TakeEnergyToken(std::string_view& line, std::string_view& token) {
@@ -546,8 +558,9 @@ bool TakeEnergyToken(std::string_view& line, std::string_view& token) {
 }
 } // namespace
 
-bool EnergyFieldState::AdmitRecord(const std::string& record) {
-    if (record.size() > kEnergyReadRecordBytes)
+bool EnergyFieldState::AdmitRecord(const std::string& record, bool canonical) {
+    if (record.size() > kEnergyReadRecordBytes ||
+        (canonical && (record.empty() || record.back() != '\n')))
         return false;
     std::string_view remaining_lines(record);
     auto take_line = [&remaining_lines]() {
@@ -557,36 +570,51 @@ bool EnergyFieldState::AdmitRecord(const std::string& record) {
         return line;
     };
     auto header = take_line();
+    if (canonical && !CanonicalEnergyLine(header))
+        return false;
     std::string_view token;
     int channels = 0;
     std::uint64_t phase = 0;
     if (!TakeEnergyToken(header, token) || token != "EFS1" || !TakeEnergyToken(header, token) ||
-        !ReadEnergyNumber(token, channels) || channels < 1 || channels > kEnergyRecordChannels ||
-        !TakeEnergyToken(header, token) || !ReadEnergyNumber(token, phase) || phase < 1 ||
-        phase > kEnergyCadenceTicks || TakeEnergyToken(header, token))
+        !ReadEnergyNumber(token, channels, canonical) || channels < 1 ||
+        channels > kEnergyRecordChannels || !TakeEnergyToken(header, token) ||
+        !ReadEnergyNumber(token, phase, canonical) || phase < 1 || phase > kEnergyCadenceTicks ||
+        TakeEnergyToken(header, token))
         return false;
     std::size_t pages = 0;
+    std::optional<std::int64_t> previous_page;
     while (!remaining_lines.empty()) {
         auto line = take_line();
+        if (canonical && !CanonicalEnergyLine(line))
+            return false;
         if (line.empty())
             continue;
         if (++pages > kEnergyReadPages || !TakeEnergyToken(line, token) || token != "P")
             return false;
-        int coordinate = 0;
-        for (int axis = 0; axis < 2; ++axis) {
-            if (!TakeEnergyToken(line, token) || !ReadEnergyNumber(token, coordinate))
-                return false;
-        }
+        int px = 0, pz = 0;
+        if (!TakeEnergyToken(line, token) || !ReadEnergyNumber(token, px, canonical) ||
+            !TakeEnergyToken(line, token) || !ReadEnergyNumber(token, pz, canonical))
+            return false;
+        const auto key = PackPageKey(px, pz);
+        if (canonical && previous_page && key <= previous_page.value_or(0))
+            return false;
+        previous_page = key;
+        std::optional<std::size_t> previous_cell;
         while (TakeEnergyToken(line, token)) {
             const auto colon = token.find(':');
             std::size_t index = 0;
             unsigned value = 0;
             if (colon == std::string_view::npos ||
-                !ReadEnergyNumber(token.substr(0, colon), index) ||
-                !ReadEnergyNumber(token.substr(colon + 1), value) ||
-                index >= 256u * static_cast<std::size_t>(channels) || value == 0 || value > 65535u)
+                !ReadEnergyNumber(token.substr(0, colon), index, canonical) ||
+                !ReadEnergyNumber(token.substr(colon + 1), value, canonical) ||
+                index >= 256u * static_cast<std::size_t>(channels) || value == 0 ||
+                value > 65535u ||
+                (canonical && previous_cell && index <= previous_cell.value_or(0)))
                 return false;
+            previous_cell = index;
         }
+        if (canonical && !previous_cell)
+            return false;
     }
     return true;
 }

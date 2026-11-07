@@ -116,10 +116,10 @@ public:
     using RegionKey = Luminumbra::world::RegionKey;
     using RegionRecords = std::map<RegionKey, Luminumbra::world::ActiveRegionRecord>;
     using EnergyAges = Luminumbra::world::ActiveRegionLedger::EnergyAges;
-    // Regional record and decoded-value budgets are independent of legacy admission.
-    static constexpr std::size_t kMaxRegionalRecordBytes = std::size_t{16} * 1024 * 1024;
+    // Preserve every legacy reader page/channel combination through regional saves.
+    static constexpr std::size_t kMaxRegionalRecordBytes = kEnergyReadRecordBytes;
     static constexpr std::size_t kMaxRegionalValueBytes = std::size_t{64} * 1024 * 1024;
-    static constexpr std::size_t kMaxRegionalDeposits = kMaxRegionalRecordBytes / 32;
+    static constexpr std::size_t kMaxRegionalDeposits = (std::size_t{16} * 1024 * 1024) / 32;
     struct RegionalResult {
         EnergyAges ages;
         // page_updates counts distinct (owner, physical page) actually processed;
@@ -251,7 +251,8 @@ public:
     // Throws length_error without mutation on a compatibility-limit refusal.
     [[nodiscard]] std::string SerializeRecord(std::uint64_t save_tick);
     // Lexical admission performs no allocation and runs before any page construction.
-    [[nodiscard]] static bool AdmitRecord(const std::string& record);
+    // Canonical admission retains the reader page range without invoking the writer.
+    [[nodiscard]] static bool AdmitRecord(const std::string& record, bool canonical = false);
     bool DeserializeRecord(const std::string& record, std::uint64_t load_tick_base);
 
     // Restore an absent record on an absolute clock without replaying empty history.
