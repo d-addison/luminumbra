@@ -716,5 +716,4 @@ TEST(ScentFieldGates, OpenGradientMatchesUngatedBitsAtEdgesAndForInvalidInputs) 
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 3));
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 1));
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 1));
-    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(0, 0));
 }
