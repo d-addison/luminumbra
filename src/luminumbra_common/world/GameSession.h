@@ -161,6 +161,7 @@ public:
         std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
+        Vec3 energy_anchor{};
         std::uint64_t simulation_tick = 0;
         std::uint64_t world_revision = 0;
         bool active_regions = true;
@@ -723,7 +724,11 @@ private:
     void AdvanceGroundObjects(std::uint64_t tick);
     // Stage existing field authority; publish only after the tick's consumers and work succeed.
     [[nodiscard]] std::optional<FieldPageState> PrepareScheduledFieldPages(std::uint64_t tick);
-    void PublishRegionCompletedWork(std::optional<FieldPageState> fields);
+    struct RegionalEnergyStep;
+    std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
+    [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
+    void PublishRegionCompletedWork(std::optional<FieldPageState> fields,
+                                    RegionalEnergyStep* energy);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;

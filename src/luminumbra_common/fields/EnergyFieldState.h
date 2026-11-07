@@ -67,6 +67,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -115,10 +116,10 @@ public:
     using RegionKey = Luminumbra::world::RegionKey;
     using RegionRecords = std::map<RegionKey, Luminumbra::world::ActiveRegionRecord>;
     using EnergyAges = Luminumbra::world::ActiveRegionLedger::EnergyAges;
-    // Regional record and decoded-value budgets are independent of legacy admission.
-    static constexpr std::size_t kMaxRegionalRecordBytes = std::size_t{16} * 1024 * 1024;
+    // Preserve every legacy reader page/channel combination through regional saves.
+    static constexpr std::size_t kMaxRegionalRecordBytes = kEnergyReadRecordBytes;
     static constexpr std::size_t kMaxRegionalValueBytes = std::size_t{64} * 1024 * 1024;
-    static constexpr std::size_t kMaxRegionalDeposits = kMaxRegionalRecordBytes / 32;
+    static constexpr std::size_t kMaxRegionalDeposits = (std::size_t{16} * 1024 * 1024) / 32;
     struct RegionalResult {
         EnergyAges ages;
         // page_updates counts distinct (owner, physical page) actually processed;
@@ -181,6 +182,36 @@ public:
                       std::span<const RegionKey> due,
                       const EnergyAges& ages,
                       RegionalResult& out);
+    // Reusable transaction for the complete scheduler due set. Its buffers grow only
+    // when participating work grows; a projected tick rolls back until committed.
+    class RegionalTick {
+    public:
+        RegionalTick();
+        ~RegionalTick();
+        RegionalTick(const RegionalTick&) = delete;
+        RegionalTick& operator=(const RegionalTick&) = delete;
+        EnergyFieldState& deposits(int channels);
+        void rollback() noexcept;
+        void commit() noexcept;
+        [[nodiscard]] std::span<const std::pair<RegionKey, std::uint64_t>> ages() const;
+        [[nodiscard]] std::span<const Luminumbra::world::RegionWork> work() const;
+        [[nodiscard]] std::size_t participating_pages() const;
+        // Includes a cold full validation as well as journal page copies.
+        [[nodiscard]] std::size_t visited_pages() const;
+        [[nodiscard]] std::size_t storage_growths() const;
+
+    private:
+        friend class EnergyFieldState;
+        struct Storage;
+        std::unique_ptr<Storage> m_storage;
+    };
+    // The ledger and values must have passed joint admission; the scheduler
+    // retains energy-owned records and supplies every scheduled owner.
+    bool BeginRegionalTick(std::uint64_t tick,
+                           const Luminumbra::world::ActiveRegionLedger& ledger,
+                           std::span<const RegionKey> complete_due,
+                           RegionalTick& transaction);
+
     [[nodiscard]] static RegionKey OwnerOfCell(int cx, int cz) noexcept;
     [[nodiscard]] bool OwnsRegion(const RegionKey& key) const;
     // Stored values only; ages are projected by ARL4. No legacy page epochs.
@@ -190,8 +221,16 @@ public:
     // in the legacy phase slot, since all regional cadence lives in ARL4.
     // An incompatible/oversized legacy object throws length_error, never absence.
     [[nodiscard]] std::string SerializeRegionalRecord() const;
-    // Present records only: empty/header-only/noncanonical inputs refuse atomically.
+    // Present records only: EFS1 needs nonzero pages; EFS2 is exactly an empty
+    // nondefault channel count ("EFS2 <channels> 0\n", channels in [1,64] except 2).
+    // Empty/noncanonical inputs refuse atomically. EFS2 never changes ledger ages.
     bool DeserializeRegionalRecord(const std::string& record);
+    // Admission only: translate a legacy next-fire offset into durable owner ages,
+    // including empty owners, before regional stepping starts. The caller stages both objects;
+    // a refusal may change those candidates and must never publish them.
+    bool MigrateLegacyCadence(Luminumbra::world::ActiveRegionLedger& ledger,
+                              const Luminumbra::world::WorldClock& clock,
+                              const Luminumbra::Vec3& anchor);
     // Validate the jointly staged EFS/ARL snapshot before exposing it to consumers.
     [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const;
@@ -214,7 +253,8 @@ public:
     // Throws length_error without mutation on a compatibility-limit refusal.
     [[nodiscard]] std::string SerializeRecord(std::uint64_t save_tick);
     // Lexical admission performs no allocation and runs before any page construction.
-    [[nodiscard]] static bool AdmitRecord(const std::string& record);
+    // Canonical admission retains the reader page range without invoking the writer.
+    [[nodiscard]] static bool AdmitRecord(const std::string& record, bool canonical = false);
     bool DeserializeRecord(const std::string& record, std::uint64_t load_tick_base);
 
     // Restore an absent record on an absolute clock without replaying empty history.
@@ -310,6 +350,16 @@ private:
                           RegionalResult& out,
                           bool ledger_validated);
 
+    bool PrepareRegionalTick(std::uint64_t tick,
+                             const Luminumbra::world::ActiveRegionLedger& ledger,
+                             std::span<const RegionKey> due,
+                             RegionalTick::Storage& storage);
+    bool DiffuseRegionalTick(std::uint64_t tick,
+                             const RegionRecords& records,
+                             RegionalTick::Storage& storage);
+    bool ProjectRegionalTick(const Luminumbra::world::ActiveRegionLedger& ledger,
+                             RegionalTick::Storage& storage);
+
     int m_channels = 1;
     // Window origin in world cell coords, page-aligned. Valid once anchored.
     int m_window_ox = 0;
@@ -325,6 +375,9 @@ private:
     std::map<std::int64_t, Page> m_pages; // ORDERED — deterministic iteration
     std::vector<PendingDeposit> m_pending;
     mutable std::optional<RegionalValidation> m_regional_validation;
+    // Queueing invalidates the generic mutation marker, but not stored page facts.
+    // The session transaction can reuse this index until an actual page writer runs.
+    mutable std::optional<RegionalValidation> m_regional_queued_validation;
 };
 
 } // namespace luminumbra::fields

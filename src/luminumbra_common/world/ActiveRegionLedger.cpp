@@ -63,6 +63,25 @@ ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const World
     if (!ValidConfig(config))
         throw std::invalid_argument("Invalid active-region scheduler configuration");
 }
+ActiveRegionLedger::ActiveRegionLedger(const ActiveRegionLedger& other)
+    : m_completedWork(other.completed_work())
+    , m_energyAges(other.energy_ages())
+    , m_waterDebts(other.m_waterDebts)
+    , m_config(other.m_config)
+    , m_records(other.m_records)
+    , m_legacyFrozenDigests(other.m_legacyFrozenDigests)
+    , m_localAnchor(other.m_localAnchor)
+    , m_tick(other.m_tick)
+    , m_headerTick(other.m_headerTick)
+    , m_nextPersistentId(other.m_nextPersistentId) {}
+
+ActiveRegionLedger& ActiveRegionLedger::operator=(const ActiveRegionLedger& other) {
+    if (this != &other) {
+        ActiveRegionLedger next(other);
+        *this = std::move(next);
+    }
+    return *this;
+}
 bool ActiveRegionLedger::valid_anchor(const Vec3& p) noexcept {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && p.x >= -16777216.0f &&
            p.x < 16777216.0f && p.z >= -16777216.0f && p.z < 16777216.0f;
@@ -91,7 +110,7 @@ bool ActiveRegionLedger::try_set_local_anchor(const Vec3& walking_feet) noexcept
 bool ActiveRegionLedger::can_activate(RegionKey key) const {
     return ValidKey(key) &&
            (m_records.contains(key) ||
-            (m_records.size() < kMaxRegions && encodable_with_counts(m_energyAges.size(),
+            (m_records.size() < kMaxRegions && encodable_with_counts(energy_ages().size(),
                                                                      m_waterDebts.size(),
                                                                      std::nullopt,
                                                                      false,
@@ -167,6 +186,92 @@ void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
     // ceiling and fail its own decode check, which is how an inconsistent
     // metadata/ledger pair is refused rather than written.
 }
+struct ActiveRegionLedger::EnergyPublication {
+    using Registers = std::map<RegionKey, std::uint64_t>;
+    Registers completed, new_ages;
+    std::vector<Registers::node_type> spare;
+    std::vector<std::pair<RegionKey, std::uint64_t>> ages;
+    std::size_t growths = 0;
+    void recycle(Registers& registers) {
+        if (spare.capacity() < spare.size() + registers.size()) {
+            spare.reserve((std::max)(spare.capacity() * 2, spare.size() + registers.size()));
+            ++growths;
+        }
+        while (!registers.empty())
+            spare.push_back(registers.extract(registers.begin()));
+    }
+    std::uint64_t& work(RegionKey key) {
+        if (const auto found = completed.find(key); found != completed.end())
+            return found->second;
+        if (spare.empty()) {
+            ++growths;
+            return completed[key];
+        }
+        auto node = std::move(spare.back());
+        spare.pop_back();
+        node.key() = key;
+        node.mapped() = 0;
+        return completed.insert(std::move(node)).position->second;
+    }
+};
+
+bool ActiveRegionLedger::prepare_energy_work(
+    std::span<const std::pair<RegionKey, std::uint64_t>> ages, std::span<const RegionWork> work) {
+    if (!m_energyPublication)
+        m_energyPublication = std::make_shared<EnergyPublication>();
+    auto& prepared = *m_energyPublication;
+    prepared.recycle(prepared.completed);
+    prepared.new_ages.clear();
+    prepared.ages.clear();
+    if (prepared.ages.capacity() < ages.size()) {
+        prepared.ages.reserve(ages.size());
+        ++prepared.growths;
+    }
+    std::optional<RegionKey> previous;
+    for (const auto& [key, age] : ages) {
+        if (!m_records.contains(key) || age >= WorldClock::kTickLimit ||
+            (previous && key <= previous.value_or(RegionKey{})))
+            return false;
+        if (!m_energyAges.contains(key)) {
+            prepared.new_ages.emplace(key, age);
+            ++prepared.growths;
+        }
+        prepared.ages.emplace_back(key, age);
+        previous = key;
+    }
+    for (const auto& units : work) {
+        if (!m_records.contains(units.key))
+            return false;
+        const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
+                               Sum(units.water_cells, units.page_updates));
+        if (total != 0) {
+            auto& count = prepared.work(units.key);
+            count = Sum(count, total);
+        }
+    }
+    return encodable_with_counts(m_energyAges.size() + prepared.new_ages.size(),
+                                 m_waterDebts.size(),
+                                 prepared.completed.size());
+}
+void ActiveRegionLedger::commit_energy_work() noexcept {
+    auto& prepared = *m_energyPublication;
+    for (const auto& [key, age] : prepared.ages) {
+        const auto found = m_energyAges.find(key);
+        if (found != m_energyAges.end())
+            found->second = age;
+        else
+            m_energyAges.insert(prepared.new_ages.extract(key));
+    }
+    m_completedWork.swap(prepared.completed);
+}
+std::size_t ActiveRegionLedger::energy_publication_growths() const noexcept {
+    return m_energyPublication ? m_energyPublication->growths : 0;
+}
+
+std::size_t ActiveRegionLedger::energy_publication_age_visits() const noexcept {
+    return m_energyPublication ? m_energyPublication->ages.size() : 0;
+}
+
 void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
     if (clock.tick() < m_headerTick)
         throw std::invalid_argument("Cannot restore a region ledger ahead of the world clock");
@@ -275,8 +380,8 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
         const bool idle = clock.tick() >= r.last_proximity &&
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !m_energyAges.contains(it->first) && !m_waterDebts.contains(it->first) &&
-            !m_completedWork.contains(it->first) && !owned(it->first)) {
+            !energy_ages().contains(it->first) && !m_waterDebts.contains(it->first) &&
+            !completed_work().contains(it->first) && !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
         } else
@@ -289,7 +394,15 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
                                             const DurableDigest& durable_digest,
                                             const OwnershipProbe& owned) {
     // Callbacks may read the original ledger, so keep it intact until scheduling succeeds.
-    ActiveRegionLedger next = *this;
+    ActiveRegionLedger next(m_config);
+    next.m_records = m_records;
+    next.m_waterDebts = m_waterDebts;
+    next.m_legacyFrozenDigests = m_legacyFrozenDigests;
+    next.m_localAnchor = m_localAnchor;
+    next.m_tick = m_tick;
+    next.m_headerTick = m_headerTick;
+    next.m_nextPersistentId = m_nextPersistentId;
+    next.m_scheduleRegisters = this;
     std::vector<RegionWork> combined(work.begin(), work.end());
     // Restored clock gaps expire stale work only after this schedule commits successfully.
     if (m_tick + 1 == clock.tick())
@@ -297,7 +410,15 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
             combined.push_back(RegionWork{key, total, 0, 0, 0});
     auto result =
         next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned);
-    next.m_completedWork.clear();
+    // No register nodes were copied into the candidate. Retain ages and recycle
+    // completed work only after every refusing scheduler callback has succeeded.
+    if (m_energyPublication)
+        m_energyPublication->recycle(m_completedWork);
+    else
+        m_completedWork.clear();
+    next.m_energyAges.swap(m_energyAges);
+    next.m_energyPublication = std::move(m_energyPublication);
+    next.m_scheduleRegisters = nullptr;
     *this = std::move(next);
     return result;
 }
@@ -574,7 +695,7 @@ bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
                                                std::optional<std::size_t> record_count) const {
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
-    const std::size_t completed_count = completed_owners.value_or(m_completedWork.size());
+    const std::size_t completed_count = completed_owners.value_or(completed_work().size());
     const std::size_t completed = completed_count == 0 ? 0u : 10u + 16u * completed_count;
     const std::size_t allocator = (allocator_advanced || m_nextPersistentId != 1) ? 14u : 0u;
     const std::size_t base =

@@ -9,6 +9,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -147,6 +148,11 @@ public:
     // An absent ledger starts at the restored clock without scheduling a tick.
     explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
                                 const WorldClock& clock = WorldClock{});
+    // Copies retain authoritative registers and start with fresh publication scratch.
+    ActiveRegionLedger(const ActiveRegionLedger& other);
+    ActiveRegionLedger& operator=(const ActiveRegionLedger& other);
+    ActiveRegionLedger(ActiveRegionLedger&&) noexcept = default;
+    ActiveRegionLedger& operator=(ActiveRegionLedger&&) noexcept = default;
     [[nodiscard]] const std::map<RegionKey, ActiveRegionRecord>& records() const {
         return m_records;
     }
@@ -188,7 +194,7 @@ public:
     bool acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at);
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
-        return m_energyAges;
+        return m_scheduleRegisters ? m_scheduleRegisters->m_energyAges : m_energyAges;
     }
     // Missing register returns false without changing age.
     bool energy_age(const RegionKey& key, std::uint64_t& age) const noexcept;
@@ -197,6 +203,14 @@ public:
     // without changing any register.
     bool set_energy_age(const RegionKey& key, std::uint64_t age);
     bool set_energy_ages(const EnergyAges& ages);
+    // Prepare sparse consumer registers without copying records or unchanged ages.
+    // Preparation can allocate/refuse; publication only transfers prepared nodes.
+    bool prepare_energy_work(std::span<const std::pair<RegionKey, std::uint64_t>> ages,
+                             std::span<const RegionWork> work);
+    // Requires a successful preparation with no intervening ledger mutation.
+    void commit_energy_work() noexcept;
+    [[nodiscard]] std::size_t energy_publication_growths() const noexcept;
+    [[nodiscard]] std::size_t energy_publication_age_visits() const noexcept;
     void reset_energy_ages() noexcept {
         m_energyAges.clear();
     }
@@ -227,7 +241,7 @@ public:
         m_completedWork.clear();
     }
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& completed_work() const {
-        return m_completedWork;
+        return m_scheduleRegisters ? m_scheduleRegisters->m_completedWork : m_completedWork;
     }
     // An accepted partial save may have an older ledger than its clock. Raise
     // only the validation ceiling on load; never run catch-up, alter any region
@@ -277,6 +291,12 @@ private:
                                std::optional<std::size_t> completed_owners = std::nullopt,
                                bool allocator_advanced = false,
                                std::optional<std::size_t> record_count = std::nullopt) const;
+    // A scheduling candidate borrows immutable registers until its record changes commit.
+    // Ordinary ledger copies still own independent registers.
+    const ActiveRegionLedger* m_scheduleRegisters = nullptr;
+    struct EnergyPublication;
+    // Derived scratch for sparse transactional energy publication.
+    std::shared_ptr<EnergyPublication> m_energyPublication;
     std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;
