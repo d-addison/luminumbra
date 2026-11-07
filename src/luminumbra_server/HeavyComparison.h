@@ -1,12 +1,15 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/GroundObjectStore.h"
 
@@ -17,6 +20,7 @@ struct HeavyHashes {
     std::string world_hash;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
     std::string scent_hash;
+    std::vector<std::uint64_t> scent_bits;
     bool active_regions = false;
     std::string clock_bytes;
     std::string ledger_bytes;
@@ -25,6 +29,30 @@ struct HeavyHashes {
     std::vector<world::GroundObject> ground_objects;
     std::string ground_notifications;
 };
+
+inline std::vector<std::uint64_t> CaptureScentBits(const luminumbra::ai::ScentField& field) {
+    std::vector<std::uint64_t> bits;
+    for (int ch = 0; ch < field.channels(); ++ch) {
+        for (int z = 0; z < field.height(); ++z) {
+            for (int x = 0; x < field.width(); ++x) {
+                bits.push_back(std::bit_cast<std::uint64_t>(field.Sample(ch, x, z)));
+            }
+        }
+    }
+    return bits;
+}
+
+inline std::string ScentDifference(const HeavyHashes& a, const HeavyHashes& b) {
+    if (a.active_regions || b.active_regions) {
+        if (a.scent_bits != b.scent_bits) {
+            return "scent_grid";
+        }
+        if (a.scent_hash != b.scent_hash) {
+            return "scents";
+        }
+    }
+    return {};
+}
 
 inline std::vector<world::GroundObject>
 CaptureGroundObjects(const world::GroundObjectStore& store) {
@@ -93,7 +121,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 15> kTable{{
+    static const std::array<HeavySubsystem, 16> kTable{{
         {"terrain",
          true,
          false,
@@ -191,12 +219,18 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
              h.sub.mesh += "x";
          }},
         {"scents",
-         false,
-         false,
-         "persisted scent state is reported but not yet asserted by the heavy oracle; the "
-         "activation-slice oracle owns its comparison and negative control",
+         true,
+         true,
+         nullptr,
          [](HeavyHashes& h) {
              h.scent_hash += "x";
+         }},
+        {"scent_grid",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.scent_bits.push_back(1);
          }},
         {"world_hash",
          false,
@@ -211,13 +245,14 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
 
 // Equality over AUTHORITATIVE SIMULATION STATE (terrain SDF + water sim +
 // entities + ground objects). Legacy loads restart at tick zero. With the persisted clock on,
-// ambient fields and the clock must also agree at save and after continuation.
+// ambient fields, scent and the clock must also agree at save and after continuation.
 inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     if (a.active_regions || b.active_regions) {
         if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
             a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
             a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
-            a.sub.aether_state != b.sub.aether_state) {
+            a.sub.aether_state != b.sub.aether_state || a.scent_hash != b.scent_hash ||
+            a.scent_bits != b.scent_bits) {
             return false;
         }
     }

@@ -1,20 +1,40 @@
 #include <array>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <limits>
 #include <set>
 #include <span>
 #include <string>
+#include <system_error>
 
+#include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 #include "luminumbra_server/HeavyComparison.h"
 
 namespace {
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
+using Luminumbra::Server::CaptureScentBits;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::HeavySubsystem;
 using Luminumbra::Server::HeavySubsystemTable;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::Server::ScentDifference;
+using Luminumbra::world::GameSession;
 using Luminumbra::world::GroundObject;
 using Luminumbra::world::GroundObjectStore;
 
@@ -30,6 +50,7 @@ HeavyHashes MakeBase(bool active_regions) {
     h.sub.aether = "aether";
     h.sub.aether_state = "aether_state";
     h.scent_hash = "scents";
+    h.scent_bits = {0, 0x3ff0000000000000ULL};
     h.active_regions = active_regions;
     h.clock_bytes = "clock";
     h.ledger_bytes = "ledger";
@@ -52,6 +73,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
     [[maybe_unused]] const auto& [world_hash,
                                   sub,
                                   scent_hash,
+                                  scent_bits,
                                   active_regions,
                                   clock_bytes,
                                   ledger_bytes,
@@ -65,7 +87,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   weather,
                                   aether,
                                   aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 8;
+    constexpr std::size_t kTopLevelFields = 9;
     constexpr std::size_t kSubFields = 8;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
@@ -88,6 +110,7 @@ TEST(HeavyComparison, TableCoversEveryHashField) {
                                          "aether_state",
                                          "mesh",
                                          "scents",
+                                         "scent_grid",
                                          "world_hash"};
     std::set<std::string> names;
     for (const auto& row : table) {
@@ -158,6 +181,183 @@ TEST(HeavyComparison, OneSideActiveIsNotEqual) {
     const HeavyHashes inactive = MakeBase(false);
     EXPECT_FALSE(AuthoritativeStateEqual(active, inactive));
     EXPECT_FALSE(AuthoritativeStateEqual(inactive, active));
+}
+
+void CheckScentHashComparison() {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        const HeavyHashes base = MakeBase(active_regions);
+        HeavyHashes changed = base;
+        changed.scent_hash += "x";
+        EXPECT_EQ(changed.scent_bits, base.scent_bits);
+        EXPECT_EQ(changed.world_hash, base.world_hash);
+        EXPECT_EQ(AuthoritativeStateEqual(base, changed), !active_regions);
+        EXPECT_EQ(AuthoritativeStateEqual(changed, base), !active_regions);
+        EXPECT_EQ(ScentDifference(base, changed), active_regions ? "scents" : "");
+        EXPECT_EQ(ScentDifference(changed, base), active_regions ? "scents" : "");
+    }
+}
+
+void CheckLiveScentGridPerturbation() {
+    luminumbra::ai::ScentField field(3, 2, 4);
+    field.RestoreCell(3, 2, 1, 8.0);
+    const auto before = CaptureScentBits(field);
+    ASSERT_EQ(before.size(), 24u);
+    EXPECT_EQ(before.back(), std::bit_cast<std::uint64_t>(8.0));
+    field.RestoreCell(3, 2, 1, std::bit_cast<double>(before.back() ^ std::uint64_t{1}));
+    const auto after = CaptureScentBits(field);
+    ASSERT_EQ(after.size(), before.size());
+    for (std::size_t i = 0; i + 1 < before.size(); ++i) {
+        EXPECT_EQ(before[i], after[i]);
+    }
+    EXPECT_EQ(before.back() ^ after.back(), 1u);
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        HeavyHashes base = MakeBase(active_regions);
+        base.scent_bits = before;
+        HeavyHashes changed = base;
+        changed.scent_bits = after;
+        EXPECT_EQ(changed.scent_hash, base.scent_hash);
+        EXPECT_EQ(changed.ledger_bytes, base.ledger_bytes);
+        EXPECT_EQ(AuthoritativeStateEqual(base, changed), !active_regions);
+        EXPECT_EQ(AuthoritativeStateEqual(changed, base), !active_regions);
+        EXPECT_EQ(ScentDifference(base, changed), active_regions ? "scent_grid" : "");
+        EXPECT_EQ(ScentDifference(changed, base), active_regions ? "scent_grid" : "");
+    }
+}
+
+TEST(HeavyComparison, ScentHashComparesOnlyWithActiveRegions) {
+    CheckScentHashComparison();
+}
+
+TEST(HeavyComparison, LiveScentGridDetectsOneBitPerturbationIndependentlyOfHash) {
+    CheckLiveScentGridPerturbation();
+}
+
+class HeavyScentSessionTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        namespace fs = std::filesystem;
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("heavy_scent_");
+        const fs::path source(LUMINUMBRA_SOURCE_ROOT);
+        const auto presets = root_ / "worlds/atlas/presets";
+        fs::create_directories(presets);
+        fs::copy_file(source / "worlds/atlas/presets/default.json", presets / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(source, root_);
+        jobs_.startup(1);
+    }
+
+    void TearDown() override {
+        jobs_.shutdown();
+        std::error_code error;
+        std::filesystem::remove_all(root_, error);
+    }
+
+    void Configure(GameSession& session) {
+        session.SetRootPath(root_.string() +
+                            static_cast<char>(std::filesystem::path::preferred_separator));
+        session.SetJobSystem(&jobs_);
+        session.SetActiveRegionsEnabled(true);
+        session.SetWaterHighResEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetRegionSchedulerConfig({std::numeric_limits<std::uint64_t>::max(), 10000, 2});
+    }
+
+private:
+    std::filesystem::path root_;
+    Luminumbra::JobSystem jobs_;
+};
+
+HeavyHashes CaptureSessionState(GameSession& session) {
+    HeavyHashes h;
+    h.active_regions = session.ActiveRegionsEnabled();
+    h.clock_bytes = session.GetWorldClock().canonical_bytes();
+    h.ledger_bytes = session.GetActiveRegionLedger().canonical_bytes();
+    h.ground_objects = CaptureGroundObjects(session.GetGroundObjects());
+    h.ground_notifications = session.CaptureGroundNotifications().canonical_bytes();
+    h.scent_hash = session.ComputeScentSubHash();
+    h.scent_bits = CaptureScentBits(*session.GetScentField());
+    auto* world = session.GetWorldSystem();
+    world->wait_for_streaming_jobs();
+    Luminumbra::WorldStreamingState state;
+    for (const auto& chunk : world->snapshot_streamed_chunks()) {
+        state.insert_chunk(chunk);
+    }
+    h.sub = Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(
+        state, world->GetWaterSimWindowCursor());
+    h.sub.wind = session.GetWindFieldSystem()->ComputeWindSubHash();
+    h.sub.weather = session.GetWeatherSystem()->ComputeWeatherSubHash();
+    h.sub.aether = session.GetAetherFieldSystem()->ComputeAetherSubHash();
+    h.sub.aether_state = session.ComputeAetherStateSubHash();
+    if (!h.sub.aether_state.empty()) {
+        h.sub.aether =
+            Luminumbra::Persistence::StableChecksum(h.sub.aether + "|state:" + h.sub.aether_state);
+    }
+    return h;
+}
+
+entt::entity AddScentEmitter(GameSession& session) {
+    namespace C = Luminumbra::Components;
+    auto& registry = session.GetRegistry();
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = session.GetMetadata().spawnPoint;
+    auto& emitter = registry.emplace<C::SensableComponent>(entity);
+    emitter.scent_channel = 3;
+    emitter.scent_deposit = 8.0f;
+    return entity;
+}
+
+bool AdvanceScentSession(GameSession& session) {
+    return session.TickSimulation(session.GetSimulationClock().fixed_dt()) == 1u &&
+           !session.GetRegionSchedulerFault();
+}
+
+void ExpectSessionStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
+    EXPECT_EQ(a.scent_bits, b.scent_bits);
+    EXPECT_EQ(a.scent_hash, b.scent_hash);
+    EXPECT_TRUE(ScentDifference(a, b).empty());
+    EXPECT_TRUE(AuthoritativeStateEqual(a, b));
+    EXPECT_TRUE(AuthoritativeStateEqual(b, a));
+}
+
+void ExpectScentChanged(const HeavyHashes& before, const HeavyHashes& after) {
+    EXPECT_NE(before.scent_bits, after.scent_bits);
+    EXPECT_NE(before.scent_hash, after.scent_hash);
+}
+
+TEST_F(HeavyScentSessionTest, SavedScentMatchesReopenedSessionAndContinuedSimulation) {
+    GameSession original, reopened;
+    Configure(original);
+    ASSERT_TRUE(original.CreateWorld("Heavy scent", "1337", "default"));
+    original.SetReplicatedSimulationAnchors({});
+    original.PinActiveRegion(
+        Luminumbra::world::ActiveRegionLedger::region_at(original.GetMetadata().spawnPoint), true);
+    const auto emitter = AddScentEmitter(original);
+    ASSERT_TRUE(AdvanceScentSession(original));
+    original.GetRegistry().destroy(emitter);
+    ASSERT_TRUE(AdvanceScentSession(original));
+    ASSERT_FALSE(original.GetFieldPages().scent_cells().empty());
+    ASSERT_TRUE(original.SaveWorld());
+    ASSERT_TRUE(
+        Luminumbra::Persistence::WorldSaveService::validate_save(original.GetWorldSaveDir()));
+    const auto saved = CaptureSessionState(original);
+    ASSERT_FALSE(saved.scent_hash.empty());
+    ASSERT_EQ(saved.scent_bits.size(), 65536u);
+
+    Configure(reopened);
+    ASSERT_TRUE(reopened.LoadWorld(original.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    ExpectSessionStateEqual(saved, CaptureSessionState(reopened));
+
+    AddScentEmitter(original);
+    AddScentEmitter(reopened);
+    for (int tick = 0; tick < 3; ++tick) {
+        SCOPED_TRACE(tick);
+        ASSERT_TRUE(AdvanceScentSession(original));
+        ASSERT_TRUE(AdvanceScentSession(reopened));
+        ExpectSessionStateEqual(CaptureSessionState(original), CaptureSessionState(reopened));
+    }
+    ExpectScentChanged(saved, CaptureSessionState(original));
 }
 
 GroundObject MakeGroundObject() {
