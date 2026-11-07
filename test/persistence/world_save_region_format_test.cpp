@@ -456,6 +456,19 @@ TEST(WorldSaveRegionFormat, ChunkEncodingInFlightLimitSerializesWithoutChangingB
     EXPECT_EQ(expected, ReadFileBytes(WorldSaveService::region_file_path(limited.path, 0, 0)));
 }
 
+TEST(WorldSaveRegionFormat, SnapshotInputByteCountMatchesTheCapturedBytes) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 3);
+    const auto sparse = AddFixtureChunk(state, IVec3(40, 1, 5), 9u);
+    for (const auto& chunk : state.snapshot_chunks()) {
+        SCOPED_TRACE(chunk->get_id());
+        EXPECT_EQ(P::ChunkSnapshotInputByteCount(*chunk),
+                  P::ChunkSnapshotInputBytes(*chunk).size());
+    }
+    EXPECT_EQ(P::ChunkSnapshotInputByteCount(*sparse), P::ChunkSnapshotInputBytes(*sparse).size());
+}
+
 TEST(WorldSaveRegionFormat, GuardedJsonDumpKeepsNonAsciiTextAsUtf8) {
     namespace P = Luminumbra::Persistence;
     const nlohmann::json value = {{"name", "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x8C\x8D"},

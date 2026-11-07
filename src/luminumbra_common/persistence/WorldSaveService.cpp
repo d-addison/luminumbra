@@ -2454,10 +2454,11 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
         auto& item = work[index];
         std::size_t admitted = 0;
         try {
-            // Captured as the record is claimed, so only the records being encoded hold a copy
-            // and a failing save never stages the rest of the region.
-            item.inputs = ChunkSnapshotInputBytes(*item.chunk);
-            const std::size_t estimate = item.inputs.size() * kEncodeInFlightFactor;
+            // The budget is reserved from the snapshot size before anything is copied, so
+            // workers waiting here hold no buffers, and a failing save never stages the rest of
+            // the region.
+            const std::size_t estimate =
+                ChunkSnapshotInputByteCount(*item.chunk) * kEncodeInFlightFactor;
             in_flight.acquire(estimate);
             admitted = estimate;
             if (index > first_failure.load(std::memory_order_relaxed)) {
@@ -2467,6 +2468,7 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             }
             if (hook)
                 hook(index);
+            item.inputs = ChunkSnapshotInputBytes(*item.chunk);
             const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
             if (!CompressPayload(payload, item.record, &item.errors)) {
                 in_flight.release(admitted);

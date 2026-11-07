@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace Luminumbra::Persistence {
@@ -69,7 +70,9 @@ const std::vector<std::string>& PersistedFields() {
 
 // The JSON serializer's constructor calls localeconv, which can write shared libc storage even
 // when the process locale is unchanged. Every serializer built by this file is constructed under
-// this lock so concurrent record encoders, snapshot writers and hashers cannot race there.
+// this lock so concurrent record encoders, snapshot writers and hashers cannot race there. The
+// serializer copies the decimal point and thousands separator into its own members while it is
+// constructed, so once the lock is released it no longer reads the shared locale storage.
 std::mutex& ChunkRecordSerializerConstructionMutex() {
     static std::mutex mutex;
     return mutex;
@@ -1213,17 +1216,10 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
-std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
-    std::string bytes;
-    const auto scalar = [&bytes](const auto& value) {
-        bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
-    };
-    const auto array = [&bytes, &scalar](const auto& values) {
-        scalar(values.size());
-        if (!values.empty())
-            bytes.append(reinterpret_cast<const char*>(values.data()),
-                         values.size() * sizeof(values.front()));
-    };
+namespace {
+// One field list for the exact input identity and its size, so the two cannot drift apart.
+template<typename Scalar, typename Array>
+void VisitChunkSnapshotInputs(const Chunk& chunk, Scalar&& scalar, Array&& array) {
     scalar(chunk.get_coords());
     scalar(chunk.get_id());
     scalar(chunk.get_state());
@@ -1260,7 +1256,35 @@ std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
     scalar(chunk.water_mesh_dirty_ticks);
     scalar(chunk.has_water_authority());
     scalar(chunk.has_terrain_authority());
+}
+} // namespace
+
+std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
+    std::string bytes;
+    const auto scalar = [&bytes](const auto& value) {
+        bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    const auto array = [&bytes, &scalar](const auto& values) {
+        scalar(values.size());
+        if (!values.empty())
+            bytes.append(reinterpret_cast<const char*>(values.data()),
+                         values.size() * sizeof(values.front()));
+    };
+    VisitChunkSnapshotInputs(chunk, scalar, array);
     return bytes;
+}
+
+std::size_t ChunkSnapshotInputByteCount(const Chunk& chunk) {
+    std::size_t count = 0;
+    const auto scalar = [&count](const auto& value) {
+        count += sizeof(value);
+    };
+    const auto array = [&count, &scalar](const auto& values) {
+        scalar(values.size());
+        count += values.size() * sizeof(typename std::decay_t<decltype(values)>::value_type);
+    };
+    VisitChunkSnapshotInputs(chunk, scalar, array);
+    return count;
 }
 
 namespace {
