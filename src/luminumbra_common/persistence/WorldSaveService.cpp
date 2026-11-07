@@ -7272,20 +7272,26 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                     return false;
                 const auto& chunk = item.chunk;
                 auto& record = item.record;
-                const auto& inputs = item.inputs;
+                auto& inputs = item.inputs;
                 const auto water_authority = item.water_authority;
                 const auto existing = record_index.find({record.lod_level, record.id});
                 // Non-finite values serialize as null, which decoding rejects; a concurrent
                 // authority change leaves the encoded field unknown. Both stay with a real decode.
                 if (water_authority == chunk->has_water_authority() && !item.has_null) {
+                    // The cache takes the captured bytes themselves, so the merge never holds a
+                    // second copy of a region's inputs.
+                    std::string cached = inputs == ChunkSnapshotInputBytes(*chunk)
+                                             ? std::move(inputs)
+                                             : std::string{};
                     encoded.push_back(
                         {existing != record_index.end() ? existing->second : records.size(),
                          ChunkRecordFacts{chunk->get_coords(),
                                           SdfLatticeAdmissible(*chunk),
                                           water_authority ||
                                               (record.flags & kRecordFlagEdited) != 0u},
-                         inputs == ChunkSnapshotInputBytes(*chunk) ? inputs : std::string{}});
+                         std::move(cached)});
                 }
+                std::string().swap(inputs);
 
                 if (existing != record_index.end()) {
                     changed = changed || ChunkRecordKeyOf(records[existing->second]) !=
