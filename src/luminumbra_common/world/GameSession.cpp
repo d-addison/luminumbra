@@ -3593,6 +3593,9 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                             m_activeRegionLedger.energy_ages()))
                     throw std::length_error("Regional energy owners or ages do not match ledger");
                 energy_bytes = energy_snapshot.SerializeRegionalRecord();
+                // Empty payloads omit EFS1, but a nondefault channel count must survive reopen.
+                if (energy_bytes.empty() && energy_snapshot.channels() != 2)
+                    energy_bytes = "EFS2 " + std::to_string(energy_snapshot.channels()) + " 0\n";
                 remove_energy = energy_bytes.empty();
             } else {
                 if (energy_snapshot.page_count() == 0) {
@@ -3957,7 +3960,8 @@ bool GameSession::ReadPreparedWorldState(
                                    : (resetting_clock ? std::uint64_t{0} : options.simulation_tick);
         // Only the synchronous snapshot wrapper supplies existing energy. Worker
         // preparation passes nullptr and never reads a live session object.
-        if (current_energy)
+        // Regional absence always denotes the default two channels.
+        if (current_energy && !options.active_regions)
             state.energy.emplace(*current_energy);
         else
             state.energy.emplace(2);

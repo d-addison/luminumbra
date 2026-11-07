@@ -221,7 +221,9 @@ public:
     // in the legacy phase slot, since all regional cadence lives in ARL4.
     // An incompatible/oversized legacy object throws length_error, never absence.
     [[nodiscard]] std::string SerializeRegionalRecord() const;
-    // Present records only: empty/header-only/noncanonical inputs refuse atomically.
+    // Present records only: EFS1 needs nonzero pages; EFS2 is exactly an empty
+    // nondefault channel count ("EFS2 <channels> 0\n", channels in [1,64] except 2).
+    // Empty/noncanonical inputs refuse atomically. EFS2 never changes ledger ages.
     bool DeserializeRegionalRecord(const std::string& record);
     // Admission only: translate a legacy next-fire offset into durable owner ages,
     // including empty owners, before regional stepping starts. The caller stages both objects;

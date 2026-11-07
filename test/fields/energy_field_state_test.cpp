@@ -40,8 +40,9 @@ struct EnergyFieldStateTestAccess {
     static void TamperPageShape(EnergyFieldState& field, int px, int pz) {
         field.m_pages.at(EnergyFieldState::PackPageKey(px, pz)).values.pop_back();
     }
-    static void SetOriginChannelOne(EnergyFieldState& field, std::uint16_t value) {
-        field.m_pages.at(EnergyFieldState::PackPageKey(0, 0)).values[1] = value;
+    static void
+    SetOriginChannel(EnergyFieldState& field, std::size_t channel, std::uint16_t value) {
+        field.m_pages.at(EnergyFieldState::PackPageKey(0, 0)).values[channel] = value;
         ForgetPageFacts(field, 0, 0);
         Invalidate(field);
     }
@@ -919,6 +920,24 @@ TEST(RegionalEnergy, RegionalDecoderRefusesNoncanonicalPresentRecordsAtomically)
     const auto before = field.SerializeRegionalRecord();
     const std::vector<std::string> refused{"",
                                            "EFS1 1 0\n",
+                                           "EFS1 2 0\n",
+                                           "EFS1 5 0\n",
+                                           "EFS2 0 0\n",
+                                           "EFS2 2 0\n",
+                                           "EFS2 65 0\n",
+                                           "EFS2 -1 0\n",
+                                           "EFS2 2147483648 0\n",
+                                           "EFS2 5 1\n",
+                                           "EFS2 05 0\n",
+                                           "EFS2 +5 0\n",
+                                           "EFS2 5 -0\n",
+                                           "EFS2 5 0",
+                                           "EFS2 5 0 \n",
+                                           "EFS2  5 0\n",
+                                           "EFS2 5 0\n\n",
+                                           "EFS2 5 0 extra\n",
+                                           "EFS2 5 0\nP 0 0 0:1\n",
+                                           "EFS3 5 0\n",
                                            "EFS1 1 1\nP 0 0 0:1\n",
                                            "EFS1 0 0\nP 0 0 0:1\n",
                                            "EFS1 65 0\nP 0 0 0:1\n",
@@ -948,6 +967,30 @@ TEST(RegionalEnergy, RegionalDecoderRefusesNoncanonicalPresentRecordsAtomically)
     EXPECT_FALSE(field.DeserializeRegionalRecord(
         std::string(EnergyFieldState::kMaxRegionalRecordBytes + 1, 'x')));
     EXPECT_EQ(field.SerializeRegionalRecord(), before);
+}
+
+TEST(RegionalEnergy, EmptyChannelRecordsRestoreOnlyCanonicalNondefaultCounts) {
+    for (const int channels : {1, 5, 16, 64}) {
+        SCOPED_TRACE(channels);
+        EnergyFieldState field(2);
+        ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 2 0\nP 0 0 0:100\n"));
+        ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 10));
+        ASSERT_TRUE(field.DeserializeRegionalRecord("EFS2 " + std::to_string(channels) + " 0\n"));
+        EXPECT_EQ(field.channels(), channels);
+        EXPECT_EQ(field.page_count(), 0u);
+        EXPECT_TRUE(field.CanonicalRegionalBytes().empty());
+        EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+        EXPECT_FALSE(field.OwnsRegion({0, 0}));
+        EXPECT_FALSE(field.ValidateRegionalOwners({}, {{{0, 0}, 5}}));
+        const auto records = TwoEnergyOwners();
+        const EnergyAges ages{{{0, 0}, 5}, {{1, 0}, 7}};
+        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+        ASSERT_TRUE(field.QueueRegionalDeposit(2, 0, 0, channels - 1, 777));
+        const std::array due{RegionKey{0, 0}};
+        const auto result = RegionalStep(field, 1, records, due, ages);
+        EXPECT_EQ(result.ages.at({0, 0}), 6u);
+        EXPECT_EQ(field.at_cell(0, 0, channels - 1), 777u);
+    }
 }
 
 TEST(RegionalEnergy, JointRestoreRequiresAgesForEveryNonzeroOwner) {
@@ -1432,13 +1475,38 @@ TEST(RegionalEnergy, RecordByteBoundariesCoverWriterDecoderAndCachedTick) {
         const std::array due{RegionKey{0, 0}};
         EnergyResult result;
         if (delta == 1) {
+            result.ages = {{{9, 9}, 42}};
+            result.work = {{{9, 9}, 1, 2, 3, 4}};
+            result.clipped_raw = 99;
+            result.staged_pages = 123;
+            result.diffusion_pages = 456;
             // The decoded budget is unchanged and one deposit is well below its cap.
             EXPECT_FALSE(field.TickRegional(1, records, due, ages, result));
+            EXPECT_EQ(result.ages, (EnergyAges{{{9, 9}, 42}}));
+            ASSERT_EQ(result.work.size(), 1u);
+            EXPECT_EQ(result.work[0].key, (RegionKey{9, 9}));
+            EXPECT_EQ(result.work[0].region_ticks, 1u);
+            EXPECT_EQ(result.work[0].entity_updates, 2u);
+            EXPECT_EQ(result.work[0].water_cells, 3u);
+            EXPECT_EQ(result.work[0].page_updates, 4u);
+            EXPECT_EQ(result.clipped_raw, 99u);
+            EXPECT_EQ(result.staged_pages, 123u);
+            EXPECT_EQ(result.diffusion_pages, 456u);
             EXPECT_EQ(field.at_cell(0, 0, 1), 5535u);
             EXPECT_TRUE(field.SerializeRegionalRecord() == record);
             // The writer independently refuses the identical over-limit state.
-            EnergyFieldStateTestAccess::SetOriginChannelOne(field, 65535);
+            EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 65535);
             EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
+            // Restore channel 1, then free two encoded bytes in channel 2 without
+            // copying the fixture. The original queued deposit grows channel 1 by one byte.
+            EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 5535);
+            EnergyFieldStateTestAccess::SetOriginChannel(field, 2, 535);
+            ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+            EXPECT_EQ(field.at_cell(0, 0, 1), 65535u);
+            EXPECT_EQ(field.at_cell(0, 0, 2), 535u);
+            EXPECT_EQ(result.ages.at({0, 0}), 1u);
+            EXPECT_EQ(result.clipped_raw, 0u);
+            EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
         } else {
             ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
             EXPECT_TRUE(field.SerializeRegionalRecord() == record);
