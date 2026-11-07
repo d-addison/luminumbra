@@ -11645,12 +11645,18 @@ void CheckSessionScentCapacityRetention(bool floors, RegionState historical_stat
         EXPECT_EQ(session.GetWorldClock().tick(), 32u + static_cast<unsigned>(tick));
         if (historical_state == RegionState::Frozen) {
             EXPECT_EQ(session.GetFieldPages().serialize(), before);
+            EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(frozen_owner));
         } else {
             EXPECT_NE(session.GetFieldPages().region_bytes(frozen_owner),
                       fields.region_bytes(frozen_owner));
             EXPECT_GT(session.GetScentField()->Sample(0, 65, 65), FieldPageState::kScentFloor);
             EXPECT_GT(session.GetFieldPages().scent_at({129, 129})[0],
                       std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor));
+            if (tick == 0) {
+                const auto& completed = session.GetActiveRegionLedger().completed_work();
+                ASSERT_TRUE(completed.contains(frozen_owner));
+                EXPECT_GT(completed.at(frozen_owner), 0u);
+            }
         }
         EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).state,
                   historical_state);

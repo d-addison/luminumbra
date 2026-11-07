@@ -47,16 +47,20 @@ struct RegionalStrike {
 };
 using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative binary64 concentrations
 
-// A near window intersects at most four owners. No nodes are allocated for work counts.
+// A near window intersects at most four owners. Ordinary captures allocate no work storage.
 struct ScentWindowWork {
     std::array<std::pair<RegionKey, std::uint64_t>, 4> entries{};
+    // Only capacity retirement uses this complete, sorted owner list. Before coalescing,
+    // it holds at most four near owners plus one row per retired sparse cell/floor block;
+    // the shared retirement scan budget bounds those rows by twice the window cell count.
+    std::vector<std::pair<RegionKey, std::uint64_t>> retirement_entries;
     std::size_t count = 0;
     void add(RegionKey owner);
     auto begin() const {
-        return entries.begin();
+        return retirement_entries.empty() ? entries.data() : retirement_entries.data();
     }
     auto end() const {
-        return entries.begin() + static_cast<std::ptrdiff_t>(count);
+        return begin() + static_cast<std::ptrdiff_t>(count);
     }
 };
 
@@ -233,7 +237,7 @@ public:
                             int side,
                             std::span<const ScentCell> cells,
                             std::map<RegionKey, std::uint64_t>& work);
-    // Runtime overload keeps counts in fixed storage. Only owners approved by can_retire
+    // Runtime overload keeps ordinary counts in fixed storage. Only owners approved by can_retire
     // may lose historical entries; the caller must exclude frozen/cached authority.
     // At capacity, inspect at most twice the window's cell count across both stores.
     bool stage_scent_window(const FieldPageState& source,

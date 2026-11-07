@@ -1108,6 +1108,57 @@ bool RetireScentHistory(const std::map<ScentCellKey, ScentCell>& source,
     }
     return excess == 0;
 }
+void CountRetiredScentWork(const std::map<ScentCellKey, ScentCell>& floors,
+                           std::span<const std::pair<ScentCellKey, ScentCell>> retired_cells,
+                           std::span<const std::pair<ScentCellKey, ScentCell>> retired_blocks,
+                           ScentWindowWork& work) {
+    if (retired_cells.empty() && retired_blocks.empty()) {
+        return;
+    }
+    auto& entries = work.retirement_entries;
+    entries.reserve(work.count + retired_cells.size() + retired_blocks.size());
+    entries.insert(entries.end(), work.begin(), work.end());
+    for (const auto& [key, values] : retired_cells) {
+        (void)values;
+        entries.emplace_back(FieldPageState::region_of_scent_cell(key), 1);
+    }
+    for (const auto& [key, values] : retired_blocks) {
+        (void)values;
+        const auto& masks = floors.find(key)->second;
+        auto bits = masks[0] | masks[1] | masks[2] | masks[3];
+        std::uint64_t updates = 0;
+        while (bits != 0) {
+            const auto bit = std::countr_zero(bits);
+            const ScentCellKey cell{key.x + bit / 8, key.z + bit % 8};
+            const auto found = std::lower_bound(
+                retired_cells.begin(),
+                retired_cells.end(),
+                cell,
+                [](const auto& entry, ScentCellKey target) { return entry.first < target; });
+            // Count a changed cell once, even if both explicit channels and floor masks retire.
+            updates +=
+                static_cast<std::uint64_t>(found == retired_cells.end() || found->first != cell);
+            bits &= bits - 1;
+        }
+        if (updates != 0) {
+            // Aligned 8 x 8 floor blocks cannot cross a 512-cell ownership boundary.
+            entries.emplace_back(FieldPageState::region_of_scent_cell(key), updates);
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    std::size_t count = 0;
+    for (const auto& entry : entries) {
+        if (count != 0 && entries[count - 1].first == entry.first) {
+            entries[count - 1].second += entry.second;
+        } else {
+            entries[count++] = entry;
+        }
+    }
+    entries.resize(count);
+    work.count = count;
+}
 void AdoptScentChanges(std::map<ScentCellKey, ScentCell>& live,
                        std::vector<std::pair<ScentCellKey, ScentCell>>& changes,
                        std::map<ScentCellKey, ScentCell>& admitted) noexcept {
@@ -1124,6 +1175,19 @@ void AdoptScentChanges(std::map<ScentCellKey, ScentCell>& live,
 } // namespace
 
 void ScentWindowWork::add(RegionKey owner) {
+    if (!retirement_entries.empty()) {
+        auto found = std::lower_bound(
+            retirement_entries.begin(),
+            retirement_entries.end(),
+            owner,
+            [](const auto& entry, RegionKey target) { return entry.first < target; });
+        if (found == retirement_entries.end() || found->first != owner) {
+            found = retirement_entries.emplace(found, owner, 0);
+        }
+        ++found->second;
+        count = retirement_entries.size();
+        return;
+    }
     std::size_t index = 0;
     while (index < count && entries[index].first < owner) {
         ++index;
@@ -1297,6 +1361,8 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
         return false;
     }
     auto retirement_budget = cells.size() * 2;
+    const auto changed_cells = changes.size();
+    const auto changed_blocks = floor_changes.size();
     if (!RetireScentHistory(source.m_scent,
                             origin,
                             side,
@@ -1317,12 +1383,16 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
                             visits)) {
         return false;
     }
+    CountRetiredScentWork(source.m_scentFloors,
+                          std::span(changes).subspan(changed_cells),
+                          std::span(floor_changes).subspan(changed_blocks),
+                          completed);
     m_scentChanges.changes.swap(changes);
     m_scentChanges.floors.swap(floor_changes);
     m_scentUpdates.swap(admitted);
     m_scentFloorUpdates.swap(floor_admitted);
     m_scentCaptureVisits = visits;
-    work = completed;
+    work = std::move(completed);
     return true;
 }
 

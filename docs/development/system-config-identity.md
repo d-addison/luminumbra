@@ -33,8 +33,8 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
-revision (u32, currently 4). All six values are included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
+revision (u32, currently 5). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000105000000`.
 The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
 `0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
