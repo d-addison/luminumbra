@@ -517,6 +517,46 @@ both GNS and Steam sockets. Loopback and TCP always deliver reliably and ignore
 libraries; that compile coverage does not test a live GNS/Steam multi-client
 connection. The owner-provided Steam SDK needs separate build validation.
 
+#### Field-page save format (FPG1)
+
+`chunks/region/field-pages.fpg` uses explicit little-endian integers, without C++
+struct padding. Its 12-byte header contains `FPG1`, a u16 version, the u16 channel
+mask (31), and a u32 section count. Nonempty sections appear in ascending type
+order: u16 type, u32 payload length, u32 record count, then records. The payload
+length includes the four-byte count. An eight-byte FNV-1a-64 footer covers all
+preceding bytes (offset basis 14695981039346656037, prime 1099511628211).
+An empty store writes no file; the total file limit is 64 MiB.
+
+Version 3 adds section 8 for compact scent floors. Each 40-byte record contains
+signed i32 world-cell x and z, both aligned to multiples of eight, followed by
+four u64 masks in scent-channel order. The block spans 8 x 8 one-metre cells;
+bit `(cell_x - x) * 8 + (cell_z - z)` represents the exact binary64 concentration
+`1.0e-9` in that channel. Cleared bits contribute zero. At least one mask must
+be nonzero. Blocks are unique and sorted by signed (x, z). Both coordinates must
+lie in `[-16777216, 16777216)`. Section 8 holds at most 4096 blocks; section 4
+continues to hold at most 65536 explicit scent cells, each with four binary64
+bit patterns. A floor bit and a nonzero explicit value cannot occupy the same
+cell/channel. Other channels in the same cell can use either representation.
+
+The writer selects v3 exactly when floor blocks are present, and v2 otherwise.
+The reader accepts v2 and v3, validates the records, and requires byte-identical
+re-encoding: v2 with section 8 and v3 without it are rejected, as are duplicate,
+unordered, empty, conflicting, oversized or otherwise noncanonical records.
+Existing v2 saves keep their bytes, including explicitly stored floor values;
+unchanged captures preserve that encoding. Readers supporting only v2 must
+refuse v3 as an unsupported format rather than silently dropping section 8.
+
+Canonical whole-store identity is `field_pages:v3:` followed by the file bytes
+when floors exist, and `field_pages:v2:` otherwise (empty stores contribute
+nothing). Per-region evolution bytes use `|evolution:v3:` when that owner has
+floor blocks, and `|evolution:v2:` otherwise, with section 8 included only when
+nonempty. Runtime retention protects frozen owners and cached digests. At either
+scent limit, a capture may retire eligible historical entries outside its
+window, in signed (x, z) order. The retirement scan examines at most twice the
+window's cell count. If it cannot free enough storage, the window update is
+refused transactionally, the live grid is restored from authority, and later
+simulation ticks continue.
+
 ## Client framework
 
 The client under `src/luminumbra_client/` owns windowing, input, UI, audio, and

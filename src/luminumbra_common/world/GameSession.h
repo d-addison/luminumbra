@@ -5,8 +5,9 @@
 #include "../ai/CreatureReproductionSystem.h" // ai::ReproductionTuning
 #include "../ai/ForagingSystem.h"             // ai::ForagingParams
 #include "../ai/ScavengingSystem.h"           // ai::ScavengingTuning
-#include "../ai/ThirstSystem.h"               // ai::ThirstTuning
-#include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
+#include "../ai/ScentFieldGates.h"
+#include "../ai/ThirstSystem.h"          // ai::ThirstTuning
+#include "../ai/WildlifeFoliageSystem.h" // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
@@ -285,10 +286,7 @@ public:
     }
 
     // Update spawn point (useful for debugging)
-    void SetSpawnPoint(const Vec3& new_spawn) {
-        m_metadata.spawnPoint = new_spawn;
-        m_preparedInitialChunks.reset();
-    }
+    void SetSpawnPoint(const Vec3& new_spawn);
 
     // Get the world system for chunk generation
     Systems::SHIELD_WorldSystem* GetWorldSystem() {
@@ -345,6 +343,10 @@ public:
     }
     const luminumbra::ai::ScentField* GetScentField() const {
         return m_scentField.get();
+    }
+    // Observational eligibility work; never persisted or included in a hash.
+    [[nodiscard]] std::size_t GetScentEligibilityVisits() const {
+        return m_scentDueCache.query_visits();
     }
     [[nodiscard]] std::string ComputeScentSubHash() const;
 
@@ -537,6 +539,9 @@ public:
     }
     [[nodiscard]] std::size_t GetRegionalWeatherScanCount() const {
         return m_regionalWeatherScanCount;
+    }
+    [[nodiscard]] std::size_t GetRegionalWeatherScheduleVisits() const {
+        return m_regionalWeatherScheduleVisits;
     }
     [[nodiscard]] std::size_t GetRegionalWeatherProjectionVisitCount() const {
         return m_regionalWeatherProjectionVisitCount;
@@ -736,7 +741,7 @@ private:
     std::map<std::uint8_t, std::set<RegionKey>> m_regionalWeatherBoundaryOwners;
     std::map<std::uint8_t, std::set<RegionKey>> m_regionalAmbientOwners;
     std::map<RegionKey, std::uint8_t> m_regionalWeatherBoundaryShifts;
-    std::size_t m_regionalWeatherScanCount = 0;
+    std::size_t m_regionalWeatherScanCount = 0, m_regionalWeatherScheduleVisits = 0;
     std::size_t m_regionalWeatherProjectionVisitCount = 0;
     std::size_t m_regionalWeatherProjectionCount = 0;
     bool ActivateGroundRegion(const GroundObject& object);
@@ -781,6 +786,12 @@ private:
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
     bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
+    std::vector<ScentCell> m_scentCapture;
+    ScentChangeBuffers m_scentChangeBuffers;
+    mutable luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
+    mutable bool m_scentDueCacheValid = false;
+    bool m_scentRecenterPending = false;
+    bool m_regionalWeatherParticipating = false;
     // Immutable species definitions shared with the captured dependency snapshot.
     // Only the forward declaration is needed for the header-only parsing registry.
     std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
@@ -817,7 +828,18 @@ private:
     bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
-    bool HasScentParticipants() const;
+    [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
+    [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentOwnerDue(RegionKey owner) const;
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
+    [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RefreshScentDueCache() const;
+    void RebaseForagingCells(int dx, int dz);
+    void RestoreRegionalScent();
+    void CaptureRegionalScent(std::optional<FieldPageState>& fields);
+    bool AdvanceNearScent(std::optional<FieldPageState>& fields);
+    bool HasScentBorderWork() const;
+    bool HasScentParticipants(bool require_due = true) const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
     std::filesystem::path m_saveRootPath;
