@@ -1,6 +1,7 @@
 #include "WorldSaveService.h"
 #include "CreatedWorldArtifacts.h"
 #include "RegionFileWriteGuard.h"
+#include "WorldSaveEncoding.h"
 #include "core/Profiler.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
@@ -56,6 +57,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -139,12 +141,26 @@ std::atomic<PublicationHook>& PublicationHookForTesting() {
     static std::atomic<PublicationHook> hook{nullptr};
     return hook;
 }
+std::atomic<unsigned>& ChunkEncodeWorkersForTesting() {
+    static std::atomic<unsigned> workers{0};
+    return workers;
+}
+std::atomic<ChunkEncodeHook>& ChunkEncodeHookForTesting() {
+    static std::atomic<ChunkEncodeHook> hook{nullptr};
+    return hook;
+}
 } // namespace
 void set_file_read_observer_for_testing(ReadObserver observer) {
     ReadObserverForTesting().store(observer, std::memory_order_release);
 }
 void set_file_publication_hook_for_testing(PublicationHook hook) {
     PublicationHookForTesting().store(hook, std::memory_order_release);
+}
+void set_chunk_encode_workers_for_testing(unsigned workers) {
+    ChunkEncodeWorkersForTesting().store(workers, std::memory_order_release);
+}
+void set_chunk_encode_hook_for_testing(ChunkEncodeHook hook) {
+    ChunkEncodeHookForTesting().store(hook, std::memory_order_release);
 }
 std::size_t waiting_file_publishers_for_testing(const std::filesystem::path& path) {
     return RegionFileSyncFor(path).waiting_publishers.load(std::memory_order_acquire);
@@ -2361,6 +2377,71 @@ bool CompressPayload(const std::string& payload,
     // LZ4's allocation for the entire uncompressed JSON payload for every chunk in the batch.
     record.compressed_payload.assign(compressed.data(), static_cast<std::size_t>(written));
     return true;
+}
+
+struct ChunkEncodeWork {
+    std::shared_ptr<Chunk> chunk;
+    RegionRecord record;
+    std::string inputs;
+    bool water_authority = false;
+    bool has_null = false;
+    bool success = false;
+    std::vector<std::string> errors{};
+    std::exception_ptr exception{};
+};
+
+void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
+    const auto hook = detail::ChunkEncodeHookForTesting().load(std::memory_order_acquire);
+    const auto encode = [&work, hook](std::size_t index) noexcept {
+        auto& item = work[index];
+        try {
+            if (hook)
+                hook(index);
+            const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
+            if (!CompressPayload(payload, item.record, &item.errors))
+                return;
+            // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
+            item.has_null = payload.find(":null") != std::string::npos ||
+                            payload.find("[null") != std::string::npos ||
+                            payload.find(",null") != std::string::npos;
+            item.success = true;
+        } catch (...) {
+            item.exception = std::current_exception();
+        }
+    };
+
+    unsigned workers = 1;
+    if (work.size() >= 128) {
+        const auto override_workers =
+            detail::ChunkEncodeWorkersForTesting().load(std::memory_order_acquire);
+        workers = std::clamp(
+            override_workers == 0 ? std::thread::hardware_concurrency() : override_workers, 1u, 8u);
+    }
+    if (workers == 1) {
+        for (std::size_t index = 0; index < work.size(); ++index) {
+            encode(index);
+            if (!work[index].success)
+                break;
+        }
+        return;
+    }
+
+    // The session job pool has no owner in this layer. Local workers also keep saves
+    // independent of a caller's pool being quiesced while persistence ownership is held.
+    std::atomic<std::size_t> next{0};
+    std::vector<std::jthread> threads;
+    threads.reserve(workers);
+    for (unsigned worker = 0; worker < workers; ++worker) {
+        threads.emplace_back([&] {
+            for (;;) {
+                const auto index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= work.size())
+                    return;
+                encode(index);
+            }
+        });
+    }
+    // jthread joins before the caller inspects results, including if thread creation throws.
 }
 
 bool DecompressPayload(const RegionRecord& record,
@@ -7157,6 +7238,8 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                                                       std::pair{rhs.lod_level, rhs.id};
                                            });
             encoded.reserve(region_chunks.size());
+            std::vector<ChunkEncodeWork> work;
+            work.reserve(region_chunks.size());
             for (const auto& chunk : region_chunks) {
                 RegionRecord record;
                 record.id = chunk->get_id();
@@ -7169,23 +7252,32 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                 }
                 record.flags = ChunkRecordFlags(*chunk, previous_flags);
 
-                const auto inputs = ChunkSnapshotInputBytes(*chunk);
+                auto inputs = ChunkSnapshotInputBytes(*chunk);
                 if (existing != record_index.end() && record.flags == previous_flags &&
                     AdmittedChunkRecordCache().matches_serialized(
                         ChunkRecordKeyOf(records[existing->second]), inputs))
                     continue;
                 const bool water_authority = chunk->has_water_authority();
-                const std::string payload = SerializeChunkRecordPayloadJson(*chunk);
-                if (!CompressPayload(payload, record, errors)) {
+                work.push_back({chunk, std::move(record), std::move(inputs), water_authority});
+            }
+
+            EncodeChunkRecords(work);
+
+            for (auto& item : work) {
+                for (auto& error : item.errors)
+                    AddError(errors, std::move(error));
+                if (item.exception)
+                    std::rethrow_exception(item.exception);
+                if (!item.success)
                     return false;
-                }
+                const auto& chunk = item.chunk;
+                auto& record = item.record;
+                const auto& inputs = item.inputs;
+                const auto water_authority = item.water_authority;
+                const auto existing = record_index.find({record.lod_level, record.id});
                 // Non-finite values serialize as null, which decoding rejects; a concurrent
                 // authority change leaves the encoded field unknown. Both stay with a real decode.
-                // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
-                const bool has_null = payload.find(":null") != std::string::npos ||
-                                      payload.find("[null") != std::string::npos ||
-                                      payload.find(",null") != std::string::npos;
-                if (water_authority == chunk->has_water_authority() && !has_null) {
+                if (water_authority == chunk->has_water_authority() && !item.has_null) {
                     encoded.push_back(
                         {existing != record_index.end() ? existing->second : records.size(),
                          ChunkRecordFacts{chunk->get_coords(),

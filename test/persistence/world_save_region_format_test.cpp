@@ -12,14 +12,18 @@
 #include "ecs/EntitySnapshot.h"
 #include "persistence/SavedJsonAdmission.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
+#include "persistence/WorldSaveEncoding.h"
 #include "persistence/WorldSaveService.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +32,7 @@
 #include <latch>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -182,6 +187,280 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+// Keep every chunk in region (0, 0); the encoder threshold applies per region.
+void PopulateEncodingWorld(WorldStreamingState& state, int count, int offset_x = 0) {
+    for (int i = 0; i < count; ++i) {
+        auto chunk =
+            AddFixtureChunk(state, {offset_x + i % 16, 0, i / 16}, static_cast<unsigned>(i));
+        constexpr std::size_t kLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Z + 1);
+        chunk->sdf_data.resize(kLattice, 1.0f);
+        chunk->water_level_data.resize(16, 1.0f);
+        chunk->water_flow_data.resize(16, Vec2(0.125f, -0.25f));
+        chunk->water_sim_terrain_height.resize(16, 0.5f);
+        chunk->water_depth_mm.assign(16, 1000);
+        chunk->water_bed_mm.assign(16, 500);
+        chunk->water_edge_flux.assign(32, 0);
+        chunk->current_water_resolution.store(4);
+        chunk->mark_sdf_generated_current_params();
+        if (i % 3 == 0) {
+            chunk->mark_voxel_data_dirty();
+        } else if (i % 3 == 1) {
+            chunk->set_water_authority();
+            chunk->mark_water_data_dirty();
+        }
+    }
+}
+
+class ChunkEncodingControl {
+public:
+    explicit ChunkEncodingControl(unsigned workers, bool rendezvous = false)
+        : m_rendezvous(rendezvous) {
+        Active() = this;
+        Luminumbra::Persistence::detail::set_chunk_encode_workers_for_testing(workers);
+        Luminumbra::Persistence::detail::set_chunk_encode_hook_for_testing(&Observe);
+    }
+    ~ChunkEncodingControl() {
+        Luminumbra::Persistence::detail::set_chunk_encode_hook_for_testing(nullptr);
+        Luminumbra::Persistence::detail::set_chunk_encode_workers_for_testing(0);
+        Active() = nullptr;
+    }
+    ChunkEncodingControl(const ChunkEncodingControl&) = delete;
+    ChunkEncodingControl& operator=(const ChunkEncodingControl&) = delete;
+
+    // Read only after all encoders have joined.
+    unsigned maximum = 0;
+    unsigned calls = 0;
+    bool caller_only = true;
+    std::function<void(std::size_t)> before_encode;
+
+private:
+    static ChunkEncodingControl*& Active() {
+        static ChunkEncodingControl* active = nullptr;
+        return active;
+    }
+    static void Observe(std::size_t index) {
+        auto& control = *Active();
+        {
+            std::unique_lock lock(control.m_mutex);
+            ++control.calls;
+            ++control.m_active;
+            control.maximum = std::max(control.maximum, control.m_active);
+            control.caller_only =
+                control.caller_only && std::this_thread::get_id() == control.m_caller;
+            control.m_entered.notify_all();
+            if (control.m_rendezvous && control.calls == 1) {
+                // A serial regression must fail the overlap assertion instead of hanging.
+                control.m_entered.wait_for(
+                    lock, std::chrono::seconds(5), [&control] { return control.maximum > 1; });
+            }
+            --control.m_active;
+        }
+        if (control.before_encode)
+            control.before_encode(index);
+    }
+    const bool m_rendezvous;
+    const std::thread::id m_caller = std::this_thread::get_id();
+    std::mutex m_mutex;
+    std::condition_variable m_entered;
+    unsigned m_active = 0;
+};
+
+TEST(WorldSaveRegionFormat, ChunkEncodingFansOutOnlyAtTheEncodingThreshold) {
+    for (const int count : {0, 1, 127, 128, 129}) {
+        SCOPED_TRACE(count);
+        TempSaveDir directory("encode_concurrency");
+        WorldStreamingState state;
+        PopulateEncodingWorld(state, count);
+        ChunkEncodingControl control(4, count >= 128);
+        WorldSaveService service;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(service.save_world(state, directory.path, &errors));
+        ASSERT_TRUE(errors.empty());
+        EXPECT_EQ(control.calls, static_cast<unsigned>(count));
+        if (count >= 128) {
+            EXPECT_GT(control.maximum, 1u);
+            EXPECT_LE(control.maximum, 4u);
+            EXPECT_FALSE(control.caller_only);
+        } else {
+            EXPECT_EQ(control.maximum, count == 0 ? 0u : 1u);
+            EXPECT_TRUE(control.caller_only);
+        }
+    }
+}
+
+TEST(WorldSaveRegionFormat, ChunkEncodingWorkerCountsProduceIdenticalRegionAndManifestBytes) {
+    TempSaveDir serial("encode_serial"), parallel("encode_parallel");
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 129);
+    WorldSaveService service;
+    for (const unsigned workers : {1u, 4u}) {
+        SCOPED_TRACE(workers);
+        const auto& dir = workers == 1 ? serial.path : parallel.path;
+        ChunkEncodingControl control(workers, workers > 1);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(service.save_world(state, dir, &errors));
+        ASSERT_TRUE(errors.empty());
+        EXPECT_EQ(control.calls, 129u);
+        if (workers == 1) {
+            EXPECT_EQ(control.maximum, 1u);
+            EXPECT_TRUE(control.caller_only);
+        } else {
+            EXPECT_GT(control.maximum, 1u);
+        }
+    }
+    const auto serial_region = WorldSaveService::region_file_path(serial.path, 0, 0);
+    const auto parallel_region = WorldSaveService::region_file_path(parallel.path, 0, 0);
+    const auto original = ReadFileBytes(serial_region);
+    ASSERT_FALSE(original.empty());
+    EXPECT_EQ(original, ReadFileBytes(parallel_region));
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::world_manifest_path(serial.path)),
+              ReadFileBytes(WorldSaveService::world_manifest_path(parallel.path)));
+
+    // A large resident region with cached records needs no encoders.
+    {
+        ChunkEncodingControl control(4);
+        ASSERT_TRUE(service.save_world(state, parallel.path));
+        EXPECT_EQ(control.calls, 0u);
+        EXPECT_EQ(ReadFileBytes(parallel_region), original);
+    }
+    // Only the changed record needs encoding, so it stays on the caller thread.
+    state.find_chunk(IVec3(0, 0, 0))->heightmap_data[0] += 1.0f;
+    for (const unsigned workers : {1u, 4u}) {
+        const auto& dir = workers == 1 ? serial.path : parallel.path;
+        ChunkEncodingControl control(workers);
+        ASSERT_TRUE(service.save_world(state, dir));
+        EXPECT_EQ(control.calls, 1u);
+        EXPECT_EQ(control.maximum, 1u);
+        EXPECT_TRUE(control.caller_only);
+    }
+    EXPECT_NE(ReadFileBytes(serial_region), original);
+    EXPECT_EQ(ReadFileBytes(serial_region), ReadFileBytes(parallel_region));
+
+    // Replace many existing records, preserve one absent resident, and insert one new record.
+    ASSERT_TRUE(state.erase_chunk(IVec3(0, 0, 0)));
+    for (const auto& chunk : state.snapshot_chunks())
+        chunk->heightmap_data[1] += 0.25f;
+    state.get_or_create_chunk({16, 0, 16})->mark_sdf_generated_current_params();
+    for (const unsigned workers : {1u, 4u}) {
+        const auto& dir = workers == 1 ? serial.path : parallel.path;
+        ChunkEncodingControl control(workers, workers > 1);
+        ASSERT_TRUE(service.save_world(state, dir));
+        EXPECT_EQ(control.calls, 129u);
+        if (workers > 1) {
+            EXPECT_GT(control.maximum, 1u);
+        }
+    }
+    EXPECT_EQ(ReadFileBytes(serial_region), ReadFileBytes(parallel_region));
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::world_manifest_path(serial.path)),
+              ReadFileBytes(WorldSaveService::world_manifest_path(parallel.path)));
+    std::vector<std::shared_ptr<Chunk>> restored;
+    ASSERT_TRUE(WorldSaveService::read_region_chunks(parallel_region, restored));
+    EXPECT_EQ(restored.size(), 130u);
+    EXPECT_TRUE(std::any_of(restored.begin(), restored.end(), [](const auto& chunk) {
+        return chunk->get_coords() == IVec3(0, 0, 0);
+    }));
+}
+
+TEST(WorldSaveRegionFormat, ChunkEncodingKeepsIndependentSmallRegionsOnTheCaller) {
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 64);
+    PopulateEncodingWorld(state, 64, 32);
+    TempSaveDir directory("encode_small_regions");
+    ChunkEncodingControl control(4);
+    WorldSaveService service;
+    ASSERT_TRUE(service.save_world(state, directory.path));
+    EXPECT_EQ(control.calls, 128u);
+    EXPECT_EQ(control.maximum, 1u);
+    EXPECT_TRUE(control.caller_only);
+}
+
+TEST(WorldSaveRegionFormat, ChunkEncodingCompressionFailureKeepsErrorsAndLeavesNoRegion) {
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 129);
+    // Base64 of 48 MiB occupies exactly 64 MiB; JSON makes the payload exceed the limit.
+    state.snapshot_chunks().front()->material_data.assign(48u * 1024u * 1024u, 7u);
+    WorldSaveService service;
+    for (const unsigned workers : {1u, 4u}) {
+        SCOPED_TRACE(workers);
+        TempSaveDir directory("encode_compression_failure");
+        ChunkEncodingControl control(workers);
+        // A later worker exception must not replace the first item's compression diagnostic.
+        control.before_encode = [](std::size_t index) {
+            if (index == 7)
+                throw std::runtime_error("later encoding failure");
+        };
+        std::vector<std::string> errors{"earlier diagnostic"};
+        EXPECT_FALSE(service.save_world(state, directory.path, &errors));
+        EXPECT_EQ(errors,
+                  (std::vector<std::string>{
+                      "earlier diagnostic",
+                      "region record payload exceeds the 64 MiB compatibility limit"}));
+        EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(directory.path)));
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::world_manifest_path(directory.path)));
+    }
+}
+
+TEST(WorldSaveRegionFormat, ChunkRecordEncodingRetainsCompactJsonDumpBytes) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 3);
+    for (const auto& chunk : state.snapshot_chunks()) {
+        const auto payload = P::SerializeChunkRecordPayloadJson(*chunk);
+        EXPECT_EQ(payload, nlohmann::json::parse(payload).dump());
+        chunk->max_water_delta_last_tick = std::numeric_limits<float>::infinity();
+        const auto non_finite = P::SerializeChunkRecordPayloadJson(*chunk);
+        EXPECT_EQ(non_finite, nlohmann::json::parse(non_finite).dump());
+        EXPECT_NE(non_finite.find(":null"), std::string::npos);
+    }
+}
+
+TEST(WorldSaveRegionFormat, ChunkEncodingRethrowsFirstWorkerExceptionInInputOrder) {
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 129);
+    WorldSaveService service;
+    for (const unsigned workers : {1u, 4u}) {
+        SCOPED_TRACE(workers);
+        TempSaveDir directory("encode_exception");
+        ChunkEncodingControl control(workers);
+        std::mutex error_mutex;
+        std::condition_variable later_error;
+        bool later_failed = false;
+        control.before_encode = [&](std::size_t index) {
+            if (index == 3 && workers > 1) {
+                std::unique_lock lock(error_mutex);
+                later_error.wait_for(lock, std::chrono::seconds(5), [&] { return later_failed; });
+            }
+            if (index == 7) {
+                const std::lock_guard lock(error_mutex);
+                later_failed = true;
+                later_error.notify_all();
+            }
+            if (index == 3 || index == 7)
+                throw std::runtime_error("encoder[" + std::to_string(index) + "] failed");
+        };
+        std::vector<std::string> errors;
+        EXPECT_FALSE(service.save_world(state, directory.path, &errors));
+        EXPECT_EQ(
+            errors,
+            (std::vector<std::string>{"failed to prepare world region files: encoder[3] failed"}));
+        if (workers > 1) {
+            EXPECT_TRUE(later_failed);
+        }
+        EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(directory.path)));
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::world_manifest_path(directory.path)));
+        // The next save also proves workers have joined and the previous failure released
+        // ownership.
+        control.before_encode = {};
+        errors.clear();
+        EXPECT_TRUE(service.save_world(state, directory.path, &errors));
+        EXPECT_TRUE(errors.empty());
+    }
 }
 
 bool HasRegionTemporaryFile(const std::filesystem::path& region_path) {
