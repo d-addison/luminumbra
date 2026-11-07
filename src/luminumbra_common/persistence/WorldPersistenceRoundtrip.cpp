@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -63,6 +64,11 @@ const std::vector<std::string>& PersistedFields() {
                                                     "water_bed_mm",
                                                     "water_state"};
     return fields;
+}
+
+std::mutex& ChunkRecordSerializerConstructionMutex() {
+    static std::mutex mutex;
+    return mutex;
 }
 
 const std::vector<std::string>& RequiredChunkFormatFields() {
@@ -1440,13 +1446,22 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
     object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
     nlohmann::json chunks = nlohmann::json::array();
     chunks.push_back(std::move(object));
-    return nlohmann::json{{"schema", kSnapshotSchema},
-                          {"order_contract", kOrderContract},
-                          {"chunk_count", chunks.size()},
-                          {"persisted_fields", PersistedFields()},
-                          {kChunkRecordFormatKey, kChunkRecordFormat},
-                          {"chunks", std::move(chunks)}}
-        .dump();
+    const nlohmann::json snapshot{{"schema", kSnapshotSchema},
+                                  {"order_contract", kOrderContract},
+                                  {"chunk_count", chunks.size()},
+                                  {"persisted_fields", PersistedFields()},
+                                  {kChunkRecordFormatKey, kChunkRecordFormat},
+                                  {"chunks", std::move(chunks)}};
+    std::string bytes;
+    // json::dump constructs this same serializer. Its constructor calls localeconv,
+    // which can write shared libc storage even when the process locale is unchanged.
+    // Protect construction between record encoders; dumping uses only instance state.
+    std::unique_lock construction(ChunkRecordSerializerConstructionMutex());
+    nlohmann::detail::serializer<nlohmann::json> serializer(
+        nlohmann::detail::output_adapter<char>(bytes), ' ');
+    construction.unlock();
+    serializer.dump(snapshot, false, false, 0);
+    return bytes;
 }
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
