@@ -11413,6 +11413,49 @@ void CheckReducedSessionScentCadence() {
     EXPECT_EQ(session.GetFieldPages().serialize(), fields);
 }
 
+void CheckSessionScentCrossOwnerCadence(bool due_participant) {
+    SCOPED_TRACE(due_participant);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey reduced{-1, 0};
+    // The persisted cadence phase for this owner is 1, so tick 32 must leave it untouched.
+    ASSERT_EQ(ActiveRegionLedger::phase(reduced, 2), 1u);
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {reduced, RegionState::Reduced}});
+    FieldPageState fields;
+    const Luminumbra::world::ScentCell exact{std::bit_cast<std::uint64_t>(8.0), 0, 0, 0};
+    ASSERT_TRUE(fields.set_scent({-1, 1}, exact));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    // A sensor keeps the solver eligible without depositing scent. Placing it in the
+    // reduced owner also exercises HasScentBorderWork when no interior is due.
+    AddSessionScentParticipant(session, 1, due_participant ? 1.0f : -1.0f);
+    const auto before = SessionScentBits(session);
+    const auto reduced_bytes = fields.region_bytes(reduced);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWorldClock().tick(), 32u);
+    ASSERT_EQ(session.GetRegionSchedule().due, std::vector<RegionKey>{kFieldOwner});
+    const auto x = session.ScentWorldToCellX(0), z = session.ScentWorldToCellZ(1);
+    EXPECT_DOUBLE_EQ(session.GetScentField()->Sample(0, x, z),
+                     due_participant ? FieldPageState::kScentFloor : 0.0);
+    EXPECT_DOUBLE_EQ(session.GetScentField()->Sample(0, x - 1, z), 8.0);
+    EXPECT_EQ(session.GetFieldPages().region_bytes(reduced), reduced_bytes);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    if (!due_participant) {
+        EXPECT_EQ(SessionScentBits(session), before);
+    }
+    // Tick 33 satisfies both the active cadence and the reduced owner's cadence phase.
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const std::vector<RegionKey> both_due{reduced, kFieldOwner};
+    ASSERT_EQ(session.GetRegionSchedule().due, both_due);
+    EXPECT_GT(session.GetScentField()->Sample(0, x, z), FieldPageState::kScentFloor);
+    EXPECT_NE(session.GetFieldPages().region_bytes(reduced), reduced_bytes);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+}
+
 void CheckFloorOnlyScentSaveOwnership() {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -11749,6 +11792,12 @@ TEST(GameSessionHeadlessWorldTest, RegionalAndLegacyScentKeepUngatedSolverArithm
 
 TEST(GameSessionHeadlessWorldTest, RegionalScentParticipantsWaitForTheirOwnersCadence) {
     ASSERT_NO_FATAL_FAILURE(CheckReducedSessionScentCadence());
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentCrossOwnerExchangeRequiresBothOwnersDue) {
+    for (const bool due_participant : {true, false}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentCrossOwnerCadence(due_participant));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionalScentPublishesWithAmbientAndWeatherCandidates) {

@@ -33,13 +33,15 @@ constexpr double kTauMax = 1.0e6;
 constexpr std::array<std::pair<double, double>, 6> kWinds{
     std::pair{0.0, 0.0}, {0.375, -1.25}, {-2.625, 0.875}, {4.25, -3.5}, {0.0, 2.125}, {-1.75, 0.0}};
 
-// Reference owner/due/edge lookups mirror GameSession's original live callbacks.
+// Reference owner/due/edge lookups mirror GameSession's live eligibility callbacks.
 // They deliberately do not use tile splits, corner decisions or cached gates.
 struct LiveSchedule {
     ScentCellKey origin;
     std::map<RegionKey, ActiveRegionRecord> records;
     std::vector<RegionKey> due;
     std::uint64_t tick = 0;
+    std::uint64_t schedule_tick = 0;
+    std::size_t ledger_records = 0;
     bool interior = true;
 
     explicit LiveSchedule(const ScentCellKey& domain_origin)
@@ -62,15 +64,27 @@ struct LiveSchedule {
 
     void Reschedule(std::uint64_t next_tick) {
         tick = next_tick;
+        schedule_tick = tick;
+        ledger_records = records.size();
         due.clear();
-        for (const auto& [owner, record] : records)
-            if (record.state != RegionState::Frozen &&
-                (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase)
+        for (auto& [owner, record] : records) {
+            if (record.state != RegionState::Frozen && record.cadence_shift < 63 &&
+                (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase) {
+                record.last_ticked = tick;
                 due.push_back(owner);
+            }
+        }
     }
 
     bool CellDue(int x, int z) const {
-        return std::find(due.begin(), due.end(), Owner(x, z)) != due.end();
+        const auto found = records.find(Owner(x, z));
+        if (found == records.end() || found->second.state == RegionState::Frozen) {
+            return false;
+        }
+        const auto& record = found->second;
+        return ledger_records != 0 && schedule_tick == tick && record.last_ticked == tick &&
+               record.cadence_shift < 63 &&
+               (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase;
     }
 
     bool EdgeOpen(int x, int z, int nx, int nz) const {
@@ -81,8 +95,7 @@ struct LiveSchedule {
         if (a == records.end() || b == records.end() || a->second.state == RegionState::Frozen ||
             b->second.state == RegionState::Frozen)
             return false;
-        const auto shift = (std::max)(a->second.cadence_shift, b->second.cadence_shift);
-        return shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0;
+        return CellDue(x, z) && CellDue(nx, nz);
     }
 
     ScentStepGates LiveGates() const {
@@ -160,7 +173,128 @@ void AdvanceAndCompare(ScentField& reference,
     optimized.Clamp(kTauMin, kTauMax, cached.participants);
     ASSERT_TRUE(SameBits(reference, optimized)) << "after Clamp";
 }
+
+void CheckCrossOwnerDiffusion(std::uint8_t source_shift,
+                              std::uint32_t source_phase,
+                              std::uint8_t destination_shift,
+                              std::uint32_t destination_phase,
+                              std::uint64_t tick,
+                              RegionState destination_state,
+                              bool open) {
+    LiveSchedule schedule({-32, 100}); // The owner boundary is between x=31 and x=32.
+    const auto source = schedule.Owner(31, 64), destination = schedule.Owner(32, 64);
+    ASSERT_NE(source, destination);
+    schedule.Set(
+        source, source_shift == 0 ? RegionState::Active : RegionState::Reduced, source_shift);
+    schedule.Set(destination, destination_state, destination_shift);
+    ASSERT_EQ(schedule.records.at(source).cadence_phase, source_phase);
+    ASSERT_EQ(schedule.records.at(destination).cadence_phase, destination_phase);
+    schedule.Reschedule(tick);
+    ASSERT_TRUE(schedule.CellDue(31, 64));
+    ASSERT_EQ(schedule.CellDue(32, 64), open);
+    const auto live = schedule.LiveGates(), cached = schedule.CachedGates();
+    ScentField initial(kCells, kCells, kChannels);
+    initial.RestoreCell(0, 32, 64, 8.0);
+    auto reference = initial, optimized = initial;
+    reference.Step(kDiffusionRate, 1, 0.0, 0.0, 0.0, live.participants, live.exchange);
+    optimized.Step(kDiffusionRate, 1, 0.0, 0.0, 0.0, cached.participants, cached.exchange);
+    if (open) {
+        EXPECT_GT(optimized.Sample(0, 31, 64), 0.0);
+        EXPECT_LT(optimized.Sample(0, 32, 64), 8.0);
+    } else {
+        EXPECT_DOUBLE_EQ(optimized.Sample(0, 31, 64), 0.0);
+        EXPECT_DOUBLE_EQ(optimized.Sample(0, 32, 64), 8.0);
+        // Every cell of the owner that is not due stays put.
+        EXPECT_TRUE(SameBits(initial, optimized));
+    }
+    EXPECT_TRUE(SameBits(reference, optimized));
+    EXPECT_EQ(schedule.EdgeOpen(31, 64, 32, 64), open);
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 31, 64), open);
+    EXPECT_EQ(!cached.exchange || cached.exchange(31, 64, 32, 64), open);
+    EXPECT_EQ(!cached.exchange || cached.exchange(32, 64, 31, 64), open);
+    EXPECT_TRUE(schedule.EdgeOpen(30, 64, 31, 64));
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 33, 64), open);
+}
+
+void CheckClosedOwnerEdges(const LiveSchedule& schedule) {
+    const auto cached = schedule.CachedGates();
+    ASSERT_TRUE(cached.exchange);
+    EXPECT_FALSE(schedule.EdgeOpen(31, 64, 32, 64));
+    EXPECT_FALSE(schedule.EdgeOpen(32, 64, 31, 64));
+    EXPECT_FALSE(cached.exchange(31, 64, 32, 64));
+    EXPECT_FALSE(cached.exchange(32, 64, 31, 64));
+    EXPECT_EQ(schedule.EdgeOpen(30, 64, 31, 64), schedule.CellDue(30, 64));
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 33, 64), schedule.CellDue(32, 64));
+}
+
+void CheckUnavailableOwnerEdges() {
+    enum class Unavailable {
+        Missing,
+        Frozen,
+        Unticked,
+        WrongPhase,
+        InvalidShift
+    };
+    for (const int x : {31, 32}) {
+        for (const auto reason : {Unavailable::Missing,
+                                  Unavailable::Frozen,
+                                  Unavailable::Unticked,
+                                  Unavailable::WrongPhase,
+                                  Unavailable::InvalidShift}) {
+            SCOPED_TRACE(testing::Message() << "x=" << x << " reason=" << static_cast<int>(reason));
+            LiveSchedule schedule({-32, 100});
+            schedule.Reschedule(4);
+            const auto owner = schedule.Owner(x, 64);
+            switch (reason) {
+                case Unavailable::Missing:
+                    schedule.records.erase(owner);
+                    break;
+                case Unavailable::Frozen:
+                    schedule.records.at(owner).state = RegionState::Frozen;
+                    break;
+                case Unavailable::Unticked:
+                    schedule.records.at(owner).last_ticked = 3;
+                    break;
+                case Unavailable::WrongPhase:
+                    // Preserve last_ticked=4 while selecting a cadence phase that is not due.
+                    schedule.Set(owner, RegionState::Reduced, 2);
+                    break;
+                case Unavailable::InvalidShift:
+                    schedule.records.at(owner).cadence_shift = 63;
+                    break;
+            }
+            ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(schedule));
+        }
+    }
+    LiveSchedule stale({480, 100});
+    stale.Reschedule(4);
+    stale.schedule_tick = 3;
+    ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(stale));
+    LiveSchedule empty({480, 100});
+    empty.Reschedule(4);
+    empty.ledger_records = 0;
+    ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(empty));
+}
 } // namespace
+
+TEST(ScentFieldGates, CrossOwnerDiffusionWaitsForBothOwnersCadence) {
+    // At tick 4 the old boundary-only rule opens, despite the destination's cadence phase being 1.
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 2, 1, 4, RegionState::Reduced, false));
+}
+
+TEST(ScentFieldGates, CrossOwnerDiffusionOpensWhenBothCadencesAreDue) {
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(1, 1, 2, 1, 1, RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(2, 1, 2, 1, 1, RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 0, 0, 4, RegionState::Active, true));
+}
+
+TEST(ScentFieldGates, CrossOwnerDiffusionKeepsFrozenOwnerCellsUntouched) {
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 2, 1, 5, RegionState::Frozen, false));
+}
+
+TEST(ScentFieldGates, CrossOwnerEdgesRejectUnavailableOwnersAndStaleSchedules) {
+    ASSERT_NO_FATAL_FAILURE(CheckUnavailableOwnerEdges());
+}
 
 TEST(ScentFieldGates, FullyOpenDomainsMatchLiveSolverBitExactly) {
     // One owner, either axis split, four owners, negative coordinates, and splits

@@ -830,6 +830,7 @@ private:
     bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
     [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentOwnerDue(RegionKey owner) const;
     [[nodiscard]] bool ScentCellDue(int x, int z) const;
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
     void RefreshScentDueCache() const;

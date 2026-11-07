@@ -4102,6 +4102,19 @@ RegionKey GameSession::ScentCellOwner(int x, int z) const {
          static_cast<std::int32_t>(ScentDomainOrigin(false)) + z});
 }
 
+bool GameSession::ScentOwnerDue(RegionKey owner) const {
+    const auto& records = m_activeRegionLedger.records();
+    const auto found = records.find(owner);
+    if (found == records.end() || found->second.state == RegionState::Frozen) {
+        return false;
+    }
+    const auto& record = found->second;
+    return m_regionSchedule.ledger_records != 0 && m_regionSchedule.tick == m_worldClock.tick() &&
+           record.last_ticked == m_regionSchedule.tick && record.cadence_shift < 63 &&
+           (m_regionSchedule.tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) ==
+               record.cadence_phase;
+}
+
 bool GameSession::ScentCellDue(int x, int z) const {
     if (m_regionFault || !m_scentField ||
         !ActiveRegionLedger::valid_anchor(m_metadata.spawnPoint) || !m_scentField->in_bounds(x, z))
@@ -4114,13 +4127,7 @@ bool GameSession::ScentEdgeOpen(int x, int z, int nx, int nz) const {
     const auto source = ScentCellOwner(x, z), destination = ScentCellOwner(nx, nz);
     if (source == destination)
         return ScentCellDue(x, z);
-    const auto& records = m_activeRegionLedger.records();
-    const auto a = records.find(source), b = records.find(destination);
-    if (a == records.end() || b == records.end() || a->second.state == RegionState::Frozen ||
-        b->second.state == RegionState::Frozen)
-        return false;
-    const auto shift = std::max(a->second.cadence_shift, b->second.cadence_shift);
-    return shift < 63 && (m_worldClock.tick() & ((std::uint64_t{1} << shift) - 1)) == 0;
+    return ScentOwnerDue(source) && ScentOwnerDue(destination);
 }
 
 void GameSession::RefreshScentDueCache() const {
@@ -4130,19 +4137,7 @@ void GameSession::RefreshScentDueCache() const {
     m_scentDueCache.Refresh(
         kScentFieldCells,
         [this](int x, int z) { return ScentCellOwner(x, z); },
-        [this](RegionKey owner) {
-            const auto& records = m_activeRegionLedger.records();
-            const auto found = records.find(owner);
-            if (found == records.end() || found->second.state == RegionState::Frozen) {
-                return false;
-            }
-            const auto& record = found->second;
-            return m_regionSchedule.ledger_records != 0 &&
-                   m_regionSchedule.tick == m_worldClock.tick() &&
-                   record.last_ticked == m_regionSchedule.tick && record.cadence_shift < 63 &&
-                   (m_regionSchedule.tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) ==
-                       record.cadence_phase;
-        });
+        [this](RegionKey owner) { return ScentOwnerDue(owner); });
     m_scentDueCacheValid = true;
 }
 
