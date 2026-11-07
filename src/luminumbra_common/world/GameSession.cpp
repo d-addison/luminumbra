@@ -4306,18 +4306,28 @@ bool GameSession::HasScentBorderWork() const {
         });
     if (!HasScentParticipants(false) && !near_forager)
         return false;
-    for (int z = 0; z < kScentFieldCells; ++z)
-        for (int x = 0; x < kScentFieldCells; ++x)
-            for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
-                const int nx = x + dx, nz = z + dz;
-                if (!m_scentField->in_bounds(nx, nz) ||
-                    ScentCellOwner(x, z) == ScentCellOwner(nx, nz) || !ScentEdgeOpen(x, z, nx, nz))
-                    continue;
-                for (int channel = 0; channel < kScentFieldChannels; ++channel)
-                    if (m_scentField->Sample(channel, x, z) !=
-                        m_scentField->Sample(channel, nx, nz))
-                        return true;
-            }
+    // Owners are axis-aligned and far larger than the grid, so each axis has at most one boundary.
+    int boundary_x = -1, boundary_z = -1;
+    for (int i = 0; i + 1 < kScentFieldCells; ++i) {
+        if (boundary_x < 0 && ScentCellOwner(i, 0) != ScentCellOwner(i + 1, 0))
+            boundary_x = i;
+        if (boundary_z < 0 && ScentCellOwner(0, i) != ScentCellOwner(0, i + 1))
+            boundary_z = i;
+    }
+    const auto differs = [this](int x, int z, int nx, int nz) {
+        if (!ScentEdgeOpen(x, z, nx, nz))
+            return false;
+        for (int channel = 0; channel < kScentFieldChannels; ++channel)
+            if (m_scentField->Sample(channel, x, z) != m_scentField->Sample(channel, nx, nz))
+                return true;
+        return false;
+    };
+    for (int i = 0; i < kScentFieldCells; ++i) {
+        if (boundary_x >= 0 && differs(boundary_x, i, boundary_x + 1, i))
+            return true;
+        if (boundary_z >= 0 && differs(i, boundary_z, i, boundary_z + 1))
+            return true;
+    }
     return false;
 }
 

@@ -1887,6 +1887,29 @@ void CheckFloorEncodingRefusalsAndRollback() {
 }
 } // namespace
 
+void CheckFloorValuesDoNotConsumeSparseCapacity() {
+    constexpr int side = 128;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    const auto floor_bits = std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor);
+    const ScentCell floor{floor_bits, floor_bits, floor_bits, floor_bits};
+    FieldPageState source;
+    for (std::size_t count = 0; count < FieldPageState::kMaxScentCells; ++count) {
+        ASSERT_TRUE(source.set_scent({900, static_cast<std::int32_t>(count)}, one));
+    }
+    ASSERT_EQ(source.scent_cells().size(), FieldPageState::kMaxScentCells);
+    // A window of uniform floor values lives in compact blocks, so a strict capture at the
+    // sparse limit must still be admitted without retiring or refusing anything.
+    const std::vector<ScentCell> cells(std::size_t{side} * side, floor);
+    FieldPageState candidate;
+    ScentWindowWork work;
+    ASSERT_TRUE(candidate.stage_scent_window(source, {30000, 0}, side, cells, work));
+    source.adopt_scent_state(candidate);
+    EXPECT_EQ(source.scent_cells().size(), FieldPageState::kMaxScentCells);
+    EXPECT_EQ(source.scent_floor_blocks(), 256u);
+    EXPECT_EQ(source.scent_at({30000, 0}), floor);
+    EXPECT_EQ(source.scent_at({900, 0}), one);
+}
+
 TEST(FieldPageStateTest, CompactScentFloorsPreserveExactChannelsOwnersAndReopen) {
     for (const ScentCellKey origin : {ScentCellKey{0, 0}, {-13, -67}, {448, 448}}) {
         ASSERT_NO_FATAL_FAILURE(CheckCompactScentFloorWindow(origin));
@@ -1903,6 +1926,10 @@ TEST(FieldPageStateTest, ScentRetirementCountsHistoricalOwnersAndPreservesFrozen
     ASSERT_NO_FATAL_FAILURE(CheckScentRetirementWork(false, false));
     ASSERT_NO_FATAL_FAILURE(CheckScentRetirementWork(true, false));
     ASSERT_NO_FATAL_FAILURE(CheckScentRetirementWork(true, true));
+}
+
+TEST(FieldPageStateTest, CompactScentFloorValuesDoNotConsumeSparseCapacity) {
+    ASSERT_NO_FATAL_FAILURE(CheckFloorValuesDoNotConsumeSparseCapacity());
 }
 
 TEST(FieldPageStateTest, ScentFloorEncodingRefusalsLeaveAuthorityAndCandidateUntouched) {
