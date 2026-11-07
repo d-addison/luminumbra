@@ -12367,6 +12367,46 @@ void CheckLegacyEnergyMigration(std::uint64_t remaining, bool empty, bool missin
     }
 }
 
+void CheckLegacyBoundaryEnergySaveReopen(bool in_world) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const auto ledger = ScheduledFieldLedger(31, {{{0, 0}, RegionState::Frozen}});
+    // Hand-written legacy input includes a wholly outside page and a boundary
+    // page whose cells have owners -32769/-32768, plus the upper edge 32767/32768.
+    const auto record = std::string("EFS1 2 3\nP -43692 0 0:999\n") +
+                        (in_world ? "P -43691 0 8:111 9:222 10:12345 11:65535\n"
+                                    "P 0 0 0:777 1:456\n"
+                                    "P 43690 0 20:54321 21:9876 22:333 23:444\n"
+                                  : "") +
+                        "P 43691 0 0:888\n";
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}, record));
+    const std::string expected = in_world ? "EFS1 2 0\nP -43691 0 10:12345 11:65535\n"
+                                            "P 0 0 0:777 1:456\n"
+                                            "P 43690 0 20:54321 21:9876\n"
+                                          : "";
+    ASSERT_EQ(session.GetEnergyFieldState()->SerializeRegionalRecord(), expected);
+    const auto state = session.GetEnergyFieldState()->CanonicalRegionalBytes();
+    const auto ages = session.GetActiveRegionLedger().energy_ages();
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    if (in_world) {
+        EXPECT_EQ(ReadClockTestFile(save / "aether_state.efs"), expected);
+    } else {
+        EXPECT_FALSE(fs::exists(save / "aether_state.efs"));
+    }
+    const auto digest = SessionWorldHash(session);
+    EnableSnapshotSession(reopened, root, jobs);
+    reopened.SetAetherStateEnabled(true);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetEnergyFieldState()->CanonicalRegionalBytes(), state);
+    EXPECT_EQ(reopened.GetEnergyFieldState()->SerializeRegionalRecord(), expected);
+    EXPECT_EQ(reopened.GetActiveRegionLedger().energy_ages(), ages);
+    ASSERT_TRUE(reopened.SaveWorld());
+    EXPECT_EQ(SessionWorldHash(reopened), digest);
+}
+
 void CheckBoundaryEnergyEmitter(int x, int z) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -12718,6 +12758,12 @@ TEST(GameSessionHeadlessWorldTest, LegacyEnergyMigratesToOwnerAgesAndSealsFrozen
         }
     }
     ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyMigration(3, false, true));
+}
+
+TEST(GameSessionHeadlessWorldTest, LegacyBoundaryEnergyKeepsInWorldValuesAcrossSaveAndReopen) {
+    for (const bool in_world : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckLegacyBoundaryEnergySaveReopen(in_world));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, LegacyEnergyCapacityAdmissionPreservesLiveStateOnRefusal) {

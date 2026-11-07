@@ -1118,9 +1118,42 @@ EnergyFieldState::RegionalPageOwners(std::int64_t key) noexcept {
 
 bool EnergyFieldState::MigrateLegacyCadence(Luminumbra::world::ActiveRegionLedger& ledger,
                                             const Luminumbra::world::WorldClock& clock,
-                                            const Luminumbra::Vec3& anchor) const {
+                                            const Luminumbra::Vec3& anchor) {
     if (!ledger.energy_ages().empty() || m_next_fire_tick <= clock.tick() ||
-        m_next_fire_tick - clock.tick() > kEnergyCadenceTicks || !RegionalRecordFits())
+        m_next_fire_tick - clock.tick() > kEnergyCadenceTicks || m_channels < 1 || m_channels > 64)
+        return false;
+    // Legacy emitters could deposit halo cells beyond the world. During admission,
+    // discard only cells whose owner is outside [-32768, 32768) on either axis;
+    // retain every in-world value, including values sharing a boundary page.
+    // Bound page coordinates before multiplication: legacy coordinates span all ints.
+    m_regional_validation.reset();
+    m_regional_queued_validation.reset();
+    for (auto it = m_pages.begin(); it != m_pages.end();) {
+        int px = 0, pz = 0;
+        UnpackCellKey(it->first, px, pz);
+        if (px < -43691 || px > 43690 || pz < -43691 || pz > 43690) {
+            it = m_pages.erase(it);
+            continue;
+        }
+        auto& page = it->second;
+        if (page.values.size() !=
+            std::size_t{kEnergyPageCells} * kEnergyPageCells * static_cast<std::size_t>(m_channels))
+            return false;
+        page.regional_summary.reset();
+        for (std::size_t i = 0; i < page.values.size(); ++i) {
+            const auto cell = i / static_cast<std::size_t>(m_channels);
+            const auto owner =
+                OwnerOfCell(px * kEnergyPageCells + static_cast<int>(cell % kEnergyPageCells),
+                            pz * kEnergyPageCells + static_cast<int>(cell / kEnergyPageCells));
+            if (!ValidEnergyOwner(owner))
+                page.values[i] = 0;
+        }
+        if (page.all_zero())
+            it = m_pages.erase(it);
+        else
+            ++it;
+    }
+    if (!RegionalRecordFits())
         return false;
     const auto age = kEnergyCadenceTicks - (m_next_fire_tick - clock.tick());
     std::set<RegionKey> owners;
