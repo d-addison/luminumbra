@@ -224,11 +224,11 @@ public:
     // Present records only: empty/header-only/noncanonical inputs refuse atomically.
     bool DeserializeRegionalRecord(const std::string& record);
     // Admission only: translate a legacy next-fire offset into durable owner ages,
-    // including empty owners, before regional stepping starts. The caller stages the ledger;
-    // a refusal may change that candidate and must never publish it.
+    // including empty owners, before regional stepping starts. The caller stages both objects;
+    // a refusal may change those candidates and must never publish them.
     bool MigrateLegacyCadence(Luminumbra::world::ActiveRegionLedger& ledger,
                               const Luminumbra::world::WorldClock& clock,
-                              const Luminumbra::Vec3& anchor) const;
+                              const Luminumbra::Vec3& anchor);
     // Validate the jointly staged EFS/ARL snapshot before exposing it to consumers.
     [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const;
