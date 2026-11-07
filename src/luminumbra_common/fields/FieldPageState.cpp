@@ -1118,10 +1118,15 @@ void CountRetiredScentWork(const std::map<ScentCellKey, ScentCell>& floors,
     auto& entries = work.retirement_entries;
     entries.reserve(work.count + retired_cells.size() + retired_blocks.size());
     entries.insert(entries.end(), work.begin(), work.end());
+    // Membership must not depend on how the retired cells were collected.
+    std::vector<ScentCellKey> retired_keys;
+    retired_keys.reserve(retired_cells.size());
     for (const auto& [key, values] : retired_cells) {
         (void)values;
+        retired_keys.push_back(key);
         entries.emplace_back(FieldPageState::region_of_scent_cell(key), 1);
     }
+    std::sort(retired_keys.begin(), retired_keys.end());
     for (const auto& [key, values] : retired_blocks) {
         (void)values;
         const auto& masks = floors.find(key)->second;
@@ -1130,14 +1135,9 @@ void CountRetiredScentWork(const std::map<ScentCellKey, ScentCell>& floors,
         while (bits != 0) {
             const auto bit = std::countr_zero(bits);
             const ScentCellKey cell{key.x + bit / 8, key.z + bit % 8};
-            const auto found = std::lower_bound(
-                retired_cells.begin(),
-                retired_cells.end(),
-                cell,
-                [](const auto& entry, ScentCellKey target) { return entry.first < target; });
             // Count a changed cell once, even if both explicit channels and floor masks retire.
-            updates +=
-                static_cast<std::uint64_t>(found == retired_cells.end() || found->first != cell);
+            updates += static_cast<std::uint64_t>(
+                !std::binary_search(retired_keys.begin(), retired_keys.end(), cell));
             bits &= bits - 1;
         }
         if (updates != 0) {
