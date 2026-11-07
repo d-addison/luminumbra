@@ -419,6 +419,16 @@ TEST(WorldSaveRegionFormat, ChunkRecordEncodingRetainsCompactJsonDumpBytes) {
     }
 }
 
+TEST(WorldSaveRegionFormat, GuardedJsonDumpMatchesTheLibraryDump) {
+    namespace P = Luminumbra::Persistence;
+    const nlohmann::json value = {{"name", "quote\" and \\ slash"},
+                                  {"values", {1, 2.5, -3}},
+                                  {"nested", {{"flag", true}, {"none", nullptr}}}};
+    EXPECT_EQ(P::detail::dump_json_guarded(value), value.dump());
+    EXPECT_EQ(P::detail::dump_json_guarded(value, 4), value.dump(4));
+    EXPECT_EQ(P::detail::dump_json_guarded(value, 0), value.dump(0));
+}
+
 TEST(WorldSaveRegionFormat, ChunkEncodingRethrowsFirstWorkerExceptionInInputOrder) {
     WorldStreamingState state;
     PopulateEncodingWorld(state, 129);

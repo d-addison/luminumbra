@@ -4053,8 +4053,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         metadata["container_version"] = kIndexedMetadataVersion;
         metadata["snapshotFormat"] = 1;
     }
-    const std::string output_bytes =
-        (scope.engaged() || has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
+    const std::string output_bytes = (scope.engaged() || has_clock || has_render_calendar)
+                                         ? detail::dump_json_guarded(metadata, 4) + "\n"
+                                         : bytes;
     if (!admit_metadata_bytes(output_bytes, errors))
         return false;
     const auto destination = save_dir / "world_info.json";
