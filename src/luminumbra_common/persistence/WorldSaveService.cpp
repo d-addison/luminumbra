@@ -4911,7 +4911,9 @@ bool RegionalEnergyMatchesLedger(const std::string& bytes,
     if (bytes.empty() || energy.DeserializeRegionalRecord(bytes))
         return energy.ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
     // Legacy cadence is self-contained; regional ages make that phase ambiguous.
-    return ledger.energy_ages().empty() && energy.DeserializeRecord(bytes, 0);
+    return ledger.energy_ages().empty() &&
+           luminumbra::fields::EnergyFieldState::AdmitRecord(bytes, true) &&
+           energy.DeserializeRecord(bytes, 0);
 }
 
 bool ValidateRegionalEnergy(const std::filesystem::path& save_dir,
@@ -6332,7 +6334,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 std::string magic;
                 int channels = 0;
                 // Bound channel allocation before invoking the legacy decoder. Indexed writers
-                // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
+                // emit canonical EFS1; lexical admission refuses duplicate pages/cells and junk.
                 if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
                     channels > luminumbra::fields::kEnergyRecordChannels) {
                     error = "corrupt energy field record";
@@ -6349,7 +6351,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                         return false;
                     }
                 luminumbra::fields::EnergyFieldState energy;
-                if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
+                if (!luminumbra::fields::EnergyFieldState::AdmitRecord(bytes, true) ||
+                    !energy.DeserializeRecord(bytes, 0)) {
                     error = "corrupt energy field record";
                     return false;
                 }

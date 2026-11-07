@@ -4040,6 +4040,64 @@ TEST(WorldSaveService, RegionalEnergyAndLedgerAgesAreAdmittedTogether) {
 }
 
 namespace {
+void CheckCanonicalLegacyEnergyAdmission(bool with_ledger) {
+    using namespace Luminumbra::world;
+    const TempSaveDir save("canonical_legacy_energy");
+    const WorldClock clock(31);
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    ASSERT_TRUE(
+        WorldSaveService::write_file_durably(save.path() / "world_info.json", metadata.dump()));
+    if (with_ledger) {
+        const ActiveRegionLedger ledger({}, clock);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(
+            WorldSaveService::active_regions_path(save.path()), ledger.encode()));
+    }
+    const std::pair<std::string, bool> cases[] = {
+        {"EFS1 2 8\nP 0 0 0:1 0:2\n", false},
+        {"", false},
+        {"EFS1 2 8\nP 0 0 1:2 0:1\n", false},
+        {"EFS1 2 8\nP 0 0 0:1\nP 0 0 1:2\n", false},
+        {"EFS1 2 8\nP 1 0 0:1\nP 0 0 0:1\n", false},
+        {"EFS1 2 8\nP 0 0\n", false},
+        {"EFS1 2 8\nP 0 0 0:0\n", false},
+        {"EFS1 2 8\nP 0 0 512:1\n", false},
+        {"EFS1 2 8\nP 0 0 0:65536\n", false},
+        {"EFS1 02 8\nP 0 0 0:1\n", false},
+        {"EFS1 2 08\nP 0 0 0:1\n", false},
+        {"EFS1 2 8\nP -0 0 0:1\n", false},
+        {"EFS1 2 8\nP -01 0 0:1\n", false},
+        {"EFS1 2 8\nP +1 0 0:1\n", false},
+        {"EFS1 2 8\nP 0 0 00:1\n", false},
+        {"EFS1 2 8\nP 0 0 0:01\n", false},
+        {"EFS1\t2 8\nP 0 0 0:1\n", false},
+        {"EFS1 2 8\nP  0 0 0:1\n", false},
+        {"EFS1 2 8\nP 0 0 0:1 \n", false},
+        {"EFS1 2 8\r\nP 0 0 0:1\n", false},
+        {"EFS1 2 8\n\nP 0 0 0:1\n", false},
+        {"EFS1 2 8\nP 0 0 0:1", false},
+        {"EFS1 2 8\nP 0 0 0:1\njunk\n", false},
+        {"EFS1 2 8\n", true},
+        {"EFS1 2 8\nP -1 0 0:1\nP 0 0 0:2 511:65535\n", true},
+        {"EFS1 2 8\nP 0 0 0:1\nP 0 -1 0:1\n", true},
+        {"EFS1 2 8\nP -2147483648 -2147483648 0:1\nP 2147483647 2147483647 0:1\n", true},
+        {"EFS1 2 1\nP 0 0 0:1\n", true}};
+    for (const auto& [record, expected] : cases) {
+        SCOPED_TRACE(record);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(save.path() / "aether_state.efs", record));
+        std::vector<std::string> errors;
+        if (with_ledger) {
+            EXPECT_EQ(WorldSaveService::validate_save(save.path(), &errors), expected)
+                << JoinErrors(errors);
+        }
+        Luminumbra::Persistence::MemberDigest digest;
+        std::string error;
+        EXPECT_EQ(WorldSaveService::member_digest(save.path(), "aether_state.efs", digest, error),
+                  expected)
+            << error;
+    }
+}
+
 void CheckLegacyEnergyReaderPageLimit(std::size_t pages) {
     using namespace Luminumbra::world;
     const TempSaveDir save("legacy_energy_reader_limit");
@@ -4066,8 +4124,20 @@ void CheckLegacyEnergyReaderPageLimit(std::size_t pages) {
     errors.clear();
     EXPECT_EQ(WorldSaveService::validate_save(save.path(), &errors), pages <= 8192)
         << JoinErrors(errors);
+    Luminumbra::Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_EQ(WorldSaveService::member_digest(save.path(), "aether_state.efs", digest, error),
+              pages <= 8192)
+        << error;
 }
 } // namespace
+
+TEST(WorldSaveService, LegacyEnergyAdmissionRequiresCanonicalCellsAndBytes) {
+    for (const bool with_ledger : {true, false}) {
+        SCOPED_TRACE(with_ledger);
+        ASSERT_NO_FATAL_FAILURE(CheckCanonicalLegacyEnergyAdmission(with_ledger));
+    }
+}
 
 TEST(WorldSaveService, LegacyEnergyAdmissionRetainsTheReaderPageRange) {
     for (const std::size_t pages : {4097u, 8192u, 8193u}) {
