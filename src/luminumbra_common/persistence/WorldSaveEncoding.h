@@ -10,6 +10,9 @@ namespace Luminumbra::Persistence::detail {
 // Internal test seams. Install before saving; reset only after the save returns.
 // Zero selects the hardware limit. Explicit limits are still capped at eight.
 void set_chunk_encode_workers_for_testing(unsigned workers);
+// Overrides the bytes of in-flight encoding the workers may hold together; zero restores the
+// default.
+void set_chunk_encode_in_flight_limit_for_testing(std::size_t bytes);
 // Called inside the encoder, before serialization; exceptions follow normal worker handling.
 using ChunkEncodeHook = void (*)(std::size_t index);
 void set_chunk_encode_hook_for_testing(ChunkEncodeHook hook);

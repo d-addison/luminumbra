@@ -419,6 +419,52 @@ TEST(WorldSaveRegionFormat, ChunkRecordEncodingRetainsCompactJsonDumpBytes) {
     }
 }
 
+TEST(WorldSaveRegionFormat, ChunkEncodingInFlightLimitSerializesWithoutChangingBytes) {
+    TempSaveDir unlimited("encode_unlimited"), limited("encode_limited");
+    WorldStreamingState state;
+    PopulateEncodingWorld(state, 129);
+    WorldSaveService service;
+    {
+        ChunkEncodingControl control(4);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(service.save_world(state, unlimited.path, &errors));
+        ASSERT_TRUE(errors.empty());
+    }
+    std::atomic<unsigned> active{0};
+    std::atomic<unsigned> peak{0};
+    {
+        ChunkEncodingControl control(4);
+        // One byte admits a single record at a time, and an oversized record still proceeds.
+        Luminumbra::Persistence::detail::set_chunk_encode_in_flight_limit_for_testing(1);
+        control.before_encode = [&](std::size_t) {
+            const unsigned now = ++active;
+            unsigned seen = peak.load();
+            while (now > seen && !peak.compare_exchange_weak(seen, now)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            --active;
+        };
+        std::vector<std::string> errors;
+        const bool saved = service.save_world(state, limited.path, &errors);
+        Luminumbra::Persistence::detail::set_chunk_encode_in_flight_limit_for_testing(0);
+        ASSERT_TRUE(saved);
+        ASSERT_TRUE(errors.empty());
+        EXPECT_EQ(control.calls, 129u);
+    }
+    EXPECT_EQ(peak.load(), 1u);
+    const auto expected = ReadFileBytes(WorldSaveService::region_file_path(unlimited.path, 0, 0));
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(expected, ReadFileBytes(WorldSaveService::region_file_path(limited.path, 0, 0)));
+}
+
+TEST(WorldSaveRegionFormat, GuardedJsonDumpKeepsNonAsciiTextAsUtf8) {
+    namespace P = Luminumbra::Persistence;
+    const nlohmann::json value = {{"name", "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x8C\x8D"},
+                                  {"list", {"\xC3\xBC", "ascii"}}};
+    EXPECT_EQ(P::detail::dump_json_guarded(value), value.dump());
+    EXPECT_EQ(P::detail::dump_json_guarded(value, 4), value.dump(4));
+    EXPECT_NE(P::detail::dump_json_guarded(value).find("caf\xC3\xA9"), std::string::npos);
+}
+
 TEST(WorldSaveRegionFormat, GuardedJsonDumpMatchesTheLibraryDump) {
     namespace P = Luminumbra::Persistence;
     const nlohmann::json value = {{"name", "quote\" and \\ slash"},

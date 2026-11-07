@@ -33,6 +33,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -145,6 +146,10 @@ std::atomic<unsigned>& ChunkEncodeWorkersForTesting() {
     static std::atomic<unsigned> workers{0};
     return workers;
 }
+std::atomic<std::size_t>& ChunkEncodeInFlightLimitForTesting() {
+    static std::atomic<std::size_t> limit{0};
+    return limit;
+}
 std::atomic<ChunkEncodeHook>& ChunkEncodeHookForTesting() {
     static std::atomic<ChunkEncodeHook> hook{nullptr};
     return hook;
@@ -158,6 +163,9 @@ void set_file_publication_hook_for_testing(PublicationHook hook) {
 }
 void set_chunk_encode_workers_for_testing(unsigned workers) {
     ChunkEncodeWorkersForTesting().store(workers, std::memory_order_release);
+}
+void set_chunk_encode_in_flight_limit_for_testing(std::size_t bytes) {
+    ChunkEncodeInFlightLimitForTesting().store(bytes, std::memory_order_release);
 }
 void set_chunk_encode_hook_for_testing(ChunkEncodeHook hook) {
     ChunkEncodeHookForTesting().store(hook, std::memory_order_release);
@@ -2392,9 +2400,44 @@ struct ChunkEncodeWork {
 
 // Matches the budget of the admitted-record cache that receives the retained inputs.
 constexpr std::size_t kEncodeRetainedInputBytes = std::size_t{64} * 1024 * 1024;
+// Bounds the memory that concurrently encoding records may hold together.
+constexpr std::size_t kEncodeInFlightBytes = std::size_t{256} * 1024 * 1024;
+// A record holds its captured inputs, the serialized JSON payload (base64 of the arrays) and
+// LZ4's compression buffer while it encodes.
+constexpr std::size_t kEncodeInFlightFactor = 4;
+
+// Admits a record when nothing is in flight or when its estimate still fits, so one oversized
+// record always proceeds on its own and the save cannot stall.
+class EncodeInFlightBudget {
+public:
+    explicit EncodeInFlightBudget(std::size_t limit)
+        : m_limit(limit) {}
+    void acquire(std::size_t bytes) {
+        std::unique_lock lock(m_mutex);
+        m_released.wait(
+            lock, [&] { return m_used == 0 || bytes <= m_limit - std::min(m_used, m_limit); });
+        m_used += bytes;
+    }
+    void release(std::size_t bytes) noexcept {
+        {
+            const std::lock_guard lock(m_mutex);
+            m_used -= bytes;
+        }
+        m_released.notify_all();
+    }
+
+private:
+    const std::size_t m_limit;
+    std::mutex m_mutex;
+    std::condition_variable m_released;
+    std::size_t m_used = 0;
+};
 
 void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
     const auto hook = detail::ChunkEncodeHookForTesting().load(std::memory_order_acquire);
+    const auto limit_override =
+        detail::ChunkEncodeInFlightLimitForTesting().load(std::memory_order_acquire);
+    EncodeInFlightBudget in_flight(limit_override == 0 ? kEncodeInFlightBytes : limit_override);
     // Records after the lowest failed index are never inspected by the merge, so workers stop
     // claiming them once an earlier one has failed.
     std::atomic<std::size_t> first_failure{std::numeric_limits<std::size_t>::max()};
@@ -2404,39 +2447,52 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
         while (index < seen &&
                !first_failure.compare_exchange_weak(seen, index, std::memory_order_relaxed)) {}
     };
-    const auto encode =
-        [&work, hook, &first_failure, &retained_inputs, &note_failure](std::size_t index) noexcept {
-            if (index > first_failure.load(std::memory_order_relaxed))
+    const auto encode = [&work, hook, &first_failure, &retained_inputs, &note_failure, &in_flight](
+                            std::size_t index) noexcept {
+        if (index > first_failure.load(std::memory_order_relaxed))
+            return;
+        auto& item = work[index];
+        std::size_t admitted = 0;
+        try {
+            // Captured as the record is claimed, so only the records being encoded hold a copy
+            // and a failing save never stages the rest of the region.
+            item.inputs = ChunkSnapshotInputBytes(*item.chunk);
+            const std::size_t estimate = item.inputs.size() * kEncodeInFlightFactor;
+            in_flight.acquire(estimate);
+            admitted = estimate;
+            if (index > first_failure.load(std::memory_order_relaxed)) {
+                in_flight.release(admitted);
+                admitted = 0;
                 return;
-            auto& item = work[index];
-            try {
-                if (hook)
-                    hook(index);
-                // Captured as the record is claimed, so only the records being encoded hold a copy
-                // and a failing save never stages the rest of the region.
-                item.inputs = ChunkSnapshotInputBytes(*item.chunk);
-                const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
-                if (!CompressPayload(payload, item.record, &item.errors)) {
-                    note_failure(index);
-                    return;
-                }
-                // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
-                item.has_null = payload.find(":null") != std::string::npos ||
-                                payload.find("[null") != std::string::npos ||
-                                payload.find(",null") != std::string::npos;
-                // Inputs beyond the cache budget would be dropped by the cache anyway.
-                if (retained_inputs.fetch_add(item.inputs.size(), std::memory_order_relaxed) +
-                        item.inputs.size() >
-                    kEncodeRetainedInputBytes) {
-                    retained_inputs.fetch_sub(item.inputs.size(), std::memory_order_relaxed);
-                    std::string().swap(item.inputs);
-                }
-                item.success = true;
-            } catch (...) {
-                item.exception = std::current_exception();
-                note_failure(index);
             }
-        };
+            if (hook)
+                hook(index);
+            const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
+            if (!CompressPayload(payload, item.record, &item.errors)) {
+                in_flight.release(admitted);
+                admitted = 0;
+                note_failure(index);
+                return;
+            }
+            // A JSON null follows ':', '[' or ','; none of those occur in base64 data.
+            item.has_null = payload.find(":null") != std::string::npos ||
+                            payload.find("[null") != std::string::npos ||
+                            payload.find(",null") != std::string::npos;
+            // Inputs beyond the cache budget would be dropped by the cache anyway.
+            if (retained_inputs.fetch_add(item.inputs.size(), std::memory_order_relaxed) +
+                    item.inputs.size() >
+                kEncodeRetainedInputBytes) {
+                retained_inputs.fetch_sub(item.inputs.size(), std::memory_order_relaxed);
+                std::string().swap(item.inputs);
+            }
+            item.success = true;
+        } catch (...) {
+            item.exception = std::current_exception();
+            note_failure(index);
+        }
+        if (admitted != 0)
+            in_flight.release(admitted);
+    };
 
     unsigned workers = 1;
     if (work.size() >= 128) {
