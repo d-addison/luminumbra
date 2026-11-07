@@ -3711,7 +3711,108 @@ void CheckEmptyLegacyEnergySnapshotPreservesCadence(bool aligned) {
         EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
     }
 }
+
+void CheckEmptyLegacyEnergyChannelsContinueAfterReopen(int channels) {
+    SCOPED_TRACE(channels);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession legacy, live, reopened, explicit_load;
+    for (auto* session : {&legacy, &live, &reopened, &explicit_load}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetAetherStateEnabled(true);
+        session->SetActiveRegionsEnabled(session != &legacy);
+    }
+    ASSERT_TRUE(legacy.CreateWorld("Empty energy channels", "1337", "default"));
+    ASSERT_TRUE(legacy.GetEnergyFieldState()->DeserializeRecord(
+        "EFS1 " + std::to_string(channels) + " 3\n", 0));
+    ASSERT_TRUE(legacy.SaveWorldState());
+    ASSERT_TRUE(live.LoadWorld(legacy.GetMetadata().worldId)) << live.GetWorldOpenError();
+    ASSERT_EQ(live.GetEnergyFieldState()->channels(), channels);
+    ASSERT_EQ(live.GetEnergyFieldState()->page_count(), 0u);
+    ASSERT_EQ(live.GetActiveRegionLedger().energy_ages().at({0, 0}), 5u);
+    const auto canonical = live.GetEnergyFieldState()->CanonicalRegionalBytes();
+    const auto hash = SessionWorldHash(live);
+    ASSERT_TRUE(live.SaveWorldState());
+    const auto save = live.GetWorldSaveDir();
+    const auto explicit_save = root.path() / "empty-channel-snapshot";
+    ASSERT_TRUE(live.SaveWorldStateTo(explicit_save));
+    EXPECT_EQ(live.GetEnergyFieldState()->CanonicalRegionalBytes(), canonical);
+    EXPECT_EQ(SessionWorldHash(live), hash);
+    if (channels == 2) {
+        EXPECT_FALSE(fs::exists(save / "aether_state.efs"));
+        EXPECT_FALSE(fs::exists(explicit_save / "aether_state.efs"));
+        auto before = SavedPresetTestDiskBytes(save);
+        ASSERT_TRUE(live.SaveWorldState());
+        auto after = SavedPresetTestDiskBytes(save);
+        // Only the snapshot generation changes on an otherwise identical save.
+        before.erase("chunks/region/snapshot.json");
+        after.erase("chunks/region/snapshot.json");
+        EXPECT_EQ(after, before);
+    } else {
+        const auto expected = "EFS2 " + std::to_string(channels) + " 0\n";
+        EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), expected);
+        EXPECT_EQ(ReadClockTestTextRecord(explicit_save / "aether_state.efs"), expected);
+    }
+    ASSERT_TRUE(reopened.LoadWorld(live.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit channels", "1337", "default"));
+    ASSERT_TRUE(explicit_load.GetEnergyFieldState()->DeserializeRecord("EFS1 4 3\n", 0));
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+    for (auto* session : {&live, &reopened, &explicit_load}) {
+        ASSERT_EQ(session->GetEnergyFieldState()->channels(), channels);
+        EXPECT_EQ(session->GetEnergyFieldState()->page_count(), 0u);
+        EXPECT_EQ(session->GetEnergyFieldState()->CanonicalRegionalBytes(), canonical);
+        EXPECT_EQ(SessionWorldHash(*session), hash);
+        ASSERT_TRUE(session->GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
+    }
+    const double dt = live.GetSimulationClock().fixed_dt();
+    for (int tick = 1; tick <= 17; ++tick) {
+        SCOPED_TRACE(tick);
+        for (auto* session : {&live, &reopened, &explicit_load}) {
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+            EXPECT_EQ(session->GetEnergyFieldState()->channels(), channels);
+            if (tick < 3) {
+                EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+            } else {
+                EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+            }
+        }
+        for (auto* session : {&reopened, &explicit_load}) {
+            EXPECT_EQ(session->GetEnergyFieldState()->CanonicalRegionalBytes(),
+                      live.GetEnergyFieldState()->CanonicalRegionalBytes());
+            EXPECT_EQ(session->GetEnergyFieldState()->SerializeRegionalRecord(),
+                      live.GetEnergyFieldState()->SerializeRegionalRecord());
+            EXPECT_EQ(session->GetActiveRegionLedger().energy_ages(),
+                      live.GetActiveRegionLedger().energy_ages());
+            EXPECT_EQ(session->ComputeAetherStateSubHash(), live.ComputeAetherStateSubHash());
+            EXPECT_EQ(SessionWorldHash(*session), SessionWorldHash(live));
+        }
+    }
+    if (channels > 2) {
+        for (auto* session : {&live, &reopened, &explicit_load}) {
+            ASSERT_TRUE(
+                session->GetEnergyFieldState()->QueueRegionalDeposit(2, 0, 0, channels - 1, 12345));
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0, channels - 1), 12345u);
+        }
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(live));
+        EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(live));
+    }
+    // Once populated, every channel count uses the existing nonempty record format.
+    ASSERT_TRUE(live.SaveWorldState());
+    const auto saved = ReadClockTestTextRecord(save / "aether_state.efs");
+    EXPECT_TRUE(saved.starts_with("EFS1 " + std::to_string(channels) + " 0\n"));
+    EXPECT_EQ(saved, live.GetEnergyFieldState()->SerializeRegionalRecord());
+}
 } // namespace
+
+TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergyChannelsContinueAfterReopen) {
+    for (const int channels : {1, 2, 5, 16}) {
+        ASSERT_NO_FATAL_FAILURE(CheckEmptyLegacyEnergyChannelsContinueAfterReopen(channels));
+    }
+}
 
 TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory) {
     ASSERT_NO_FATAL_FAILURE(CheckEmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory());

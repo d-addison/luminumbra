@@ -1038,9 +1038,14 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     std::string magic, count_token, phase_token, extra;
     int channels = 0;
     std::uint64_t phase = 0;
-    if (!(header >> magic >> count_token >> phase_token) || (header >> extra) || magic != "EFS1" ||
-        !ParseRegionalInteger(count_token, channels) || channels < 1 || channels > 64 ||
-        !ParseRegionalInteger(phase_token, phase) || phase != 0)
+    if (!(header >> magic >> count_token >> phase_token) || (header >> extra) ||
+        (magic != "EFS1" && magic != "EFS2") || !ParseRegionalInteger(count_token, channels) ||
+        channels < 1 || channels > 64 || !ParseRegionalInteger(phase_token, phase) || phase != 0)
+        return false;
+    // EFS2 carries only a nondefault empty layer's channel count. EFS1 still
+    // requires nonzero pages, and default empty layers still have no record.
+    const bool empty_channels = magic == "EFS2";
+    if (empty_channels && (channels == 2 || record != "EFS2 " + std::to_string(channels) + " 0\n"))
         return false;
     EnergyFieldState staged(channels);
     const auto values_per_page =
@@ -1048,7 +1053,7 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     const auto max_pages = kMaxRegionalValueBytes / (values_per_page * sizeof(std::uint16_t));
     std::optional<std::int64_t> previous;
     while (std::getline(in, line)) {
-        if (staged.m_pages.size() == max_pages)
+        if (empty_channels || staged.m_pages.size() == max_pages)
             return false;
         std::istringstream row(line);
         row.imbue(std::locale::classic());
@@ -1092,7 +1097,8 @@ bool EnergyFieldState::DeserializeRegionalRecord(const std::string& record) {
     }
     // Exact reencoding rejects alternate whitespace, signed zero, leading zeros,
     // missing newline, duplicate/empty pages and extra/trailing data.
-    if (!staged.RegionalRecordFits() || staged.SerializeRegionalRecord() != record)
+    if (!staged.RegionalRecordFits() ||
+        (!empty_channels && staged.SerializeRegionalRecord() != record))
         return false;
     m_regional_validation.reset();
     m_regional_queued_validation.reset();
