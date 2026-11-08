@@ -2597,6 +2597,33 @@ void ExpectCompleteSaveFailure(int save_path,
     }
 }
 
+void ExpectRetryAcknowledgesSave(int save_path,
+                                 world::GameSession* session,
+                                 Server::ServerWorldRunner& runner,
+                                 const fs::path& canonical,
+                                 const fs::path& destination,
+                                 const std::shared_ptr<Chunk>& chunk,
+                                 const std::string& old_metadata,
+                                 const std::string& old_chunks) {
+    if (save_path == 3) {
+        ASSERT_TRUE(session->SaveWorldStateTo(destination, nullptr, /*full_snapshot=*/true));
+    } else {
+        ASSERT_TRUE(session->SaveWorld());
+    }
+    EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 3);
+    EXPECT_NE(Read(destination / "world_info.json"), old_metadata);
+    if (save_path == 3) {
+        // A successful export must not acknowledge the canonical save's edits.
+        EXPECT_EQ(Read(canonical / "world_info.json"), old_metadata);
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)), old_chunks);
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
+                  Read(WorldSaveService::region_file_path(destination, 0, 0)));
+    }
+    runner.Shutdown();
+}
+
 TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPending) {
     const auto [regions, failure_and_path] = GetParam();
     const bool energy_failure = failure_and_path % 2 != 0;
@@ -2675,23 +2702,8 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     observation.reset();
     EXPECT_TRUE(WorldSaveService::validate_save(destination));
     if (save_path != 6) {
-        if (save_path == 3) {
-            ASSERT_TRUE(session->SaveWorldStateTo(destination, nullptr, /*full_snapshot=*/true));
-        } else {
-            ASSERT_TRUE(session->SaveWorld());
-        }
-        EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 3);
-        EXPECT_NE(Read(destination / "world_info.json"), old_metadata);
-        if (save_path == 3) {
-            // A successful export must not acknowledge the canonical save's edits.
-            EXPECT_EQ(Read(canonical / "world_info.json"), old_metadata);
-            EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)), old_chunks);
-            ASSERT_TRUE(session->SaveWorldState());
-            EXPECT_FALSE(chunk->is_voxel_data_dirty());
-            EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
-                      Read(WorldSaveService::region_file_path(destination, 0, 0)));
-        }
-        runner.Shutdown();
+        ASSERT_NO_FATAL_FAILURE(ExpectRetryAcknowledgesSave(
+            save_path, session, runner, canonical, destination, chunk, old_metadata, old_chunks));
     }
 }
 
