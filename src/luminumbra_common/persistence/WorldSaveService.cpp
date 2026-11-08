@@ -3696,8 +3696,10 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                 if (stop.stop_requested())
                     return "Saved-world validation cancelled.";
                 std::string error;
-                if (!WorldSaveService::member_digest(save_dir, member.path, actual, error))
-                    return member.path + ": " + error;
+                if (!WorldSaveService::member_digest_cancellable(
+                        save_dir, member.path, actual, error, stop))
+                    return stop.stop_requested() ? "Saved-world validation cancelled."
+                                                 : member.path + ": " + error;
             }
         }
         if (member.present != actual.present)
@@ -4920,8 +4922,17 @@ bool ValidateRegionalEnergy(const std::filesystem::path& save_dir,
                             const world::ActiveRegionLedger& ledger,
                             std::vector<std::string>* errors,
                             const std::stop_token& stop) {
+    // Each open is cancellation work: stop before the next file once a stop is requested.
+    const auto cancelled = [&] {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    };
+    if (stop.stop_requested())
+        return cancelled();
     if (SavedInputFile(WorldSaveService::active_regions_path(save_dir)).missing())
         return true;
+    if (stop.stop_requested())
+        return cancelled();
     const SavedInputFile input(save_dir / "aether_state.efs");
     std::string bytes;
     const auto maximum = ledger.energy_ages().empty()
@@ -6214,6 +6225,14 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      MemberDigest& out,
                                      std::string& error) {
+    return member_digest_cancellable(save_dir, relative_path, out, error, {});
+}
+
+bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& save_dir,
+                                                 std::string_view relative_path,
+                                                 MemberDigest& out,
+                                                 std::string& error,
+                                                 const std::stop_token& stop) {
     out = MemberDigest{};
     try {
         if (!member_path_allowed(relative_path)) {
@@ -6322,9 +6341,22 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         } else if (relative == "aether_state.efs") {
             const auto& bytes = member_bytes;
+            if (stop.stop_requested()) {
+                error = "Saved-world validation cancelled.";
+                return false;
+            }
             if (!SavedInputFile(active_regions_path(save_dir)).missing()) {
                 world::ActiveRegionLedger ledger;
-                if (bytes.empty() || !load_active_regions(ledger, save_dir, &diagnostics) ||
+                if (stop.stop_requested()) {
+                    error = "Saved-world validation cancelled.";
+                    return false;
+                }
+                if (bytes.empty() ||
+                    !load_active_regions(ledger,
+                                         save_dir,
+                                         &diagnostics,
+                                         world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                         stop) ||
                     !RegionalEnergyMatchesLedger(bytes, ledger)) {
                     error = kRegionalEnergyError;
                     return false;

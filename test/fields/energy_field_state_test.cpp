@@ -1438,6 +1438,65 @@ TEST(RegionalEnergy, RegionalRecordCapCoversTheLegacyReaderRange) {
                   luminumbra::fields::kEnergyReadRecordBytes);
 }
 
+namespace {
+// One byte over the limit through the width of a single value: the decoder
+// refuses it, and the same pages below the limit decode after one digit is removed.
+void RefuseWideRecordAndNarrowIt(EnergyFieldState& field, std::string& record) {
+    EXPECT_FALSE(field.DeserializeRegionalRecord(record));
+    EXPECT_EQ(field.page_count(), 0u);
+    const auto wide_value = record.find(":65535");
+    ASSERT_NE(wide_value, std::string::npos);
+    record.erase(wide_value + 1, 1);
+}
+
+void ExpectOverLimitTickRefusedKeepsCallerResult(EnergyFieldState& field,
+                                                 const EnergyRecords& records,
+                                                 const EnergyAges& ages,
+                                                 std::span<const RegionKey> due,
+                                                 const std::string& record) {
+    EnergyResult result;
+    result.ages = {{{9, 9}, 42}};
+    result.work = {{{9, 9}, 1, 2, 3, 4}};
+    result.clipped_raw = 99;
+    result.staged_pages = 123;
+    result.diffusion_pages = 456;
+    // The decoded budget is unchanged and one deposit is well below its cap.
+    EXPECT_FALSE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(result.ages, (EnergyAges{{{9, 9}, 42}}));
+    ASSERT_EQ(result.work.size(), 1u);
+    EXPECT_EQ(result.work[0].key, (RegionKey{9, 9}));
+    EXPECT_EQ(result.work[0].region_ticks, 1u);
+    EXPECT_EQ(result.work[0].entity_updates, 2u);
+    EXPECT_EQ(result.work[0].water_cells, 3u);
+    EXPECT_EQ(result.work[0].page_updates, 4u);
+    EXPECT_EQ(result.clipped_raw, 99u);
+    EXPECT_EQ(result.staged_pages, 123u);
+    EXPECT_EQ(result.diffusion_pages, 456u);
+    EXPECT_EQ(field.at_cell(0, 0, 1), 5535u);
+    EXPECT_TRUE(field.SerializeRegionalRecord() == record);
+}
+
+void ExpectWriterRefusesThenTickFreesBytes(EnergyFieldState& field,
+                                           const EnergyRecords& records,
+                                           const EnergyAges& ages,
+                                           std::span<const RegionKey> due) {
+    // The writer independently refuses the identical over-limit state.
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 65535);
+    EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
+    // Restore channel 1, then free two encoded bytes in channel 2 without
+    // copying the fixture. The original queued deposit grows channel 1 by one byte.
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 5535);
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 2, 535);
+    EnergyResult result;
+    ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(field.at_cell(0, 0, 1), 65535u);
+    EXPECT_EQ(field.at_cell(0, 0, 2), 535u);
+    EXPECT_EQ(result.ages.at({0, 0}), 1u);
+    EXPECT_EQ(result.clipped_raw, 0u);
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+}
+} // namespace
+
 TEST(RegionalEnergy, RecordByteBoundariesCoverWriterDecoderAndCachedTick) {
     // Construct and release one large fixture at a time. At each boundary the
     // same decoded pages back the writer, decoder and cached tick assertions.
@@ -1452,11 +1511,7 @@ TEST(RegionalEnergy, RecordByteBoundariesCoverWriterDecoderAndCachedTick) {
         if (delta == 1) {
             // Refuse a canonical record with exactly the same pages and tokens
             // as the accepted one-byte-shorter record below. Only value width differs.
-            EXPECT_FALSE(field.DeserializeRegionalRecord(record));
-            EXPECT_EQ(field.page_count(), 0u);
-            const auto wide_value = record.find(":65535");
-            ASSERT_NE(wide_value, std::string::npos);
-            record.erase(wide_value + 1, 1);
+            ASSERT_NO_FATAL_FAILURE(RefuseWideRecordAndNarrowIt(field, record));
         }
         ASSERT_TRUE(field.DeserializeRegionalRecord(record));
         ASSERT_TRUE(field.SerializeRegionalRecord() == record);
@@ -1473,41 +1528,13 @@ TEST(RegionalEnergy, RecordByteBoundariesCoverWriterDecoderAndCachedTick) {
         ASSERT_TRUE(EnergyFieldStateTestAccess::Validated(field));
         const auto page_count = field.page_count();
         const std::array due{RegionKey{0, 0}};
-        EnergyResult result;
         if (delta == 1) {
-            result.ages = {{{9, 9}, 42}};
-            result.work = {{{9, 9}, 1, 2, 3, 4}};
-            result.clipped_raw = 99;
-            result.staged_pages = 123;
-            result.diffusion_pages = 456;
-            // The decoded budget is unchanged and one deposit is well below its cap.
-            EXPECT_FALSE(field.TickRegional(1, records, due, ages, result));
-            EXPECT_EQ(result.ages, (EnergyAges{{{9, 9}, 42}}));
-            ASSERT_EQ(result.work.size(), 1u);
-            EXPECT_EQ(result.work[0].key, (RegionKey{9, 9}));
-            EXPECT_EQ(result.work[0].region_ticks, 1u);
-            EXPECT_EQ(result.work[0].entity_updates, 2u);
-            EXPECT_EQ(result.work[0].water_cells, 3u);
-            EXPECT_EQ(result.work[0].page_updates, 4u);
-            EXPECT_EQ(result.clipped_raw, 99u);
-            EXPECT_EQ(result.staged_pages, 123u);
-            EXPECT_EQ(result.diffusion_pages, 456u);
-            EXPECT_EQ(field.at_cell(0, 0, 1), 5535u);
-            EXPECT_TRUE(field.SerializeRegionalRecord() == record);
-            // The writer independently refuses the identical over-limit state.
-            EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 65535);
-            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
-            // Restore channel 1, then free two encoded bytes in channel 2 without
-            // copying the fixture. The original queued deposit grows channel 1 by one byte.
-            EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 5535);
-            EnergyFieldStateTestAccess::SetOriginChannel(field, 2, 535);
-            ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
-            EXPECT_EQ(field.at_cell(0, 0, 1), 65535u);
-            EXPECT_EQ(field.at_cell(0, 0, 2), 535u);
-            EXPECT_EQ(result.ages.at({0, 0}), 1u);
-            EXPECT_EQ(result.clipped_raw, 0u);
-            EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectOverLimitTickRefusedKeepsCallerResult(field, records, ages, due, record));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectWriterRefusesThenTickFreesBytes(field, records, ages, due));
         } else {
+            EnergyResult result;
             ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
             EXPECT_TRUE(field.SerializeRegionalRecord() == record);
             EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));

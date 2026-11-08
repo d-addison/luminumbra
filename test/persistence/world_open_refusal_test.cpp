@@ -1,6 +1,7 @@
 #include "../support/CalendarMetadataCases.h"
 #include "../support/IndexedSaveFixture.h"
 #include "../support/PersistenceFileOps.h"
+#include "../support/SessionEnergyTick.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
@@ -76,6 +77,7 @@ namespace {
 namespace fs = std::filesystem;
 using namespace Luminumbra;
 using Persistence::WorldSaveService;
+using TestSupport::ApplySnapshotTestEnergy;
 using world::GameSession;
 
 std::string Read(const fs::path& path) {
@@ -1906,7 +1908,7 @@ void PreparePendingSnapshot(GameSession& session,
     ASSERT_NE(energy, nullptr);
     energy->SetAnchorCell(0, 0);
     energy->QueueDeposit(1, 0, 0, 0, 60000);
-    energy->Tick(0);
+    ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(session, 0));
     if (existing_snapshot) {
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_FALSE(chunk->is_voxel_data_dirty());
@@ -1917,7 +1919,7 @@ void PreparePendingSnapshot(GameSession& session,
     chunk->mark_voxel_data_dirty();
     registry.get<Components::PlantGrowthComponent>(plant).growth_points = 123;
     energy->QueueDeposit(2, 0, 0, 0, 1000);
-    energy->Tick(0);
+    ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(session, 0));
 }
 
 class PendingSnapshotState {
@@ -2234,7 +2236,7 @@ TEST_P(SnapshotEnergyFailure, FailureKeepsDirtyChunksAndRetryPersistsAllState) {
         ASSERT_FALSE(chunk->is_voxel_data_dirty());
         auto* energy = session->GetEnergyFieldState();
         energy->QueueDeposit(3, 0, 0, 0, 500);
-        energy->Tick(0);
+        ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(*session, 0));
     }
     // Retain the prior energy file while injecting the energy-only failure.
     const PendingSnapshotState pending(*session);
@@ -2632,7 +2634,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     for (auto plant : plants)
         plants.get<Components::PlantGrowthComponent>(plant).growth_points += 7;
     session->GetEnergyFieldState()->QueueDeposit(7, 0, 0, 0, 500);
-    session->GetEnergyFieldState()->Tick(0);
+    ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(*session, 0));
 
     // Declare after the runner so even a fatal assertion releases the obstruction
     // before its destructor attempts a shutdown save.
@@ -2758,7 +2760,7 @@ TEST_F(WorldOpenRefusal, IndexedFlagOffFinalMetadataFailureRollsBackEnergyAndEmp
             session->GetEnergyFieldState()->ResetEmptyAtTick(session->GetSimulationTickCount());
         } else {
             session->GetEnergyFieldState()->QueueDeposit(7, 0, 0, 0, 500);
-            session->GetEnergyFieldState()->Tick(0);
+            ASSERT_NO_FATAL_FAILURE(ApplySnapshotTestEnergy(*session, 0));
         }
         chunk->heightmap_data.front() = 47.0f;
         chunk->mark_voxel_data_dirty();
@@ -3389,14 +3391,17 @@ TEST_F(WorldOpenRefusal, CleanOversizedRegionDoesNotBlockIndependentPayloadSaves
         const auto plants_before = Read(plant_path);
         const auto energy_before = Read(energy_path);
         // Restore energy so only the plant payload changes in this save.
-        ASSERT_TRUE(session->GetEnergyFieldState()->DeserializeRecord(
-            energy_before, session->GetSimulationTickCount()));
+        auto* energy_state = session->GetEnergyFieldState();
+        ASSERT_TRUE(active_regions ? energy_state->DeserializeRegionalRecord(energy_before)
+                                   : energy_state->DeserializeRecord(
+                                         energy_before, session->GetSimulationTickCount()));
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_NE(Read(plant_path), plants_before);
         EXPECT_EQ(Read(energy_path), energy_before);
         const auto plants_after = Read(plant_path);
         session->GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 1000);
-        session->GetEnergyFieldState()->Tick(session->GetSimulationTickCount());
+        ASSERT_NO_FATAL_FAILURE(
+            ApplySnapshotTestEnergy(*session, session->GetSimulationTickCount()));
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_EQ(Read(plant_path), plants_after);
         EXPECT_NE(Read(energy_path), energy_before);
