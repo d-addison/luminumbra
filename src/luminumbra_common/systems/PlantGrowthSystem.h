@@ -29,6 +29,26 @@ namespace luminumbra::foliage {
 // (the engine mixes `luminumbra::` for ai/core and `Luminumbra::` for components).
 namespace Comp = ::Luminumbra::Components;
 
+inline std::uint64_t PlantPersistentId(const entt::registry& registry, entt::entity entity) {
+    const auto* identity = registry.try_get<const Comp::PlantRegionComponent>(entity);
+    return identity ? identity->persistent_id : 0;
+}
+
+inline std::uint64_t PlantSimulationId(const entt::registry& registry, entt::entity entity) {
+    const auto id = PlantPersistentId(registry, entity);
+    return id != 0 ? id : static_cast<std::uint64_t>(entt::to_integral(entity));
+}
+
+// Persistent plants precede legacy plants; handles break duplicate/absent identity ties.
+inline bool PlantIdentityLess(const entt::registry& registry, entt::entity a, entt::entity b) {
+    const auto id_a = PlantPersistentId(registry, a);
+    const auto id_b = PlantPersistentId(registry, b);
+    if ((id_a != 0) != (id_b != 0)) {
+        return id_a != 0;
+    }
+    return id_a != id_b ? id_a < id_b : entt::to_integral(a) < entt::to_integral(b);
+}
+
 // Seed-stream offset for plant genomes/mutation (wind+11, weather+12/13, aether+14
 // taken; plants claim +15 in the stable subsystem allocation.
 inline constexpr std::uint64_t kPlantSeedOffset = 15;
@@ -173,6 +193,9 @@ inline PlantGrowthStats RunPlantGrowthSystemOnTick(entt::registry& reg,
         const int q = 100 - static_cast<int>(growth.stress_points / 50u);
         growth.quality = static_cast<std::uint8_t>(q < 0 ? 0 : q);
         growth.last_tick = current_tick;
+        if (auto* identity = reg.try_get<Comp::PlantRegionComponent>(e)) {
+            identity->region_stamp = current_tick;
+        }
         ++stats.updated;
     }
     return stats;

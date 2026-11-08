@@ -1160,8 +1160,25 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::PlantGenomeComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
-                if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                    fol::RunCropLifecycleOnTick(m_registry, current_tick, 0, foliage_gate);
+                if (!m_registry.view<Comp::CropLifecycleComponent>().empty()) {
+                    const auto allocate_identity = [this, current_tick](std::uint64_t& id) {
+                        try {
+                            if (!m_activeRegionLedger.allocate_persistent_id(id)) {
+                                LatchRegionFault(current_tick, "persistent id space exhausted");
+                                return false;
+                            }
+                        } catch (const std::length_error& error) {
+                            LatchRegionFault(current_tick, error.what());
+                            return false;
+                        }
+                        return true;
+                    };
+                    fol::RunCropLifecycleOnTick(
+                        m_registry, current_tick, 0, foliage_gate, allocate_identity);
+                    if (m_regionFault) {
+                        return i + 1;
+                    }
+                }
                 budget.Next(Stage::Fire, [&] {
                     return SimParticipantCount<TelemetryComp::CombustibleComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
@@ -4577,17 +4594,8 @@ std::string GameSession::ComputePlantSubHash() const {
         ents.push_back(e);
     // Identified plants order by persistent ID so replay does not depend on handle history;
     // legacy plants keep handle order after them.
-    const auto persistent_id = [this](entt::entity e) -> std::uint64_t {
-        const auto* owner =
-            m_registry.try_get<const Luminumbra::Components::PlantRegionComponent>(e);
-        return owner ? owner->persistent_id : 0;
-    };
-    std::sort(ents.begin(), ents.end(), [&persistent_id](entt::entity a, entt::entity b) {
-        const std::uint64_t id_a = persistent_id(a);
-        const std::uint64_t id_b = persistent_id(b);
-        if ((id_a != 0) != (id_b != 0))
-            return id_a != 0;
-        return id_a != id_b ? id_a < id_b : a < b;
+    std::sort(ents.begin(), ents.end(), [this](entt::entity a, entt::entity b) {
+        return luminumbra::foliage::PlantIdentityLess(m_registry, a, b);
     });
     std::ostringstream bytes;
     bytes << "plant:v1:" << ents.size() << ':';

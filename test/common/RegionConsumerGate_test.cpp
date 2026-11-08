@@ -6,6 +6,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,8 @@ namespace C = Luminumbra::Components;
 namespace F = luminumbra::foliage;
 using Luminumbra::world::RegionConsumerGate;
 using Luminumbra::world::RegionKey;
+namespace W = Luminumbra::world;
+namespace P = Luminumbra::Persistence;
 
 entt::entity Plant(entt::registry& registry, float x) {
     const auto entity = registry.create();
@@ -222,7 +226,8 @@ TEST(RegionConsumerGate, DefaultGateMatchesLegacyBytesAndTelemetry) {
         AddCounters(*registry, Plant(*registry, 100.0f));
         Plant(*registry, 101.0f);
     }
-    const std::array<RegionKey, 1> due{{{0, 0}}};
+    // Seed dispersal can cross z = 0, so the neighbouring owner is due as well.
+    const std::array<RegionKey, 2> due{{{0, 0}, {0, -1}}};
     const RegionConsumerGate gate(admitted, due);
     const auto legacy = StepConsumers(implicit, {}, false);
     EXPECT_EQ(StepConsumers(explicit_default, {}), legacy);
@@ -375,5 +380,337 @@ TEST(RegionConsumerGate, MembershipIsLazyAndReusesCallerScratch) {
     EXPECT_FALSE(second.Allows(participant));
     EXPECT_EQ(scratch.size(), 1u);
     EXPECT_EQ(scratch.data(), storage);
+}
+
+void Identify(entt::registry& registry, entt::entity entity, std::uint64_t id) {
+    const auto owner =
+        W::ActiveRegionLedger::region_at(registry.get<C::TransformComponent>(entity).position);
+    registry.emplace<C::PlantRegionComponent>(entity, id, owner.x, owner.z, std::uint64_t{0});
+}
+
+void Ripen(entt::registry& registry, entt::entity entity, bool perennial) {
+    auto& crop = registry.emplace<C::CropLifecycleComponent>(entity);
+    crop.perennial = perennial;
+    crop.lifespan_ticks = 2;
+    crop.ripe_ticks = 1;
+}
+
+bool OpenLedger(W::GameSession& session,
+                Luminumbra::JobSystem& jobs,
+                const std::filesystem::path& directory,
+                W::ActiveRegionLedger& ledger) {
+    session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+    session.SetSaveRootPath(directory);
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetAetherStateEnabled(false);
+    if (!session.CreateTransientWorld("Plant identity", "1337", "default")) {
+        return false;
+    }
+    std::filesystem::create_directories(directory);
+    nlohmann::json metadata{{"container_version", P::WorldSaveService::kContainerVersion}};
+    W::WorldClock{}.write_metadata(metadata);
+    return P::WorldSaveService::save_metadata_and_active_regions(
+               metadata.dump(), ledger, directory) &&
+           session.LoadWorldStateFrom(directory);
+}
+
+TEST(RegionConsumerGate, IdentifiedAnnualAndPerennialReseedPassPersistentSnapshotAdmission) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool perennial : {false, true}) {
+        SCOPED_TRACE(perennial);
+        const Luminumbra::TestSupport::ScopedTempFile temporary("plant_identity_", ".json");
+        const auto directory = temporary.Path().parent_path();
+        W::ActiveRegionLedger ledger;
+        ledger.pin({0, 0}, true, W::WorldClock{});
+        std::uint64_t parent_id = 0, reserved_id = 0;
+        ASSERT_TRUE(ledger.allocate_persistent_id(parent_id));
+        ASSERT_TRUE(ledger.allocate_persistent_id(reserved_id));
+        W::GameSession session;
+        ASSERT_TRUE(OpenLedger(session, jobs, directory / "input", ledger));
+        auto& registry = session.GetRegistry();
+        const auto parent = Plant(registry, 100.0f);
+        registry.get<C::TransformComponent>(parent).position.z = 100.0f;
+        Identify(registry, parent, parent_id);
+        Ripen(registry, parent, perennial);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        const auto snapshot = F::BuildPlantEntitySnapshot(registry, true);
+        std::string error;
+        ASSERT_TRUE(
+            F::ValidatePlantEntitySnapshot(snapshot, session.GetActiveRegionLedger(), {}, error))
+            << error;
+        EXPECT_EQ(snapshot.entities.size(), perennial ? 2u : 1u);
+        bool found_child = false;
+        for (const auto entity : registry.view<C::PlantRegionComponent>()) {
+            const auto& identity = registry.get<C::PlantRegionComponent>(entity);
+            const auto& growth = registry.get<C::PlantGrowthComponent>(entity);
+            EXPECT_LE(growth.planted_tick, identity.region_stamp);
+            EXPECT_LE(identity.region_stamp, growth.last_tick);
+            if (identity.persistent_id != parent_id) {
+                found_child = true;
+                EXPECT_EQ(identity.persistent_id, reserved_id + 1u);
+                EXPECT_EQ(identity.region_stamp, 1u);
+                const auto owner = W::ActiveRegionLedger::region_at(
+                    registry.get<C::TransformComponent>(entity).position);
+                EXPECT_EQ(identity.owner_x, owner.x);
+                EXPECT_EQ(identity.owner_z, owner.z);
+            }
+        }
+        EXPECT_TRUE(found_child);
+        EXPECT_TRUE(F::HasPersistentPlantIdentity(registry));
+    }
+}
+
+TEST(RegionConsumerGate, PersistedRosterIgnoresHandleHistoryForCrossesAndBirths) {
+    entt::registry source;
+    for (const auto id : {std::uint64_t{30}, std::uint64_t{20}, std::uint64_t{10}}) {
+        const auto entity = Plant(source, id == 30 ? 100.0f : (id == 10 ? 99.0f : 101.0f));
+        source.get<C::TransformComponent>(entity).position.z = 100.0f;
+        source.get<C::PlantGenomeComponent>(entity).genes.fill(id == 10 ? 0.2f : 0.8f);
+        source.get<C::PlantGrowthComponent>(entity).growth_points = static_cast<std::uint32_t>(id);
+        Identify(source, entity, id);
+        Ripen(source, entity, true);
+    }
+    auto snapshot = F::BuildPlantEntitySnapshot(source, true);
+    W::GameSession first, second;
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(first.GetRegistry(), snapshot));
+    auto& other = second.GetRegistry();
+    for (std::uint32_t index = 0; index < 7u; ++index) {
+        (void)other.create();
+    }
+    const auto filler = other.create();
+    other.destroy(filler);
+    std::reverse(snapshot.entities.begin(), snapshot.entities.end());
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(other, snapshot));
+    EXPECT_EQ(first.ComputePlantSubHash(), second.ComputePlantSubHash());
+    for (auto* registry : {&first.GetRegistry(), &other}) {
+        EXPECT_EQ(F::RunPollinationOnTick(*registry, 1).crossed, 3);
+        for (const auto entity : registry->view<C::PlantRegionComponent>()) {
+            if (registry->get<C::PlantRegionComponent>(entity).persistent_id == 30u) {
+                C::PlantGenomeComponent donor;
+                donor.genes.fill(0.2f);
+                EXPECT_EQ(registry->get<C::PollinationComponent>(entity).next_genome.genes,
+                          F::PollinateCross(
+                              registry->get<C::PlantGenomeComponent>(entity), donor, 30, 10, 1)
+                              .genes);
+            }
+        }
+    }
+    EXPECT_EQ(PlantBytes(first.GetRegistry()), PlantBytes(other));
+    for (auto* registry : {&first.GetRegistry(), &other}) {
+        W::ActiveRegionLedger ledger;
+        std::uint64_t id = 0;
+        for (std::uint64_t reserved = 0; reserved < 30; ++reserved) {
+            ASSERT_TRUE(ledger.allocate_persistent_id(id));
+        }
+        const auto allocate = [&ledger](std::uint64_t& child_id) {
+            return ledger.allocate_persistent_id(child_id);
+        };
+        EXPECT_EQ(F::RunCropLifecycleOnTick(*registry, 1, 0, {}, allocate).reseeded, 3);
+        EXPECT_TRUE(F::ValidatePlantEntitySnapshot(F::BuildPlantEntitySnapshot(*registry, true)));
+    }
+    EXPECT_EQ(PlantBytes(first.GetRegistry()), PlantBytes(other));
+    EXPECT_EQ(first.ComputePlantSubHash(), second.ComputePlantSubHash());
+}
+
+TEST(RegionConsumerGate, BlockedBirthDestinationPreservesParentUntilDue) {
+    for (const bool perennial : {false, true}) {
+        entt::registry registry;
+        const auto parent = Plant(registry, 511.5f);
+        registry.get<C::TransformComponent>(parent).position.z = 100.0f;
+        Identify(registry, parent, 1);
+        Ripen(registry, parent, perennial);
+        // Pick a deterministic outward dispersal, independent of registry handles.
+        std::uint64_t tick = 1;
+        for (; tick < 100; ++tick) {
+            auto rng =
+                luminumbra::core::DeterministicRng::seeded(F::kGerminationSeedOffset, 1, tick);
+            const float angle = rng.next_unit() * 6.2831853f;
+            const float radius = 1.0f + rng.next_unit() * 2.0f;
+            if (radius * Luminumbra::DeterministicMath::Cos(angle) > 0.5f) {
+                break;
+            }
+        }
+        ASSERT_LT(tick, 100u);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        std::uint32_t allocations = 0;
+        const auto allocate = [&allocations](std::uint64_t& id) {
+            ++allocations;
+            id = 2;
+            return true;
+        };
+        const auto before = PlantBytes(registry);
+        const auto stats = F::RunCropLifecycleOnTick(registry, tick, 0, gate, allocate);
+        EXPECT_EQ(PlantBytes(registry), before);
+        EXPECT_EQ(allocations, 0u);
+        EXPECT_EQ(gate.owner_visits(), 3u);
+        EXPECT_EQ(stats.ripening, 0);
+        EXPECT_EQ(stats.reseeded, 0);
+        EXPECT_EQ(stats.reset, 0);
+        EXPECT_EQ(stats.died, 0);
+        const std::array<RegionKey, 2> both{{{0, 0}, {1, 0}}};
+        EXPECT_EQ(F::RunCropLifecycleOnTick(
+                      registry, tick + 1u, 0, RegionConsumerGate(registry, both), allocate)
+                      .reseeded,
+                  1);
+        EXPECT_EQ(allocations, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, FailedIdentityAllocationLeavesEveryParentUntouched) {
+    for (const bool perennial : {false, true}) {
+        entt::registry registry;
+        const auto parent = Plant(registry, 100.0f);
+        Identify(registry, parent, 1);
+        Ripen(registry, parent, perennial);
+        const auto before = PlantBytes(registry);
+        const auto refuse = [](std::uint64_t&) {
+            return false;
+        };
+        const auto stats = F::RunCropLifecycleOnTick(registry, 1, 0, {}, refuse);
+        EXPECT_EQ(PlantBytes(registry), before);
+        EXPECT_EQ(stats.ripening, 0);
+        EXPECT_EQ(stats.reseeded, 0);
+        EXPECT_EQ(stats.reset, 0);
+        EXPECT_EQ(stats.died, 0);
+        const auto full = [](std::uint64_t&) -> bool {
+            throw std::length_error("Active-region ledger file capacity reached");
+        };
+        EXPECT_THROW(F::RunCropLifecycleOnTick(registry, 1, 0, {}, full), std::length_error);
+        EXPECT_EQ(PlantBytes(registry), before);
+    }
+}
+
+TEST(RegionConsumerGate, SessionLatchesExhaustedSharedAllocatorWithoutReseeding) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool perennial : {false, true}) {
+        const Luminumbra::TestSupport::ScopedTempFile temporary("plant_exhaustion_", ".json");
+        W::ActiveRegionLedger ledger;
+        ledger.pin({0, 0}, true, W::WorldClock{});
+        std::uint64_t id = 0;
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+        auto encoded = ledger.encode();
+        ASSERT_EQ(encoded.size(),
+                  W::ActiveRegionLedger::kHeaderBytes + W::ActiveRegionLedger::kRecordBytes + 4u +
+                      14u + 8u);
+        // The sole extension is the allocator TLV; its u64 payload precedes the checksum.
+        for (unsigned byte = 0; byte < 8; ++byte) {
+            encoded[encoded.size() - 16u + byte] = static_cast<char>(
+                (W::ActiveRegionLedger::kPersistentIdLimit >> (8u * byte)) & 255u);
+        }
+        std::uint64_t checksum = 14695981039346656037ull;
+        for (std::size_t index = 0; index < encoded.size() - 8u; ++index) {
+            checksum ^= static_cast<unsigned char>(encoded[index]);
+            checksum *= 1099511628211ull;
+        }
+        for (unsigned byte = 0; byte < 8; ++byte) {
+            encoded[encoded.size() - 8u + byte] =
+                static_cast<char>((checksum >> (8u * byte)) & 255u);
+        }
+        std::string error;
+        ASSERT_TRUE(W::ActiveRegionLedger::decode(encoded, ledger, error)) << error;
+        W::GameSession session;
+        ASSERT_TRUE(OpenLedger(session, jobs, temporary.Path().parent_path(), ledger));
+        auto& registry = session.GetRegistry();
+        const auto parent = Plant(registry, 100.0f);
+        registry.get<C::TransformComponent>(parent).position.z = 100.0f;
+        Identify(registry, parent, id);
+        Ripen(registry, parent, perennial);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        const auto& fault = session.GetRegionSchedulerFault();
+        if (fault.has_value()) {
+            EXPECT_EQ(fault->message, "persistent id space exhausted");
+        } else {
+            FAIL() << "exhausted allocator did not latch a region fault";
+        }
+        ASSERT_TRUE(registry.valid(parent));
+        EXPECT_EQ(registry.view<C::PlantTag>().size(), 1u);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 1u);
+        EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 0u);
+        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(parent).stage,
+                  static_cast<std::uint8_t>(C::PlantStage::Fruiting));
+        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(),
+                  W::ActiveRegionLedger::kPersistentIdLimit);
+    }
+}
+
+TEST(RegionConsumerGate, GrowthStepsKeepPersistentStampCurrent) {
+    entt::registry registry;
+    const auto entity = Plant(registry, 100.0f);
+    Identify(registry, entity, 1);
+    F::RunPlantGrowthSystemOnTick(registry, 5, [](const auto&) { return F::PlantEnvSample{}; });
+    auto& identity = registry.get<C::PlantRegionComponent>(entity);
+    EXPECT_EQ(identity.region_stamp, 5u);
+    auto& growth = registry.get<C::PlantGrowthComponent>(entity);
+    const auto& genome = registry.get<C::PlantGenomeComponent>(entity);
+    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 3, 8, &identity);
+    EXPECT_EQ(identity.region_stamp, 8u);
+    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 0, 9, &identity);
+    EXPECT_EQ(identity.region_stamp, 8u);
+    EXPECT_EQ(growth.last_tick, 8u);
+    EXPECT_THROW(F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 36001, 9, &identity),
+                 std::invalid_argument);
+    EXPECT_EQ(identity.region_stamp, 8u);
+    EXPECT_EQ(growth.last_tick, 8u);
+}
+
+TEST(RegionConsumerGate, LegacyReseedKeepsHandleSeedAndNeverUsesIdentityAllocator) {
+    entt::registry legacy, supplied;
+    for (auto* registry : {&legacy, &supplied}) {
+        const auto parent = Plant(*registry, 100.0f);
+        Ripen(*registry, parent, true);
+    }
+    std::uint32_t allocations = 0;
+    const auto allocate = [&allocations](std::uint64_t&) {
+        ++allocations;
+        return false;
+    };
+    EXPECT_EQ(F::RunCropLifecycleOnTick(legacy, 1).reseeded, 1);
+    EXPECT_EQ(F::RunCropLifecycleOnTick(supplied, 1, 0, {}, allocate).reseeded, 1);
+    EXPECT_EQ(allocations, 0u);
+    const auto bytes = [](const entt::registry& registry) {
+        return Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+            F::BuildPlantEntitySnapshot(registry));
+    };
+    EXPECT_EQ(bytes(legacy), bytes(supplied));
+    auto rng = luminumbra::core::DeterministicRng::seeded(F::kGerminationSeedOffset, 0, 1);
+    const float angle = rng.next_unit() * 6.2831853f;
+    const float radius = 1.0f + rng.next_unit() * 2.0f;
+    for (const auto entity : legacy.view<C::PlantGrowthComponent>()) {
+        EXPECT_FALSE(legacy.all_of<C::PlantRegionComponent>(entity));
+        if (legacy.get<C::PlantGrowthComponent>(entity).planted_tick == 1u) {
+            const auto& position = legacy.get<C::TransformComponent>(entity).position;
+            EXPECT_EQ(position.x, 100.0f + radius * Luminumbra::DeterministicMath::Cos(angle));
+            EXPECT_EQ(position.z, radius * Luminumbra::DeterministicMath::Sin(angle));
+        }
+    }
+}
+TEST(RegionConsumerGate, IdentityOrderingIsStrictForMixedZeroAndDuplicateIds) {
+    entt::registry registry;
+    std::array<entt::entity, 5> entities{};
+    for (auto& entity : entities) {
+        entity = Plant(registry, 100.0f);
+    }
+    Identify(registry, entities[1], 8);
+    Identify(registry, entities[2], 0);
+    Identify(registry, entities[3], 3);
+    Identify(registry, entities[4], 3);
+    const std::array expected{entities[3], entities[4], entities[1], entities[0], entities[2]};
+    std::sort(entities.begin(), entities.end(), [&registry](auto a, auto b) {
+        return F::PlantIdentityLess(registry, a, b);
+    });
+    EXPECT_EQ(entities, expected);
+    for (std::size_t a = 0; a < entities.size(); ++a) {
+        for (std::size_t b = 0; b < entities.size(); ++b) {
+            EXPECT_EQ(F::PlantIdentityLess(registry, entities[a], entities[b]), a < b);
+        }
+    }
+    EXPECT_EQ(F::PlantSimulationId(registry, entities[0]), 3u);
+    EXPECT_EQ(F::PlantSimulationId(registry, entities[3]), entt::to_integral(entities[3]));
+    EXPECT_EQ(F::PlantSimulationId(registry, entities[4]), entt::to_integral(entities[4]));
 }
 } // namespace

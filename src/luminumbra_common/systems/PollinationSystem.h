@@ -10,7 +10,7 @@
 // of ids so the cross A<->B is symmetric and order-independent.
 //
 // DETERMINISM (this feeds world_hash):
-//   * id-ordered traversal (sorted by entt::to_integral) for receivers AND the
+//   * persistent-id traversal (legacy plants follow in handle order) for receivers AND the
 //     donor scan, so donor selection ties resolve to the lowest id deterministically.
 //   * the per-cross RNG is seeded ONLY from integers — DeterministicRng::seeded(
 //     kPollinationSeedOffset, lower_id, higher_id, tick) — pair-symmetric (sorted
@@ -162,8 +162,8 @@ RunPollinationOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(ents.begin(), ents.end(), [&reg](entt::entity a, entt::entity b) {
+        return PlantIdentityLess(reg, a, b);
     });
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
@@ -179,7 +179,7 @@ RunPollinationOnTick(entt::registry& reg,
 
     for (auto r : ents) {
         ++stats.considered;
-        const std::uint64_t rid = static_cast<std::uint64_t>(entt::to_integral(r));
+        const std::uint64_t rid = PlantSimulationId(reg, r);
         const auto& r_tf = view.get<Comp::TransformComponent>(r);
         const auto& r_genome = view.get<Comp::PlantGenomeComponent>(r);
 
@@ -191,7 +191,7 @@ RunPollinationOnTick(entt::registry& reg,
         for (auto d : ents) { // already id-ordered -> deterministic tie-break
             if (d == r)
                 continue;
-            const std::uint64_t did = static_cast<std::uint64_t>(entt::to_integral(d));
+            const std::uint64_t did = PlantSimulationId(reg, d);
             const auto& d_growth = view.get<Comp::PlantGrowthComponent>(d);
             if (!IsPollenDonor(d_growth))
                 continue; // only reproductive plants donate
