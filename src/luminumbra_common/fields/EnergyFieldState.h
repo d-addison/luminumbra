@@ -156,6 +156,27 @@ public:
     bool QueueRegionalDeposit(
         std::uint64_t emitter_id, int cx, int cz, int channel, std::uint32_t amount_raw);
 
+    struct RegionalDeposit {
+        std::uint64_t emitter_id = 0;
+        int cx = 0, cz = 0, channel = 0;
+        // Wide input permits overflow refusal before narrowing to the pending format.
+        std::uint64_t amount = 0;
+    };
+    // A batch may use the whole pending budget, so dense rosters that fit the live queue
+    // still gather in one atomic call; staging and validation remain bounded by it.
+    static constexpr std::size_t kMaxRegionalBatchDeposits = kMaxRegionalDeposits;
+    // All-or-nothing admission against the existing pending capacity. Every cell
+    // must have an Active/Reduced ledger owner with valid cadence metadata.
+    // Zero amounts are validated but consume no pending slots. Empty batches are
+    // neutral. Refusal or allocation failure preserves prior pending input.
+    bool QueueRegionalDeposits(std::span<const RegionalDeposit> deposits,
+                               const RegionRecords& records);
+    // Remaining slots for a separately staged emitter batch; legacy over-cap input has none.
+    [[nodiscard]] std::size_t regional_deposit_capacity() const noexcept {
+        return m_pending.size() < kMaxRegionalDeposits ? kMaxRegionalDeposits - m_pending.size()
+                                                       : 0;
+    }
+
     // Advance to `tick`: catch-up any page re-entering the window, apply the
     // sorted deposit buffer, then (on the cadence, honouring the persisted
     // phase) decay + diffuse the window with sealed edges. Returns the raw
