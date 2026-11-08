@@ -4562,7 +4562,20 @@ std::string GameSession::ComputePlantSubHash() const {
     std::vector<entt::entity> ents;
     for (auto e : view)
         ents.push_back(e);
-    std::sort(ents.begin(), ents.end());
+    // Identified plants order by persistent ID so replay does not depend on handle history;
+    // legacy plants keep handle order after them.
+    const auto persistent_id = [this](entt::entity e) -> std::uint64_t {
+        const auto* owner =
+            m_registry.try_get<const Luminumbra::Components::PlantRegionComponent>(e);
+        return owner ? owner->persistent_id : 0;
+    };
+    std::sort(ents.begin(), ents.end(), [&persistent_id](entt::entity a, entt::entity b) {
+        const std::uint64_t id_a = persistent_id(a);
+        const std::uint64_t id_b = persistent_id(b);
+        if ((id_a != 0) != (id_b != 0))
+            return id_a != 0;
+        return id_a != id_b ? id_a < id_b : a < b;
+    });
     std::ostringstream bytes;
     bytes << "plant:v1:" << ents.size() << ':';
     for (auto e : ents) {

@@ -4428,6 +4428,37 @@ TEST_F(PersistentPlantSessionTest, IdlePlantOnlyOwnerSurvivesSchedulingAndRoundT
     EXPECT_TRUE(luminumbra::foliage::HasPersistentPlantIdentity(session.GetRegistry()));
 }
 
+TEST_F(PersistentPlantSessionTest, PlantSubHashOrdersIdentifiedPlantsByPersistentIdNotHandle) {
+    namespace C = Luminumbra::Components;
+    auto& registry = session.GetRegistry();
+    const auto stale_view = registry.view<C::PlantTag>();
+    const std::vector<entt::entity> stale(stale_view.begin(), stale_view.end());
+    registry.destroy(stale.begin(), stale.end());
+    const auto spawn = [&registry](std::uint64_t id, std::uint16_t species) {
+        const auto plant = registry.create();
+        registry.emplace<C::PlantTag>(plant);
+        C::PlantGrowthComponent growth;
+        growth.species_id = species;
+        registry.emplace<C::PlantGrowthComponent>(plant, growth);
+        C::PlantRegionComponent owner;
+        owner.persistent_id = id;
+        registry.emplace<C::PlantRegionComponent>(plant, owner);
+    };
+    spawn(5, 1);
+    spawn(9, 2);
+    const std::string forward = session.ComputePlantSubHash();
+    ASSERT_FALSE(forward.empty());
+    const auto replaced_view = registry.view<C::PlantTag>();
+    const std::vector<entt::entity> replaced(replaced_view.begin(), replaced_view.end());
+    registry.destroy(replaced.begin(), replaced.end());
+    for (int i = 0; i < 3; ++i) {
+        registry.destroy(registry.create());
+    }
+    spawn(9, 2);
+    spawn(5, 1);
+    EXPECT_EQ(session.ComputePlantSubHash(), forward);
+}
+
 TEST_F(PersistentPlantSessionTest, WorldPlantAuthorityRefusalPreservesResidentChunksAndPlants) {
     auto chunk = std::make_shared<Chunk>(IVec3{0, 0, 0});
     chunk->set_state(ChunkState::Idle);
