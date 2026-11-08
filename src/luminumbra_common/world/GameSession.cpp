@@ -2102,10 +2102,19 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
         m_regionalEnergyStep = std::make_unique<RegionalEnergyStep>();
     auto& step = *m_regionalEnergyStep;
     auto& input = step.transaction.deposits(m_energyFieldState->channels());
-    Systems::GatherFieldEmitterDeposits(m_registry, input, true);
     step.due.assign(m_regionSchedule.due.begin(), m_regionSchedule.due.end());
     std::sort(step.due.begin(), step.due.end());
     try {
+        // A refused batch (malformed emitter or over-budget roster) is a scheduler fault, not
+        // a silent skip: the energy ages must not advance without the emitter input.
+        if (!Systems::GatherRegionalFieldEmitterDeposits(
+                 m_registry,
+                 input,
+                 m_activeRegionLedger.records(),
+                 true,
+                 m_energyFieldState->regional_deposit_capacity())
+                 .accepted)
+            throw std::runtime_error("Regional energy emitter batch refused");
         if (!m_energyFieldState->BeginRegionalTick(
                 tick, m_activeRegionLedger, step.due, step.transaction))
             throw std::runtime_error("Regional energy tick refused");

@@ -745,6 +745,56 @@ bool EnergyFieldState::QueueRegionalDeposit(
     return true;
 }
 
+bool EnergyFieldState::QueueRegionalDeposits(std::span<const RegionalDeposit> deposits,
+                                             const RegionRecords& records) {
+    using Luminumbra::world::RegionState;
+    if (deposits.empty())
+        return true;
+    if (deposits.size() > kMaxRegionalBatchDeposits || m_pending.size() > kMaxRegionalDeposits ||
+        m_channels < 1 || m_channels > 64)
+        return false;
+    std::size_t count = 0;
+    for (const auto& deposit : deposits) {
+        const auto owner = OwnerOfCell(deposit.cx, deposit.cz);
+        if (!ValidEnergyOwner(owner) || deposit.channel < 0 || deposit.channel >= m_channels ||
+            deposit.amount > (std::numeric_limits<std::uint32_t>::max)())
+            return false;
+        const auto found = records.find(owner);
+        if (found == records.end())
+            return false;
+        const auto& record = found->second;
+        if ((record.state != RegionState::Active && record.state != RegionState::Reduced) ||
+            record.cadence_shift > 16 ||
+            record.cadence_phase >= (std::uint32_t{1} << record.cadence_shift))
+            return false;
+        count += deposit.amount != 0 ? 1u : 0u;
+    }
+    if (count > kMaxRegionalDeposits - m_pending.size())
+        return false;
+    if (count == 0)
+        return true;
+    const auto required = m_pending.size() + count;
+    if (required > m_pending.capacity()) {
+        // Geometric growth avoids copying the pending queue for each emitter batch;
+        // allocation is capped by kMaxRegionalDeposits and precedes all mutation.
+        const auto capacity = m_pending.capacity();
+        const auto grown =
+            capacity > kMaxRegionalDeposits / 2 ? kMaxRegionalDeposits : capacity * 2;
+        m_pending.reserve((std::max)(required, grown));
+    }
+    if (m_regional_validation)
+        m_regional_queued_validation = std::move(m_regional_validation);
+    m_regional_validation.reset();
+    for (const auto& deposit : deposits) {
+        if (deposit.amount != 0)
+            m_pending.push_back({PackCellKey(deposit.cx, deposit.cz),
+                                 deposit.channel,
+                                 deposit.emitter_id,
+                                 static_cast<std::uint32_t>(deposit.amount)});
+    }
+    return true;
+}
+
 bool EnergyFieldState::OwnsRegion(const RegionKey& owner) const {
     for (const auto& deposit : m_pending) {
         int cx = 0, cz = 0;
