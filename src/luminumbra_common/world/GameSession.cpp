@@ -1122,6 +1122,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
+                const auto foliage_gate = m_activeRegionsEnabled
+                                              ? RegionConsumerGate(m_registry,
+                                                                   m_regionSchedule.due,
+                                                                   m_consumerGateScratch)
+                                              : RegionConsumerGate{};
                 // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
                 // (already deterministic, already-hashed) wind field at the anchor.
                 const ::Luminumbra::Vec2 windXZ =
@@ -1137,14 +1142,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
                     fol::RunPollinationOnTick(
-                        m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+                        m_registry, current_tick, windXZ, 0, m_plantMutationRate, foliage_gate);
                 budget.Next(Stage::Disease, [&] {
                     return SimParticipantCount<TelemetryComp::PlantTag,
                                                TelemetryComp::PlantHealthComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+                    fol::RunPlantDiseaseOnTick(m_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -1156,7 +1161,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                    fol::RunCropLifecycleOnTick(m_registry, current_tick);
+                    fol::RunCropLifecycleOnTick(m_registry, current_tick, 0, foliage_gate);
                 budget.Next(Stage::Fire, [&] {
                     return SimParticipantCount<TelemetryComp::CombustibleComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
@@ -1174,7 +1179,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         }
                     }
                     luminumbra::sim::RunFireSpreadOnTick(
-                        m_registry, current_tick, windXZ, weather_ignitions);
+                        m_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
                 }
                 budget.Next(Stage::Grazing, [&] {
                     return SimParticipantCount<TelemetryComp::GrazeableComponent,
@@ -1182,12 +1187,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!m_registry.view<Comp::GrazeableComponent>().empty())
                     luminumbra::ai::RunWildlifeFoliageOnTick(
-                        m_registry, current_tick, m_wildlifeFoliageTuning);
+                        m_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
@@ -1913,6 +1918,14 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     inputs.field_page_bytes = m_fieldPages.region_bytes(key);
                     if (m_energyFieldState)
                         inputs.field_page_bytes += m_energyFieldState->RegionBytes(key);
+                    const auto debt = m_activeRegionLedger.water_debts().find(key);
+                    if (debt != m_activeRegionLedger.water_debts().end()) {
+                        inputs.field_page_bytes += "|water_debt:";
+                        for (int i = 0; i < 8; ++i) {
+                            inputs.field_page_bytes.push_back(
+                                static_cast<char>((debt->second >> (8 * i)) & 255));
+                        }
+                    }
                     const auto age = m_activeRegionLedger.energy_ages().find(key);
                     if (age != m_activeRegionLedger.energy_ages().end()) {
                         inputs.field_page_bytes += "|energy_age:";

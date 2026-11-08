@@ -46,6 +46,8 @@
 #include "../core/DeterministicMath.h" // Sqrt (libm-free / IEEE-deterministic)
 #include "../core/DeterministicRng.h"
 
+#include "RegionConsumerGate.h"
+
 namespace luminumbra::foliage {
 
 // The component types live in the capital-L Luminumbra::Components namespace.
@@ -138,11 +140,13 @@ inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponen
 // Advance pollination by one fixed tick. Pure function of registry state + the tick
 // (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
 // to still air). `world_seed` lets distinct worlds diverge.
-inline PollinationStats RunPollinationOnTick(entt::registry& reg,
-                                             std::uint64_t tick,
-                                             ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
-                                             std::uint64_t world_seed = 0,
-                                             float mutation_frac = kPollinationMutationFrac) {
+inline PollinationStats
+RunPollinationOnTick(entt::registry& reg,
+                     std::uint64_t tick,
+                     ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
+                     std::uint64_t world_seed = 0,
+                     float mutation_frac = kPollinationMutationFrac,
+                     const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     PollinationStats stats;
 
     auto view = reg.view<Comp::PollinationTag,
@@ -153,8 +157,11 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
 
     // id-ordered participant ids so donor-selection ties + apply order are deterministic.
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });

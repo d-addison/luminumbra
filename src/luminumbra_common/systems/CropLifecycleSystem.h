@@ -31,6 +31,8 @@
 #include "FarmingSystem.h"     // PlantSeed
 #include "PlantGrowthSystem.h" // StageThreshold, Comp alias
 
+#include "RegionConsumerGate.h"
+
 namespace luminumbra::foliage {
 
 inline constexpr std::uint64_t kGerminationSeedOffset = 36;
@@ -49,7 +51,10 @@ struct CropLifecycleStats {
 // Advance every CropLifecycleComponent plant one tick. world_seed lets distinct worlds diverge
 // (GameSession passes the default 0, mirroring the reproduction/pollination systems).
 inline CropLifecycleStats
-RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t world_seed = 0) {
+RunCropLifecycleOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     namespace Comp = ::Luminumbra::Components;
     namespace dm = ::Luminumbra::DeterministicMath;
     CropLifecycleStats stats;
@@ -59,8 +64,11 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
                          const Comp::PlantGenomeComponent,
                          const Comp::TransformComponent>();
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     if (ents.empty())
         return stats; // opt-in: no participants -> byte-identical no-op
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {

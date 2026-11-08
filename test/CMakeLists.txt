@@ -257,6 +257,7 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    common/RegionConsumerGate_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
@@ -1574,6 +1575,7 @@ endif()
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    common/RegionConsumerGate_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp
