@@ -612,7 +612,9 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
                       self.function(source, "WaterStateToJson", ""))
-        captured = self.function(source, "ChunkSnapshotInputBytes", "")
+        captured = self.function(source, "VisitChunkSnapshotInputs", "")
+        for consumer in ("ChunkSnapshotInputBytes", "ChunkSnapshotInputByteCount"):
+            self.assertIn("VisitChunkSnapshotInputs(chunk,", self.function(source, consumer, ""))
         fields = set(re.findall(r"\bchunk\.([A-Za-z_][A-Za-z_0-9]*)", serialized))
         self.assertTrue(fields)
         self.assertLessEqual(fields,

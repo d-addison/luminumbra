@@ -80,6 +80,8 @@ const char* EntitySnapshotArtifactSchema();
 
 // Process-local exact input identity for the canonical chunk serializer. Never persisted.
 std::string ChunkSnapshotInputBytes(const Chunk& chunk);
+// The size ChunkSnapshotInputBytes would return, computed without copying the arrays.
+std::size_t ChunkSnapshotInputByteCount(const Chunk& chunk);
 std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 // Authority snapshots retain ownership explicitly. Legacy callers keep their byte protocol.
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,

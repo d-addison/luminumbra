@@ -1,5 +1,6 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "SavedInputLimits.h"
+#include "WorldSaveEncoding.h"
 
 #include "../HashCheckpoint.h"
 #include "../core/Log.h"
@@ -17,9 +18,11 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace Luminumbra::Persistence {
@@ -63,6 +66,27 @@ const std::vector<std::string>& PersistedFields() {
                                                     "water_bed_mm",
                                                     "water_state"};
     return fields;
+}
+
+// The JSON serializer's constructor calls localeconv, which can write shared libc storage even
+// when the process locale is unchanged. Every serializer built by this file is constructed under
+// this lock so concurrent record encoders, snapshot writers and hashers cannot race there. The
+// serializer copies the decimal point and thousands separator into its own members while it is
+// constructed, so once the lock is released it no longer reads the shared locale storage.
+std::mutex& ChunkRecordSerializerConstructionMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+// Same bytes as nlohmann::json::dump(indent): compact for a negative indent, otherwise pretty.
+std::string DumpJson(const nlohmann::json& value, int indent = -1) {
+    std::string bytes;
+    std::unique_lock construction(ChunkRecordSerializerConstructionMutex());
+    nlohmann::detail::serializer<nlohmann::json> serializer(
+        nlohmann::detail::output_adapter<char>(bytes), ' ');
+    construction.unlock();
+    serializer.dump(value, indent >= 0, false, indent >= 0 ? static_cast<unsigned>(indent) : 0u);
+    return bytes;
 }
 
 const std::vector<std::string>& RequiredChunkFormatFields() {
@@ -810,7 +834,7 @@ void ApplyChunkJson(const nlohmann::json& value,
 
 std::string StableDump(const nlohmann::json& value) {
     // Same serializer and settings as streaming with std::setw(4), without the stream copy.
-    std::string text = value.dump(4);
+    std::string text = DumpJson(value, 4);
     text.push_back('\n');
     return text;
 }
@@ -1192,17 +1216,10 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
-std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
-    std::string bytes;
-    const auto scalar = [&bytes](const auto& value) {
-        bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
-    };
-    const auto array = [&bytes, &scalar](const auto& values) {
-        scalar(values.size());
-        if (!values.empty())
-            bytes.append(reinterpret_cast<const char*>(values.data()),
-                         values.size() * sizeof(values.front()));
-    };
+namespace {
+// One field list for the exact input identity and its size, so the two cannot drift apart.
+template<typename Scalar, typename Array>
+void VisitChunkSnapshotInputs(const Chunk& chunk, Scalar&& scalar, Array&& array) {
     scalar(chunk.get_coords());
     scalar(chunk.get_id());
     scalar(chunk.get_state());
@@ -1239,7 +1256,35 @@ std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
     scalar(chunk.water_mesh_dirty_ticks);
     scalar(chunk.has_water_authority());
     scalar(chunk.has_terrain_authority());
+}
+} // namespace
+
+std::string ChunkSnapshotInputBytes(const Chunk& chunk) {
+    std::string bytes;
+    const auto scalar = [&bytes](const auto& value) {
+        bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    const auto array = [&bytes, &scalar](const auto& values) {
+        scalar(values.size());
+        if (!values.empty())
+            bytes.append(reinterpret_cast<const char*>(values.data()),
+                         values.size() * sizeof(values.front()));
+    };
+    VisitChunkSnapshotInputs(chunk, scalar, array);
     return bytes;
+}
+
+std::size_t ChunkSnapshotInputByteCount(const Chunk& chunk) {
+    std::size_t count = 0;
+    const auto scalar = [&count](const auto& value) {
+        count += sizeof(value);
+    };
+    const auto array = [&count, &scalar](const auto& values) {
+        scalar(values.size());
+        count += values.size() * sizeof(typename std::decay_t<decltype(values)>::value_type);
+    };
+    VisitChunkSnapshotInputs(chunk, scalar, array);
+    return count;
 }
 
 namespace {
@@ -1252,7 +1297,10 @@ public:
     explicit SnapshotJsonWriter(std::string& bytes, bool preserve_authority = false)
         : m_preserve_authority(preserve_authority)
         , m_bytes(bytes)
-        , m_serializer(nlohmann::detail::output_adapter<char>(bytes), ' ') {}
+        , m_construction(ChunkRecordSerializerConstructionMutex())
+        , m_serializer(nlohmann::detail::output_adapter<char>(bytes), ' ') {
+        m_construction.unlock();
+    }
 
     void value(const nlohmann::json& item, unsigned indent) {
         m_serializer.dump(item, true, false, 4, indent);
@@ -1403,6 +1451,7 @@ private:
     };
     bool m_preserve_authority;
     std::string& m_bytes;
+    std::unique_lock<std::mutex> m_construction;
     nlohmann::detail::serializer<nlohmann::json> m_serializer;
     std::array<Number, 1024> m_numbers{};
 };
@@ -1440,13 +1489,13 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
     object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
     nlohmann::json chunks = nlohmann::json::array();
     chunks.push_back(std::move(object));
-    return nlohmann::json{{"schema", kSnapshotSchema},
-                          {"order_contract", kOrderContract},
-                          {"chunk_count", chunks.size()},
-                          {"persisted_fields", PersistedFields()},
-                          {kChunkRecordFormatKey, kChunkRecordFormat},
-                          {"chunks", std::move(chunks)}}
-        .dump();
+    const nlohmann::json snapshot{{"schema", kSnapshotSchema},
+                                  {"order_contract", kOrderContract},
+                                  {"chunk_count", chunks.size()},
+                                  {"persisted_fields", PersistedFields()},
+                                  {kChunkRecordFormatKey, kChunkRecordFormat},
+                                  {"chunks", std::move(chunks)}};
+    return DumpJson(snapshot);
 }
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
@@ -1745,7 +1794,7 @@ void HashAuthorityBytes(std::uint64_t& hash, std::string_view bytes) {
 void HashTerrainFields(std::uint64_t& hash, const nlohmann::json& terrain) {
     for (const char* field :
          {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
-        HashAuthorityBytes(hash, terrain.at(field).dump());
+        HashAuthorityBytes(hash, DumpJson(terrain.at(field)));
         HashAuthorityBytes(hash, "|");
     }
 }
@@ -1762,11 +1811,11 @@ void RegionContentHasher::append(const Chunk& chunk) {
     auto content = TerrainAuthorityJson(chunk);
     const auto water = WaterAuthorityJson(chunk);
     HashTerrainFields(m_terrainHash, content);
-    HashAuthorityBytes(m_waterHash, water.dump());
+    HashAuthorityBytes(m_waterHash, DumpJson(water));
     content.update(water);
     // Match StableDump's four-space layout, at the array's eight-space depth.
     // The byte protocol stays identical without retaining the whole region JSON.
-    const auto bytes = content.dump(4);
+    const auto bytes = DumpJson(content, 4);
     feed("        ");
     std::size_t begin = 0;
     for (;;) {
@@ -2481,5 +2530,11 @@ bool WriteEntitySnapshotArtifact(const std::filesystem::path& output_path,
         return false;
     }
 }
+
+namespace detail {
+std::string dump_json_guarded(const nlohmann::json& value, int indent) {
+    return DumpJson(value, indent);
+}
+} // namespace detail
 
 } // namespace Luminumbra::Persistence
