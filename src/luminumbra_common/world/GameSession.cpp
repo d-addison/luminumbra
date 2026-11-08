@@ -3506,7 +3506,10 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
     if ((persistent_plants &&
          !luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, plant_snapshot, plant_error)) ||
-        !luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
+        !(persistent_plants
+              ? luminumbra::foliage::ValidatePlantEntitySnapshot(
+                    plant_snapshot, m_activeRegionLedger, m_groundObjects, plant_error)
+              : luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot))) {
         LUMINUMBRA_CORE_ERROR("Saved-input admission refused: invalid plant component value.");
         return false;
     }
@@ -3891,7 +3894,8 @@ bool GameSession::ReadPreparedWorldState(
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
         state.input_refused = error.find("Saved-input admission refused:") == 0 ||
-                              error.find("Corrupt regional energy record:") == 0;
+                              error.find("Corrupt regional energy record:") == 0 ||
+                              error.find("Corrupt plant authority:") == 0;
         for (const std::string& diagnostic : errors)
             LUMINUMBRA_CORE_ERROR("World state load failed: {}", diagnostic);
         return false;
@@ -3912,7 +3916,9 @@ bool GameSession::ReadPreparedWorldState(
         error = errors.empty()
                     ? "Incompatible configuration: this world requires sim.active_regions."
                     : errors.front();
-        state.input_refused = error.find("Saved-input admission refused:") == 0;
+        state.input_refused = error.find("Saved-input admission refused:") == 0 ||
+                              error.find("Corrupt regional energy record:") == 0 ||
+                              error.find("Corrupt plant authority:") == 0;
         return false;
     }
     if (cancelled())

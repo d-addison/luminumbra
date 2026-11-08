@@ -1265,6 +1265,19 @@ TEST(PlantPersistence, PersistentIdentityRefusalsAreAtomic) {
     CheckIdentityRanges();
     CheckIdentityParserRefusals();
 }
+TEST(PlantPersistence, PersistentIgnitionIntensityIsUnitBoundedWithoutChangingLegacyAdmission) {
+    for (const float intensity :
+         {0.0f, 1.0f, 1.5f, -0.5f, std::numeric_limits<float>::quiet_NaN()}) {
+        auto snapshot = IdentityPlants();
+        IdentityData(snapshot, "IgnitionSource")["intensity"] = intensity;
+        EXPECT_EQ(F::ValidatePlantEntitySnapshot(snapshot), intensity >= 0.0f && intensity <= 1.0f);
+        snapshot.persistent_identity = false;
+        for (auto& record : snapshot.entities) {
+            std::erase_if(record.components, [](const auto& c) { return c.type == "PlantRegion"; });
+        }
+        EXPECT_TRUE(F::ValidatePlantEntitySnapshot(snapshot));
+    }
+}
 TEST(PlantPersistence, LegacyProjectionBytesStayUnchangedAndEnabledProjectionReturnsErrors) {
     CheckLegacyIdentityOptOut();
 }

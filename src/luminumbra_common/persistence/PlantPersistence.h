@@ -200,7 +200,7 @@ inline bool ValidEnabledComponent(const ::Luminumbra::Ecs::EntityComponentSnapsh
         return FitsNumber<std::uint16_t>(data.at("output"));
     if (type == "IgnitionSource")
         return ScalarInRange(data.at("radius"), 16777216.0f) &&
-               ScalarInRange(data.at("intensity"), 16777216.0f);
+               ScalarInRange(data.at("intensity"), 1.0f);
     if (type == "PlantGenome" || type == "Pollination") {
         const auto& genes = data.at(type == "PlantGenome" ? "genes" : "next_genome");
         return ValidComponent(component) && genes.size() == C::kPlantGeneCount &&
@@ -455,15 +455,17 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
             return false;
         }
         const auto* owner = pp_detail::ComponentData(record, "PlantRegion");
-        if (!owner) {
+        const auto* growth = pp_detail::ComponentData(record, "PlantGrowth");
+        if (!owner || !growth) {
             error = "Corrupt plant authority: incomplete persistent plant.";
             return false;
         }
         const ::Luminumbra::world::RegionKey key{owner->at("owner_x").get<std::int32_t>(),
                                                  owner->at("owner_z").get<std::int32_t>()};
         if (!ledger.records().contains(key) ||
-            owner->at("region_stamp").get<std::uint64_t>() > ledger.header_tick()) {
-            error = "Corrupt plant authority: orphaned owner or future stamp.";
+            owner->at("region_stamp").get<std::uint64_t>() > ledger.header_tick() ||
+            growth->at("last_tick").get<std::uint64_t>() > ledger.header_tick()) {
+            error = "Corrupt plant authority: orphaned owner or future stamp/growth tick.";
             return false;
         }
     }
