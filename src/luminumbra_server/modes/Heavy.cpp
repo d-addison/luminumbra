@@ -300,12 +300,12 @@ int RunHeavy(const ServerCliOptions& options) {
         {"water_sim_cursor_at_load", cursor_at_load},
         {"authoritative_sections",
          nlohmann::json::array(
-             {"terrain", "water", "entities", "ground_objects", "ground_notifications"})},
+             {"terrain", "water", "entities", "ground_objects", "ground_notifications", "scents"})},
         {"mesh_excluded_reason",
          "surface mesh is a deterministically-regenerated derived render artifact; async "
          "re-meshing across a save/load boundary reaches identical geometry via a different "
          "in-memory pending-mesh snapshot. Authoritative sim state (terrain/water/entities/ground "
-         "objects) "
+         "objects/scents) "
          "round-trips exactly."},
         {"passed", passed},
     };
