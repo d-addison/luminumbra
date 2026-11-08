@@ -1922,7 +1922,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     }
                     return digest_operation->digest(key, inputs);
                 },
-                // Later slices extend this probe with creatures, plants and water debt.
+                // Future creature ownership must also participate in this probe.
                 [this, &owned_regions](RegionKey key) {
                     if (m_groundObjects.owns_region(key) || m_fieldPages.owns_region(key) ||
                         (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
@@ -1931,6 +1931,15 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
+                        const auto plants =
+                            m_registry.view<const Luminumbra::Components::PlantTag,
+                                            const Luminumbra::Components::PlantRegionComponent>();
+                        for (const auto entity : plants) {
+                            const auto& owner =
+                                plants.get<const Luminumbra::Components::PlantRegionComponent>(
+                                    entity);
+                            owned_regions->insert({owner.owner_x, owner.owner_z});
+                        }
                     }
                     return owned_regions->contains(key) ||
                            (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
@@ -4128,8 +4137,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
 
     // Plant numeric projection was admitted before any live state changed. A persistent
-    // roster replaces the live plants; its identities must not collide with stale entities.
-    if (saved.plants.persistent_identity) {
+    // roster on either side requires replacement so the restored ledger has no stale owners.
+    if (saved.plants.persistent_identity ||
+        luminumbra::foliage::HasPersistentPlantIdentity(m_registry)) {
         const auto stale_view = m_registry.view<Luminumbra::Components::PlantTag>();
         const std::vector<entt::entity> stale(stale_view.begin(), stale_view.end());
         m_registry.destroy(stale.begin(), stale.end());

@@ -4190,13 +4190,20 @@ WorldPlantSnapshot(bool persistent, PlantAdmissionCase admission = PlantAdmissio
 void WriteIndexedPlants(const std::filesystem::path& directory,
                         const Luminumbra::Ecs::EntityRegistrySnapshot& plants,
                         PlantAdmissionCase admission,
-                        std::uint64_t tick = 31) {
+                        std::uint64_t tick = 31,
+                        bool idle_regions = false) {
     namespace P = Luminumbra::Persistence;
     using namespace Luminumbra::world;
     const WorldClock clock(tick);
     ActiveRegionLedger ledger({}, clock);
-    if (admission != PlantAdmissionCase::Orphan)
-        ledger.mark_edited({0, -1}, clock);
+    if (admission != PlantAdmissionCase::Orphan) {
+        if (idle_regions) {
+            ledger.activate_owned({0, -1}, clock);
+            ledger.activate_owned({1, 0}, clock);
+        } else {
+            ledger.mark_edited({0, -1}, clock);
+        }
+    }
     if (admission != PlantAdmissionCase::Unallocated) {
         for (std::size_t i = 0; i < std::max(std::size_t{1}, plants.entities.size()); ++i) {
             std::uint64_t id = 0;
@@ -4334,6 +4341,92 @@ protected:
     Luminumbra::world::GameSession session;
 };
 } // namespace
+
+TEST_F(PersistentPlantSessionTest, LegacyAndMissingRostersReplacePersistentPlants) {
+    namespace C = Luminumbra::Components;
+    for (const bool empty : {false, true}) {
+        SCOPED_TRACE(empty);
+        ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "valid"));
+        auto& registry = session.GetRegistry();
+        const auto old = *registry.view<C::PlantTag>().begin();
+        const auto candidate = root.path() / (empty ? "empty" : "legacy");
+        ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(candidate,
+                                                   empty ? Luminumbra::Ecs::EntityRegistrySnapshot{}
+                                                         : WorldPlantSnapshot(false),
+                                                   PlantAdmissionCase::Valid));
+        EXPECT_EQ(std::filesystem::exists(WorldSaveService::plant_entities_path(candidate)),
+                  !empty);
+        ASSERT_TRUE(session.LoadWorldStateFrom(candidate)) << session.GetWorldOpenError();
+        EXPECT_FALSE(registry.valid(old));
+        EXPECT_EQ(registry.view<C::PlantTag>().size(), empty ? 0u : 1u);
+        EXPECT_FALSE(luminumbra::foliage::HasPersistentPlantIdentity(registry));
+        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), 2u);
+        const auto output = root.path() / "replacement-save";
+        ASSERT_TRUE(session.SaveWorldStateTo(output));
+        EXPECT_TRUE(WorldSaveService::validate_save(output));
+    }
+}
+
+TEST_F(PersistentPlantSessionTest, LegacyRostersStillAppendAndMissingRosterPreservesLegacyPlants) {
+    namespace C = Luminumbra::Components;
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        session.SetActiveRegionsEnabled(enabled);
+        ASSERT_TRUE(session.CreateWorld("Legacy plants", "1337", "default"));
+        auto& registry = session.GetRegistry();
+        ASSERT_TRUE(
+            luminumbra::foliage::ApplyPlantEntitySnapshot(registry, WorldPlantSnapshot(false)));
+        const auto old = *registry.view<C::PlantTag>().begin();
+        for (const bool empty : {false, true}) {
+            const auto candidate = root.path() / (empty ? "empty" : "legacy");
+            ASSERT_TRUE(WorldSaveService::save_plant_entities(
+                empty ? Luminumbra::Ecs::EntityRegistrySnapshot{} : WorldPlantSnapshot(false),
+                candidate));
+            ASSERT_TRUE(session.LoadWorldStateFrom(candidate)) << session.GetWorldOpenError();
+            EXPECT_TRUE(registry.valid(old));
+            EXPECT_EQ(registry.view<C::PlantTag>().size(), 2u);
+            EXPECT_FALSE(luminumbra::foliage::HasPersistentPlantIdentity(registry));
+        }
+    }
+}
+
+TEST_F(PersistentPlantSessionTest, IdlePlantOnlyOwnerSurvivesSchedulingAndRoundTrips) {
+    namespace C = Luminumbra::Components;
+    using namespace Luminumbra::world;
+    const RegionKey owner{0, -1}, unowned{1, 0};
+    const auto input = root.path() / "idle";
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(input,
+                                               WorldPlantSnapshot(true),
+                                               PlantAdmissionCase::Valid,
+                                               ActiveRegionLedger::kIdleEvictionTicks,
+                                               true));
+    ASSERT_TRUE(session.LoadWorldStateFrom(input)) << session.GetWorldOpenError();
+    for (const auto key : {owner, unowned}) {
+        const auto& record = session.GetActiveRegionLedger().records().at(key);
+        ASSERT_FALSE(record.edited || record.pinned || record.populated);
+        ASSERT_EQ(record.water_cursor, 0u);
+        ASSERT_EQ(record.last_proximity, 0u);
+        ASSERT_FALSE(session.GetWorldSystem()->has_region_members(key.x, key.z));
+        ASSERT_FALSE(session.GetGroundObjects().owns_region(key));
+        ASSERT_FALSE(session.GetFieldPages().owns_region(key));
+    }
+    ASSERT_TRUE(session.GetActiveRegionLedger().energy_ages().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().water_debts().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    session.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(owner));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+    const auto plants = session.ComputePlantSubHash();
+    const auto output = root.path() / "idle-roundtrip";
+    ASSERT_TRUE(session.SaveWorldStateTo(output));
+    ASSERT_TRUE(session.LoadWorldStateFrom(output)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.ComputePlantSubHash(), plants);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(owner));
+    EXPECT_EQ(session.GetRegistry().view<C::PlantTag>().size(), 1u);
+    EXPECT_TRUE(luminumbra::foliage::HasPersistentPlantIdentity(session.GetRegistry()));
+}
 
 TEST_F(PersistentPlantSessionTest, WorldPlantAuthorityRefusalPreservesResidentChunksAndPlants) {
     auto chunk = std::make_shared<Chunk>(IVec3{0, 0, 0});
