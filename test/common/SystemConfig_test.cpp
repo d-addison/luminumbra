@@ -240,110 +240,112 @@ TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // See docs/development/system-config-identity.md for the complete computation.
     EXPECT_EQ(Luminumbra::world::GameSession{}.LegacyRevision3SystemConfigIdentity(),
               "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "2f2a9405252345a8");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "35e233a89e8c87b1");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
     Luminumbra::world::GameSession legacy;
     legacy.ApplySystemConfig(SystemConfig::LoadFromFile(path));
     EXPECT_EQ(legacy.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "2f2a9405252345a8");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path)), "35e233a89e8c87b1");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
+    // The previously admitted revision-4 shipping identity must no longer match.
+    EXPECT_NE(ConfigIdentity(SystemConfig::Defaults()), "2f2a9405252345a8");
 }
 
 TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
     // Fixed reference digests from the frozen 297-byte revision-3 projection and
-    // independent 339-byte revision-4 encoding, for both active-region modes.
+    // independent 339-byte revision-5 encoding, for both active-region modes.
     struct Vector {
         const char* name;
         std::array<const char*, 4> hashes;
     };
     constexpr Vector vectors[]{
         {"hydrology_weather",
-         {"b1975c398a0d70f1", "8af20c07c4ce9746", "23be26e2546a0e7a", "bc0e480d481bb6cb"}},
+         {"b1975c398a0d70f1", "1e3c320161595ac7", "23be26e2546a0e7a", "b10a8182b954c83a"}},
         {"weather_events",
-         {"979cacb197b79b45", "540054b5dafd7a4a", "455e323c2d5080de", "4e014ae88877f47f"}},
+         {"979cacb197b79b45", "ae97327f7644debb", "455e323c2d5080de", "c175cb08c1c26a6e"}},
         {"aether_state",
-         {"4da37f266978b979", "cae22b77fb905d1e", "a9f11c36b15d4702", "3421d2a36bfc7303"}},
+         {"4da37f266978b979", "95f8ee276a42ed5f", "a9f11c36b15d4702", "e2ede8b18269d552"}},
         {"water_high_res",
-         {"f19ddc19ff363221", "3dfa559981098696", "77bc1aa8d3d992aa", "3a16cda6f8b9015b"}},
+         {"f19ddc19ff363221", "3cf403e741fe3297", "77bc1aa8d3d992aa", "f70a598733dc5fca"}},
         {"active_regions",
-         {"0820e02bb23ece12", "969a6193a6519779", "60ab3c242d54ce89", "2f2a9405252345a8"}},
+         {"0820e02bb23ece12", "b76760e17b50d2d8", "60ab3c242d54ce89", "35e233a89e8c87b1"}},
         {"mutation_rate",
-         {"685d3dd6e3bacd77", "6d0c9b74ef1786f4", "87c6f0914eb60e88", "2f52db50dca71119"}},
+         {"685d3dd6e3bacd77", "dd7c175fcec38d35", "87c6f0914eb60e88", "c51b1e2e88d488f0"}},
         {"energy_drain_per_second",
-         {"f308a2a1a5d112a9", "839be588e450ceb2", "2049da7218c8c4b2", "ad6e44c463df3d07"}},
+         {"f308a2a1a5d112a9", "2e20ad76265f1b83", "2049da7218c8c4b2", "e64acaf0a8e4e656"}},
         {"energy_rest_recover",
-         {"f316851aa23f4334", "40d99503e62c50e3", "5c667288b978f003", "e9981a0f4f290c0a"}},
+         {"f316851aa23f4334", "fb21d8589e1d4512", "5c667288b978f003", "ed38dd0d5991da9b"}},
         {"energy_sleep_recover",
-         {"07d7dc3b1cb8e286", "d4b9bfcf4a57d3c5", "10afe978edc705ad", "2c514fc4f8c75644"}},
+         {"07d7dc3b1cb8e286", "96734294f2a66c04", "10afe978edc705ad", "de496a06286deafd"}},
         {"hunger_growth_per_second",
-         {"789f49bc80b89f48", "604fe2b3232fd00b", "fcded29c6381fc37", "7e22532ffced1d32"}},
+         {"789f49bc80b89f48", "0f7c64bb8ba94d1a", "fcded29c6381fc37", "d7ca53812b332963"}},
         {"hunger_graze_sate",
-         {"e0c54945f81bebd2", "0062566193bb0ab9", "bfa151bde98c6f49", "b18c888e0842b3e8"}},
+         {"e0c54945f81bebd2", "398b2290bc311218", "bfa151bde98c6f49", "967c5c740bcf65f1"}},
         {"stamina_rest_recover",
-         {"1d8582c805590483", "ffe018969f9db414", "7fbbf8d5d02193b4", "393322289aafaff9"}},
+         {"1d8582c805590483", "c7cfab393cf54955", "7fbbf8d5d02193b4", "e8e8d67ab2de5bd0"}},
         {"stamina_move_drain",
-         {"32e3f58cad39f794", "86c97933a58501bf", "3670057f1b14c3e3", "3f18dd2a5468faa6"}},
+         {"32e3f58cad39f794", "d9dbd00b30f2de7e", "3670057f1b14c3e3", "222a0bed67dd4c17"}},
         {"herd_weight",
-         {"01da4d6dacc5ce11", "c58ff7eae37cc97a", "0cd5ce25eea4171a", "0e0d05733eb34caf"}},
+         {"01da4d6dacc5ce11", "f3b06daaa13008eb", "0cd5ce25eea4171a", "acc405acd75bd99e"}},
         {"alignment_weight",
-         {"8548338bfa873dd2", "08991bfba9138d39", "64243c03ebf7c149", "bb1ed99e8ac7aa68"}},
+         {"8548338bfa873dd2", "e84a23da6297f298", "64243c03ebf7c149", "a00ead848e545c71"}},
         {"catch_radius",
-         {"9c9a064a0d815352", "f4a4b42b9d766d39", "77592945e93dc0c9", "a72a71ce7f2a8a68"}},
+         {"9c9a064a0d815352", "d455bc0a56fad298", "77592945e93dc0c9", "8c1a45b482b73c71"}},
         {"catch_satiation",
-         {"ff92cc970fa81e81", "1c4111c7c28faa82", "f4b51fb6cf0e578a", "60906affb61c0e97"}},
+         {"ff92cc970fa81e81", "daaafe27ab424f13", "f4b51fb6cf0e578a", "7d7f3c3ca2a7bd26"}},
         {"flock_neighbor_radius",
-         {"66d35a8ed48e9382", "9c63f1e5c9686929", "57846f6b4646eff9", "af35769626be7ed8"}},
+         {"66d35a8ed48e9382", "8aa8b0fb207b7388", "57846f6b4646eff9", "93391ec476485221"}},
         {"flock_separation_radius",
-         {"f36052321e998752", "70654342efd2ffb9", "ce1f752dfa55f4c9", "218f756f645aa8e8"}},
+         {"f36052321e998752", "a98e0f7218490718", "ce1f752dfa55f4c9", "067f495567e75af1"}},
         {"flock_cohesion_weight",
-         {"35799529611c3ef7", "b9caa81da76e3acc", "6419052d9ac49008", "9188180fcb2f6451"}},
+         {"35799529611c3ef7", "012c16fe7df7fa6d", "6419052d9ac49008", "f7a7b88f5775d148"}},
         {"flock_separation_weight",
-         {"fc70e688455b7206", "6a8b53e4fed4f375", "7b895025fac53f2d", "69448c6ad091e334"}},
+         {"fc70e688455b7206", "ab0ac8e1fb5d4734", "7b895025fac53f2d", "3c4a439df51307ed"}},
         {"graze_radius",
-         {"43327ef3839a8cd2", "4f95a833d364dcb9", "220e876b750b1049", "00bfda6047ec85e8"}},
+         {"43327ef3839a8cd2", "88be7462fbdae418", "220e876b750b1049", "e5afae464b7937f1"}},
         {"graze_per_creature",
-         {"fc072684a572ed4b", "e46eedb5ec066b38", "4821155bbaf8af5c", "ea8bf461694ebe1d"}},
+         {"fc072684a572ed4b", "06a1a63945418c59", "4821155bbaf8af5c", "2e85021cc47b6264"}},
         {"regrow_per_tick",
-         {"8829887f8c91cf3d", "786bd5e7a9a1eaae", "a26425a9c07e3cd6", "6c8ce3c0b3d536d3"}},
+         {"8829887f8c91cf3d", "dac20db3b3b35e6f", "a26425a9c07e3cd6", "06266caf60f376a2"}},
         {"feed_per_graze",
-         {"6a01bedb4fea3e78", "2f247e0227ea28b3", "4b8920bf3f9be767", "4c9de1f8a773deda"}},
+         {"6a01bedb4fea3e78", "123a7019f2d230a2", "4b8920bf3f9be767", "d9600a85151006eb"}},
         {"rise_rate_per_second",
-         {"d58e9289ead43be3", "702b0d16384d492c", "d20282977cf96f94", "3635156653dce6f1"}},
+         {"d58e9289ead43be3", "e068e17a745a464d", "d20282977cf96f94", "51454180505034e8"}},
         {"drink_rate_per_second",
-         {"23959a73c2d11e52", "53f0abe44de96fb9", "fe54bd6f9e8d8bc9", "051ade10c27118e8"}},
+         {"23959a73c2d11e52", "8d197813765f7718", "fe54bd6f9e8d8bc9", "ea0ab1f6c5fdcaf1"}},
         {"seek_threshold",
-         {"a4818c84cd83cc33", "ffb7d30f415b805c", "77c086e95acb7d64", "0a93196690db4621"}},
+         {"a4818c84cd83cc33", "7d837137711e19bd", "77c086e95acb7d64", "268f7138415172d8"}},
         {"hunger_threshold",
-         {"187dca69ca9a513b", "381474039e4dcabc", "0e2a413a6b9f490c", "87212c8c848e96c1"}},
+         {"187dca69ca9a513b", "ded33655c87e909d", "0e2a413a6b9f490c", "5db8fd4ef4be3478"}},
         {"feed_radius",
-         {"23cb6d3f5fd7e78b", "e610ccdd48f116c4", "3262959885cf209c", "aba8e9b2e831d9e9"}},
+         {"23cb6d3f5fd7e78b", "b7d709aa143d7185", "3262959885cf209c", "4f6b1555ea4af740"}},
         {"feed_rate_per_tick",
-         {"2634683024d49a3b", "ecf836c4c37ed530", "1be0df00c5d9920c", "04b19bfe83189995"}},
+         {"2634683024d49a3b", "cfb3351d9633d5f1", "1be0df00c5d9920c", "7b1a8010a3a22b3c"}},
         {"maturity_ticks",
-         {"aa5addef1bd017a3", "a10f950da705c248", "8da2c96e50024954", "1e32116d74b8c12d"}},
+         {"aa5addef1bd017a3", "9bd0f8a4bef640e9", "8da2c96e50024954", "3f389ae5b3b4af74"}},
         {"cooldown_ticks",
-         {"9855901802c6298b", "618eec4330a732e8", "a6ecb87128bd629c", "1a3bef168740fa8d"}},
+         {"9855901802c6298b", "0758e76fa5f26a89", "a6ecb87128bd629c", "6e137a2de2f433d4"}},
         {"healthy_stamina",
-         {"6f47172c8a7d2fd2", "00d64e1760d30d39", "4e231fa47bedb349", "b35c0bba42872a68"}},
+         {"6f47172c8a7d2fd2", "e08755f61a577298", "4e231fa47bedb349", "984bdfa04613dc71"}},
         {"mate_seek_radius",
-         {"f2dc3640d6074196", "6a57560336dab135", "ea4ca76611a910fd", "c4bd0f3e43e1cff4"}},
+         {"f2dc3640d6074196", "f9e7da18572eaaf4", "ea4ca76611a910fd", "4a3ec17595f43fad"}},
         {"courtship_radius",
-         {"75bdd1c6e3c940d2", "247be9bf9d9ae5b9", "5499da3ed539c449", "d5a61bec12228ee8"}},
+         {"75bdd1c6e3c940d2", "5da4b5eec610ed18", "5499da3ed539c449", "ba95efd215af40f1"}},
         {"courtship_ticks",
-         {"bdf689fe074c9c27", "5add3df575df4a34", "1c0427bf58fe8038", "9486ec1b7fd36659"}},
+         {"bdf689fe074c9c27", "1a5dc8f87956f675", "1c0427bf58fe8038", "25128a14a9d07f30"}},
         {"spawn_radius",
-         {"9d31f8449f67230e", "18e24602b34425d9", "cfe1b76e5757ddb5", "78486ff591ac7848"}},
+         {"9d31f8449f67230e", "f6af8d7f5a0904b8", "cfe1b76e5757ddb5", "1228cf7605660b51"}},
         {"deposit",
-         {"7568296522c4fe1b", "3f9593a6d3712c34", "2857e1634040ad6c", "793f41ccdd654859"}},
+         {"7568296522c4fe1b", "ff161ea9d6e8d875", "2857e1634040ad6c", "09cadfc607626130"}},
         {"trail_weight",
-         {"5f470b8621134834", "3391bd5aad2f8cf3", "c896f8f4384cf503", "b866ec0fdda60c1a"}},
+         {"5f470b8621134834", "40e2ff6b04d769e2", "c896f8f4384cf503", "8fef28bdb06d8d2b"}},
         {"goal_weight",
-         {"39b325ecef65bad3", "875f4b7b9208354c", "05629935822ec304", "ba2cf6b4cf1016d1"}},
+         {"39b325ecef65bad3", "7548f60bf9a052ed", "05629935822ec304", "204c97345b5683c8"}},
         {"amplitude",
-         {"a01007e699175c93", "de348c846159511c", "fdcc2987aac02fdc", "5164ed74b441abf9"}},
+         {"a01007e699175c93", "775290f97fe0207d", "fdcc2987aac02fdc", "011aa1c6cc7057d0"}},
     };
     const auto variants = Luminumbra::TestSupport::SimulationConfigVariants();
     ASSERT_EQ(variants.size(), std::size(vectors));
@@ -363,18 +365,18 @@ TEST(SystemConfig, FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting) {
 
 TEST(SystemConfig, FrozenIdentitySessionOptionsCoverBothRegionProfiles) {
     constexpr std::array<const char*, 2> expected[]{
-        {"6940021d07bb62cf", "7f489b7b3b0d74d4"},
-        {"dc39d8a56618c7ff", "1d89780da5e17800"},
-        {"0017f78957d1631d", "dda1be4eb1066422"},
-        {"c66b76418c25cab5", "10010ba65d2f161a"},
-        {"fb71ff0134ef6715", "ec7e72d2803f4cba"},
-        {"0820df2bb23ecc5f", "6269a118e3ca8120"},
-        {"973a17daa4bfe1cc", "a0d8248757cbe8c5"},
-        {"e49a4f3da30a6690", "dbc660c0adc76835"},
-        {"8426406d0826954e", "9542bf5e0873c4af"},
-        {"acd293f874d98fe6", "ce9a84f70a712417"},
-        {"6d5a1d4eaaa43586", "bcd999c888df9937"},
-        {"60ab39242d54c970", "ab41dab95ae7eed5"},
+        {"6940021d07bb62cf", "82696265f95f6f15"},
+        {"dc39d8a56618c7ff", "78130a1ee10da7c1"},
+        {"0017f78957d1631d", "fa8bcc36e61e5c33"},
+        {"c66b76418c25cab5", "60d4899df4b5990b"},
+        {"fb71ff0134ef6715", "6822ed8e1061412b"},
+        {"0820df2bb23ecc5f", "b49c915d20fbb5e1"},
+        {"973a17daa4bfe1cc", "dc83793983ee9b6c"},
+        {"e49a4f3da30a6690", "9925dd917cebd75c"},
+        {"8426406d0826954e", "33f9bf97a11c519e"},
+        {"acd293f874d98fe6", "eb895633f6fcd2a6"},
+        {"6d5a1d4eaaa43586", "4606f40f6ed39646"},
+        {"60ab39242d54c970", "9610358f8ef1e27c"},
     };
     std::size_t index = 0;
     for (const bool regions : {false, true}) {

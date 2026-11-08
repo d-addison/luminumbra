@@ -31,6 +31,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -60,7 +61,9 @@
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
+#include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
+#include "luminumbra_common/components/ForagingComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
@@ -7108,7 +7111,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "2f2a9405252345a8");
+    EXPECT_EQ(baseline, "35e233a89e8c87b1");
     EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
@@ -10884,4 +10887,962 @@ TEST(GameSessionHeadlessWorldTest, RegionalWeatherWaitsForDestinationDueMembersh
 
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherStationaryAgeTickRetainsProjectionNodes) {
     ASSERT_NO_FATAL_FAILURE(CheckStationaryWeatherProjection());
+}
+
+namespace {
+
+std::vector<std::uint64_t> ScentBits(const luminumbra::ai::ScentField& field) {
+    std::vector<std::uint64_t> bits;
+    for (int ch = 0; ch < field.channels(); ++ch)
+        for (int x = 0; x < field.width(); ++x)
+            for (int z = 0; z < field.height(); ++z)
+                bits.push_back(std::bit_cast<std::uint64_t>(field.Sample(ch, x, z)));
+    return bits;
+}
+
+std::vector<std::uint64_t> SessionScentBits(const GameSession& session) {
+    return ScentBits(*session.GetScentField());
+}
+
+entt::entity AddSessionScentParticipant(GameSession& session, int kind, float x) {
+    namespace C = Luminumbra::Components;
+    auto& registry = session.GetRegistry();
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = {x, 0, 1};
+    if (kind == 0) {
+        auto& emitter = registry.emplace<C::SensableComponent>(entity);
+        emitter.scent_channel = 0;
+        emitter.scent_deposit = 8;
+    } else if (kind == 1) {
+        registry.emplace<C::ScentSenseComponent>(entity).channel = 0;
+        registry.emplace<C::LocomotionProfile>(entity);
+        registry.emplace<C::LocomotionIntentComponent>(entity);
+    } else {
+        auto& ant = registry.emplace<C::ForagerComponent>(entity);
+        ant.cell_x = session.ScentWorldToCellX(x);
+        ant.cell_z = session.ScentWorldToCellZ(1);
+        ant.home_x = ant.cell_x + 4;
+        ant.home_z = ant.cell_z;
+        ant.carrying_food = true;
+    }
+    return entity;
+}
+
+void CheckSpawnScentConsumers(GameSession& session) {
+    namespace C = Luminumbra::Components;
+    const auto spawn = session.GetMetadata().spawnPoint;
+    const int side = session.ScentFieldCells();
+    EXPECT_EQ(session.ScentCellToWorldX(0), std::floor(spawn.x) - 64.0f);
+    EXPECT_EQ(session.ScentCellToWorldZ(0), std::floor(spawn.z) - 64.0f);
+    const auto creature = ClockTestCreature(session.GetRegistry());
+    auto& position = session.GetRegistry().get<C::TransformComponent>(creature).position;
+    position = spawn + Luminumbra::Vec3(3, 0, -3);
+    EXPECT_TRUE(session.GetScentField()->in_bounds(session.ScentWorldToCellX(position.x),
+                                                   session.ScentWorldToCellZ(position.z)));
+    session.GetRegistry().destroy(creature);
+    // Same nest clamp and offsets as the client colony spawner.
+    const int nest_x = std::clamp(session.ScentWorldToCellX(spawn.x), 0, side - 1);
+    const int nest_z = std::clamp(session.ScentWorldToCellZ(spawn.z) + 6, 0, side - 1);
+    EXPECT_EQ(nest_x, side / 2 + std::lround(spawn.x - std::floor(spawn.x)));
+    EXPECT_EQ(nest_z, side / 2 + 6 + std::lround(spawn.z - std::floor(spawn.z)));
+    EXPECT_LE(std::abs(session.ScentCellToWorldX(nest_x) - spawn.x), 1.0f);
+    EXPECT_LE(std::abs(session.ScentCellToWorldZ(nest_z) - spawn.z - 6), 1.0f);
+}
+
+void CheckSessionScentProjection(const GameSession& session) {
+    const auto& fields = session.GetFieldPages();
+    std::vector<std::uint64_t> expected;
+    for (int ch = 0; ch < 4; ++ch) {
+        for (int x = 0; x < session.ScentFieldCells(); ++x) {
+            for (int z = 0; z < session.ScentFieldCells(); ++z) {
+                const Luminumbra::world::ScentCellKey key{
+                    static_cast<std::int32_t>(session.ScentCellToWorldX(x)),
+                    static_cast<std::int32_t>(session.ScentCellToWorldZ(z))};
+                expected.push_back(fields.scent_at(key)[static_cast<std::size_t>(ch)]);
+            }
+        }
+    }
+    EXPECT_EQ(SessionScentBits(session), expected);
+}
+
+void CheckNewWorldScentSpawnMapping(bool active_regions) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(active_regions);
+    ASSERT_TRUE(session.CreateWorld("Scent spawn mapping", "1337", "default"));
+    if (active_regions) {
+        ASSERT_NO_FATAL_FAILURE(CheckSpawnScentConsumers(session));
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    } else {
+        session.GetScentField()->Deposit(0, 10, 10, 1.0);
+        const auto bits = SessionScentBits(session);
+        const auto spawn =
+            session.GetMetadata().spawnPoint + Luminumbra::Vec3(1024.75f, 0, -512.25f);
+        session.SetSpawnPoint(spawn);
+        EXPECT_EQ(SessionScentBits(session), bits);
+        EXPECT_EQ(session.ScentCellToWorldX(0), spawn.x - 64.0f);
+        EXPECT_EQ(session.ScentCellToWorldZ(0), spawn.z - 64.0f);
+        EXPECT_TRUE(session.GetFieldPages().scent_cells().empty());
+    }
+}
+
+void CheckScentSpawnChange(float offset) {
+    SCOPED_TRACE(offset);
+    namespace C = Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    FieldPageState fields;
+    const Luminumbra::world::ScentCell exact{0x3ff0000000000001ULL, 1, 0, 0};
+    for (const Luminumbra::world::ScentCellKey key :
+         {Luminumbra::world::ScentCellKey{-1023, -511}, {1, 1}, {25, 1}, {1025, 513}, {4000, 1}}) {
+        ASSERT_TRUE(fields.set_scent(key, exact));
+    }
+    std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active}};
+    for (const auto& [key, values] : fields.scent_cells()) {
+        owners.try_emplace(FieldPageState::region_of_scent_cell(key), RegionState::Frozen);
+    }
+    const auto ledger = ScheduledFieldLedger(31, owners);
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_NO_FATAL_FAILURE(CheckSpawnScentConsumers(session));
+    const auto emitter = AddSessionScentParticipant(session, 0, 1);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    session.GetRegistry().destroy(emitter);
+    const auto ant_entity = AddSessionScentParticipant(session, 2, 25);
+    const auto food_entity = session.GetRegistry().create();
+    auto& food = session.GetRegistry().emplace<C::FoodSourceComponent>(food_entity);
+    food.cell_x = session.ScentWorldToCellX(25);
+    food.cell_z = session.ScentWorldToCellZ(1);
+    const auto before = session.GetFieldPages().serialize();
+    const auto original_spawn = session.GetMetadata().spawnPoint;
+    auto moved_spawn = original_spawn;
+    moved_spawn.x += offset;
+    moved_spawn.z += offset * 0.5f + 0.75f;
+    session.SetSpawnPoint(moved_spawn);
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    ASSERT_NO_FATAL_FAILURE(CheckSpawnScentConsumers(session));
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    const auto& ant = session.GetRegistry().get<C::ForagerComponent>(ant_entity);
+    EXPECT_EQ(session.ScentCellToWorldX(ant.cell_x), 25);
+    EXPECT_EQ(session.ScentCellToWorldZ(ant.cell_z), 1);
+    EXPECT_EQ(session.ScentCellToWorldX(ant.home_x), 29);
+    EXPECT_EQ(session.ScentCellToWorldZ(ant.home_z), 1);
+    EXPECT_EQ(session.ScentCellToWorldX(food.cell_x), 25);
+    EXPECT_EQ(session.ScentCellToWorldZ(food.cell_z), 1);
+    // Save immediately after recentering, before any tick at the new spawn.
+    ASSERT_TRUE(session.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_NO_FATAL_FAILURE(CheckSpawnScentConsumers(reopened));
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(reopened));
+    EXPECT_EQ(SessionScentBits(reopened), SessionScentBits(session));
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), before);
+    // An inactive tick must not erase historical cells outside the moved window.
+    session.GetRegistry().destroy(ant_entity);
+    session.GetRegistry().destroy(food_entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    session.SetSpawnPoint(original_spawn);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    // Repeated and sub-cell moves reuse the same world cells without duplication.
+    session.SetSpawnPoint(original_spawn);
+    session.SetSpawnPoint(original_spawn + Luminumbra::Vec3(0.25f, 0, 0.25f));
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    auto invalid_spawn = original_spawn;
+    invalid_spawn.x = std::numeric_limits<float>::quiet_NaN();
+    session.SetSpawnPoint(invalid_spawn);
+    EXPECT_FALSE(session.GetScentField()->SimulationCellAllowed(64, 64));
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    session.SetSpawnPoint(original_spawn);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+}
+
+void CheckSessionScentDueQueryCost() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    std::size_t reference_work = 0;
+    for (const std::size_t unrelated : {std::size_t{0}, std::size_t{32}, std::size_t{512}}) {
+        SCOPED_TRACE(unrelated);
+        GameSession session;
+        std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active}};
+        for (std::size_t i = 0; i < unrelated; ++i) {
+            owners.emplace(RegionKey{static_cast<std::int32_t>(100 + i), 100}, RegionState::Active);
+        }
+        const auto ledger = ScheduledFieldLedger(31, owners);
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+        const auto disabled = AddSessionScentParticipant(session, 0, 1);
+        session.GetRegistry()
+            .get<Luminumbra::Components::SensableComponent>(disabled)
+            .scent_channel = -1;
+        const auto idle_visits = session.GetScentEligibilityVisits();
+        TickOnce(session);
+        EXPECT_EQ(session.GetScentEligibilityVisits(), idle_visits);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetRegionSchedule().due.size(), unrelated + 1);
+        const auto before = session.GetScentEligibilityVisits();
+        EXPECT_TRUE(session.GetScentField()->SimulationCellAllowed(session.ScentWorldToCellX(1),
+                                                                   session.ScentWorldToCellZ(1)));
+        const auto refreshed = session.GetScentEligibilityVisits();
+        EXPECT_LE(refreshed - before, 18u);
+        EXPECT_TRUE(session.GetScentField()->SimulationCellAllowed(session.ScentWorldToCellX(1),
+                                                                   session.ScentWorldToCellZ(1)));
+        const auto warm_query = session.GetScentEligibilityVisits() - refreshed;
+        EXPECT_LE(warm_query, 4u);
+        EXPECT_GT(refreshed - before, warm_query);
+        for (int query = 2; query < 1024; ++query) {
+            EXPECT_TRUE(session.GetScentField()->SimulationCellAllowed(
+                session.ScentWorldToCellX(1), session.ScentWorldToCellZ(1)));
+        }
+        const auto work = session.GetScentEligibilityVisits() - before;
+        EXPECT_GT(work, 0u);
+        EXPECT_LE(work, 14u + 4u * 1024u);
+        if (unrelated == 0) {
+            reference_work = work;
+        } else {
+            EXPECT_EQ(work, reference_work);
+        }
+        AddSessionScentParticipant(session, 0, 1);
+        for (int tick = 0; tick < 3; ++tick) {
+            TickOnce(session);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            EXPECT_TRUE(session.GetFieldPages().weather_clocks().empty());
+            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+            EXPECT_EQ(session.GetRegionalWeatherCandidateRecordCount(), 0u);
+            EXPECT_EQ(session.GetRegionalWeatherScanCount(), 0u);
+        }
+    }
+}
+
+void CheckActiveScentContinuation(bool moved_spawn) {
+    SCOPED_TRACE(moved_spawn);
+    namespace C = Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {{2, 0}, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    const auto old_emitter = AddSessionScentParticipant(session, 0, 1);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    session.GetRegistry().destroy(old_emitter);
+    const auto historical = session.GetFieldPages().region_bytes(kFieldOwner);
+    if (moved_spawn) {
+        auto spawn = session.GetMetadata().spawnPoint;
+        spawn.x += 1024.25f;
+        session.SetSpawnPoint(spawn);
+    }
+    const auto spawn = session.GetMetadata().spawnPoint;
+    const auto emitter = AddSessionScentParticipant(session, 0, spawn.x + 1);
+    session.GetRegistry().get<C::TransformComponent>(emitter).position.z = spawn.z;
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_TRUE(session.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    ASSERT_NO_FATAL_FAILURE(CheckSpawnScentConsumers(reopened));
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(reopened));
+    EXPECT_EQ(SessionScentBits(reopened), SessionScentBits(session));
+    const auto restored_emitter = AddSessionScentParticipant(reopened, 0, spawn.x + 1);
+    reopened.GetRegistry().get<C::TransformComponent>(restored_emitter).position.z = spawn.z;
+    for (int tick = 0; tick < 5; ++tick) {
+        const auto previous = SessionScentBits(session);
+        TickOnce(session);
+        TickOnce(reopened);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        EXPECT_NE(SessionScentBits(session), previous);
+        EXPECT_EQ(SessionScentBits(reopened), SessionScentBits(session));
+        EXPECT_EQ(reopened.ComputeScentSubHash(), session.ComputeScentSubHash());
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+        EXPECT_EQ(reopened.GetActiveRegionLedger().completed_work(),
+                  session.GetActiveRegionLedger().completed_work());
+        EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().empty());
+        if (moved_spawn) {
+            EXPECT_EQ(session.GetFieldPages().region_bytes(kFieldOwner), historical);
+        }
+        ASSERT_TRUE(session.SaveWorld());
+        const auto saved_fields =
+            ReadClockTestFile(P::WorldSaveService::field_pages_path(session.GetWorldSaveDir()));
+        const auto saved_ledger =
+            ReadClockTestFile(P::WorldSaveService::active_regions_path(session.GetWorldSaveDir()));
+        ASSERT_TRUE(reopened.SaveWorld());
+        EXPECT_EQ(
+            ReadClockTestFile(P::WorldSaveService::field_pages_path(reopened.GetWorldSaveDir())),
+            saved_fields);
+        EXPECT_EQ(
+            ReadClockTestFile(P::WorldSaveService::active_regions_path(reopened.GetWorldSaveDir())),
+            saved_ledger);
+        EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+                  session.GetActiveRegionLedger().canonical_bytes());
+    }
+}
+
+void CheckHistoricalSessionScent() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    const auto emitter = AddSessionScentParticipant(session, 0, 1);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_FALSE(session.GetFieldPages().scent_cells().empty());
+    EXPECT_EQ(session.GetActiveRegionLedger().completed_work().size(), 1u);
+    EXPECT_GT(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 0u);
+    const auto live = SessionScentBits(session);
+    const auto scent = session.GetFieldPages().scent_cells();
+    const auto hash = session.ComputeScentSubHash();
+    ASSERT_FALSE(hash.empty());
+    session.GetRegistry().destroy(emitter);
+    TickOnce(session);
+    EXPECT_EQ(session.GetFieldPages().scent_cells(), scent);
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_EQ(session.ComputeScentSubHash(), hash);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto bytes = ReadClockTestFile(P::WorldSaveService::field_pages_path(save));
+    EXPECT_EQ(bytes, session.GetFieldPages().serialize());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(SessionScentBits(reopened), live);
+    EXPECT_EQ(reopened.GetFieldPages().scent_cells(), scent);
+    EXPECT_EQ(reopened.ComputeScentSubHash(), hash);
+    ASSERT_TRUE(reopened.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(save)), bytes);
+    TickOnce(reopened);
+    EXPECT_EQ(SessionScentBits(reopened), live);
+    EXPECT_EQ(reopened.GetFieldPages().scent_cells(), scent);
+}
+
+void CheckProceduralWeatherWithScent(GameSession& session, GameSession& control) {
+    AddSessionScentParticipant(session, 0, 1);
+    bool saw_storm = false;
+    for (int tick = 0; tick < 340; ++tick) {
+        SCOPED_TRACE(session.GetWorldClock().tick());
+        TickOnce(session);
+        TickOnce(control);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(control.GetRegionSchedulerFault());
+        ASSERT_EQ(WeatherOverlayHashes(session), WeatherOverlayHashes(control));
+        saw_storm = saw_storm || !control.GetWeatherSystem()->StormCells().empty();
+        EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+    }
+    EXPECT_TRUE(saw_storm);
+    EXPECT_TRUE(session.GetFieldPages().has_scent());
+    EXPECT_FALSE(session.GetFieldPages().has_ambient());
+}
+
+void CheckScentOnlyWeatherContinuation(bool stored_scent) {
+    SCOPED_TRACE(stored_scent);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, control, reopened, control_reopened;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    if (stored_scent) {
+        ASSERT_TRUE(fields.set_scent({1, 1}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(control, root, jobs, ledger, {}));
+    ASSERT_EQ(WeatherOverlayHashes(session), WeatherOverlayHashes(control));
+    ASSERT_NO_FATAL_FAILURE(CheckProceduralWeatherWithScent(session, control));
+    const auto scent = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(control.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    EnableSnapshotSession(control_reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(control_reopened.LoadWorld(control.GetMetadata().worldId))
+        << control_reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    control_reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), scent);
+    ASSERT_EQ(WeatherOverlayHashes(reopened), WeatherOverlayHashes(session));
+    ASSERT_EQ(WeatherOverlayHashes(reopened), WeatherOverlayHashes(control_reopened));
+    ASSERT_NO_FATAL_FAILURE(CheckProceduralWeatherWithScent(reopened, control_reopened));
+}
+
+void CheckSessionScentOwnership(int kind, bool frozen_participant) {
+    SCOPED_TRACE(kind);
+    SCOPED_TRACE(frozen_participant);
+    namespace C = Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey frozen{-1, 0};
+    const auto ledger = ScheduledFieldLedger(31,
+                                             {{kFieldOwner, RegionState::Active},
+                                              {frozen, RegionState::Frozen},
+                                              {{4, 0}, RegionState::Frozen}});
+    FieldPageState fields;
+    const Luminumbra::world::ScentCell exact{
+        0x3ff0000000000001ULL, 0x0000000000000001ULL, 0x400921fb54442d18ULL, 0};
+    ASSERT_TRUE(fields.set_scent({-2, 1}, exact));
+    ASSERT_TRUE(fields.set_scent({2, 1}, exact));
+    ASSERT_TRUE(fields.set_scent({2048, 1}, exact));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto x = session.ScentWorldToCellX(-2);
+    const auto z = session.ScentWorldToCellZ(1);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(session.GetScentField()->Sample(0, x, z)), exact[0]);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(session.GetScentField()->Sample(1, x, z)), exact[1]);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(session.GetScentField()->Sample(2, x, z)), exact[2]);
+    const auto entity =
+        AddSessionScentParticipant(session, kind, frozen_participant ? -1.0f : 1.0f);
+    const auto frozen_bytes = fields.region_bytes(frozen);
+    const auto active_scent = fields.scent_cells();
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().region_bytes(frozen), frozen_bytes);
+    EXPECT_EQ(session.GetFieldPages().scent_cells().at({-2, 1}), exact);
+    EXPECT_EQ(session.GetFieldPages().scent_cells().at({2048, 1}), exact);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(session.GetScentField()->Sample(0, x, z)), exact[0]);
+    EXPECT_EQ(session.GetScentField()->SimulationCellAllowed(
+                  session.ScentWorldToCellX(frozen_participant ? -1.0f : 1.0f), z),
+              !frozen_participant);
+    EXPECT_EQ(session.GetFieldPages().scent_cells() == active_scent, frozen_participant);
+    if (kind == 1) {
+        const auto wish = session.GetRegistry().get<C::LocomotionIntentComponent>(entity).wish_xz;
+        EXPECT_EQ(wish == Luminumbra::Vec2(0), frozen_participant);
+    }
+    if (kind == 2) {
+        const auto& ant = session.GetRegistry().get<C::ForagerComponent>(entity);
+        EXPECT_EQ(ant.cell_x == session.ScentWorldToCellX(frozen_participant ? -1.0f : 1.0f),
+                  frozen_participant);
+    }
+    ASSERT_TRUE(session.SaveWorld());
+    const auto live = SessionScentBits(session);
+    const auto bytes = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+}
+
+void CheckSessionScentCandidate(bool ambient_pages, bool weather, bool fail_consumer) {
+    SCOPED_TRACE(ambient_pages);
+    SCOPED_TRACE(weather);
+    SCOPED_TRACE(fail_consumer);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey frozen{4, 0};
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
+    FieldPageState fields;
+    if (ambient_pages) {
+        ASSERT_TRUE(fields.activate_region(kFieldOwner, 1337, 31));
+    }
+    if (weather) {
+        ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 7));
+    }
+    ASSERT_TRUE(fields.set_weather_age(frozen, 11));
+    ASSERT_TRUE(fields.replace_weather({SessionStorm(frozen, 2100, 108)}, {}));
+    ASSERT_TRUE(fields.set_scent({2048, 1}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    AddSessionScentParticipant(session, 0, 1);
+    const auto before = session.GetFieldPages().serialize();
+    const auto live_before = SessionScentBits(session);
+    if (fail_consumer) {
+        session.GetSimulationEventBus().subscribe(
+            [](const auto&) { throw std::runtime_error("injected scent candidate fault"); });
+        session.GetSimulationEventBus().publish(32, "scent-test", "");
+    }
+    TickOnce(session);
+    if (fail_consumer) {
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        EXPECT_EQ(SessionScentBits(session), live_before);
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        return;
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_GT(session.GetFieldPages().scent_cells().size(), fields.scent_cells().size());
+    EXPECT_EQ(session.GetFieldPages().region_bytes(frozen), fields.region_bytes(frozen));
+    EXPECT_EQ(session.GetFieldPages().weather_clocks().contains(kFieldOwner),
+              ambient_pages || weather);
+    if (weather) {
+        EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner), 8u);
+    }
+    if (ambient_pages) {
+        EXPECT_NE(session.GetFieldPages().pages(), fields.pages());
+    }
+    EXPECT_GT(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 0u);
+    const auto live = SessionScentBits(session);
+    const auto bytes = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+}
+
+void CheckReducedSessionScentCadence() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const std::uint64_t due_tick = std::uint64_t{32} + ActiveRegionLedger::phase(kFieldOwner, 2);
+    const auto ledger = ScheduledFieldLedger(due_tick - 1, {{kFieldOwner, RegionState::Reduced}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    AddSessionScentParticipant(session, 0, 1);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_FALSE(session.GetFieldPages().scent_cells().empty());
+    EXPECT_EQ(session.GetRegionSchedule().due, std::vector<RegionKey>{kFieldOwner});
+    const auto live = SessionScentBits(session);
+    const auto fields = session.GetFieldPages().serialize();
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+}
+
+void CheckSessionScentCrossOwnerCadence(bool due_participant) {
+    SCOPED_TRACE(due_participant);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey reduced{-1, 0};
+    // The persisted cadence phase for this owner is 1, so tick 32 must leave it untouched.
+    ASSERT_EQ(ActiveRegionLedger::phase(reduced, 2), 1u);
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {reduced, RegionState::Reduced}});
+    FieldPageState fields;
+    const Luminumbra::world::ScentCell exact{std::bit_cast<std::uint64_t>(8.0), 0, 0, 0};
+    ASSERT_TRUE(fields.set_scent({-1, 1}, exact));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    // A sensor keeps the solver eligible without depositing scent. Placing it in the
+    // reduced owner also exercises HasScentBorderWork when no interior is due.
+    AddSessionScentParticipant(session, 1, due_participant ? 1.0f : -1.0f);
+    const auto before = SessionScentBits(session);
+    const auto reduced_bytes = fields.region_bytes(reduced);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWorldClock().tick(), 32u);
+    ASSERT_EQ(session.GetRegionSchedule().due, std::vector<RegionKey>{kFieldOwner});
+    const auto x = session.ScentWorldToCellX(0), z = session.ScentWorldToCellZ(1);
+    EXPECT_DOUBLE_EQ(session.GetScentField()->Sample(0, x, z),
+                     due_participant ? FieldPageState::kScentFloor : 0.0);
+    EXPECT_DOUBLE_EQ(session.GetScentField()->Sample(0, x - 1, z), 8.0);
+    EXPECT_EQ(session.GetFieldPages().region_bytes(reduced), reduced_bytes);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    if (!due_participant) {
+        EXPECT_EQ(SessionScentBits(session), before);
+    }
+    // Tick 33 satisfies both the active cadence and the reduced owner's cadence phase.
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const std::vector<RegionKey> both_due{reduced, kFieldOwner};
+    ASSERT_EQ(session.GetRegionSchedule().due, both_due);
+    EXPECT_GT(session.GetScentField()->Sample(0, x, z), FieldPageState::kScentFloor);
+    EXPECT_NE(session.GetFieldPages().region_bytes(reduced), reduced_bytes);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+}
+
+void CheckFloorOnlyScentSaveOwnership() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    const auto floor = std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor);
+    const std::array<Luminumbra::world::ScentCell, 1> cells{
+        Luminumbra::world::ScentCell{floor, floor, floor, floor}};
+    FieldPageState fields;
+    std::map<RegionKey, std::uint64_t> work;
+    ASSERT_TRUE(fields.capture_scent_window({1, 1}, 1, cells, work));
+    ASSERT_TRUE(fields.scent_cells().empty());
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    EXPECT_FALSE(session.GetScentField()->SimulationCellAllowed(session.ScentWorldToCellX(1),
+                                                                session.ScentWorldToCellZ(1)));
+    EXPECT_FALSE(session.ComputeScentSubHash().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    // A compact-only owner must pass the same orphan check as an explicit scent cell.
+    FieldPageState orphan;
+    ASSERT_TRUE(orphan.capture_scent_window({2048, 1}, 1, cells, work));
+    const auto input = root.path() / "scheduled-field-input";
+    std::vector<std::string> errors;
+    P::WorldSaveService::SaveFactsScope facts(input);
+    P::SaveTransaction transaction(input, ledger.tick(), {}, &P::WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(P::WorldSaveService::save_field_pages(orphan, input, &errors));
+    EXPECT_FALSE(P::WorldSaveService::validate_field_pages(input, ledger, &errors));
+}
+
+void CheckDisjointSessionScentWindows() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    std::map<RegionKey, RegionState> owners;
+    for (std::int32_t window = 0; window < 6; ++window) {
+        owners.emplace(RegionKey{window * 4, 0}, RegionState::Active);
+    }
+    const auto ledger = ScheduledFieldLedger(31, owners);
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    for (int window = 0; window < 6; ++window) {
+        session.SetSpawnPoint({static_cast<float>(window * 2048 + 128), 0, 128});
+        const auto emitter =
+            AddSessionScentParticipant(session, 0, session.GetMetadata().spawnPoint.x + 1);
+        session.GetRegistry().get<Luminumbra::Components::TransformComponent>(emitter).position.z =
+            129;
+        for (int tick = 0; tick < 2; ++tick) {
+            TickOnce(session);
+            ASSERT_FALSE(session.GetRegionSchedulerFault()) << "window=" << window;
+            EXPECT_GT(session.GetScentField()->Sample(0, 65, 65), 1.0e-9);
+            EXPECT_EQ(session.GetRegionalWeatherScheduleVisits(), 0u);
+        }
+        session.GetRegistry().destroy(emitter);
+    }
+    EXPECT_LE(session.GetFieldPages().scent_cells().size(), FieldPageState::kMaxScentCells);
+    EXPECT_LE(session.GetFieldPages().scent_floor_blocks(), FieldPageState::kMaxScentFloorBlocks);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    const auto bytes = session.GetFieldPages().serialize();
+    const auto bits = SessionScentBits(session);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    EXPECT_EQ(SessionScentBits(session), bits);
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+}
+
+void CheckSessionScentFaultRollback(bool move_spawn) {
+    SCOPED_TRACE(move_spawn);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    AddSessionScentParticipant(session, 0, 1);
+    const auto live = SessionScentBits(session);
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        if (move_spawn) {
+            session.SetSpawnPoint(session.GetMetadata().spawnPoint + Luminumbra::Vec3(24, 0, 8));
+        }
+        throw std::runtime_error("injected scent consumer fault");
+    });
+    session.GetSimulationEventBus().publish(32, "scent-test", "");
+    TickOnce(session);
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        EXPECT_EQ(fault->message, "injected scent consumer fault");
+    }
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+}
+
+void CheckScentCallbackSpawnMove(float offset) {
+    SCOPED_TRACE(offset);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    AddSessionScentParticipant(session, 0, 1);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const auto before = session.GetFieldPages().serialize();
+    auto spawn = session.GetMetadata().spawnPoint;
+    spawn.x += offset;
+    spawn.z += 8.75f;
+    int callbacks = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        ++callbacks;
+        session.SetSpawnPoint(spawn);
+        session.SetSpawnPoint(spawn); // Repeated moves must retain the pending refresh.
+    });
+    session.GetSimulationEventBus().publish(33, "scent-test", "");
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(callbacks, 1);
+    EXPECT_NE(session.GetFieldPages().serialize(), before);
+    // The shifted live grid must include the candidate published after the callback.
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    const auto live = SessionScentBits(session);
+    ASSERT_TRUE(session.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(SessionScentBits(reopened), live);
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+    AddSessionScentParticipant(reopened, 0, 1);
+    TickOnce(session);
+    TickOnce(reopened);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+    EXPECT_EQ(SessionScentBits(reopened), SessionScentBits(session));
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().completed_work(),
+              session.GetActiveRegionLedger().completed_work());
+}
+
+void CheckSessionScentCapacityRetention(bool floors, RegionState historical_state) {
+    SCOPED_TRACE(floors);
+    SCOPED_TRACE(static_cast<int>(historical_state));
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    FieldPageState fields;
+    const auto bits = std::bit_cast<std::uint64_t>(floors ? FieldPageState::kScentFloor : 1.0);
+    const std::vector<Luminumbra::world::ScentCell> cells(
+        128u * 128u, Luminumbra::world::ScentCell{bits, bits, bits, bits});
+    std::map<RegionKey, std::uint64_t> work;
+    const int extent = floors ? 512 : 256;
+    for (int x = 0; x < extent; x += 128) {
+        for (int z = 0; z < extent; z += 128) {
+            ASSERT_TRUE(fields.capture_scent_window({1024 + x, z}, 128, cells, work));
+        }
+    }
+    ASSERT_EQ(floors ? fields.scent_floor_blocks() : fields.scent_cells().size(),
+              floors ? FieldPageState::kMaxScentFloorBlocks : FieldPageState::kMaxScentCells);
+    const RegionKey frozen_owner{2, 0};
+    auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {frozen_owner, RegionState::Frozen}});
+    if (historical_state != RegionState::Frozen) {
+        // Typed thaw fixture: the ledger retains the previous freeze's digest and timestamp.
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(frozen_owner);
+        record.state = historical_state;
+        record.cadence_shift =
+            historical_state == RegionState::Active ? std::uint8_t{0} : std::uint8_t{2};
+        record.cadence_phase = ActiveRegionLedger::phase(frozen_owner, record.cadence_shift);
+    }
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetSpawnPoint({128, 0, 128});
+    const auto emitter = AddSessionScentParticipant(session, 0, 129);
+    session.GetRegistry().get<Luminumbra::Components::TransformComponent>(emitter).position.z = 129;
+    const auto before = fields.serialize();
+    const auto frozen_digest = ledger.records().at(frozen_owner).frozen_digest;
+    for (int tick = 0; tick < 3; ++tick) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetWorldClock().tick(), 32u + static_cast<unsigned>(tick));
+        if (historical_state == RegionState::Frozen) {
+            EXPECT_EQ(session.GetFieldPages().serialize(), before);
+            EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(frozen_owner));
+        } else {
+            EXPECT_NE(session.GetFieldPages().region_bytes(frozen_owner),
+                      fields.region_bytes(frozen_owner));
+            EXPECT_GT(session.GetScentField()->Sample(0, 65, 65), FieldPageState::kScentFloor);
+            EXPECT_GT(session.GetFieldPages().scent_at({129, 129})[0],
+                      std::bit_cast<std::uint64_t>(FieldPageState::kScentFloor));
+            if (tick == 0) {
+                const auto& completed = session.GetActiveRegionLedger().completed_work();
+                ASSERT_TRUE(completed.contains(frozen_owner));
+                EXPECT_GT(completed.at(frozen_owner), 0u);
+            }
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).state,
+                  historical_state);
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).frozen_digest,
+                  frozen_digest);
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    }
+    const auto saved = session.GetFieldPages().serialize();
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(session.GetFieldPages().serialize(), saved);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen_owner).frozen_digest,
+              frozen_digest);
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentProjection(session));
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldClock().tick(), 35u);
+}
+
+void CheckSessionScentUngatedArithmetic(bool active_regions) {
+    SCOPED_TRACE(active_regions);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    if (active_regions) {
+        const auto ledger = ScheduledFieldLedger(31,
+                                                 {{{-1, -1}, RegionState::Active},
+                                                  {{-1, 0}, RegionState::Active},
+                                                  {{0, -1}, RegionState::Active},
+                                                  {{0, 0}, RegionState::Active}});
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    } else {
+        EnableSnapshotSession(session, root, jobs);
+        session.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Legacy scent arithmetic", "1337", "default"));
+    }
+    AddSessionScentParticipant(session, 0, 1);
+    luminumbra::ai::ScentField expected(128, 128, 4);
+    expected.Deposit(0, session.ScentWorldToCellX(1), session.ScentWorldToCellZ(1), 8.0);
+    const auto wind = session.GetWindFieldSystem()->SampleWind(session.GetMetadata().spawnPoint);
+    const double dt = session.GetSimulationClock().fixed_dt();
+    expected.Step(
+        0.25, 4, 0.05, static_cast<double>(wind.x) * dt, static_cast<double>(wind.y) * dt);
+    expected.Clamp(1.0e-9, 1.0e6);
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(SessionScentBits(session), ScentBits(expected));
+    EXPECT_EQ(session.GetFieldPages().scent_cells().empty(), !active_regions);
+}
+
+void CheckEmptyScentCompatibility(bool active_regions) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(active_regions);
+    ASSERT_TRUE(session.CreateWorld("Empty scent", "1337", "default"));
+    const auto live = SessionScentBits(session);
+    TickOnce(session);
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_TRUE(session.ComputeScentSubHash().empty());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+    ASSERT_TRUE(session.SaveWorld());
+    auto resaved = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+    // The snapshot index records the save generation, which advances on every save.
+    disk.erase("chunks/region/snapshot.json");
+    resaved.erase("chunks/region/snapshot.json");
+    EXPECT_EQ(resaved, disk);
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::field_pages_path(session.GetWorldSaveDir())));
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_EQ(SessionScentBits(session), live);
+    EXPECT_TRUE(session.ComputeScentSubHash().empty());
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, NewWorldScentUsesSpawnAndLegacyMovesKeepGridBits) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckNewWorldScentSpawnMapping(active_regions));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentRecentersOnSpawnWithoutChangingHistoricalCells) {
+    for (const float offset : {32.25f, 1024.25f, -1024.25f}) {
+        ASSERT_NO_FATAL_FAILURE(CheckScentSpawnChange(offset));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ScentEligibilityWorkStaysFixedAsDueRegionsGrow) {
+    ASSERT_NO_FATAL_FAILURE(CheckSessionScentDueQueryCost());
+}
+
+TEST(GameSessionHeadlessWorldTest, ActiveScentContinuesBitExactlyAcrossReopenAtCurrentSpawn) {
+    for (const bool moved_spawn : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckActiveScentContinuation(moved_spawn));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, HistoricalScentSurvivesEmitterRemovalAndReopenByteExactly) {
+    ASSERT_NO_FATAL_FAILURE(CheckHistoricalSessionScent());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScentOnlyPublicationPreservesProceduralWeatherAcrossReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckScentOnlyWeatherContinuation(false));
+}
+
+TEST(GameSessionHeadlessWorldTest, ScentOnlyRestorePreservesProceduralWeatherAcrossReopen) {
+    ASSERT_NO_FATAL_FAILURE(CheckScentOnlyWeatherContinuation(true));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentEmittersAndConsumersRespectFrozenOwners) {
+    for (const int kind : {0, 1, 2}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentOwnership(kind, false));
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentOwnership(kind, true));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentFaultDiscardsCaptureAndRestoresLiveBytes) {
+    for (const bool move_spawn : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentFaultRollback(move_spawn));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyScentPreservesLiveAndSaveBytes) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckEmptyScentCompatibility(active_regions));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalAndLegacyScentKeepUngatedSolverArithmetic) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentUngatedArithmetic(active_regions));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentParticipantsWaitForTheirOwnersCadence) {
+    ASSERT_NO_FATAL_FAILURE(CheckReducedSessionScentCadence());
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentCrossOwnerExchangeRequiresBothOwnersDue) {
+    for (const bool due_participant : {true, false}) {
+        ASSERT_NO_FATAL_FAILURE(CheckSessionScentCrossOwnerCadence(due_participant));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentPublishesWithAmbientAndWeatherCandidates) {
+    for (const bool ambient_pages : {false, true}) {
+        for (const bool weather : {false, true}) {
+            for (const bool fail_consumer : {false, true}) {
+                ASSERT_NO_FATAL_FAILURE(
+                    CheckSessionScentCandidate(ambient_pages, weather, fail_consumer));
+            }
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalScentContinuesAcrossSixDisjointWindows) {
+    ASSERT_NO_FATAL_FAILURE(CheckDisjointSessionScentWindows());
+}
+
+TEST(GameSessionHeadlessWorldTest, CompactOnlyScentRetainsSavedOwnerValidationAndHash) {
+    ASSERT_NO_FATAL_FAILURE(CheckFloorOnlyScentSaveOwnership());
+}
+
+TEST(GameSessionHeadlessWorldTest, CallbackSpawnMovePublishesMatchingLiveAndSavedScent) {
+    for (const float offset : {-24.25f, 24.25f}) {
+        ASSERT_NO_FATAL_FAILURE(CheckScentCallbackSpawnMove(offset));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FrozenScentCapacityRefusalKeepsSimulationAdvancing) {
+    for (const bool floors : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(
+            CheckSessionScentCapacityRetention(floors, Luminumbra::world::RegionState::Frozen));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ThawedScentHistoryRetiresAtCapacityDespiteHistoricalDigest) {
+    for (const auto state :
+         {Luminumbra::world::RegionState::Active, Luminumbra::world::RegionState::Reduced}) {
+        for (const bool floors : {false, true}) {
+            ASSERT_NO_FATAL_FAILURE(CheckSessionScentCapacityRetention(floors, state));
+        }
+    }
 }

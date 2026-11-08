@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/ForagingSystem.h"
 #include "luminumbra_common/ai/ScentDepositSystem.h"
 #include "luminumbra_common/ai/ScentFieldGates.h"
@@ -12,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -31,13 +33,15 @@ constexpr double kTauMax = 1.0e6;
 constexpr std::array<std::pair<double, double>, 6> kWinds{
     std::pair{0.0, 0.0}, {0.375, -1.25}, {-2.625, 0.875}, {4.25, -3.5}, {0.0, 2.125}, {-1.75, 0.0}};
 
-// Reference owner/due/edge lookups mirror GameSession's original live callbacks.
+// Reference owner/due/edge lookups mirror GameSession's live eligibility callbacks.
 // They deliberately do not use tile splits, corner decisions or cached gates.
 struct LiveSchedule {
     ScentCellKey origin;
     std::map<RegionKey, ActiveRegionRecord> records;
     std::vector<RegionKey> due;
     std::uint64_t tick = 0;
+    std::uint64_t schedule_tick = 0;
+    std::size_t ledger_records = 0;
     bool interior = true;
 
     explicit LiveSchedule(const ScentCellKey& domain_origin)
@@ -60,15 +64,27 @@ struct LiveSchedule {
 
     void Reschedule(std::uint64_t next_tick) {
         tick = next_tick;
+        schedule_tick = tick;
+        ledger_records = records.size();
         due.clear();
-        for (const auto& [owner, record] : records)
-            if (record.state != RegionState::Frozen &&
-                (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase)
+        for (auto& [owner, record] : records) {
+            if (record.state != RegionState::Frozen && record.cadence_shift < 63 &&
+                (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase) {
+                record.last_ticked = tick;
                 due.push_back(owner);
+            }
+        }
     }
 
     bool CellDue(int x, int z) const {
-        return std::find(due.begin(), due.end(), Owner(x, z)) != due.end();
+        const auto found = records.find(Owner(x, z));
+        if (found == records.end() || found->second.state == RegionState::Frozen) {
+            return false;
+        }
+        const auto& record = found->second;
+        return ledger_records != 0 && schedule_tick == tick && record.last_ticked == tick &&
+               record.cadence_shift < 63 &&
+               (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase;
     }
 
     bool EdgeOpen(int x, int z, int nx, int nz) const {
@@ -79,8 +95,7 @@ struct LiveSchedule {
         if (a == records.end() || b == records.end() || a->second.state == RegionState::Frozen ||
             b->second.state == RegionState::Frozen)
             return false;
-        const auto shift = (std::max)(a->second.cadence_shift, b->second.cadence_shift);
-        return shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0;
+        return CellDue(x, z) && CellDue(nx, nz);
     }
 
     ScentStepGates LiveGates() const {
@@ -158,7 +173,128 @@ void AdvanceAndCompare(ScentField& reference,
     optimized.Clamp(kTauMin, kTauMax, cached.participants);
     ASSERT_TRUE(SameBits(reference, optimized)) << "after Clamp";
 }
+
+void CheckCrossOwnerDiffusion(std::uint8_t source_shift,
+                              std::uint32_t source_phase,
+                              std::uint8_t destination_shift,
+                              std::uint32_t destination_phase,
+                              std::uint64_t tick,
+                              RegionState destination_state,
+                              bool open) {
+    LiveSchedule schedule({-32, 100}); // The owner boundary is between x=31 and x=32.
+    const auto source = schedule.Owner(31, 64), destination = schedule.Owner(32, 64);
+    ASSERT_NE(source, destination);
+    schedule.Set(
+        source, source_shift == 0 ? RegionState::Active : RegionState::Reduced, source_shift);
+    schedule.Set(destination, destination_state, destination_shift);
+    ASSERT_EQ(schedule.records.at(source).cadence_phase, source_phase);
+    ASSERT_EQ(schedule.records.at(destination).cadence_phase, destination_phase);
+    schedule.Reschedule(tick);
+    ASSERT_TRUE(schedule.CellDue(31, 64));
+    ASSERT_EQ(schedule.CellDue(32, 64), open);
+    const auto live = schedule.LiveGates(), cached = schedule.CachedGates();
+    ScentField initial(kCells, kCells, kChannels);
+    initial.RestoreCell(0, 32, 64, 8.0);
+    auto reference = initial, optimized = initial;
+    reference.Step(kDiffusionRate, 1, 0.0, 0.0, 0.0, live.participants, live.exchange);
+    optimized.Step(kDiffusionRate, 1, 0.0, 0.0, 0.0, cached.participants, cached.exchange);
+    if (open) {
+        EXPECT_GT(optimized.Sample(0, 31, 64), 0.0);
+        EXPECT_LT(optimized.Sample(0, 32, 64), 8.0);
+    } else {
+        EXPECT_DOUBLE_EQ(optimized.Sample(0, 31, 64), 0.0);
+        EXPECT_DOUBLE_EQ(optimized.Sample(0, 32, 64), 8.0);
+        // Every cell of the owner that is not due stays put.
+        EXPECT_TRUE(SameBits(initial, optimized));
+    }
+    EXPECT_TRUE(SameBits(reference, optimized));
+    EXPECT_EQ(schedule.EdgeOpen(31, 64, 32, 64), open);
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 31, 64), open);
+    EXPECT_EQ(!cached.exchange || cached.exchange(31, 64, 32, 64), open);
+    EXPECT_EQ(!cached.exchange || cached.exchange(32, 64, 31, 64), open);
+    EXPECT_TRUE(schedule.EdgeOpen(30, 64, 31, 64));
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 33, 64), open);
+}
+
+void CheckClosedOwnerEdges(const LiveSchedule& schedule) {
+    const auto cached = schedule.CachedGates();
+    ASSERT_TRUE(cached.exchange);
+    EXPECT_FALSE(schedule.EdgeOpen(31, 64, 32, 64));
+    EXPECT_FALSE(schedule.EdgeOpen(32, 64, 31, 64));
+    EXPECT_FALSE(cached.exchange(31, 64, 32, 64));
+    EXPECT_FALSE(cached.exchange(32, 64, 31, 64));
+    EXPECT_EQ(schedule.EdgeOpen(30, 64, 31, 64), schedule.CellDue(30, 64));
+    EXPECT_EQ(schedule.EdgeOpen(32, 64, 33, 64), schedule.CellDue(32, 64));
+}
+
+void CheckUnavailableOwnerEdges() {
+    enum class Unavailable {
+        Missing,
+        Frozen,
+        Unticked,
+        WrongPhase,
+        InvalidShift
+    };
+    for (const int x : {31, 32}) {
+        for (const auto reason : {Unavailable::Missing,
+                                  Unavailable::Frozen,
+                                  Unavailable::Unticked,
+                                  Unavailable::WrongPhase,
+                                  Unavailable::InvalidShift}) {
+            SCOPED_TRACE(testing::Message() << "x=" << x << " reason=" << static_cast<int>(reason));
+            LiveSchedule schedule({-32, 100});
+            schedule.Reschedule(4);
+            const auto owner = schedule.Owner(x, 64);
+            switch (reason) {
+                case Unavailable::Missing:
+                    schedule.records.erase(owner);
+                    break;
+                case Unavailable::Frozen:
+                    schedule.records.at(owner).state = RegionState::Frozen;
+                    break;
+                case Unavailable::Unticked:
+                    schedule.records.at(owner).last_ticked = 3;
+                    break;
+                case Unavailable::WrongPhase:
+                    // Preserve last_ticked=4 while selecting a cadence phase that is not due.
+                    schedule.Set(owner, RegionState::Reduced, 2);
+                    break;
+                case Unavailable::InvalidShift:
+                    schedule.records.at(owner).cadence_shift = 63;
+                    break;
+            }
+            ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(schedule));
+        }
+    }
+    LiveSchedule stale({480, 100});
+    stale.Reschedule(4);
+    stale.schedule_tick = 3;
+    ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(stale));
+    LiveSchedule empty({480, 100});
+    empty.Reschedule(4);
+    empty.ledger_records = 0;
+    ASSERT_NO_FATAL_FAILURE(CheckClosedOwnerEdges(empty));
+}
 } // namespace
+
+TEST(ScentFieldGates, CrossOwnerDiffusionWaitsForBothOwnersCadence) {
+    // At tick 4 the old boundary-only rule opens, despite the destination's cadence phase being 1.
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 2, 1, 4, RegionState::Reduced, false));
+}
+
+TEST(ScentFieldGates, CrossOwnerDiffusionOpensWhenBothCadencesAreDue) {
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(1, 1, 2, 1, 1, RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(2, 1, 2, 1, 1, RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 0, 0, 4, RegionState::Active, true));
+}
+
+TEST(ScentFieldGates, CrossOwnerDiffusionKeepsFrozenOwnerCellsUntouched) {
+    ASSERT_NO_FATAL_FAILURE(CheckCrossOwnerDiffusion(0, 0, 2, 1, 5, RegionState::Frozen, false));
+}
+
+TEST(ScentFieldGates, CrossOwnerEdgesRejectUnavailableOwnersAndStaleSchedules) {
+    ASSERT_NO_FATAL_FAILURE(CheckUnavailableOwnerEdges());
+}
 
 TEST(ScentFieldGates, FullyOpenDomainsMatchLiveSolverBitExactly) {
     // One owner, either axis split, four owners, negative coordinates, and splits
@@ -319,6 +455,77 @@ TEST(ScentFieldGates, CachedDecisionsStaySealedUntilRebuilt) {
     EXPECT_FALSE(rebuilt.exchange);
 }
 
+namespace {
+
+void CheckNearDueQueryCost(std::size_t unrelated) {
+    SCOPED_TRACE(unrelated);
+    LiveSchedule schedule({480, 500});
+    schedule.Reschedule(4);
+    const auto owner_of = [&schedule](int x, int z) {
+        return schedule.Owner(x, z);
+    };
+    auto due = schedule.due;
+    for (std::size_t i = 0; i < unrelated; ++i) {
+        due.push_back({static_cast<std::int32_t>(100 + i), 100});
+    }
+    luminumbra::ai::detail::NearScentDueCache<RegionKey> cache;
+    std::size_t lookups = 0;
+    const auto refresh = [&] {
+        const std::set<RegionKey> index(due.begin(), due.end());
+        const auto before = cache.query_visits();
+        lookups = 0;
+        cache.Refresh(kCells, owner_of, [&](RegionKey owner) {
+            ++lookups;
+            return index.contains(owner);
+        });
+        EXPECT_LE(lookups, 4u);
+        EXPECT_GT(cache.query_visits() - before, lookups);
+        EXPECT_LE(cache.query_visits() - before, 14u);
+    };
+    refresh();
+    const auto queries = [&] {
+        const auto before = cache.query_visits();
+        for (int x = 0; x < kCells; ++x) {
+            for (int z = 0; z < kCells; ++z) {
+                EXPECT_EQ(cache.Allows(owner_of(x, z)), schedule.CellDue(x, z));
+            }
+        }
+        return cache.query_visits() - before;
+    };
+    const auto work = queries();
+    EXPECT_LE(work, 4u * kCells * kCells);
+    due.clear();
+    // A changed global schedule cannot leak into queries until refresh.
+    EXPECT_EQ(queries(), work);
+    refresh();
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+    due.push_back(schedule.Owner(kCells - 1, kCells - 1));
+    refresh();
+    EXPECT_TRUE(cache.Allows(owner_of(kCells - 1, kCells - 1)));
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+    const auto shifted_owner = [](int, int) {
+        return RegionKey{1000, -1000};
+    };
+    const std::set<RegionKey> shifted_index(due.begin(), due.end());
+    cache.Refresh(
+        kCells, shifted_owner, [&](RegionKey owner) { return shifted_index.contains(owner); });
+    EXPECT_FALSE(cache.Allows(shifted_owner(0, 0)));
+    due.push_back(shifted_owner(0, 0));
+    const std::set<RegionKey> refreshed_index(due.begin(), due.end());
+    cache.Refresh(
+        kCells, shifted_owner, [&](RegionKey owner) { return refreshed_index.contains(owner); });
+    EXPECT_TRUE(cache.Allows(shifted_owner(0, 0)));
+    EXPECT_FALSE(cache.Allows(owner_of(0, 0)));
+}
+
+} // namespace
+
+TEST(ScentFieldGates, NearDueQueriesStayBoundedAsGlobalScheduleGrows) {
+    for (const std::size_t unrelated : {std::size_t{0}, std::size_t{128}, std::size_t{8192}}) {
+        ASSERT_NO_FATAL_FAILURE(CheckNearDueQueryCost(unrelated));
+    }
+}
+
 TEST(ScentFieldGates, DepositSkipsFrozenEmittersAndEmptyGateRestoresEligibility) {
     namespace Comp = Luminumbra::Components;
     entt::registry registry;
@@ -424,4 +631,223 @@ TEST(ScentFieldGates, ForagingCannotFollowAStrongTrailIntoAFrozenCell) {
     EXPECT_EQ(registry.get<Comp::ForagerComponent>(ant).cell_x, 3);
     EXPECT_EQ(registry.get<Comp::ForagerComponent>(ant).cell_z, 1);
     EXPECT_DOUBLE_EQ(field.Sample(luminumbra::ai::kFoodTrailChannel, 5, 1), 100.0);
+}
+
+namespace {
+void CheckBrainScentEligibility(RegionState state, bool due) {
+    namespace Comp = Luminumbra::Components;
+    LiveSchedule schedule({100, 100});
+    const auto owner = schedule.Owner(16, 16);
+    schedule.Set(owner, state, state == RegionState::Reduced ? std::uint8_t{2} : std::uint8_t{0});
+    const auto phase = ActiveRegionLedger::phase(owner, 2);
+    schedule.Reschedule(due ? 32 + phase : 33 + phase);
+    if (state == RegionState::Frozen) {
+        due = false;
+    }
+    ScentField field(kCells, kCells, 4);
+    for (int x = 0; x < kCells; ++x) {
+        for (int z = 0; z < kCells; ++z) {
+            field.RestoreCell(0, x, z, static_cast<double>(x + 1));
+        }
+    }
+    field.BindDepositGate([&](int x, int z) { return schedule.CellDue(x, z); });
+    entt::registry sampled, cold;
+    const auto spawn = [](entt::registry& registry) {
+        const auto entity = registry.create();
+        registry.emplace<Comp::TransformComponent>(entity).position = {116, 0, 116};
+        auto& creature = registry.emplace<Comp::CreatureComponent>(entity);
+        creature.is_predator = true;
+        creature.hunger = 0.95f;
+        return entity;
+    };
+    const auto animal = spawn(sampled);
+    const auto control = spawn(cold);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(sampled, 1.0f / 30.0f, {}, &field, 100, 100, 1);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(cold, 1.0f / 30.0f);
+    const auto& actual = sampled.get<Comp::CreatureComponent>(animal);
+    const auto& expected = cold.get<Comp::CreatureComponent>(control);
+    if (due) {
+        EXPECT_EQ(actual.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Hunt));
+        EXPECT_GT(actual.wish_x, 0.0f);
+    } else {
+        EXPECT_EQ(actual.last_action, expected.last_action);
+        EXPECT_FLOAT_EQ(actual.wish_x, expected.wish_x);
+        EXPECT_FLOAT_EQ(actual.wish_z, expected.wish_z);
+        EXPECT_EQ(sampled.get<Comp::TransformComponent>(animal).position,
+                  cold.get<Comp::TransformComponent>(control).position);
+    }
+}
+} // namespace
+
+TEST(ScentFieldGates, CreatureBrainSamplesOnlyDueUnfrozenOwners) {
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Active, true));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Reduced, true));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Reduced, false));
+    ASSERT_NO_FATAL_FAILURE(CheckBrainScentEligibility(RegionState::Frozen, false));
+}
+
+namespace {
+constexpr std::array<std::pair<int, int>, 4> kScentDirections{
+    std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+void CheckBoundaryScentConsumers(const std::pair<int, int>& direction,
+                                 RegionState source_state,
+                                 bool source_due) {
+    namespace Comp = Luminumbra::Components;
+    const auto [dx, dz] = direction;
+    SCOPED_TRACE(testing::Message() << "direction=(" << dx << ',' << dz << ") state="
+                                    << static_cast<int>(source_state) << " due=" << source_due);
+    // The window starts at world cell 480; the owner boundary is at local cell 32.
+    const int x = dx == 0 ? 16 : (dx > 0 ? 31 : 32);
+    const int z = dz == 0 ? 16 : (dz > 0 ? 31 : 32);
+    LiveSchedule schedule({480, 480});
+    const auto source_owner = schedule.Owner(x + dx, z + dz);
+    schedule.Set(source_owner, source_state, std::uint8_t{2});
+    const auto due_tick = 32 + ActiveRegionLedger::phase(source_owner, 2);
+    schedule.Reschedule(source_due ? due_tick : due_tick + 1);
+    ASSERT_NE(schedule.Owner(x, z), source_owner);
+    ASSERT_TRUE(schedule.CellDue(x, z));
+    ASSERT_EQ(schedule.CellDue(x + dx, z + dz), source_due);
+
+    ScentField field(kCells, kCells);
+    field.RestoreCell(0, x + dx, z + dz, 8.0); // Only the neighbouring owner has scent.
+    field.BindDepositGate([&schedule](int cx, int cz) { return schedule.CellDue(cx, cz); });
+    float gx = 1.0f, gz = 1.0f;
+    const float confidence = field.GradientSteer(0, x, z, 1.0f, 1e-4f, 0.05f, gx, gz);
+    EXPECT_FLOAT_EQ(confidence, source_due ? 8.0f / 8.05f : 0.0f);
+    EXPECT_FLOAT_EQ(gx, source_due ? static_cast<float>(dx) : 0.0f);
+    EXPECT_FLOAT_EQ(gz, source_due ? static_cast<float>(dz) : 0.0f);
+
+    entt::registry sampled, cold;
+    const auto spawn = [x, z](entt::registry& registry) {
+        const auto entity = registry.create();
+        registry.emplace<Comp::TransformComponent>(entity).position = {
+            static_cast<float>(480 + x), 0.0f, static_cast<float>(480 + z)};
+        auto& creature = registry.emplace<Comp::CreatureComponent>(entity);
+        creature.is_predator = true;
+        creature.hunger = 0.95f;
+        return entity;
+    };
+    const auto animal = spawn(sampled);
+    const auto control = spawn(cold);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(sampled, 1.0f / 30.0f, {}, &field, 480, 480, 1);
+    luminumbra::ai::RunCreatureBrainSystemOnTick(cold, 1.0f / 30.0f);
+    const auto& actual = sampled.get<Comp::CreatureComponent>(animal);
+    const auto& expected = cold.get<Comp::CreatureComponent>(control);
+    if (source_due) {
+        EXPECT_EQ(actual.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Hunt));
+        EXPECT_GT(actual.wish_x * static_cast<float>(dx) + actual.wish_z * static_cast<float>(dz),
+                  0.0f);
+        EXPECT_FLOAT_EQ(
+            actual.wish_x * static_cast<float>(dz) - actual.wish_z * static_cast<float>(dx), 0.0f);
+    } else {
+        EXPECT_EQ(actual.last_action, expected.last_action);
+        EXPECT_FLOAT_EQ(actual.wish_x, expected.wish_x);
+        EXPECT_FLOAT_EQ(actual.wish_z, expected.wish_z);
+        EXPECT_EQ(sampled.get<Comp::TransformComponent>(animal).position,
+                  cold.get<Comp::TransformComponent>(control).position);
+    }
+
+    // A fresh predator exercises the independent locomotion-intent consumer.
+    entt::registry steering;
+    const auto sniffer = spawn(steering);
+    steering.emplace<Comp::ScentSenseComponent>(sniffer).channel = 0;
+    steering.emplace<Comp::LocomotionProfile>(sniffer).move_speed = 2.0f;
+    steering.emplace<Comp::LocomotionIntentComponent>(sniffer).wish_xz = {0.0f, 0.0f};
+    const auto stats = luminumbra::ai::RunScentSteeringOnTick(steering, field, 480, 480, 1);
+    const auto& wish = steering.get<Comp::LocomotionIntentComponent>(sniffer).wish_xz;
+    EXPECT_EQ(stats.considered, 1u);
+    EXPECT_EQ(stats.steered, source_due ? 1u : 0u);
+    // Magnitude 8, default Weber k=1 and speed=2 give a bias of 16/9, below the cap.
+    EXPECT_FLOAT_EQ(wish.x, source_due ? static_cast<float>(dx) * (16.0f / 9.0f) : 0.0f);
+    EXPECT_FLOAT_EQ(wish.y, source_due ? static_cast<float>(dz) * (16.0f / 9.0f) : 0.0f);
+    EXPECT_DOUBLE_EQ(field.Sample(0, x + dx, z + dz), 8.0);
+}
+
+void CheckGradientCentreSubstitute(const std::pair<int, int>& direction) {
+    const auto [dx, dz] = direction;
+    SCOPED_TRACE(testing::Message() << "direction=(" << dx << ',' << dz << ')');
+    ScentField field(3, 3);
+    for (int z = 0; z < 3; ++z) {
+        for (int x = 0; x < 3; ++x) {
+            field.RestoreCell(0, x, z, 4.0);
+        }
+    }
+    field.RestoreCell(0, 1 + dx, 1 + dz, 20.0);
+    std::vector<std::pair<int, int>> visits;
+    field.BindDepositGate([&](int x, int z) {
+        visits.emplace_back(x, z);
+        return x != 1 + dx || z != 1 + dz;
+    });
+    float gx = 1.0f, gz = 1.0f;
+    EXPECT_DOUBLE_EQ(field.Gradient(0, 1, 1, gx, gz), 0.0);
+    EXPECT_FLOAT_EQ(gx, 0.0f);
+    EXPECT_FLOAT_EQ(gz, 0.0f);
+    // Exactly the four stencil neighbours are queried, independent of world size.
+    std::sort(visits.begin(), visits.end());
+    const std::vector<std::pair<int, int>> expected{{0, 1}, {1, 0}, {1, 2}, {2, 1}};
+    EXPECT_EQ(visits, expected);
+}
+
+void CheckOpenGradientBits(int width, int height) {
+    ScentField ungated(width, height, 2);
+    for (int ch = 0; ch < 2; ++ch) {
+        for (int z = 0; z < height; ++z) {
+            for (int x = 0; x < width; ++x) {
+                ungated.RestoreCell(ch, x, z, static_cast<double>(x * 17 + z * 31 + ch) / 37.0);
+            }
+        }
+    }
+    auto gated = ungated;
+    int queries = 0;
+    bool outside = false;
+    gated.BindDepositGate([&](int x, int z) {
+        ++queries;
+        outside = outside || !gated.in_bounds(x, z);
+        return gated.in_bounds(x, z);
+    });
+    for (int ch = -1; ch <= 2; ++ch) {
+        for (int z = -1; z <= height; ++z) {
+            for (int x = -1; x <= width; ++x) {
+                SCOPED_TRACE(testing::Message() << "size=(" << width << ',' << height << ") ch="
+                                                << ch << " cell=(" << x << ',' << z << ')');
+                float ux = 1.0f, uz = 1.0f, gx = 1.0f, gz = 1.0f;
+                const auto um = ungated.Gradient(ch, x, z, ux, uz);
+                const auto gm = gated.Gradient(ch, x, z, gx, gz);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(um), std::bit_cast<std::uint64_t>(gm));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(ux), std::bit_cast<std::uint32_t>(gx));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(uz), std::bit_cast<std::uint32_t>(gz));
+            }
+        }
+    }
+    EXPECT_FALSE(outside); // Eligibility is queried after the existing edge clamp.
+    EXPECT_EQ(queries, 2 * width * height * 4); // Invalid inputs do not consult the gate.
+}
+} // namespace
+
+TEST(ScentFieldGates, ConsumersIgnoreFrozenNeighbourScent) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(CheckBoundaryScentConsumers(direction, RegionState::Frozen, false));
+    }
+}
+
+TEST(ScentFieldGates, ConsumersFollowNeighbourScentOnlyWhenItsOwnerIsDue) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(
+            CheckBoundaryScentConsumers(direction, RegionState::Reduced, false));
+        ASSERT_NO_FATAL_FAILURE(CheckBoundaryScentConsumers(direction, RegionState::Reduced, true));
+    }
+}
+
+TEST(ScentFieldGates, BlockedGradientNeighboursUseCentreConcentrationWithBoundedQueries) {
+    for (const auto& direction : kScentDirections) {
+        ASSERT_NO_FATAL_FAILURE(CheckGradientCentreSubstitute(direction));
+    }
+}
+
+TEST(ScentFieldGates, OpenGradientMatchesUngatedBitsAtEdgesAndForInvalidInputs) {
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 3));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 3));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 1));
+    ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 1));
 }

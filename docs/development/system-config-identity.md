@@ -33,8 +33,8 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
-revision (u32, currently 4). All six values are included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
+revision (u32, currently 5). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000105000000`.
 The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
 `0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
@@ -53,7 +53,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **339 bytes → `2f2a9405252345a8`** for revision 4.
+to **339 bytes → `35e233a89e8c87b1`** for revision 5.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
@@ -90,11 +90,12 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The current encoder appends authority-rules revision 4 so admission can distinguish
+The current encoder appends authority-rules revision 5 so admission can distinguish
 compiled authority rules as well as configured values. It retains the resolved
 calendar that the admission identity already folds in. The shipping identity
-changes once from `49f694fd70645bcc` to `2f2a9405252345a8`, for the four added
-revision bytes. No world-state, terrain, water, save-format or replay checkpoint
+changed from `49f694fd70645bcc` to the revision-4 value `2f2a9405252345a8` when the revision
+field was added, and revision 5 (regional scent eligibility, advancement and persistence rules)
+changes it again to `35e233a89e8c87b1`. The revision-4 identity is no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
 encoding changes in this identity step.
 
 The frozen current vectors in `SystemConfig_test.cpp` cover the complete 339-byte
@@ -116,7 +117,7 @@ revision-3 identity `60ab3c242d54ce89`, earlier authority identity
 Existing matching codec literals are fixtures, not a live admission fallback.
 Hello version and wire layout are unchanged.
 
-The current historical-defaults-off configuration has identity `25078e8b112a6ebd`;
+The current historical-defaults-off configuration has identity `a73bf062e167d55c`;
 its explicit revision-3 identity remains `74f285c5fa387d66`. Newly created worlds
 record the current render calendar even when active regions are disabled, so the
 live identity continues to follow that marker.

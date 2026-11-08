@@ -30,6 +30,7 @@
 #include "../ai/ScavengingSystem.h"   // Converts carcasses into scavenger food.
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
+#include "../ai/ScentFieldGates.h"
 #include "../ai/ScentSteeringSystem.h"
 #include "../ai/SimTuningConfig.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
@@ -133,7 +134,7 @@ constexpr float kScentCellSize = 1.0f;
 constexpr double kScentDiffusionRate = 0.25;
 constexpr std::size_t kScentDiffusionIterations = 4;
 constexpr double kScentEvaporation = 0.05;
-constexpr double kScentTauMin = 1.0e-9;
+constexpr double kScentTauMin = Luminumbra::world::FieldPageState::kScentFloor;
 constexpr double kScentTauMax = 1.0e6;
 //  scent wind-advection strength. 0 = OFF -> ScentField::Step skips advection. Tuned ON at 1.0
 // (advect at the TRUE wind velocity — the physically-correct semi-Lagrangian drift) so scent drifts
@@ -328,6 +329,7 @@ void GameSession::ResetWorldSystems() {
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionalFieldView = nullptr;
+    m_scentRecenterPending = false;
     m_regionalFieldsBound = false;
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
@@ -672,54 +674,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
-                        (HasScentParticipants() ||
+                        (HasScentParticipants(false) ||
                          SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
                            ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
                                  kScentFieldChannels
                            : 0ull;
             });
-            // 2c.: scent stigmergy write/update. Game-data opt-in:
-            // no scent emitter/sensor components means no field mutation, while active
-            // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
-            const bool scent_active = HasScentParticipants();
-            // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
-            // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate
-            // this tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a
-            // no-op, so the canonical roster (and any scent-only world) is byte-identical.
-            // Integer/id-ordered/libm-free.
-            const auto foragers_view =
-                m_registry.view<const Luminumbra::Components::ForagerComponent>();
-            const bool foraging_active = foragers_view.begin() != foragers_view.end();
-            if ((scent_active || foraging_active) && m_scentField) {
-                if (scent_active) {
-                    luminumbra::ai::RunScentDepositOnTick(m_registry,
-                                                          *m_scentField,
-                                                          ScentOriginFor(m_metadata.spawnPoint.x),
-                                                          ScentOriginFor(m_metadata.spawnPoint.z),
-                                                          kScentCellSize);
-                }
-                if (foraging_active) {
-                    luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
-                }
-                // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
-                // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
-                // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
-                // Step skips advection -> byte-identical (no re-pin until tuned on).
-                double wind_cx = 0.0, wind_cz = 0.0;
-                if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
-                    const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
-                    const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
-                                     static_cast<double>(kScentCellSize);
-                    wind_cx = static_cast<double>(w.x) * k;
-                    wind_cz = static_cast<double>(w.y) * k;
-                }
-                m_scentField->Step(kScentDiffusionRate,
-                                   kScentDiffusionIterations,
-                                   kScentEvaporation,
-                                   wind_cx,
-                                   wind_cz);
-                m_scentField->Clamp(kScentTauMin, kScentTauMax);
-            }
+            const bool scent_active = AdvanceNearScent(scheduled_fields);
 
             budget.Next(Stage::Locomotion, [&] {
                 return SimParticipantCount<TelemetryComp::ActionPlanComponent,
@@ -733,8 +694,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
-                                                       ScentOriginFor(m_metadata.spawnPoint.x),
-                                                       ScentOriginFor(m_metadata.spawnPoint.z),
+                                                       ScentDomainOrigin(true),
+                                                       ScentDomainOrigin(false),
                                                        kScentCellSize);
             }
 
@@ -757,8 +718,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         static_cast<float>(m_simulationClock.fixed_dt()),
                         m_ecologyTuning,
                         m_scentField.get(),
-                        ScentOriginFor(m_metadata.spawnPoint.x),
-                        ScentOriginFor(m_metadata.spawnPoint.z),
+                        ScentDomainOrigin(true),
+                        ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
                         m_speciesTable.get());
@@ -1965,6 +1926,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return owned_regions->contains(key) ||
                            (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
                 });
+            m_scentDueCacheValid = false;
             m_regionWork.clear();
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
@@ -2029,11 +1991,13 @@ bool HasDueWeatherBoundary(RegionKey owner,
 } // namespace
 
 std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint64_t tick) {
+    m_regionalWeatherParticipating = false;
     m_regionalWeatherProjectionCount = 0;
     m_regionalWeatherScanCount = 0;
+    m_regionalWeatherScheduleVisits = 0;
     m_regionalWeatherProjectionVisitCount = 0;
     // Empty authority retains the legacy weather path, including its save bytes.
-    if (!m_activeRegionsEnabled || !m_worldSystem || m_fieldPages.empty())
+    if (!m_activeRegionsEnabled || !m_worldSystem || !m_fieldPages.has_ambient())
         return std::nullopt;
     const auto& records = m_activeRegionLedger.records();
     const auto refresh_boundary = [this](RegionKey changed) {
@@ -2105,6 +2069,7 @@ std::optional<FieldPageState> GameSession::PrepareScheduledFieldPages(std::uint6
     // A shared physical page can contain only frozen cells. It contributes no candidate work.
     if (work.empty() && !weather_due && !boundary_due)
         return std::nullopt;
+    m_regionalWeatherParticipating = true;
     next.begin_weather_update(m_fieldPages);
     for (const auto& [owner, updates] : work)
         m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
@@ -2115,12 +2080,20 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
     m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
     if (fields) {
         m_fieldPages.adopt_weather_state(*fields);
+        m_fieldPages.adopt_scent_state(*fields);
+        if (fields->scent_capture_visits() != 0) {
+            fields->reuse_scent_buffers(m_scentChangeBuffers);
+        }
         m_fieldPages.adopt_scheduled_pages(std::move(*fields));
+    }
+    if (std::exchange(m_scentRecenterPending, false)) {
+        // Event callbacks can move the spawn after capture; project the committed candidate.
+        RestoreRegionalScent();
     }
     m_regionCompletedWork.clear();
     // Authority may first appear in a running world. Rebind only at a transition, after
     // publication has succeeded, and replace any legacy weather projection at that boundary.
-    if ((m_activeRegionsEnabled && !m_fieldPages.empty()) != m_regionalFieldsBound) {
+    if ((m_activeRegionsEnabled && m_fieldPages.has_ambient()) != m_regionalFieldsBound) {
         BindRegionalFieldQueries();
         ProjectRegionalWeather(m_worldClock.tick(), false);
     }
@@ -2159,7 +2132,7 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
-    const bool regional = m_activeRegionsEnabled && !m_fieldPages.empty();
+    const bool regional = m_activeRegionsEnabled && m_fieldPages.has_ambient();
     if (!regional) {
         m_regionalWeatherBoundaryOwners.clear();
         m_regionalWeatherBoundaryShifts.clear();
@@ -2386,7 +2359,7 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
 }
 
 void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick) {
-    if (!fields) {
+    if (!m_regionalWeatherParticipating || !fields) {
         if (m_regionalFieldsBound && m_weatherSystem)
             m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
         return;
@@ -2403,6 +2376,8 @@ void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std
 
 std::map<RegionKey, std::uint64_t> GameSession::AdvanceRegionalWeather(FieldPageState& fields,
                                                                        std::uint64_t tick) {
+    // Include the initial due-owner filter in the observational cost oracle.
+    m_regionalWeatherScheduleVisits += m_regionSchedule.due.size();
     // All mutations stay in the tick candidate until completed work is admitted.
     const auto& records = m_activeRegionLedger.records();
     const std::set<RegionKey> scheduled_due(m_regionSchedule.due.begin(),
@@ -3095,6 +3070,8 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 }
 
 void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
+    m_scentRecenterPending = false;
+    RestoreRegionalScent();
     BindRegionalFieldQueries();
     if (m_regionalFieldsBound)
         ProjectRegionalWeather(tick, true);
@@ -4087,23 +4064,25 @@ int GameSession::ScentFieldCells() const {
     return kScentFieldCells;
 }
 int GameSession::ScentWorldToCellX(float world_x) const {
-    return static_cast<int>(
-        std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_x - ScentDomainOrigin(true)) / kScentCellSize));
 }
 int GameSession::ScentWorldToCellZ(float world_z) const {
-    return static_cast<int>(
-        std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_z - ScentDomainOrigin(false)) / kScentCellSize));
 }
 float GameSession::ScentCellToWorldX(int cell_x) const {
-    return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;
+    return ScentDomainOrigin(true) + static_cast<float>(cell_x) * kScentCellSize;
 }
 float GameSession::ScentCellToWorldZ(int cell_z) const {
-    return ScentOriginFor(m_metadata.spawnPoint.z) + static_cast<float>(cell_z) * kScentCellSize;
+    return ScentDomainOrigin(false) + static_cast<float>(cell_z) * kScentCellSize;
 }
 
 void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
+    if (m_activeRegionsEnabled) {
+        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
+        RestoreRegionalScent();
+    }
     LUMINUMBRA_CORE_INFO("Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
                          kScentFieldCells,
                          kScentFieldCells,
@@ -4111,13 +4090,265 @@ void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
                          kScentCellSize);
 }
 
-bool GameSession::HasScentParticipants() const {
+float GameSession::ScentDomainOrigin(bool x_axis) const {
+    const auto& anchor = m_metadata.spawnPoint;
+    const float coordinate = x_axis ? anchor.x : anchor.z;
+    return ScentOriginFor(m_activeRegionsEnabled ? std::floor(coordinate) : coordinate);
+}
+
+RegionKey GameSession::ScentCellOwner(int x, int z) const {
+    return FieldPageState::region_of_scent_cell(
+        {static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+         static_cast<std::int32_t>(ScentDomainOrigin(false)) + z});
+}
+
+bool GameSession::ScentOwnerDue(RegionKey owner) const {
+    const auto& records = m_activeRegionLedger.records();
+    const auto found = records.find(owner);
+    if (found == records.end() || found->second.state == RegionState::Frozen) {
+        return false;
+    }
+    const auto& record = found->second;
+    return m_regionSchedule.ledger_records != 0 && m_regionSchedule.tick == m_worldClock.tick() &&
+           record.last_ticked == m_regionSchedule.tick && record.cadence_shift < 63 &&
+           (m_regionSchedule.tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) ==
+               record.cadence_phase;
+}
+
+bool GameSession::ScentCellDue(int x, int z) const {
+    if (m_regionFault || !m_scentField ||
+        !ActiveRegionLedger::valid_anchor(m_metadata.spawnPoint) || !m_scentField->in_bounds(x, z))
+        return false;
+    RefreshScentDueCache();
+    return m_scentDueCache.Allows(ScentCellOwner(x, z));
+}
+
+bool GameSession::ScentEdgeOpen(int x, int z, int nx, int nz) const {
+    const auto source = ScentCellOwner(x, z), destination = ScentCellOwner(nx, nz);
+    if (source == destination)
+        return ScentCellDue(x, z);
+    return ScentOwnerDue(source) && ScentOwnerDue(destination);
+}
+
+void GameSession::RefreshScentDueCache() const {
+    if (m_scentDueCacheValid) {
+        return;
+    }
+    m_scentDueCache.Refresh(
+        kScentFieldCells,
+        [this](int x, int z) { return ScentCellOwner(x, z); },
+        [this](RegionKey owner) { return ScentOwnerDue(owner); });
+    m_scentDueCacheValid = true;
+}
+
+void GameSession::RebaseForagingCells(int dx, int dz) {
+    const auto shift = [](std::int32_t value, int delta) {
+        return static_cast<std::int32_t>(
+            std::clamp(static_cast<std::int64_t>(value) + delta,
+                       static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()),
+                       static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())));
+    };
+    for (auto&& [entity, ant] :
+         m_registry.view<Luminumbra::Components::ForagerComponent>().each()) {
+        ant.cell_x = shift(ant.cell_x, dx);
+        ant.cell_z = shift(ant.cell_z, dz);
+        ant.home_x = shift(ant.home_x, dx);
+        ant.home_z = shift(ant.home_z, dz);
+    }
+    for (auto&& [entity, food] :
+         m_registry.view<Luminumbra::Components::FoodSourceComponent>().each()) {
+        food.cell_x = shift(food.cell_x, dx);
+        food.cell_z = shift(food.cell_z, dz);
+    }
+}
+
+void GameSession::SetSpawnPoint(const Vec3& new_spawn) {
+    const auto previous = m_metadata.spawnPoint;
+    m_metadata.spawnPoint = new_spawn;
+    m_preparedInitialChunks.reset();
+    if (!m_activeRegionsEnabled || !m_scentField) {
+        return;
+    }
+    if (ActiveRegionLedger::valid_anchor(previous) && ActiveRegionLedger::valid_anchor(new_spawn)) {
+        const int dx = static_cast<int>(ScentOriginFor(std::floor(previous.x))) -
+                       static_cast<int>(ScentDomainOrigin(true));
+        const int dz = static_cast<int>(ScentOriginFor(std::floor(previous.z))) -
+                       static_cast<int>(ScentDomainOrigin(false));
+        if (dx == 0 && dz == 0) {
+            return;
+        }
+        RebaseForagingCells(dx, dz);
+    }
+    RestoreRegionalScent();
+    m_scentRecenterPending = m_scentRecenterPending || m_simulationBatchInProgress;
+}
+
+void GameSession::RestoreRegionalScent() {
+    if (!m_activeRegionsEnabled || !m_scentField)
+        return;
+    m_scentDueCacheValid = false;
+    const bool valid_anchor = ActiveRegionLedger::valid_anchor(m_metadata.spawnPoint);
+    const auto origin_x = valid_anchor ? static_cast<std::int32_t>(ScentDomainOrigin(true)) : 0;
+    const auto origin_z = valid_anchor ? static_cast<std::int32_t>(ScentDomainOrigin(false)) : 0;
+    for (int x = 0; x < kScentFieldCells; ++x) {
+        for (int z = 0; z < kScentFieldCells; ++z) {
+            const auto values =
+                valid_anchor ? m_fieldPages.scent_at({origin_x + x, origin_z + z}) : ScentCell{};
+            for (int channel = 0; channel < kScentFieldChannels; ++channel) {
+                m_scentField->RestoreCell(
+                    channel,
+                    x,
+                    z,
+                    std::bit_cast<double>(values[static_cast<std::size_t>(channel)]));
+            }
+        }
+    }
+}
+
+void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
+    m_scentCapture.resize(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
+    auto& cells = m_scentCapture;
+    for (int x = 0; x < kScentFieldCells; ++x)
+        for (int z = 0; z < kScentFieldCells; ++z)
+            for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                cells[static_cast<std::size_t>(x) * kScentFieldCells + static_cast<std::size_t>(z)]
+                     [static_cast<std::size_t>(channel)] =
+                         std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
+    if (!fields) {
+        fields.emplace();
+        fields->begin_weather_update(m_fieldPages);
+    }
+    fields->reuse_scent_buffers(m_scentChangeBuffers);
+    ScentWindowWork work;
+    if (!fields->stage_scent_window(m_fieldPages,
+                                    {static_cast<std::int32_t>(ScentDomainOrigin(true)),
+                                     static_cast<std::int32_t>(ScentDomainOrigin(false))},
+                                    kScentFieldCells,
+                                    cells,
+                                    work,
+                                    [this](RegionKey owner) {
+                                        const auto& records = m_activeRegionLedger.records();
+                                        const auto found = records.find(owner);
+                                        // Thawed owners retain historical digests; only Frozen
+                                        // owners still use them as authority.
+                                        return found != records.end() &&
+                                               found->second.state != RegionState::Frozen;
+                                    })) {
+        // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
+        // and retry on a later tick, preserving both frozen bytes and the live projection.
+        fields->reuse_scent_buffers(m_scentChangeBuffers);
+        RestoreRegionalScent();
+        return;
+    }
+    for (const auto& [owner, updates] : work)
+        m_regionCompletedWork.push_back(RegionWork{owner, 0, 0, 0, updates});
+    m_regionalFieldView = &*fields;
+}
+
+bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {
+    const bool scent_active = HasScentParticipants();
+    const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+    const bool foraging_active =
+        std::any_of(foragers.begin(), foragers.end(), [this, &foragers](const auto entity) {
+            const auto& ant = foragers.get<const Luminumbra::Components::ForagerComponent>(entity);
+            return !m_activeRegionsEnabled || ScentCellDue(ant.cell_x, ant.cell_z);
+        });
+    const bool interior = scent_active || foraging_active;
+    if (!m_scentField || (!interior && !HasScentBorderWork()))
+        return scent_active;
+    if (scent_active)
+        luminumbra::ai::RunScentDepositOnTick(m_registry,
+                                              *m_scentField,
+                                              ScentDomainOrigin(true),
+                                              ScentDomainOrigin(false),
+                                              kScentCellSize);
+    if (foraging_active)
+        luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+    double wind_cx = 0.0, wind_cz = 0.0;
+    if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
+        const auto wind = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
+        const double scale = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
+                             static_cast<double>(kScentCellSize);
+        wind_cx = static_cast<double>(wind.x) * scale;
+        wind_cz = static_cast<double>(wind.y) * scale;
+    }
+    luminumbra::ai::detail::ScentStepGates gates;
+    if (m_activeRegionsEnabled) {
+        static_assert(kScentFieldCells * kScentCellSize < 512.0f);
+        gates = luminumbra::ai::detail::CacheNearScentGates(
+            kScentFieldCells,
+            [this](int x, int z) { return ScentCellOwner(x, z); },
+            [this, interior](int x, int z) { return interior && ScentCellDue(x, z); },
+            [this](int x, int z, int nx, int nz) { return ScentEdgeOpen(x, z, nx, nz); });
+    }
+    m_scentField->Step(kScentDiffusionRate,
+                       kScentDiffusionIterations,
+                       kScentEvaporation,
+                       wind_cx,
+                       wind_cz,
+                       gates.participants,
+                       gates.exchange);
+    m_scentField->Clamp(kScentTauMin, kScentTauMax, gates.participants);
+    if (m_activeRegionsEnabled)
+        CaptureRegionalScent(fields);
+    return scent_active;
+}
+
+bool GameSession::HasScentBorderWork() const {
+    if (!m_activeRegionsEnabled || !m_scentField || m_regionFault ||
+        !ActiveRegionLedger::valid_anchor(m_metadata.spawnPoint))
+        return false;
+    const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+    const bool near_forager =
+        std::any_of(foragers.begin(), foragers.end(), [this, &foragers](const auto entity) {
+            const auto& ant = foragers.get<const Luminumbra::Components::ForagerComponent>(entity);
+            return m_scentField->in_bounds(ant.cell_x, ant.cell_z);
+        });
+    if (!HasScentParticipants(false) && !near_forager)
+        return false;
+    // Owners are axis-aligned and far larger than the grid, so each axis has at most one boundary.
+    int boundary_x = -1, boundary_z = -1;
+    for (int i = 0; i + 1 < kScentFieldCells; ++i) {
+        if (boundary_x < 0 && ScentCellOwner(i, 0) != ScentCellOwner(i + 1, 0))
+            boundary_x = i;
+        if (boundary_z < 0 && ScentCellOwner(0, i) != ScentCellOwner(0, i + 1))
+            boundary_z = i;
+    }
+    const auto differs = [this](int x, int z, int nx, int nz) {
+        if (!ScentEdgeOpen(x, z, nx, nz))
+            return false;
+        for (int channel = 0; channel < kScentFieldChannels; ++channel)
+            if (m_scentField->Sample(channel, x, z) != m_scentField->Sample(channel, nx, nz))
+                return true;
+        return false;
+    };
+    for (int i = 0; i < kScentFieldCells; ++i) {
+        if (boundary_x >= 0 && differs(boundary_x, i, boundary_x + 1, i))
+            return true;
+        if (boundary_z >= 0 && differs(i, boundary_z, i, boundary_z + 1))
+            return true;
+    }
+    return false;
+}
+
+bool GameSession::HasScentParticipants(bool require_due) const {
+    const auto eligible = [this, require_due](const Vec3& position) {
+        if (!m_activeRegionsEnabled)
+            return true;
+        const float x = position.x - ScentDomainOrigin(true);
+        const float z = position.z - ScentDomainOrigin(false);
+        return std::isfinite(x) && std::isfinite(z) && x >= 0 && z >= 0 && x < kScentFieldCells &&
+               z < kScentFieldCells &&
+               (!require_due || ScentCellDue(static_cast<int>(x), static_cast<int>(z)));
+    };
     {
         auto emitters = m_registry.view<const Luminumbra::Components::TransformComponent,
                                         const Luminumbra::Components::SensableComponent>();
         for (auto e : emitters) {
             const auto& s = emitters.get<const Luminumbra::Components::SensableComponent>(e);
-            if (s.scent_channel >= 0 && s.scent_deposit > 0.0f) {
+            if (s.scent_channel >= 0 && s.scent_deposit > 0.0f &&
+                eligible(
+                    emitters.get<const Luminumbra::Components::TransformComponent>(e).position)) {
                 return true;
             }
         }
@@ -4127,7 +4358,9 @@ bool GameSession::HasScentParticipants() const {
                                        const Luminumbra::Components::ScentSenseComponent>();
         for (auto e : sensors) {
             const auto& s = sensors.get<const Luminumbra::Components::ScentSenseComponent>(e);
-            if (s.channel >= 0) {
+            if (s.channel >= 0 &&
+                eligible(
+                    sensors.get<const Luminumbra::Components::TransformComponent>(e).position)) {
                 return true;
             }
         }
@@ -4136,7 +4369,8 @@ bool GameSession::HasScentParticipants() const {
 }
 
 std::string GameSession::ComputeScentSubHash() const {
-    if (!m_scentField || !HasScentParticipants()) {
+    if (!m_scentField ||
+        (!HasScentParticipants(false) && (!m_activeRegionsEnabled || !m_fieldPages.has_scent()))) {
         return {};
     }
 

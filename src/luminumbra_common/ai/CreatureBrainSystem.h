@@ -333,14 +333,16 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
             const int cx = WorldToScentCell(sx, scent_origin_x, scent_cell_size);
             const int cz = WorldToScentCell(sz, scent_origin_z, scent_cell_size);
             float gdx = 0.0f, gdz = 0.0f;
-            const float conf = scent->GradientSteer(/*ch=*/0,
-                                                    cx,
-                                                    cz,
-                                                    /*sign=*/+1.0f,
-                                                    /*floor=*/1e-4f,
-                                                    /*k=*/0.05f,
-                                                    gdx,
-                                                    gdz);
+            const float conf = scent->SimulationCellAllowed(cx, cz)
+                                   ? scent->GradientSteer(/*ch=*/0,
+                                                          cx,
+                                                          cz,
+                                                          /*sign=*/+1.0f,
+                                                          /*floor=*/1e-4f,
+                                                          /*k=*/0.05f,
+                                                          gdx,
+                                                          gdz)
+                                   : 0.0f;
             if (conf > 0.0f) {
                 tx = sx + gdx * 12.0f; // a stride up the gradient
                 tz = sz + gdz * 12.0f;

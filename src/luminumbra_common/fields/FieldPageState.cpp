@@ -33,7 +33,8 @@ constexpr std::int64_t kPageSpan = FieldPageState::kPageCells;
 constexpr std::int64_t kMinCellIndex = FieldPageState::kMinCell;
 constexpr std::int64_t kMaxCellIndex = FieldPageState::kMaxCell;
 
-// FPG1 v2: magic/version/channel mask/section count, ascending typed sections, FNV footer.
+// FPG1: v2 exact sparse cells; v3 adds compact scent floor blocks (section 8).
+// Magic/version/channel mask/section count, ascending typed sections, FNV footer.
 constexpr const char* kMagic = "FPG1";
 constexpr std::uint64_t kFormatVersion = 2;
 constexpr std::uint64_t kChannelCount = 5;
@@ -360,6 +361,8 @@ auto StrikeOrder(const RegionalStrike& strike) {
 }
 // Scent cells lie in [-kScentLimit, kScentLimit) on both axes.
 constexpr std::int32_t kScentLimit = 16777216;
+
+void ClearScentFloor(std::map<ScentCellKey, ScentCell>& floors, ScentCellKey key);
 
 bool ValidScent(ScentCellKey key, const ScentCell& cell) {
     if (key.x < -kScentLimit || key.x >= kScentLimit || key.z < -kScentLimit ||
@@ -976,12 +979,14 @@ bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
     const bool zero =
         std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
     if (zero) {
+        ClearScentFloor(m_scentFloors, key);
         m_scent.erase(key);
         return true;
     }
     if (!m_scent.contains(key) && m_scent.size() == kMaxScentCells)
         return false;
     m_scent[key] = values;
+    ClearScentFloor(m_scentFloors, key);
     return true;
 }
 FieldPageState FieldPageState::foliage_snapshot() const {
@@ -1021,6 +1026,7 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
         }
     }
     for (const auto& [key, values] : updates) {
+        ClearScentFloor(m_scentFloors, key);
         const bool zero =
             std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
         if (zero)
@@ -1032,69 +1038,369 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
     }
     return true;
 }
+namespace {
+bool ZeroScent(const ScentCell& values) {
+    return std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+}
+ScentCellKey ScentBlock(ScentCellKey key) {
+    return {static_cast<std::int32_t>(FloorDiv(key.x, 8) * 8),
+            static_cast<std::int32_t>(FloorDiv(key.z, 8) * 8)};
+}
+std::uint64_t ScentBit(ScentCellKey key) {
+    const auto block = ScentBlock(key);
+    return std::uint64_t{1} << ((key.x - block.x) * 8 + key.z - block.z);
+}
+void ClearScentFloor(std::map<ScentCellKey, ScentCell>& floors, ScentCellKey key) {
+    const auto found = floors.find(ScentBlock(key));
+    if (found == floors.end()) {
+        return;
+    }
+    for (auto& mask : found->second) {
+        mask &= ~ScentBit(key);
+    }
+    if (ZeroScent(found->second)) {
+        floors.erase(found);
+    }
+}
+bool ValidScentFloor(const std::map<ScentCellKey, ScentCell>& sparse,
+                     ScentCellKey key,
+                     const ScentCell& masks) {
+    if (key != ScentBlock(key) || !ValidScent(key, {}) || ZeroScent(masks)) {
+        return false;
+    }
+    for (int x = 0; x < 8; ++x) {
+        for (int z = 0; z < 8; ++z) {
+            const ScentCellKey cell{key.x + x, key.z + z};
+            const auto found = sparse.find(cell);
+            if (found == sparse.end()) {
+                continue;
+            }
+            for (std::size_t channel = 0; channel < masks.size(); ++channel) {
+                if ((masks[channel] & ScentBit(cell)) != 0 && found->second[channel] != 0) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+// Only called at capacity. A shared budget bounds scans even when every owner is protected.
+bool RetireScentHistory(const std::map<ScentCellKey, ScentCell>& source,
+                        ScentCellKey origin,
+                        int side,
+                        int width,
+                        std::size_t excess,
+                        const ActiveRegionLedger::OwnershipProbe& can_retire,
+                        std::size_t& budget,
+                        std::vector<std::pair<ScentCellKey, ScentCell>>& changes,
+                        std::size_t& visits) {
+    for (auto found = source.begin(); excess != 0 && budget != 0 && found != source.end();
+         ++found) {
+        --budget;
+        ++visits;
+        const auto key = found->first;
+        const bool intersects = key.x < origin.x + side && key.z < origin.z + side &&
+                                key.x + width > origin.x && key.z + width > origin.z;
+        if (!intersects && can_retire(FieldPageState::region_of_scent_cell(key))) {
+            changes.emplace_back(key, ScentCell{});
+            --excess;
+        }
+    }
+    return excess == 0;
+}
+void CountRetiredScentWork(const std::map<ScentCellKey, ScentCell>& floors,
+                           std::span<const std::pair<ScentCellKey, ScentCell>> retired_cells,
+                           std::span<const std::pair<ScentCellKey, ScentCell>> retired_blocks,
+                           ScentWindowWork& work) {
+    if (retired_cells.empty() && retired_blocks.empty()) {
+        return;
+    }
+    auto& entries = work.retirement_entries;
+    entries.reserve(work.count + retired_cells.size() + retired_blocks.size());
+    entries.insert(entries.end(), work.begin(), work.end());
+    // Membership must not depend on how the retired cells were collected.
+    std::vector<ScentCellKey> retired_keys;
+    retired_keys.reserve(retired_cells.size());
+    for (const auto& [key, values] : retired_cells) {
+        (void)values;
+        retired_keys.push_back(key);
+        entries.emplace_back(FieldPageState::region_of_scent_cell(key), 1);
+    }
+    std::sort(retired_keys.begin(), retired_keys.end());
+    for (const auto& [key, values] : retired_blocks) {
+        (void)values;
+        const auto& masks = floors.find(key)->second;
+        auto bits = masks[0] | masks[1] | masks[2] | masks[3];
+        std::uint64_t updates = 0;
+        while (bits != 0) {
+            const auto bit = std::countr_zero(bits);
+            const ScentCellKey cell{key.x + bit / 8, key.z + bit % 8};
+            // Count a changed cell once, even if both explicit channels and floor masks retire.
+            updates += static_cast<std::uint64_t>(
+                !std::binary_search(retired_keys.begin(), retired_keys.end(), cell));
+            bits &= bits - 1;
+        }
+        if (updates != 0) {
+            // Aligned 8 x 8 floor blocks cannot cross a 512-cell ownership boundary.
+            entries.emplace_back(FieldPageState::region_of_scent_cell(key), updates);
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    std::size_t count = 0;
+    for (const auto& entry : entries) {
+        if (count != 0 && entries[count - 1].first == entry.first) {
+            entries[count - 1].second += entry.second;
+        } else {
+            entries[count++] = entry;
+        }
+    }
+    entries.resize(count);
+    work.count = count;
+}
+void AdoptScentChanges(std::map<ScentCellKey, ScentCell>& live,
+                       std::vector<std::pair<ScentCellKey, ScentCell>>& changes,
+                       std::map<ScentCellKey, ScentCell>& admitted) noexcept {
+    for (const auto& [key, values] : changes) {
+        if (ZeroScent(values)) {
+            live.erase(key);
+        } else {
+            live.find(key)->second = values;
+        }
+    }
+    changes.clear();
+    live.merge(admitted);
+}
+} // namespace
+
+void ScentWindowWork::add(RegionKey owner) {
+    if (!retirement_entries.empty()) {
+        auto found = std::lower_bound(
+            retirement_entries.begin(),
+            retirement_entries.end(),
+            owner,
+            [](const auto& entry, RegionKey target) { return entry.first < target; });
+        if (found == retirement_entries.end() || found->first != owner) {
+            found = retirement_entries.emplace(found, owner, 0);
+        }
+        ++found->second;
+        count = retirement_entries.size();
+        return;
+    }
+    std::size_t index = 0;
+    while (index < count && entries[index].first < owner) {
+        ++index;
+    }
+    if (index == count || entries[index].first != owner) {
+        for (auto at = count; at > index; --at) {
+            entries[at] = entries[at - 1];
+        }
+        entries[index] = {owner, 0};
+        ++count;
+    }
+    ++entries[index].second;
+}
+
+ScentCell FieldPageState::scent_at(ScentCellKey key) const {
+    const auto cell = m_scent.find(key);
+    ScentCell values = cell == m_scent.end() ? ScentCell{} : cell->second;
+    const auto floor = m_scentFloors.find(ScentBlock(key));
+    if (floor != m_scentFloors.end()) {
+        const auto bit = ScentBit(key);
+        for (std::size_t channel = 0; channel < values.size(); ++channel) {
+            if ((floor->second[channel] & bit) != 0) {
+                values[channel] = std::bit_cast<std::uint64_t>(kScentFloor);
+            }
+        }
+    }
+    return values;
+}
+
 bool FieldPageState::capture_scent_window(ScentCellKey origin,
                                           int side,
                                           std::span<const ScentCell> cells,
                                           std::map<RegionKey, std::uint64_t>& work) {
+    FieldPageState staged;
+    if (!staged.stage_scent_window(*this, origin, side, cells, work)) {
+        return false;
+    }
+    adopt_scent_state(staged);
+    return true;
+}
+
+bool FieldPageState::stage_scent_window(const FieldPageState& source,
+                                        ScentCellKey origin,
+                                        int side,
+                                        std::span<const ScentCell> cells,
+                                        std::map<RegionKey, std::uint64_t>& work) {
+    ScentWindowWork completed;
+    if (!stage_scent_window(source, origin, side, cells, completed)) {
+        return false;
+    }
+    std::map<RegionKey, std::uint64_t> result(completed.begin(), completed.end());
+    work.swap(result);
+    return true;
+}
+
+bool FieldPageState::stage_scent_window(const FieldPageState& source,
+                                        ScentCellKey origin,
+                                        int side,
+                                        std::span<const ScentCell> cells,
+                                        ScentWindowWork& work,
+                                        const ActiveRegionLedger::OwnershipProbe& can_retire) {
     if (side < 1 || side > 128 ||
         cells.size() != static_cast<std::size_t>(side) * static_cast<std::size_t>(side) ||
         origin.x > std::numeric_limits<std::int32_t>::max() - (side - 1) ||
-        origin.z > std::numeric_limits<std::int32_t>::max() - (side - 1))
+        origin.z > std::numeric_limits<std::int32_t>::max() - (side - 1)) {
         return false;
-    // Absent zero cells are skipped below, so refuse a window outside the domain up front.
-    // A window straddling the edge stays valid; its outside cells must be zero.
+    }
     if (origin.x >= kScentLimit || origin.z >= kScentLimit ||
-        origin.x + (side - 1) < -kScentLimit || origin.z + (side - 1) < -kScentLimit)
+        origin.x + (side - 1) < -kScentLimit || origin.z + (side - 1) < -kScentLimit) {
         return false;
-    using Iterator = decltype(m_scent)::iterator;
-    struct Change {
-        Iterator position;
-        const ScentCell* values;
-        bool remove;
+    }
+    auto& changes = m_scentChanges.scratch;
+    auto& floor_changes = m_scentChanges.floor_scratch;
+    changes.clear();
+    floor_changes.clear();
+    changes.reserve(cells.size() * 2);
+    // A 128-cell window intersects at most 17 x 17 aligned blocks.
+    struct Block {
+        ScentCellKey key;
+        ScentCell before{}, after{};
     };
-    // At most 16384 changes/nodes. Allocate and validate every admission before mutation;
-    // map iterators stay valid until their own erasure in the final commit pass.
-    std::vector<Change> changes;
-    changes.reserve(cells.size());
-    std::map<ScentCellKey, ScentCell> admitted;
-    std::map<RegionKey, std::uint64_t> completed;
-    std::size_t removed = 0;
+    std::array<Block, 17 * 17> blocks{};
+    const auto first = ScentBlock(origin);
+    const auto last = ScentBlock({origin.x + side - 1, origin.z + side - 1});
+    const int columns = (last.z - first.z) / 8 + 1;
+    std::size_t block_count = 0;
+    for (int x = first.x; x <= last.x; x += 8) {
+        for (int z = first.z; z <= last.z; z += 8) {
+            auto& block = blocks[block_count++];
+            block.key = {x, z};
+            const auto found = source.m_scentFloors.find(block.key);
+            if (found != source.m_scentFloors.end()) {
+                block.before = block.after = found->second;
+            }
+        }
+    }
+    floor_changes.reserve(block_count * 2);
+    std::map<ScentCellKey, ScentCell> admitted, floor_admitted;
+    ScentWindowWork completed;
+    std::size_t added = 0, removed = 0, visits = 0;
     for (int x = 0; x < side; ++x) {
-        auto found = m_scent.lower_bound({origin.x + x, origin.z});
+        auto found = source.m_scent.lower_bound({origin.x + x, origin.z});
         for (int z = 0; z < side; ++z) {
+            ++visits;
             const ScentCellKey key{origin.x + x, origin.z + z};
-            const auto& values =
-                cells[static_cast<std::size_t>(x) * static_cast<std::size_t>(side) +
-                      static_cast<std::size_t>(z)];
-            const bool exists = found != m_scent.end() && found->first == key;
-            const auto current = exists ? found++ : m_scent.end();
-            const bool zero =
-                std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
-            if ((exists && current->second == values) || (!exists && zero))
-                continue;
-            if (!ValidScent(key, values))
+            const auto& input = cells[static_cast<std::size_t>(x) * static_cast<std::size_t>(side) +
+                                      static_cast<std::size_t>(z)];
+            // Zero cells outside the domain are allowed when a window straddles its edge.
+            if (!ValidScent(key, input)) {
+                if (ZeroScent(input)) {
+                    continue;
+                }
                 return false;
-            ++completed[region_of_scent_cell(key)];
+            }
+            const bool exists = found != source.m_scent.end() && found->first == key;
+            const auto current = exists ? found++ : source.m_scent.end();
+            auto& block = blocks[static_cast<std::size_t>((key.x - first.x) / 8 * columns +
+                                                          (key.z - first.z) / 8)];
+            const auto bit = ScentBit(key);
+            ScentCell previous = exists ? current->second : ScentCell{};
+            for (std::size_t channel = 0; channel < previous.size(); ++channel) {
+                if ((block.before[channel] & bit) != 0) {
+                    previous[channel] = std::bit_cast<std::uint64_t>(kScentFloor);
+                }
+            }
+            // Preserve an unchanged cell's encoding too, including frozen legacy authority.
+            if (previous == input) {
+                continue;
+            }
+            completed.add(region_of_scent_cell(key));
+            auto values = input;
+            for (std::size_t channel = 0; channel < values.size(); ++channel) {
+                block.after[channel] &= ~bit;
+                if (values[channel] == std::bit_cast<std::uint64_t>(kScentFloor)) {
+                    block.after[channel] |= bit;
+                    values[channel] = 0;
+                }
+            }
+            const bool zero = ZeroScent(values);
+            if ((exists && current->second == values) || (!exists && zero)) {
+                continue;
+            }
+            added += static_cast<std::size_t>(!exists);
+            removed += static_cast<std::size_t>(exists && zero);
             if (exists) {
-                changes.push_back({current, &values, zero});
-                removed += static_cast<std::size_t>(zero);
+                changes.emplace_back(key, values);
             } else {
                 admitted.emplace_hint(admitted.end(), key, values);
             }
         }
     }
-    if (admitted.size() > kMaxScentCells - (m_scent.size() - removed))
-        return false;
-    for (const auto& change : changes) {
-        if (change.remove)
-            m_scent.erase(change.position);
-        else
-            change.position->second = *change.values;
+    std::size_t floor_size = source.m_scentFloors.size();
+    for (std::size_t index = 0; index < block_count; ++index) {
+        const auto& block = blocks[index];
+        if (block.before == block.after) {
+            continue;
+        }
+        if (ZeroScent(block.before)) {
+            floor_admitted.emplace_hint(floor_admitted.end(), block.key, block.after);
+            ++floor_size;
+        } else {
+            floor_changes.emplace_back(block.key, block.after);
+            floor_size -= static_cast<std::size_t>(ZeroScent(block.after));
+        }
     }
-    m_scent.merge(admitted);
-    work.swap(completed);
+    const auto size = source.m_scent.size() + added - removed;
+    const auto excess = size > kMaxScentCells ? size - kMaxScentCells : 0;
+    const auto floor_excess =
+        floor_size > kMaxScentFloorBlocks ? floor_size - kMaxScentFloorBlocks : 0;
+    if ((excess != 0 || floor_excess != 0) && !can_retire) {
+        return false;
+    }
+    auto retirement_budget = cells.size() * 2;
+    const auto changed_cells = changes.size();
+    const auto changed_blocks = floor_changes.size();
+    if (!RetireScentHistory(source.m_scent,
+                            origin,
+                            side,
+                            1,
+                            excess,
+                            can_retire,
+                            retirement_budget,
+                            changes,
+                            visits) ||
+        !RetireScentHistory(source.m_scentFloors,
+                            origin,
+                            side,
+                            8,
+                            floor_excess,
+                            can_retire,
+                            retirement_budget,
+                            floor_changes,
+                            visits)) {
+        return false;
+    }
+    CountRetiredScentWork(source.m_scentFloors,
+                          std::span(changes).subspan(changed_cells),
+                          std::span(floor_changes).subspan(changed_blocks),
+                          completed);
+    m_scentChanges.changes.swap(changes);
+    m_scentChanges.floors.swap(floor_changes);
+    m_scentUpdates.swap(admitted);
+    m_scentFloorUpdates.swap(floor_admitted);
+    m_scentCaptureVisits = visits;
+    work = std::move(completed);
     return true;
 }
+
+void FieldPageState::adopt_scent_state(FieldPageState& staged) noexcept {
+    AdoptScentChanges(m_scent, staged.m_scentChanges.changes, staged.m_scentUpdates);
+    AdoptScentChanges(m_scentFloors, staged.m_scentChanges.floors, staged.m_scentFloorUpdates);
+}
+
 RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
     return {static_cast<std::int32_t>(
                 FloorDiv(static_cast<std::int64_t>(key.x) * 1000 + 500, kRegionMm)),
@@ -1106,7 +1412,9 @@ bool FieldPageState::owns_evolution_state(RegionKey key) const {
         return true;
     if (owns_weather(key))
         return true;
-    return VisitRegionScent(m_scent, key, [](ScentCellKey, const ScentCell&) { return true; });
+    return VisitRegionScent(m_scent, key, [](ScentCellKey, const ScentCell&) { return true; }) ||
+           VisitRegionScent(
+               m_scentFloors, key, [](ScentCellKey, const ScentCell&) { return true; });
 }
 bool FieldPageState::set_weather_age(RegionKey owner, std::uint64_t active_age) {
     const auto* previous = owner_weather(owner);
@@ -1127,14 +1435,15 @@ std::string FieldPageState::serialize() const {
     if (empty())
         return {};
     std::string out = kMagic;
-    AppendLe(out, kFormatVersion, 2);
+    AppendLe(out, m_scentFloors.empty() ? kFormatVersion : 3, 2);
     AppendLe(out, kChannelMask, 2);
     AppendLe(
         out,
         static_cast<unsigned>(!m_pages.empty()) + static_cast<unsigned>(!m_storms.empty()) +
             static_cast<unsigned>(!m_strikes.empty()) + static_cast<unsigned>(!m_scent.empty()) +
             static_cast<unsigned>(!m_weatherClocks.empty()) +
-            static_cast<unsigned>(!m_soil.empty()) + static_cast<unsigned>(!m_irrigation.empty()),
+            static_cast<unsigned>(!m_soil.empty()) + static_cast<unsigned>(!m_irrigation.empty()) +
+            static_cast<unsigned>(!m_scentFloors.empty()),
         4);
     std::string records;
     for (const auto& [key, page] : m_pages)
@@ -1161,6 +1470,11 @@ std::string FieldPageState::serialize() const {
         AppendLe(records, active_age, 8);
     }
     AppendSection(out, 7, m_weatherClocks.size(), records);
+    records.clear();
+    for (const auto& [key, masks] : m_scentFloors) {
+        AppendScent(records, key, masks);
+    }
+    AppendSection(out, 8, m_scentFloors.size(), records);
     AppendLe(out, Fnv1a64(out), 8);
     return out;
 }
@@ -1168,14 +1482,15 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
     error = "field pages: corrupt typed record";
     try {
         if (bytes.size() < kHeaderBytes + kFooterBytes || bytes.size() > kMaxFileBytes ||
-            bytes.compare(0, 4, kMagic) != 0 || ReadLe(bytes, 4, 2) != kFormatVersion ||
+            bytes.compare(0, 4, kMagic) != 0 ||
+            (ReadLe(bytes, 4, 2) != kFormatVersion && ReadLe(bytes, 4, 2) != 3) ||
             ReadLe(bytes, 6, 2) != kChannelMask)
             return false;
         const auto footer = bytes.size() - kFooterBytes;
         if (ReadLe(bytes, footer, 8) != Fnv1a64(std::string_view(bytes).substr(0, footer)))
             return false;
         const auto sections = ReadLe(bytes, 8, 4);
-        if (sections == 0 || sections > 7)
+        if (sections == 0 || sections > 8)
             return false;
         FieldPageState temporary;
         std::vector<RegionalStorm> storms;
@@ -1187,20 +1502,21 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                 return false;
             const auto type = ReadLe(bytes, at, 2), length = ReadLe(bytes, at + 2, 4),
                        count = ReadLe(bytes, at + 6, 4);
-            if (type <= previous || type > 7 || length < 4 || length > footer - at - 6 ||
+            if (type <= previous || type > 8 || length < 4 || length > footer - at - 6 ||
                 count == 0)
                 return false;
             previous = type;
             const std::size_t width = type == 1                ? kPageBytes
                                       : type == 2              ? 48
                                       : type == 3              ? 36
-                                      : type == 4              ? 40
+                                      : type == 4 || type == 8 ? 40
                                       : type == 5 || type == 6 ? FoliageFieldPages::kRecordBytes
                                                                : 16;
             const std::size_t cap = type == 1                ? kMaxPages
                                     : type == 2              ? kMaxStorms
                                     : type == 3              ? kMaxStrikes
                                     : type == 4              ? kMaxScentCells
+                                    : type == 8              ? kMaxScentFloorBlocks
                                     : type == 5 || type == 6 ? FoliageFieldPages::kMaxPages
                                                              : kMaxWeatherClocks;
             if (count > cap || length != 4 + count * width)
@@ -1259,8 +1575,15 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                         ScentCell values{};
                         for (auto& value : values)
                             value = reader.read(8);
-                        if (!temporary.set_scent(key, values))
+                        if (type == 8) {
+                            if (!ValidScentFloor(temporary.m_scent, key, values) ||
+                                temporary.m_scentFloors.contains(key)) {
+                                return false;
+                            }
+                            temporary.m_scentFloors.emplace(key, values);
+                        } else if (!temporary.set_scent(key, values)) {
                             return false;
+                        }
                     }
                 }
             }
@@ -1280,7 +1603,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
 std::string FieldPageState::canonical_bytes() const {
     if (empty())
         return {};
-    return "field_pages:v2:" + serialize();
+    return std::string(m_scentFloors.empty() ? "field_pages:v2:" : "field_pages:v3:") + serialize();
 }
 
 std::string FieldPageState::ambient_bytes(std::uint8_t channels,
@@ -1357,10 +1680,17 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
         ++scent_count;
         return false;
     });
+    std::string floors;
+    std::size_t floor_count = 0;
+    VisitRegionScent(m_scentFloors, key, [&](ScentCellKey block, const ScentCell& masks) {
+        AppendScent(floors, block, masks);
+        ++floor_count;
+        return false;
+    });
     const bool has_clock = weather != nullptr && weather->clock.has_value();
     const std::uint64_t clock_value = weather != nullptr ? weather->clock.value_or(0) : 0;
-    if (storm_count + strike_count + scent_count != 0 || has_clock) {
-        out += "|evolution:v2:";
+    if (storm_count + strike_count + scent_count + floor_count != 0 || has_clock) {
+        out += floor_count == 0 ? "|evolution:v2:" : "|evolution:v3:";
         AppendSection(out, 2, storm_count, storms);
         AppendSection(out, 3, strike_count, strikes);
         AppendSection(out, 4, scent_count, scent);
@@ -1371,6 +1701,7 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
             AppendLe(age, clock_value, 8);
             AppendSection(out, 7, 1, age);
         }
+        AppendSection(out, 8, floor_count, floors);
     }
     const auto soil_bytes = m_soil.region_bytes(key),
                irrigation_bytes = m_irrigation.region_bytes(key);

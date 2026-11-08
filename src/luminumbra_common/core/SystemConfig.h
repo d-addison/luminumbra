@@ -116,7 +116,7 @@ enum class SysParam : std::uint8_t {
 struct SimulationIdentityValues {
     // Bump whenever compiled authority membership/advancement rules change.
     // Negotiated by every transport and recorded in replay admission identity.
-    static constexpr std::uint32_t kAuthorityRulesRevision = 4;
+    static constexpr std::uint32_t kAuthorityRulesRevision = 5;
     static constexpr std::uint32_t kLegacyAuthorityRulesRevision = 3;
     std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};
     std::array<double, static_cast<std::size_t>(SysParam::Count)> scalars{};
