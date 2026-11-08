@@ -559,6 +559,13 @@ public:
                               std::string_view relative_path,
                               MemberDigest& out,
                               std::string& error);
+    // The same validation for a cancellable caller: a requested stop is checked before each
+    // further file is opened and is reported as a failure.
+    static bool member_digest_cancellable(const std::filesystem::path& save_dir,
+                                          std::string_view relative_path,
+                                          MemberDigest& out,
+                                          std::string& error,
+                                          const std::stop_token& stop);
     // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
     // active transaction for save_dir, else run an implicit one when the directory is indexed, else
     // just replace the file durably. An outer transaction must already protect the member.

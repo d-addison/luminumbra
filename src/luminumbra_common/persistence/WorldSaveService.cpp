@@ -3696,8 +3696,10 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                 if (stop.stop_requested())
                     return "Saved-world validation cancelled.";
                 std::string error;
-                if (!WorldSaveService::member_digest(save_dir, member.path, actual, error))
-                    return member.path + ": " + error;
+                if (!WorldSaveService::member_digest_cancellable(
+                        save_dir, member.path, actual, error, stop))
+                    return stop.stop_requested() ? "Saved-world validation cancelled."
+                                                 : member.path + ": " + error;
             }
         }
         if (member.present != actual.present)
@@ -4898,6 +4900,50 @@ bool FieldPageOwnersRecorded(const Pages& pages,
                 !ledger.records().contains(owner(FieldCellAt(key, index))))
                 return false;
         }
+    }
+    return true;
+}
+
+constexpr const char* kRegionalEnergyError =
+    "Corrupt regional energy record: expected EFS1 cadence offset 0 with matching ARL energy ages.";
+
+bool RegionalEnergyMatchesLedger(const std::string& bytes,
+                                 const world::ActiveRegionLedger& ledger) {
+    luminumbra::fields::EnergyFieldState energy;
+    if (bytes.empty() || energy.DeserializeRegionalRecord(bytes))
+        return energy.ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
+    // Legacy cadence is self-contained; regional ages make that phase ambiguous.
+    return ledger.energy_ages().empty() &&
+           luminumbra::fields::EnergyFieldState::AdmitRecord(bytes, true) &&
+           energy.DeserializeRecord(bytes, 0);
+}
+
+bool ValidateRegionalEnergy(const std::filesystem::path& save_dir,
+                            const world::ActiveRegionLedger& ledger,
+                            std::vector<std::string>* errors,
+                            const std::stop_token& stop) {
+    // Each open is cancellation work: stop before the next file once a stop is requested.
+    const auto cancelled = [&] {
+        AddError(errors, "Saved-world validation cancelled.");
+        return false;
+    };
+    if (stop.stop_requested())
+        return cancelled();
+    if (SavedInputFile(WorldSaveService::active_regions_path(save_dir)).missing())
+        return true;
+    if (stop.stop_requested())
+        return cancelled();
+    const SavedInputFile input(save_dir / "aether_state.efs");
+    std::string bytes;
+    const auto maximum = ledger.energy_ages().empty()
+                             ? luminumbra::fields::kEnergyReadRecordBytes
+                             : luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
+    if ((!input.missing() && (!input.read(bytes, maximum, stop) || bytes.empty())) ||
+        !RegionalEnergyMatchesLedger(bytes, ledger)) {
+        AddError(errors,
+                 stop.stop_requested() ? "Saved-world validation cancelled."
+                                       : kRegionalEnergyError);
+        return false;
     }
     return true;
 }
@@ -6179,6 +6225,14 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      MemberDigest& out,
                                      std::string& error) {
+    return member_digest_cancellable(save_dir, relative_path, out, error, {});
+}
+
+bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& save_dir,
+                                                 std::string_view relative_path,
+                                                 MemberDigest& out,
+                                                 std::string& error,
+                                                 const std::stop_token& stop) {
     out = MemberDigest{};
     try {
         if (!member_path_allowed(relative_path)) {
@@ -6287,30 +6341,53 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         } else if (relative == "aether_state.efs") {
             const auto& bytes = member_bytes;
-            std::istringstream header(bytes);
-            std::string magic;
-            int channels = 0;
-            // Bound channel allocation before invoking the legacy decoder. Indexed writers
-            // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
-            if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
-                channels > luminumbra::fields::kEnergyRecordChannels) {
-                error = "corrupt energy field record";
+            if (stop.stop_requested()) {
+                error = "Saved-world validation cancelled.";
                 return false;
             }
-            std::string line;
-            std::size_t pages = 0;
-            std::getline(header, line);
-            while (std::getline(header, line))
-                if (!line.empty() &&
-                    ++pages > (64u * 1024u * 1024u) / (256u * sizeof(std::uint16_t) *
-                                                       static_cast<std::size_t>(channels))) {
-                    error = "corrupt energy field record: decoded size limit";
+            if (!SavedInputFile(active_regions_path(save_dir)).missing()) {
+                world::ActiveRegionLedger ledger;
+                if (stop.stop_requested()) {
+                    error = "Saved-world validation cancelled.";
                     return false;
                 }
-            luminumbra::fields::EnergyFieldState energy;
-            if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
-                error = "corrupt energy field record";
-                return false;
+                if (bytes.empty() ||
+                    !load_active_regions(ledger,
+                                         save_dir,
+                                         &diagnostics,
+                                         world::WorldClock{0, world::WorldCalendar::Legacy()},
+                                         stop) ||
+                    !RegionalEnergyMatchesLedger(bytes, ledger)) {
+                    error = kRegionalEnergyError;
+                    return false;
+                }
+            } else {
+                std::istringstream header(bytes);
+                std::string magic;
+                int channels = 0;
+                // Bound channel allocation before invoking the legacy decoder. Indexed writers
+                // emit canonical EFS1; lexical admission refuses duplicate pages/cells and junk.
+                if (!(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
+                    channels > luminumbra::fields::kEnergyRecordChannels) {
+                    error = "corrupt energy field record";
+                    return false;
+                }
+                std::string line;
+                std::size_t pages = 0;
+                std::getline(header, line);
+                while (std::getline(header, line))
+                    if (!line.empty() &&
+                        ++pages > (64u * 1024u * 1024u) / (256u * sizeof(std::uint16_t) *
+                                                           static_cast<std::size_t>(channels))) {
+                        error = "corrupt energy field record: decoded size limit";
+                        return false;
+                    }
+                luminumbra::fields::EnergyFieldState energy;
+                if (!luminumbra::fields::EnergyFieldState::AdmitRecord(bytes, true) ||
+                    !energy.DeserializeRecord(bytes, 0)) {
+                    error = "corrupt energy field record";
+                    return false;
+                }
             }
         } else if (relative == "chunks/region/active-regions.arl") {
             world::ActiveRegionLedger ledger;
@@ -7184,7 +7261,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     return reject(world::ActiveRegionLedger::kCorruptMessage);
             }
             if (!validate_ground_objects(save_dir, ledger, &errors, stop) ||
-                !validate_field_pages(save_dir, ledger, &errors, stop))
+                !validate_field_pages(save_dir, ledger, &errors, stop) ||
+                !ValidateRegionalEnergy(save_dir, ledger, &errors, stop))
                 return reject("");
         }
         Ecs::EntityRegistrySnapshot plants;

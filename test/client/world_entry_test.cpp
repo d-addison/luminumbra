@@ -1,4 +1,5 @@
 #include "../support/PersistenceFileOps.h"
+#include "../support/SessionEnergyTick.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/world/WorldEntry.h"
 #include "luminumbra_common/core/FilesystemPath.h"
@@ -438,7 +439,7 @@ TEST_F(WorldEntryFilesystem, CancellationAtEverySavedFileReadPreservesLiveState)
         ASSERT_NE(session.GetEnergyFieldState(), nullptr);
         session.GetEnergyFieldState()->SetAnchorCell(0, 0);
         session.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 512);
-        session.GetEnergyFieldState()->Tick(1);
+        ASSERT_NO_FATAL_FAILURE(Luminumbra::TestSupport::ApplySnapshotTestEnergy(session, 1));
         constexpr std::size_t kSamples = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                          (Luminumbra::CHUNK_SIZE_Y + 1) *
                                          (Luminumbra::CHUNK_SIZE_Z + 1);

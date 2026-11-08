@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,12 @@ struct EnergyFieldStateTestAccess {
     }
     static void TamperPageShape(EnergyFieldState& field, int px, int pz) {
         field.m_pages.at(EnergyFieldState::PackPageKey(px, pz)).values.pop_back();
+    }
+    static void
+    SetOriginChannel(EnergyFieldState& field, std::size_t channel, std::uint16_t value) {
+        field.m_pages.at(EnergyFieldState::PackPageKey(0, 0)).values[channel] = value;
+        ForgetPageFacts(field, 0, 0);
+        Invalidate(field);
     }
     static void Normalize(EnergyFieldState& field) {
         field.NormalizeAllPages();
@@ -807,7 +814,7 @@ TEST(RegionalEnergy, IntrinsicOneFireRoundingAndNoAbsoluteCatchup) {
 TEST(RegionalEnergy, EmptyEnergyAgeContinuesAcrossSaveAndReopenBeforeLaterDeposit) {
     ActiveRegionLedger ledger;
     ledger.mark_edited({0, 0}, WorldClock{});
-    EnergyFieldState field;
+    EnergyFieldState field(2);
     const std::array due{RegionKey{0, 0}};
     for (std::uint64_t tick = 1; tick <= 7; ++tick) {
         auto result = RegionalStep(field, tick, ledger.records(), due, ledger.energy_ages());
@@ -819,7 +826,7 @@ TEST(RegionalEnergy, EmptyEnergyAgeContinuesAcrossSaveAndReopenBeforeLaterDeposi
     ActiveRegionLedger restored;
     std::string error;
     ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
-    EnergyFieldState reopened; // indexed absent EFS; do not reset the ARL age
+    EnergyFieldState reopened(2); // indexed absent EFS; do not reset the ARL age
     field.QueueDeposit(1, 1, 1, 0, 1025);
     reopened.QueueDeposit(1, 1, 1, 0, 1025);
     const auto uninterrupted = RegionalStep(field, 8, ledger.records(), due, ledger.energy_ages());
@@ -913,6 +920,24 @@ TEST(RegionalEnergy, RegionalDecoderRefusesNoncanonicalPresentRecordsAtomically)
     const auto before = field.SerializeRegionalRecord();
     const std::vector<std::string> refused{"",
                                            "EFS1 1 0\n",
+                                           "EFS1 2 0\n",
+                                           "EFS1 5 0\n",
+                                           "EFS2 0 0\n",
+                                           "EFS2 2 0\n",
+                                           "EFS2 65 0\n",
+                                           "EFS2 -1 0\n",
+                                           "EFS2 2147483648 0\n",
+                                           "EFS2 5 1\n",
+                                           "EFS2 05 0\n",
+                                           "EFS2 +5 0\n",
+                                           "EFS2 5 -0\n",
+                                           "EFS2 5 0",
+                                           "EFS2 5 0 \n",
+                                           "EFS2  5 0\n",
+                                           "EFS2 5 0\n\n",
+                                           "EFS2 5 0 extra\n",
+                                           "EFS2 5 0\nP 0 0 0:1\n",
+                                           "EFS3 5 0\n",
                                            "EFS1 1 1\nP 0 0 0:1\n",
                                            "EFS1 0 0\nP 0 0 0:1\n",
                                            "EFS1 65 0\nP 0 0 0:1\n",
@@ -942,6 +967,33 @@ TEST(RegionalEnergy, RegionalDecoderRefusesNoncanonicalPresentRecordsAtomically)
     EXPECT_FALSE(field.DeserializeRegionalRecord(
         std::string(EnergyFieldState::kMaxRegionalRecordBytes + 1, 'x')));
     EXPECT_EQ(field.SerializeRegionalRecord(), before);
+}
+
+TEST(RegionalEnergy, EmptyChannelRecordsRestoreOnlyCanonicalNondefaultCounts) {
+    for (const int channels : {1, 5, 16, 64}) {
+        SCOPED_TRACE(channels);
+        EnergyFieldState field(2);
+        ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 2 0\nP 0 0 0:100\n"));
+        ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 10));
+        ASSERT_TRUE(field.DeserializeRegionalRecord("EFS2 " + std::to_string(channels) + " 0\n"));
+        EXPECT_EQ(field.channels(), channels);
+        EXPECT_EQ(field.page_count(), 0u);
+        EXPECT_FALSE(field.CanonicalRegionalBytes().empty());
+        EXPECT_TRUE(EnergyFieldState(2).CanonicalRegionalBytes().empty());
+        EXPECT_NE(field.CanonicalRegionalBytes(),
+                  EnergyFieldState(channels + 1).CanonicalRegionalBytes());
+        EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+        EXPECT_FALSE(field.OwnsRegion({0, 0}));
+        EXPECT_FALSE(field.ValidateRegionalOwners({}, {{{0, 0}, 5}}));
+        const auto records = TwoEnergyOwners();
+        const EnergyAges ages{{{0, 0}, 5}, {{1, 0}, 7}};
+        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+        ASSERT_TRUE(field.QueueRegionalDeposit(2, 0, 0, channels - 1, 777));
+        const std::array due{RegionKey{0, 0}};
+        const auto result = RegionalStep(field, 1, records, due, ages);
+        EXPECT_EQ(result.ages.at({0, 0}), 6u);
+        EXPECT_EQ(field.at_cell(0, 0, channels - 1), 777u);
+    }
 }
 
 TEST(RegionalEnergy, JointRestoreRequiresAgesForEveryNonzeroOwner) {
@@ -1333,125 +1385,165 @@ namespace {
 std::string
 RegionalRecordAtByteLimit(EnergyRecords& records,
                           EnergyAges& ages,
-                          std::size_t byte_limit = EnergyFieldState::kMaxRegionalRecordBytes,
-                          std::size_t channel_count = 64) {
-    const std::size_t values_per_page = 256 * channel_count;
-    std::string record = "EFS1 " + std::to_string(channel_count) + " 0\n";
+                          std::size_t byte_limit = EnergyFieldState::kMaxRegionalRecordBytes) {
+    // 64 channels allow five-digit indices. Five-digit values reach the byte
+    // cap in fewer than 2048 pages, within both the page and decoded-value budgets.
+    constexpr std::size_t channels = 64;
+    constexpr std::size_t values_per_page = 256 * channels;
+    std::string record = "EFS1 64 0\n";
+    record.reserve(byte_limit);
     bool complete = false;
+    std::size_t pages = 0;
     for (int px = 0; !complete; ++px) {
         std::string row = "P " + std::to_string(px) + " 0";
         std::vector<std::size_t> value_offsets;
         for (std::size_t index = 0; index < values_per_page; ++index) {
-            const auto token =
-                " " + std::to_string(index) + ":" + (px == 0 && index == 0 ? "9" : "1");
-            if (record.size() + row.size() + token.size() + 1 > byte_limit) {
-                auto padding = byte_limit - record.size() - row.size() - 1;
-                // Extend earlier nonzero values by decimal digits to reach the exact
-                // byte limit without introducing noncanonical whitespace.
+            const auto prefix = " " + std::to_string(index) + ":";
+            value_offsets.push_back(row.size() + prefix.size());
+            row += prefix;
+            row += px == 0 && index == 0 ? "9" : "65535";
+            if (record.size() + row.size() + 1 >= byte_limit) {
+                auto excess = record.size() + row.size() + 1 - byte_limit;
+                // Shorten up to three final values, keeping canonical nonzero tokens.
                 for (auto offset = value_offsets.rbegin();
-                     padding != 0 && offset != value_offsets.rend();
+                     excess != 0 && offset != value_offsets.rend();
                      ++offset) {
-                    const auto extra = padding < 4 ? padding : 4;
-                    row.insert(*offset, extra, '1');
-                    padding -= extra;
+                    const auto removed = (std::min)(excess, std::size_t{4});
+                    row.erase(*offset, removed);
+                    excess -= removed;
                 }
-                EXPECT_EQ(padding, 0u);
+                EXPECT_EQ(excess, 0u);
                 complete = true;
                 break;
             }
-            value_offsets.push_back(row.size() + token.size() - 1);
-            row += token;
         }
-        record += row + '\n';
+        record += row;
+        record += '\n';
+        ++pages;
         for (int x = 0; x < kEnergyPageCells; ++x) {
             const auto owner = EnergyFieldState::OwnerOfCell(px * kEnergyPageCells + x, 0);
             records[owner].state = RegionState::Frozen;
             ages[owner] = 0;
         }
     }
+    EXPECT_LE(pages, luminumbra::fields::kEnergyReadPages);
+    EXPECT_LE(pages * values_per_page * sizeof(std::uint16_t),
+              EnergyFieldState::kMaxRegionalValueBytes);
+    EXPECT_EQ(record.size(), byte_limit);
     return record;
 }
 } // namespace
 
-TEST(RegionalEnergy, WriterDecoderAndCachedTickAgreeAtExactByteBoundaries) {
-    constexpr auto limit = EnergyFieldState::kMaxRegionalRecordBytes;
-    for (const auto size : {limit - 1, limit, limit + 1}) {
-        SCOPED_TRACE(size);
-        EnergyRecords records;
-        EnergyAges ages;
-        const auto record = RegionalRecordAtByteLimit(records, ages, size, 16);
-        ASSERT_EQ(record.size(), size);
-        const bool fits = size <= limit;
-        EnergyFieldState decoded;
-        EXPECT_EQ(decoded.DeserializeRegionalRecord(record), fits);
-
-        // Legacy admission can construct all three canonical page sets, including
-        // the one whose regional encoding is one byte above the regional cap.
-        auto legacy = record;
-        const auto phase = legacy.find(" 0\n");
-        ASSERT_NE(phase, std::string::npos);
-        legacy[phase + 1] = '8';
-        EnergyFieldState field;
-        ASSERT_TRUE(field.DeserializeRecord(legacy, 0));
-        const auto canonical = field.CanonicalRegionalBytes();
-        if (fits) {
-            const auto serialized = field.SerializeRegionalRecord();
-            EXPECT_EQ(serialized, record);
-            ASSERT_TRUE(decoded.DeserializeRegionalRecord(serialized));
-            EXPECT_EQ(decoded.CanonicalRegionalBytes(), canonical);
-        } else {
-            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
-        }
-        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
-        EnergyResult result;
-        result.clipped_raw = 91;
-        EXPECT_EQ(field.TickRegional(1, records, {}, ages, result), fits);
-        EXPECT_EQ(field.CanonicalRegionalBytes(), canonical);
-        if (fits) {
-            EXPECT_EQ(field.SerializeRegionalRecord(), record);
-            EXPECT_EQ(result.ages, ages);
-        } else {
-            EXPECT_EQ(result.clipped_raw, 91u);
-            EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
-        }
-    }
+TEST(RegionalEnergy, RegionalRecordCapCoversTheLegacyReaderRange) {
+    // Every record the legacy reader admits must also be admissible and re-savable through the
+    // regional paths, so the regional cap may never fall below the legacy reader cap.
+    static_assert(EnergyFieldState::kMaxRegionalRecordBytes >=
+                  luminumbra::fields::kEnergyReadRecordBytes);
 }
 
-TEST(RegionalEnergy, EncodedByteLimitRefusesGrowthAtomicallyAndPreservesPendingInput) {
-    constexpr auto byte_limit = EnergyFieldState::kMaxRegionalRecordBytes;
-    EnergyRecords records;
-    EnergyAges ages;
-    const auto record = RegionalRecordAtByteLimit(records, ages);
-    ASSERT_EQ(record.size(), byte_limit);
-    EnergyFieldState field;
-    ASSERT_TRUE(field.DeserializeRegionalRecord(record));
-    ASSERT_EQ(field.SerializeRegionalRecord(), record);
-    records.at({0, 0}).state = RegionState::Active;
-    ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 1)); // 9 -> 10 needs one extra byte
-    const std::array due{RegionKey{0, 0}};
-    EnergyResult output;
-    output.ages = {{{9, 9}, 42}};
-    output.work = {{{9, 9}, 1, 2, 3, 4}};
-    output.clipped_raw = 91;
-    output.staged_pages = 92;
-    output.diffusion_pages = 93;
-    EXPECT_FALSE(field.TickRegional(1, records, due, ages, output));
-    EXPECT_EQ(field.SerializeRegionalRecord(), record);
-    EXPECT_EQ(output.ages, (EnergyAges{{{9, 9}, 42}}));
-    ASSERT_EQ(output.work.size(), 1u);
-    EXPECT_EQ(output.work[0].key, (RegionKey{9, 9}));
-    EXPECT_EQ(output.work[0].region_ticks, 1u);
-    EXPECT_EQ(output.work[0].entity_updates, 2u);
-    EXPECT_EQ(output.work[0].water_cells, 3u);
-    EXPECT_EQ(output.work[0].page_updates, 4u);
-    EXPECT_EQ(output.clipped_raw, 91u);
-    EXPECT_EQ(output.staged_pages, 92u);
-    EXPECT_EQ(output.diffusion_pages, 93u);
-    // Retrying with no due owner clips the still-pending unit and preserves all bytes/ages.
-    ASSERT_TRUE(field.TickRegional(1, records, {}, ages, output));
-    EXPECT_EQ(output.clipped_raw, 1u);
-    EXPECT_EQ(output.ages, ages);
-    EXPECT_EQ(field.SerializeRegionalRecord(), record);
+namespace {
+// One byte over the limit through the width of a single value: the decoder
+// refuses it, and the same pages below the limit decode after one digit is removed.
+void RefuseWideRecordAndNarrowIt(EnergyFieldState& field, std::string& record) {
+    EXPECT_FALSE(field.DeserializeRegionalRecord(record));
+    EXPECT_EQ(field.page_count(), 0u);
+    const auto wide_value = record.find(":65535");
+    ASSERT_NE(wide_value, std::string::npos);
+    record.erase(wide_value + 1, 1);
+}
+
+void ExpectOverLimitTickRefusedKeepsCallerResult(EnergyFieldState& field,
+                                                 const EnergyRecords& records,
+                                                 const EnergyAges& ages,
+                                                 std::span<const RegionKey> due,
+                                                 const std::string& record) {
+    EnergyResult result;
+    result.ages = {{{9, 9}, 42}};
+    result.work = {{{9, 9}, 1, 2, 3, 4}};
+    result.clipped_raw = 99;
+    result.staged_pages = 123;
+    result.diffusion_pages = 456;
+    // The decoded budget is unchanged and one deposit is well below its cap.
+    EXPECT_FALSE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(result.ages, (EnergyAges{{{9, 9}, 42}}));
+    ASSERT_EQ(result.work.size(), 1u);
+    EXPECT_EQ(result.work[0].key, (RegionKey{9, 9}));
+    EXPECT_EQ(result.work[0].region_ticks, 1u);
+    EXPECT_EQ(result.work[0].entity_updates, 2u);
+    EXPECT_EQ(result.work[0].water_cells, 3u);
+    EXPECT_EQ(result.work[0].page_updates, 4u);
+    EXPECT_EQ(result.clipped_raw, 99u);
+    EXPECT_EQ(result.staged_pages, 123u);
+    EXPECT_EQ(result.diffusion_pages, 456u);
+    EXPECT_EQ(field.at_cell(0, 0, 1), 5535u);
+    EXPECT_TRUE(field.SerializeRegionalRecord() == record);
+}
+
+void ExpectWriterRefusesThenTickFreesBytes(EnergyFieldState& field,
+                                           const EnergyRecords& records,
+                                           const EnergyAges& ages,
+                                           std::span<const RegionKey> due) {
+    // The writer independently refuses the identical over-limit state.
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 65535);
+    EXPECT_THROW(static_cast<void>(field.SerializeRegionalRecord()), std::length_error);
+    // Restore channel 1, then free two encoded bytes in channel 2 without
+    // copying the fixture. The original queued deposit grows channel 1 by one byte.
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 1, 5535);
+    EnergyFieldStateTestAccess::SetOriginChannel(field, 2, 535);
+    EnergyResult result;
+    ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+    EXPECT_EQ(field.at_cell(0, 0, 1), 65535u);
+    EXPECT_EQ(field.at_cell(0, 0, 2), 535u);
+    EXPECT_EQ(result.ages.at({0, 0}), 1u);
+    EXPECT_EQ(result.clipped_raw, 0u);
+    EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+}
+} // namespace
+
+TEST(RegionalEnergy, RecordByteBoundariesCoverWriterDecoderAndCachedTick) {
+    // Construct and release one large fixture at a time. At each boundary the
+    // same decoded pages back the writer, decoder and cached tick assertions.
+    for (const int delta : {-1, 0, 1}) {
+        SCOPED_TRACE(delta);
+        EnergyRecords records;
+        EnergyAges ages;
+        const auto bytes =
+            EnergyFieldState::kMaxRegionalRecordBytes - 1 + static_cast<std::size_t>(delta + 1);
+        auto record = RegionalRecordAtByteLimit(records, ages, bytes);
+        EnergyFieldState field;
+        if (delta == 1) {
+            // Refuse a canonical record with exactly the same pages and tokens
+            // as the accepted one-byte-shorter record below. Only value width differs.
+            ASSERT_NO_FATAL_FAILURE(RefuseWideRecordAndNarrowIt(field, record));
+        }
+        ASSERT_TRUE(field.DeserializeRegionalRecord(record));
+        ASSERT_TRUE(field.SerializeRegionalRecord() == record);
+        EXPECT_LE(field.page_count(), luminumbra::fields::kEnergyReadPages);
+        EXPECT_LE(field.page_count() * 256u * 64u * sizeof(std::uint16_t),
+                  EnergyFieldState::kMaxRegionalValueBytes);
+        if (delta == 1) {
+            // Restore the removed digit through the deposit path: 5535 -> 65535.
+            // The first wide value is channel 1 of cell (0,0), on an existing page.
+            ASSERT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 1, 60000));
+        }
+        records.at({0, 0}).state = RegionState::Active;
+        ASSERT_TRUE(field.ValidateRegionalOwners(records, ages));
+        ASSERT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        const auto page_count = field.page_count();
+        const std::array due{RegionKey{0, 0}};
+        if (delta == 1) {
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectOverLimitTickRefusedKeepsCallerResult(field, records, ages, due, record));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectWriterRefusesThenTickFreesBytes(field, records, ages, due));
+        } else {
+            EnergyResult result;
+            ASSERT_TRUE(field.TickRegional(1, records, due, ages, result));
+            EXPECT_TRUE(field.SerializeRegionalRecord() == record);
+            EXPECT_TRUE(EnergyFieldStateTestAccess::Validated(field));
+        }
+        EXPECT_EQ(field.page_count(), page_count);
+    }
 }
 
 TEST(RegionalEnergy, MissingFinalNewlineAtByteLimitRefusesWithoutThrowingOrChangingState) {
@@ -1483,6 +1575,110 @@ TEST(RegionalEnergy, MissingFinalNewlineAtByteLimitRefusesWithoutThrowingOrChang
     const auto result = RegionalStep(field, 1, owners, due, {});
     EXPECT_EQ(field.at_cell(0, 0), 101u);
     EXPECT_EQ(result.clipped_raw, 0u);
+}
+
+TEST(RegionalEnergy, LegacyMigrationKeepsLegalBoundaryOwnersAndDropsOnlyOutsideCells) {
+    struct BoundaryCase {
+        const char* legacy_pages;
+        const char* kept_pages;
+        int cx, cz;
+        RegionKey kept_owner, dropped_owner;
+    };
+    // Cell centres use floor((24*c + 12)/512). The two cells in each
+    // boundary page belong to adjacent owners, on opposite sides of the world edge.
+    const BoundaryCase cases[]{
+        {"P -43691 0 8:111 9:222 10:12345 11:65535\nP 0 0 0:777\n",
+         "P -43691 0 10:12345 11:65535\nP 0 0 0:777\n",
+         -699051,
+         0,
+         {-32768, 0},
+         {-32769, 0}},
+        {"P 0 0 0:777\nP 43690 0 20:12345 21:65535 22:111 23:222\n",
+         "P 0 0 0:777\nP 43690 0 20:12345 21:65535\n",
+         699050,
+         0,
+         {32767, 0},
+         {32768, 0}},
+        {"P 0 0 0:777\nP 0 -43691 128:111 129:222 160:12345 161:65535\n",
+         "P 0 0 0:777\nP 0 -43691 160:12345 161:65535\n",
+         0,
+         -699051,
+         {0, -32768},
+         {0, -32769}},
+        {"P 0 0 0:777\nP 0 43690 320:12345 321:65535 352:111 353:222\n",
+         "P 0 0 0:777\nP 0 43690 320:12345 321:65535\n",
+         0,
+         699050,
+         {0, 32767},
+         {0, 32768}},
+        {"P -43691 -43691 136:111 138:222 168:333 170:12345 171:65535\nP 0 0 0:777\n",
+         "P -43691 -43691 170:12345 171:65535\nP 0 0 0:777\n",
+         -699051,
+         -699051,
+         {-32768, -32768},
+         {-32769, -32769}},
+        {"P 0 0 0:777\nP 43690 43690 340:12345 341:65535 342:111 372:222 374:333\n",
+         "P 0 0 0:777\nP 43690 43690 340:12345 341:65535\n",
+         699050,
+         699050,
+         {32767, 32767},
+         {32768, 32768}},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.legacy_pages);
+        EnergyFieldState field(2);
+        const auto legacy = std::string("EFS1 2 3\n") + item.legacy_pages;
+        ASSERT_TRUE(EnergyFieldState::AdmitRecord(legacy, true));
+        ASSERT_TRUE(field.DeserializeRecord(legacy, 31));
+        ActiveRegionLedger ledger({}, WorldClock(31));
+        ASSERT_TRUE(field.MigrateLegacyCadence(ledger, WorldClock(31), {}));
+        EXPECT_EQ(field.SerializeRegionalRecord(), std::string("EFS1 2 0\n") + item.kept_pages);
+        EXPECT_EQ(field.at_cell(item.cx, item.cz, 0), 12345u);
+        EXPECT_EQ(field.at_cell(item.cx, item.cz, 1), 65535u);
+        EXPECT_EQ(field.total_raw(), 12345u + 65535u + 777u);
+        EXPECT_EQ(ledger.energy_ages().at(item.kept_owner), 5u);
+        EXPECT_FALSE(ledger.records().contains(item.dropped_owner));
+        EnergyFieldState reopened;
+        ASSERT_TRUE(reopened.DeserializeRegionalRecord(field.SerializeRegionalRecord()));
+        EXPECT_EQ(reopened.CanonicalRegionalBytes(), field.CanonicalRegionalBytes());
+    }
+}
+
+TEST(RegionalEnergy, LegacyMigrationDropsWhollyOutsidePagesWithoutCoordinateOverflow) {
+    for (const bool in_world : {false, true}) {
+        const auto legacy = std::string("EFS1 2 8\nP -2147483648 -2147483648 0:111\n") +
+                            "P -43692 0 0:222\n" + (in_world ? "P 0 0 0:777\n" : "") +
+                            "P 43691 0 0:333\nP 2147483647 2147483647 0:444\n";
+        ASSERT_TRUE(EnergyFieldState::AdmitRecord(legacy, true));
+        EnergyFieldState field;
+        ASSERT_TRUE(field.DeserializeRecord(legacy, 31));
+        ActiveRegionLedger ledger({}, WorldClock(31));
+        ASSERT_TRUE(field.MigrateLegacyCadence(ledger, WorldClock(31), {}));
+        EXPECT_EQ(field.SerializeRegionalRecord(), in_world ? "EFS1 2 0\nP 0 0 0:777\n" : "");
+        EXPECT_EQ(field.page_count(), in_world ? 1u : 0u);
+        EXPECT_TRUE(field.ValidateRegionalOwners(ledger.records(), ledger.energy_ages()));
+    }
+}
+
+TEST(RegionalEnergy, LegacyMigrationRefusesExistingAgesAndInvalidCadenceBeforeClipping) {
+    const std::string legacy = "EFS1 2 3\nP -43691 0 8:111\nP 0 0 0:777\n";
+    for (const std::uint64_t tick : {25u, 31u, 34u}) {
+        EnergyFieldState field;
+        ASSERT_TRUE(field.DeserializeRecord(legacy, 31));
+        ActiveRegionLedger ledger({}, WorldClock(tick));
+        if (tick == 31) {
+            ledger.mark_edited({0, 0}, WorldClock(tick));
+            ASSERT_TRUE(ledger.set_energy_age({0, 0}, 1));
+        }
+        const auto before = field.CanonicalBytes();
+        const auto ledger_before = ledger.encode();
+        EXPECT_FALSE(field.MigrateLegacyCadence(ledger, WorldClock(tick), {}));
+        EXPECT_EQ(field.CanonicalBytes(), before);
+        EXPECT_EQ(ledger.encode(), ledger_before);
+    }
+    EnergyFieldState invalid_channels(65);
+    ActiveRegionLedger ledger;
+    EXPECT_FALSE(invalid_channels.MigrateLegacyCadence(ledger, WorldClock(0), {}));
 }
 
 TEST(RegionalEnergy, RegionalWriterRefusesIncompatibleLegacyPagesWithoutChangingBytes) {

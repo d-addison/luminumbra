@@ -41,7 +41,9 @@ struct FieldEmitterGatherStats {
 // zero-amount rings skipped (a deposit of 0 is not queued). Emitters with
 // rate 0 are inert and skipped outright.
 inline FieldEmitterGatherStats
-GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyFieldState& field) {
+GatherFieldEmitterDeposits(entt::registry& registry,
+                           luminumbra::fields::EnergyFieldState& field,
+                           bool clip_to_world = false) {
     using Luminumbra::Components::FieldEmitterComponent;
     using Luminumbra::Components::TransformComponent;
 
@@ -82,6 +84,13 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
                     (cheb < 32) ? (emitter.rate_raw_per_tick >> static_cast<unsigned>(cheb)) : 0u;
                 if (amount == 0u)
                     continue;
+                if (clip_to_world) {
+                    const auto owner =
+                        luminumbra::fields::EnergyFieldState::OwnerOfCell(cx + dx, cz + dz);
+                    if (owner.x < -32768 || owner.x >= 32768 || owner.z < -32768 ||
+                        owner.z >= 32768)
+                        continue;
+                }
                 field.QueueDeposit(emitter_id, cx + dx, cz + dz, emitter.channel, amount);
                 ++stats.deposits;
                 queued = true;
