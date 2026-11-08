@@ -3669,6 +3669,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "aether_state.efs",
                                               "chunks/region/world-manifest.json",
                                               "chunks/region/plant-entities.json",
+                                              "chunks/region/plant-identities.json",
                                               "chunks/region/ground-objects.json",
                                               "chunks/region/field-pages.fpg",
                                               "chunks/region/active-regions.arl"};
@@ -4395,11 +4396,107 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
     return region_directory(save_dir) / "plant-entities.json";
 }
 
+std::filesystem::path
+WorldSaveService::plant_identities_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "plant-identities.json";
+}
+
+namespace {
+bool IdentityComponent(std::string_view type) {
+    constexpr std::array<std::string_view, 7> types = {"PlantRegion",
+                                                       "PollinationTag",
+                                                       "Combustible",
+                                                       "Mortal",
+                                                       "Grazeable",
+                                                       "WaterSource",
+                                                       "IgnitionSource"};
+    return std::find(types.begin(), types.end(), type) != types.end();
+}
+
+// Only the fixed, numerically admitted component set reaches this combined budget check.
+bool PlantComponentBudget(const Ecs::EntityRegistrySnapshot& snapshot) {
+    std::size_t aggregate = 0;
+    for (const auto& entity : snapshot.entities) {
+        for (const auto& component : entity.components) {
+            std::string encoded;
+            if (!BoundedJsonDump(component.data, SavedInputLimits::kPlantComponentBytes, encoded) ||
+                encoded.size() > SavedInputLimits::kPlantComponentAggregateBytes - aggregate)
+                return false;
+            aggregate += encoded.size();
+        }
+    }
+    return true;
+}
+
+bool MergePlantIdentities(const std::string& map_bytes,
+                          const std::string& payload,
+                          Ecs::EntityRegistrySnapshot& plants,
+                          std::vector<std::string>* errors) {
+    const auto refuse = [&](const char* message) {
+        AddError(errors, std::string("Corrupt plant authority: ") + message);
+        return false;
+    };
+    if (!AdmitPlantComponentBytes(map_bytes))
+        return refuse("identity map JSON compatibility limit.");
+    try {
+        const auto map = nlohmann::json::parse(map_bytes);
+        if (!map.is_object() || map.size() != 4)
+            return refuse("malformed identity map.");
+        if (!map.at("version").is_number_unsigned() || map.at("version") != 1u)
+            return refuse("unsupported identity map version (future format).");
+        if (!map.at("payload_bytes").is_number_unsigned() ||
+            !map.at("payload_fnv64").is_number_unsigned() ||
+            map.at("payload_bytes") != payload.size() ||
+            map.at("payload_fnv64") != fnv1a64_bytes(payload.data(), payload.size()))
+            return refuse("identity map payload digest/length mismatch.");
+        const auto& entries = map.at("plants");
+        if (!entries.is_array() || plants.entities.empty() ||
+            entries.size() != plants.entities.size())
+            return refuse("orphaned identity map or roster length mismatch.");
+        std::set<std::uint64_t> payload_ids;
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const auto& entry = entries[i];
+            auto& plant = plants.entities[i];
+            if (!payload_ids.insert(plant.entity_id).second)
+                return refuse("duplicate payload entity ID.");
+            if (!entry.is_object() || entry.size() != 5 ||
+                !entry.at("persistent_id").is_number_unsigned() ||
+                !entry.at("components").is_array())
+                return refuse("invalid identity map entry.");
+            plant.legacy_entity_id = plant.entity_id;
+            plant.entity_id = entry.at("persistent_id").get<std::uint64_t>();
+            plant.components.push_back({"PlantRegion",
+                                        {{"owner_x", entry.at("owner_x")},
+                                         {"owner_z", entry.at("owner_z")},
+                                         {"region_stamp", entry.at("region_stamp")}}});
+            for (const auto& component : entry.at("components")) {
+                const auto type = component.at("type").get<std::string>();
+                if (type == "PlantRegion" || !IdentityComponent(type))
+                    return refuse("invalid identity map component.");
+                plant.components.push_back({type, component.at("data")});
+            }
+        }
+        plants.persistent_identity = true;
+        if (!luminumbra::foliage::ValidatePlantEntitySnapshot(plants))
+            return refuse("invalid identity or component value.");
+        if (!PlantComponentBudget(plants))
+            return refuse("combined component JSON compatibility limit.");
+        return true;
+    } catch (const nlohmann::json::exception&) {
+        return refuse("malformed identity map.");
+    }
+}
+} // namespace
+
 bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
                                               std::string& bytes,
-                                              std::vector<std::string>* errors) {
+                                              std::vector<std::string>* errors,
+                                              std::string* identity_bytes) {
     if (!luminumbra::foliage::ValidatePlantEntitySnapshot(snapshot, false)) {
-        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+        AddError(errors,
+                 snapshot.persistent_identity
+                     ? "Corrupt plant authority: invalid identity or component value."
+                     : "Saved-input admission refused: invalid plant component value.");
         return false;
     }
     std::size_t aggregate = 0;
@@ -4422,36 +4519,84 @@ bool WorldSaveService::prepare_plant_entities(const Ecs::EntityRegistrySnapshot&
     }
     // Preserve the existing serializer's ordering and exact pretty-file bytes,
     // with bounded output rather than an unbounded dump followed by a size check.
+    // Both arrays follow legacy runtime-handle order; identities never enter the payload.
+    std::vector<const Ecs::EntitySnapshotRecord*> ordered;
+    // The pointer ordering buffer is bounded by the existing 256 MiB file budget.
+    if (snapshot.entities.size() > SavedInputLimits::kPlantFileBytes / sizeof(ordered.front())) {
+        AddError(errors,
+                 "Saved-input admission refused: plant roster exceeds compatibility limit.");
+        return false;
+    }
+    ordered.reserve(snapshot.entities.size());
+    for (const auto& entity : snapshot.entities)
+        ordered.push_back(&entity);
+    const auto legacy_id = [&](const auto* entity) {
+        return snapshot.persistent_identity ? entity->legacy_entity_id : entity->entity_id;
+    };
+    std::sort(ordered.begin(), ordered.end(), [&](const auto* lhs, const auto* rhs) {
+        return legacy_id(lhs) < legacy_id(rhs);
+    });
     nlohmann::json entities = nlohmann::json::array();
+    nlohmann::json identities = nlohmann::json::array();
     std::size_t components = 0;
-    for (const auto& entity : snapshot.entities) {
+    for (const auto* entity : ordered) {
         nlohmann::json values = nlohmann::json::array();
-        for (const auto& component : entity.components) {
+        nlohmann::json enabled = nlohmann::json::array();
+        for (const auto& component : entity->components) {
+            if (snapshot.persistent_identity && IdentityComponent(component.type)) {
+                if (component.type != "PlantRegion")
+                    enabled.push_back({{"type", component.type}, {"data", component.data}});
+                continue;
+            }
             values.push_back({{"type", component.type}, {"data", component.data}});
             ++components;
         }
-        std::sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
+        const auto component_order = [](const auto& lhs, const auto& rhs) {
             return lhs.at("type") < rhs.at("type");
-        });
-        entities.push_back({{"entity_id", entity.entity_id},
-                            {"name", entity.name},
+        };
+        std::sort(values.begin(), values.end(), component_order);
+        std::sort(enabled.begin(), enabled.end(), component_order);
+        entities.push_back({{"entity_id", legacy_id(entity)},
+                            {"name", entity->name},
                             {"components", std::move(values)}});
+        if (snapshot.persistent_identity) {
+            const auto* owner =
+                luminumbra::foliage::pp_detail::ComponentData(*entity, "PlantRegion");
+            if (!owner)
+                return false; // Already required by snapshot admission.
+            identities.push_back({{"persistent_id", entity->entity_id},
+                                  {"owner_x", owner->at("owner_x")},
+                                  {"owner_z", owner->at("owner_z")},
+                                  {"region_stamp", owner->at("region_stamp")},
+                                  {"components", std::move(enabled)}});
+        }
     }
-    std::sort(entities.begin(), entities.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.at("entity_id") < rhs.at("entity_id");
-    });
-    const nlohmann::json envelope = {{"schema", Ecs::EntitySnapshotSchema()},
-                                     {"order_contract", Ecs::EntitySnapshotOrderContract()},
-                                     {"entity_count", snapshot.entities.size()},
-                                     {"component_count", components},
-                                     {"entities", std::move(entities)}};
+    nlohmann::json envelope = {{"schema", Ecs::EntitySnapshotSchema()},
+                               {"order_contract", Ecs::EntitySnapshotOrderContract()},
+                               {"entity_count", snapshot.entities.size()},
+                               {"component_count", components},
+                               {"entities", std::move(entities)}};
     std::string checked;
     if (!BoundedJsonDump(envelope, SavedInputLimits::kPlantFileBytes, checked, 4)) {
         AddError(errors,
                  "Saved-input admission refused: plant file exceeds 256 MiB compatibility limit.");
         return false;
     }
+    std::string checked_map;
+    if (!identities.empty() &&
+        !BoundedJsonDump({{"version", 1u},
+                          {"payload_bytes", checked.size()},
+                          {"payload_fnv64", fnv1a64_bytes(checked.data(), checked.size())},
+                          {"plants", std::move(identities)}},
+                         SavedInputLimits::kPlantFileBytes,
+                         checked_map,
+                         4)) {
+        AddError(errors, "Corrupt plant authority: identity map exceeds compatibility limit.");
+        return false;
+    }
     bytes = std::move(checked);
+    if (identity_bytes)
+        *identity_bytes = std::move(checked_map);
     return true;
 }
 
@@ -4467,7 +4612,7 @@ bool WorldSaveService::PreparedPlantWrite::prepare(const Ecs::EntityRegistrySnap
                                                    std::vector<std::string>* errors) {
     m_prepared = false;
     m_bytes.clear();
-    if (!prepare_plant_entities(snapshot, m_bytes, errors))
+    if (!prepare_plant_entities(snapshot, m_bytes, errors, &m_identity_bytes))
         return false;
     m_empty = snapshot.entities.empty();
     m_prepared = true;
@@ -4484,7 +4629,7 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     }
     if (!validate_save(save_dir, errors))
         return false;
-    TransactionScope scope(save_dir, {}, errors);
+    TransactionScope scope(save_dir, {}, errors, !m_identity_bytes.empty());
     if (!scope.ok())
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
@@ -4493,6 +4638,22 @@ bool WorldSaveService::PreparedPlantWrite::publish(const std::filesystem::path& 
     // region scan. Reclaim them even when the new roster is empty.
     const auto staging = save_dir / path.filename();
     ReclaimAbandonedStaging(staging);
+    const auto identity_path = plant_identities_path(save_dir);
+    const detail::RegionFileWriteGuard identity_guard(identity_path);
+    ReclaimAbandonedStaging(save_dir / identity_path.filename());
+    // Protect both before publishing either; the index commits their binding last.
+    if (auto* active = SaveTransaction::active_for(save_dir);
+        active &&
+        !active->protect(
+            {"chunks/region/plant-entities.json", "chunks/region/plant-identities.json"}, errors))
+        return false;
+    if (!m_identity_bytes.empty()) {
+        if (!write_member_bytes(
+                save_dir, "chunks/region/plant-identities.json", m_identity_bytes, errors))
+            return false;
+    } else if (!durable_remove(identity_path, errors)) {
+        return false;
+    }
     if (!m_empty && FileBytesEqual(path, m_bytes)) {
         if (auto* active = SaveTransaction::active_for(save_dir);
             active && active->member_is_protected("chunks/region/plant-entities.json") &&
@@ -4538,6 +4699,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors,
                                            const std::stop_token& stop) {
+    const detail::SnapshotReadOwnership ownership;
     LUMIN_PROFILE_ZONE_N("File plant entities load");
     if (stop.stop_requested()) {
         AddError(errors, "Saved-world validation cancelled.");
@@ -4549,6 +4711,11 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
         AddError(errors, "Saved-world validation cancelled.");
         return false;
     }
+    const SavedInputFile identity_input(plant_identities_path(save_dir));
+    if (input.missing() && !identity_input.missing()) {
+        AddError(errors, "Corrupt plant authority: identity map without plant payload.");
+        return false;
+    }
     if (input.missing()) {
         out = Luminumbra::Ecs::EntityRegistrySnapshot{};
         return true; // clean miss: a fresh / no-plant world
@@ -4557,8 +4724,10 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)) {
         AddError(
             errors,
-            stop.stop_requested()
-                ? "Saved-world validation cancelled."
+            stop.stop_requested() ? "Saved-world validation cancelled."
+            : !identity_input.missing()
+                ? "Corrupt plant authority: unreadable plant payload: " +
+                      Filesystem::GenericUtf8PathString(path)
                 : "Saved-input admission refused: unreadable, non-regular or over 256 MiB plant "
                   "entities file: " +
                       Filesystem::GenericUtf8PathString(path));
@@ -4572,19 +4741,36 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
                  "each, 128 MiB aggregate).");
         return false;
     }
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors)) {
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, candidate, load_errors, false)) {
         for (const auto& e : load_errors)
-            AddError(errors, e);
+            AddError(errors, identity_input.missing() ? e : "Corrupt plant authority: " + e);
         return false;
     }
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(candidate, false)) {
-        AddError(errors, "Saved-input admission refused: invalid plant component value.");
+    if (candidate.persistent_identity ||
+        !luminumbra::foliage::ValidatePlantEntitySnapshot(candidate, false)) {
+        AddError(errors,
+                 (candidate.persistent_identity || !identity_input.missing())
+                     ? "Corrupt plant authority: invalid identity or component value."
+                     : "Saved-input admission refused: invalid plant component value.");
         return false;
+    }
+    if (!identity_input.missing()) {
+        std::string identity_bytes;
+        if (!identity_input.read(identity_bytes, SavedInputLimits::kPlantFileBytes, stop)) {
+            AddError(errors,
+                     stop.stop_requested()
+                         ? "Saved-world validation cancelled."
+                         : "Corrupt plant authority: unreadable or oversized identity map.");
+            return false;
+        }
+        if (!MergePlantIdentities(identity_bytes, bytes, candidate, errors))
+            return false;
     }
     if (stop.stop_requested()) {
         AddError(errors, "Saved-world validation cancelled.");
         return false;
     }
+    Ecs::SortEntityRegistrySnapshot(candidate);
     out = std::move(candidate);
     return true;
 }
@@ -6262,7 +6448,8 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
         }
 
         std::uint64_t maximum = SavedInputLimits::kManifestBytes;
-        if (relative == "chunks/region/plant-entities.json")
+        if (relative == "chunks/region/plant-entities.json" ||
+            relative == "chunks/region/plant-identities.json")
             maximum = SavedInputLimits::kPlantFileBytes;
         else if (relative == "chunks/region/ground-objects.json")
             maximum = world::GroundObjectStore::kMaxFileBytes;
@@ -6325,6 +6512,18 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
                 !Ecs::LoadEntityRegistrySnapshotJson(member_bytes, plants, diagnostics) ||
                 !luminumbra::foliage::ValidatePlantEntitySnapshot(plants, false)) {
                 error = first_error("corrupt plant entities");
+                return false;
+            }
+        } else if (relative == "chunks/region/plant-identities.json") {
+            std::string payload;
+            const SavedInputFile input(plant_entities_path(save_dir));
+            Ecs::EntityRegistrySnapshot plants;
+            if (!input.read(payload, SavedInputLimits::kPlantFileBytes, stop) ||
+                !AdmitPlantComponentBytes(payload) ||
+                !Ecs::LoadEntityRegistrySnapshotJson(payload, plants, diagnostics, false) ||
+                plants.persistent_identity ||
+                !MergePlantIdentities(member_bytes, payload, plants, &diagnostics)) {
+                error = first_error("Corrupt plant authority: invalid identity map.");
                 return false;
             }
         } else if (relative == "chunks/region/ground-objects.json") {
@@ -7129,6 +7328,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                               Filesystem::GenericUtf8PathString(entry.path()));
             if (entry.path() == world_manifest_path(save_dir) ||
                 entry.path() == plant_entities_path(save_dir) ||
+                entry.path() == plant_identities_path(save_dir) ||
                 entry.path() == ground_objects_path(save_dir) ||
                 entry.path() == field_pages_path(save_dir) ||
                 entry.path() == active_regions_path(save_dir)) {
@@ -7264,12 +7464,23 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 !validate_field_pages(save_dir, ledger, &errors, stop) ||
                 !ValidateRegionalEnergy(save_dir, ledger, &errors, stop))
                 return reject("");
+            Ecs::EntityRegistrySnapshot plants;
+            if (!load_plant_entities(plants, save_dir, &errors, stop))
+                return reject("");
+            if (plants.persistent_identity) {
+                if (!indexed)
+                    return reject(
+                        "Corrupt plant authority: identity map requires a snapshot index.");
+                world::GroundObjectStore ground;
+                if (!load_ground_objects(
+                        ground, save_dir, ledger.next_persistent_id(), &errors, stop))
+                    return reject("");
+                std::string plant_error;
+                if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
+                        plants, ledger, ground, plant_error))
+                    return reject(plant_error);
+            }
         }
-        Ecs::EntityRegistrySnapshot plants;
-        if (stop.stop_requested())
-            return reject("Saved-world validation cancelled.");
-        if (!load_plant_entities(plants, save_dir, &errors, stop))
-            return reject("");
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         if (indexed) {

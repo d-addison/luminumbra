@@ -18,20 +18,27 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <entt/entt.hpp>
 
+#include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/CropLifecycleComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/GrazeableComponent.h"
+#include "../components/IrrigationComponents.h"
+#include "../components/MortalComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../ecs/EntitySnapshot.h"
+#include "../world/GroundObjectStore.h"
 
 namespace luminumbra::foliage {
 
@@ -124,14 +131,149 @@ inline bool ValidComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& com
                FitsNumber<std::uint16_t>(data.at("species_id"));
     return true; // Unknown components remain forward-compatible and are skipped.
 }
+
+inline bool ExactFloat(const nlohmann::json& value) {
+    return value.is_number_float() && FitsNumber<float>(value) &&
+           static_cast<double>(value.get<float>()) == value.get<double>();
+}
+
+inline bool ScalarInRange(const nlohmann::json& value, float maximum) {
+    return ExactFloat(value) && value.get<double>() >= 0 && value.get<double>() <= maximum;
+}
+
+inline bool ValidOwnerCoordinate(const nlohmann::json& value) {
+    if (value.is_number_unsigned())
+        return value.get<std::uint64_t>() < 32768;
+    return value.is_number_integer() && value.get<std::int64_t>() >= -32768 &&
+           value.get<std::int64_t>() < 32768;
+}
+
+inline bool ValidEnabledComponent(const ::Luminumbra::Ecs::EntityComponentSnapshot& component) {
+    namespace C = ::Luminumbra::Components;
+    const auto& data = component.data;
+    const auto& type = component.type;
+    constexpr std::array<std::pair<std::string_view, std::size_t>, 14> fields = {
+        {{"Transform", 3},
+         {"PlantGenome", 1},
+         {"PlantGrowth", 8},
+         {"SoilFeeder", 2},
+         {"PlantHealth", 4},
+         {"Pollination", 4},
+         {"CropLifecycle", 5},
+         {"PlantRegion", 3},
+         {"PollinationTag", 0},
+         {"Combustible", 5},
+         {"Mortal", 3},
+         {"Grazeable", 2},
+         {"WaterSource", 1},
+         {"IgnitionSource", 2}}};
+    const auto found = std::find_if(
+        fields.begin(), fields.end(), [&](const auto& entry) { return entry.first == type; });
+    if (found == fields.end() || !data.is_object() || data.size() != found->second)
+        return false;
+    if (type == "Transform")
+        return ExactFloat(data.at("x")) && ExactFloat(data.at("y")) && ExactFloat(data.at("z"));
+    if (type == "PlantRegion")
+        return ValidOwnerCoordinate(data.at("owner_x")) &&
+               ValidOwnerCoordinate(data.at("owner_z")) &&
+               FitsNumber<std::uint64_t>(data.at("region_stamp"));
+    if (type == "PollinationTag")
+        return data.is_object() && data.empty();
+    if (type == "Combustible")
+        return FitsNumber<std::uint16_t>(data.at("fuel_milli")) &&
+               data.at("fuel_milli").get<std::uint16_t>() <= 1000 &&
+               FitsNumber<std::uint16_t>(data.at("moisture_milli")) &&
+               data.at("moisture_milli").get<std::uint16_t>() <= 1000 &&
+               FitsNumber<std::uint8_t>(data.at("burn_state")) &&
+               data.at("burn_state").get<std::uint8_t>() <
+                   static_cast<std::uint8_t>(C::BurnState::Count) &&
+               FitsNumber<std::uint32_t>(data.at("burn_ticks_remaining")) &&
+               ScalarInRange(data.at("ignition_radius"), 16777216.0f);
+    if (type == "Mortal")
+        return FitsNumber<std::uint32_t>(data.at("age_ticks")) &&
+               FitsNumber<std::uint32_t>(data.at("lifespan_ticks")) &&
+               FitsNumber<std::uint8_t>(data.at("dead")) && data.at("dead").get<unsigned>() <= 1;
+    if (type == "Grazeable")
+        return ScalarInRange(data.at("biomass"), 1.0f) &&
+               FitsNumber<std::uint32_t>(data.at("last_grazed_tick"));
+    if (type == "WaterSource")
+        return FitsNumber<std::uint16_t>(data.at("output"));
+    if (type == "IgnitionSource")
+        return ScalarInRange(data.at("radius"), 16777216.0f) &&
+               ScalarInRange(data.at("intensity"), 16777216.0f);
+    if (type == "PlantGenome" || type == "Pollination") {
+        const auto& genes = data.at(type == "PlantGenome" ? "genes" : "next_genome");
+        return ValidComponent(component) && genes.size() == C::kPlantGeneCount &&
+               std::all_of(
+                   genes.begin(), genes.end(), [](const auto& gene) { return ExactFloat(gene); });
+    }
+    return ValidComponent(component);
+}
+
+inline const nlohmann::json* ComponentData(const ::Luminumbra::Ecs::EntitySnapshotRecord& record,
+                                           std::string_view type) {
+    const auto found = std::find_if(record.components.begin(),
+                                    record.components.end(),
+                                    [&](const auto& c) { return c.type == type; });
+    return found == record.components.end() ? nullptr : &found->data;
+}
+
+// Called only after the fixed core and owner payloads have passed component admission.
+inline bool OwnerMatchesTransform(const ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
+    using Ledger = ::Luminumbra::world::ActiveRegionLedger;
+    const auto* transform = ComponentData(record, "Transform");
+    const auto* owner = ComponentData(record, "PlantRegion");
+    const auto* growth = ComponentData(record, "PlantGrowth");
+    if (!transform || !owner || !growth)
+        return false;
+    const ::Luminumbra::Vec3 position{transform->at("x").get<float>(),
+                                      transform->at("y").get<float>(),
+                                      transform->at("z").get<float>()};
+    const ::Luminumbra::world::RegionKey key{owner->at("owner_x").get<std::int32_t>(),
+                                             owner->at("owner_z").get<std::int32_t>()};
+    const auto stamp = owner->at("region_stamp").get<std::uint64_t>();
+    return Ledger::valid_anchor(position) && Ledger::region_at(position) == key &&
+           stamp <= growth->at("last_tick").get<std::uint64_t>() &&
+           growth->at("planted_tick").get<std::uint64_t>() <= stamp;
+}
+
+inline void ProjectEnabledComponents(const entt::registry& reg,
+                                     entt::entity entity,
+                                     ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
+    namespace C = ::Luminumbra::Components;
+    if (reg.all_of<C::PollinationTag>(entity))
+        record.components.push_back({"PollinationTag", nlohmann::json::object()});
+    if (const auto* value = reg.try_get<const C::CombustibleComponent>(entity))
+        record.components.push_back({"Combustible",
+                                     {{"fuel_milli", value->fuel_milli},
+                                      {"moisture_milli", value->moisture_milli},
+                                      {"burn_state", value->burn_state},
+                                      {"burn_ticks_remaining", value->burn_ticks_remaining},
+                                      {"ignition_radius", value->ignition_radius}}});
+    if (const auto* value = reg.try_get<const C::MortalComponent>(entity))
+        record.components.push_back({"Mortal",
+                                     {{"age_ticks", value->age_ticks},
+                                      {"lifespan_ticks", value->lifespan_ticks},
+                                      {"dead", value->dead}}});
+    if (const auto* value = reg.try_get<const C::GrazeableComponent>(entity))
+        record.components.push_back(
+            {"Grazeable",
+             {{"biomass", value->biomass}, {"last_grazed_tick", value->last_grazed_tick}}});
+    if (const auto* value = reg.try_get<const C::WaterSourceComponent>(entity))
+        record.components.push_back({"WaterSource", {{"output", value->output}}});
+    if (const auto* value = reg.try_get<const C::IgnitionSourceComponent>(entity))
+        record.components.push_back(
+            {"IgnitionSource", {{"radius", value->radius}, {"intensity", value->intensity}}});
+}
 } // namespace pp_detail
 
 // Project all plant entities into a deterministic snapshot. Plants need (at minimum) PlantTag +
 // growth + genome + transform; soil/health/pollination/lifecycle are optional (per-plant opt-in).
 [[nodiscard]] inline ::Luminumbra::Ecs::EntityRegistrySnapshot
-BuildPlantEntitySnapshot(const entt::registry& reg) {
+BuildPlantEntitySnapshot(const entt::registry& reg, bool persistent_identity = false) {
     namespace C = ::Luminumbra::Components;
     ::Luminumbra::Ecs::EntityRegistrySnapshot snap;
+    snap.persistent_identity = persistent_identity;
     auto view = reg.view<const C::PlantTag,
                          const C::PlantGrowthComponent,
                          const C::PlantGenomeComponent,
@@ -141,7 +283,18 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
     for (auto e : ents) {
         ::Luminumbra::Ecs::EntitySnapshotRecord rec;
         rec.entity_id = static_cast<std::uint64_t>(entt::to_integral(e));
+        rec.legacy_entity_id = rec.entity_id;
         rec.name = "plant";
+        if (persistent_identity) {
+            if (const auto* owner = reg.try_get<const C::PlantRegionComponent>(e)) {
+                rec.entity_id = owner->persistent_id;
+                rec.components.push_back({"PlantRegion",
+                                          {{"owner_x", owner->owner_x},
+                                           {"owner_z", owner->owner_z},
+                                           {"region_stamp", owner->region_stamp}}});
+            }
+            pp_detail::ProjectEnabledComponents(reg, e, rec);
+        }
 
         const auto& tf = reg.get<const C::TransformComponent>(e);
         rec.components.push_back(
@@ -201,28 +354,54 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
 inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
                                         bool require_core_components = true) {
     try {
+        std::set<std::uint64_t> ids;
         for (const auto& record : snap.entities) {
+            if (snap.persistent_identity &&
+                (record.name != "plant" || record.entity_id == 0 ||
+                 record.entity_id >= ::Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit ||
+                 !ids.insert(record.entity_id).second))
+                return false;
             if (record.name != "plant")
                 continue;
             // Fixed shipping component set; unknown extension payloads are ignored.
-            constexpr std::array<std::string_view, 7> known = {"Transform",
-                                                               "PlantGenome",
-                                                               "PlantGrowth",
-                                                               "SoilFeeder",
-                                                               "PlantHealth",
-                                                               "Pollination",
-                                                               "CropLifecycle"};
+            constexpr std::array<std::string_view, 14> known = {"Transform",
+                                                                "PlantGenome",
+                                                                "PlantGrowth",
+                                                                "SoilFeeder",
+                                                                "PlantHealth",
+                                                                "Pollination",
+                                                                "CropLifecycle",
+                                                                "PlantRegion",
+                                                                "PollinationTag",
+                                                                "Combustible",
+                                                                "Mortal",
+                                                                "Grazeable",
+                                                                "WaterSource",
+                                                                "IgnitionSource"};
             std::array<bool, known.size()> seen{};
             for (const auto& component : record.components) {
                 const auto found = std::find(known.begin(), known.end(), component.type);
-                if (found == known.end())
+                if (found == known.end()) {
+                    if (snap.persistent_identity)
+                        return false;
                     continue;
+                }
                 const auto index = static_cast<std::size_t>(found - known.begin());
-                if (seen[index] || !pp_detail::ValidComponent(component))
+                if (!snap.persistent_identity && index >= 7) {
+                    if (component.type == "PlantRegion")
+                        return false;
+                    continue;
+                }
+                if (seen[index] ||
+                    !(snap.persistent_identity ? pp_detail::ValidEnabledComponent(component)
+                                               : pp_detail::ValidComponent(component)))
                     return false;
                 seen[index] = true;
             }
-            if (require_core_components && (!seen[0] || !seen[1] || !seen[2]))
+            if ((require_core_components || snap.persistent_identity) &&
+                (!seen[0] || !seen[1] || !seen[2]))
+                return false;
+            if (snap.persistent_identity && (!seen[7] || !pp_detail::OwnerMatchesTransform(record)))
                 return false;
         }
         return true;
@@ -230,6 +409,105 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
         return false;
     }
 }
+
+inline bool HasPersistentPlantIdentity(const entt::registry& reg) {
+    const auto plants = reg.view<const ::Luminumbra::Components::PlantTag,
+                                 const ::Luminumbra::Components::PlantRegionComponent>();
+    return plants.begin() != plants.end();
+}
+
+// Error-returning enabled projection; an incomplete tagged plant is never silently omitted.
+inline bool BuildPlantEntitySnapshot(const entt::registry& reg,
+                                     ::Luminumbra::Ecs::EntityRegistrySnapshot& out,
+                                     std::string& error) {
+    namespace C = ::Luminumbra::Components;
+    for (const auto entity : reg.view<const C::PlantTag>()) {
+        if (!reg.all_of<C::TransformComponent,
+                        C::PlantGenomeComponent,
+                        C::PlantGrowthComponent,
+                        C::PlantRegionComponent>(entity)) {
+            error = "Corrupt plant authority: incomplete persistent plant.";
+            return false;
+        }
+    }
+    auto candidate = BuildPlantEntitySnapshot(reg, true);
+    if (!ValidatePlantEntitySnapshot(candidate)) {
+        error = "Corrupt plant authority: invalid identity or component value.";
+        return false;
+    }
+    out = std::move(candidate);
+    return true;
+}
+
+inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
+                                        const ::Luminumbra::world::ActiveRegionLedger& ledger,
+                                        const ::Luminumbra::world::GroundObjectStore& ground,
+                                        std::string& error) {
+    if (!ValidatePlantEntitySnapshot(snap)) {
+        error = "Corrupt plant authority: invalid identity or component value.";
+        return false;
+    }
+    if (!snap.persistent_identity)
+        return true;
+    for (const auto& record : snap.entities) {
+        if (record.entity_id >= ledger.next_persistent_id() || ground.find(record.entity_id)) {
+            error = "Corrupt plant authority: duplicate or unallocated plant ID.";
+            return false;
+        }
+        const auto* owner = pp_detail::ComponentData(record, "PlantRegion");
+        if (!owner) {
+            error = "Corrupt plant authority: incomplete persistent plant.";
+            return false;
+        }
+        const ::Luminumbra::world::RegionKey key{owner->at("owner_x").get<std::int32_t>(),
+                                                 owner->at("owner_z").get<std::int32_t>()};
+        if (!ledger.records().contains(key) ||
+            owner->at("region_stamp").get<std::uint64_t>() > ledger.header_tick()) {
+            error = "Corrupt plant authority: orphaned owner or future stamp.";
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace pp_detail {
+inline void ApplyEnabledComponent(entt::registry& reg,
+                                  entt::entity entity,
+                                  const ::Luminumbra::Ecs::EntityComponentSnapshot& component,
+                                  std::uint64_t persistent_id) {
+    namespace C = ::Luminumbra::Components;
+    const auto& data = component.data;
+    if (component.type == "PlantRegion")
+        reg.emplace<C::PlantRegionComponent>(entity,
+                                             persistent_id,
+                                             data.at("owner_x").get<std::int32_t>(),
+                                             data.at("owner_z").get<std::int32_t>(),
+                                             data.at("region_stamp").get<std::uint64_t>());
+    else if (component.type == "PollinationTag")
+        reg.emplace<C::PollinationTag>(entity);
+    else if (component.type == "Combustible")
+        reg.emplace<C::CombustibleComponent>(entity,
+                                             data.at("fuel_milli").get<std::uint16_t>(),
+                                             data.at("moisture_milli").get<std::uint16_t>(),
+                                             data.at("burn_state").get<std::uint8_t>(),
+                                             data.at("burn_ticks_remaining").get<std::uint32_t>(),
+                                             data.at("ignition_radius").get<float>());
+    else if (component.type == "Mortal")
+        reg.emplace<C::MortalComponent>(entity,
+                                        data.at("age_ticks").get<std::uint32_t>(),
+                                        data.at("lifespan_ticks").get<std::uint32_t>(),
+                                        data.at("dead").get<std::uint8_t>());
+    else if (component.type == "Grazeable")
+        reg.emplace<C::GrazeableComponent>(entity,
+                                           data.at("biomass").get<float>(),
+                                           data.at("last_grazed_tick").get<std::uint32_t>());
+    else if (component.type == "WaterSource")
+        reg.emplace<C::WaterSourceComponent>(entity, data.at("output").get<std::uint16_t>());
+    else if (component.type == "IgnitionSource")
+        reg.emplace<C::IgnitionSourceComponent>(
+            entity, data.at("radius").get<float>(), data.at("intensity").get<float>());
+}
+} // namespace pp_detail
 
 // Reconstruct plant entities from a snapshot into `reg` (creates fresh entities). Unknown component
 // types are skipped. Returns false without registry mutation for invalid input.
@@ -239,6 +517,16 @@ inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
     if (!ValidatePlantEntitySnapshot(snap))
         return false;
     namespace C = ::Luminumbra::Components;
+    if (snap.persistent_identity) {
+        // Save/load only: bounded by the admitted roster, never run on the tick path.
+        std::set<std::uint64_t> existing_ids;
+        for (const auto entity : reg.view<const C::PlantRegionComponent>())
+            existing_ids.insert(reg.get<const C::PlantRegionComponent>(entity).persistent_id);
+        for (const auto& record : snap.entities) {
+            if (existing_ids.contains(record.entity_id))
+                return false;
+        }
+    }
     for (const auto& rec : snap.entities) {
         if (rec.name != "plant")
             continue;
@@ -246,6 +534,8 @@ inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
         reg.emplace<C::PlantTag>(e);
         for (const auto& comp : rec.components) {
             const nlohmann::json& d = comp.data;
+            if (snap.persistent_identity)
+                pp_detail::ApplyEnabledComponent(reg, e, comp, rec.entity_id);
             if (comp.type == "Transform") {
                 auto& tf = reg.emplace<C::TransformComponent>(e);
                 tf.position = ::Luminumbra::Vec3(
@@ -279,7 +569,8 @@ inline bool ApplyPlantEntitySnapshot(entt::registry& reg,
                 // and the pollination tick views PollinationTag — without it a reloaded field would
                 // stop drifting. Co-emplaced with the component (they are always added together at
                 // spawn).
-                reg.emplace<C::PollinationTag>(e);
+                if (!snap.persistent_identity)
+                    reg.emplace<C::PollinationTag>(e);
                 auto& pc = reg.emplace<C::PollinationComponent>(e);
                 pc.pollinated = d.at("pollinated").get<bool>();
                 pc.last_pollen_tick = d.at("last_pollen_tick").get<std::uint64_t>();

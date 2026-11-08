@@ -988,6 +988,7 @@ bool member_path_allowed(std::string_view relative_path) {
     if (relative_path == "world_info.json" || relative_path == "aether_state.efs" ||
         relative_path == "chunks/region/world-manifest.json" ||
         relative_path == "chunks/region/plant-entities.json" ||
+        relative_path == "chunks/region/plant-identities.json" ||
         relative_path == "chunks/region/ground-objects.json" ||
         relative_path == "chunks/region/field-pages.fpg" ||
         relative_path == "chunks/region/active-regions.arl") {
@@ -1952,6 +1953,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "aether_state.efs",
                 "chunks/region/world-manifest.json",
                 "chunks/region/plant-entities.json",
+                "chunks/region/plant-identities.json",
                 "chunks/region/ground-objects.json",
                 "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",

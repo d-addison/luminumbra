@@ -3,9 +3,11 @@
 // pollination/lifecycle sim truth). Empty roster -> empty snapshot (no-plant save byte-identical).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -1006,4 +1008,303 @@ TEST_F(PlantSaveRecovery, PreparedPlantWriteOwnsBytesAndFailedReprepareCannotPub
     ASSERT_TRUE(prepared.publish(Directory()));
     EXPECT_FALSE(std::filesystem::exists(path));
     ASSERT_TRUE(prepared.publish(Directory()));
+}
+
+namespace {
+E::EntityRegistrySnapshot IdentityPlants() {
+    entt::registry plants;
+    const auto first = barePlant(plants, 1.0f, 3, 500);
+    const auto second = barePlant(plants, 2.0f, 4, 600);
+    plants.emplace<C::PlantRegionComponent>(first, C::PlantRegionComponent{17, 0, -1, 600});
+    plants.emplace<C::PlantRegionComponent>(second, C::PlantRegionComponent{18, 0, -1, 700});
+    plants.emplace<C::CombustibleComponent>(first, C::CombustibleComponent{900, 300, 1, 41, 2.5f});
+    plants.emplace<C::MortalComponent>(first, C::MortalComponent{42, 9000, 0});
+    plants.emplace<C::GrazeableComponent>(first, C::GrazeableComponent{0.25f, 21});
+    plants.emplace<C::WaterSourceComponent>(first, C::WaterSourceComponent{123});
+    plants.emplace<C::IgnitionSourceComponent>(first, C::IgnitionSourceComponent{4.0f, 0.5f});
+    plants.emplace<C::SoilFeederComponent>(first);
+    plants.emplace<C::PlantHealthComponent>(first);
+    plants.emplace<C::CropLifecycleComponent>(first);
+    plants.emplace<C::PollinationComponent>(first);
+    plants.emplace<C::PollinationTag>(second);
+    return F::BuildPlantEntitySnapshot(plants, true);
+}
+
+nlohmann::json& IdentityData(E::EntityRegistrySnapshot& snapshot, std::string_view type) {
+    auto& components = snapshot.entities.front().components;
+    const auto found = std::find_if(
+        components.begin(), components.end(), [&](const auto& c) { return c.type == type; });
+    return found->data;
+}
+
+void ExpectIdentityRefused(const E::EntityRegistrySnapshot& snapshot) {
+    EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot, false));
+    entt::registry target;
+    const auto existing = barePlant(target, 3.0f, 3, 100);
+    const auto before = E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target));
+    EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, snapshot));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target)), before);
+    EXPECT_EQ(entt::to_integral(target.create()), entt::to_integral(existing) + 1u);
+    std::string bytes = "unchanged";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(Luminumbra::Persistence::WorldSaveService::prepare_plant_entities(
+        snapshot, bytes, &errors));
+    EXPECT_EQ(bytes, "unchanged");
+    EXPECT_FALSE(errors.empty());
+}
+
+void ExpectEnabledFieldRefused(const E::EntityRegistrySnapshot& original,
+                               std::size_t component_index,
+                               const std::string& key,
+                               bool missing) {
+    auto changed = original;
+    auto& data = changed.entities.front().components[component_index].data;
+    if (missing)
+        data.erase(key);
+    else
+        data[key] = "invalid";
+    ExpectIdentityRefused(changed);
+}
+
+void CheckIdentityRoundtrip() {
+    const auto original = IdentityPlants();
+    ASSERT_TRUE(F::ValidatePlantEntitySnapshot(original));
+    const auto bytes = E::SerializeEntityRegistrySnapshotJson(original);
+    E::EntityRegistrySnapshot loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors));
+    EXPECT_TRUE(loaded.persistent_identity);
+    entt::registry target;
+    static_cast<void>(target.create()); // Runtime entity handles need not equal persistent IDs.
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, loaded));
+    std::string error;
+    E::EntityRegistrySnapshot projected;
+    ASSERT_TRUE(F::BuildPlantEntitySnapshot(target, projected, error)) << error;
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(projected), bytes);
+    for (const auto entity : target.view<C::PlantRegionComponent>()) {
+        const auto& owner = target.get<C::PlantRegionComponent>(entity);
+        EXPECT_NE(owner.persistent_id, entt::to_integral(entity));
+        if (owner.persistent_id == 17) {
+            EXPECT_TRUE(target.all_of<C::PollinationComponent>(entity));
+            EXPECT_FALSE(target.all_of<C::PollinationTag>(entity));
+            EXPECT_TRUE((target.all_of<C::CombustibleComponent,
+                                       C::MortalComponent,
+                                       C::GrazeableComponent,
+                                       C::WaterSourceComponent,
+                                       C::IgnitionSourceComponent>(entity)));
+        } else {
+            EXPECT_TRUE(target.all_of<C::PollinationTag>(entity));
+            EXPECT_FALSE(target.all_of<C::PollinationComponent>(entity));
+        }
+    }
+    EXPECT_FALSE(F::ApplyPlantEntitySnapshot(target, loaded)); // Refuse live ID collisions too.
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target, true)),
+              bytes);
+}
+
+void CheckIdentityStructureRefusals() {
+    const auto original = IdentityPlants();
+    for (const auto id : {std::uint64_t{0},
+                          std::uint64_t{1} << 63,
+                          std::numeric_limits<std::uint64_t>::max(),
+                          std::uint64_t{18}}) {
+        auto changed = original;
+        changed.entities.front().entity_id = id;
+        ExpectIdentityRefused(changed);
+    }
+    for (std::size_t index = 0; index < original.entities.front().components.size(); ++index) {
+        auto changed = original;
+        changed.entities.front().components.push_back(changed.entities.front().components[index]);
+        ExpectIdentityRefused(changed);
+        changed = original;
+        changed.entities.front().components[index].data["unknown"] = 0;
+        ExpectIdentityRefused(changed);
+        const auto& component = original.entities.front().components[index];
+        for (auto field = component.data.begin(); field != component.data.end(); ++field) {
+            ExpectEnabledFieldRefused(original, index, field.key(), false);
+            ExpectEnabledFieldRefused(original, index, field.key(), true);
+        }
+    }
+    for (const auto* type : {"Transform", "PlantGrowth", "PlantGenome", "PlantRegion"}) {
+        auto changed = original;
+        std::erase_if(changed.entities.front().components,
+                      [&](const auto& c) { return c.type == type; });
+        ExpectIdentityRefused(changed);
+    }
+    auto changed = original;
+    changed.entities.back().components.push_back({"Future", nlohmann::json::object()});
+    ExpectIdentityRefused(changed);
+    changed = original;
+    changed.persistent_identity = false;
+    ExpectIdentityRefused(changed);
+    changed = original;
+    changed.entities.back().name = "extension";
+    ExpectIdentityRefused(changed);
+    changed = original;
+    auto& marker_components = changed.entities.back().components;
+    const auto marker = std::find_if(marker_components.begin(),
+                                     marker_components.end(),
+                                     [](const auto& c) { return c.type == "PollinationTag"; });
+    marker->data = {{"invalid", true}};
+    ExpectIdentityRefused(changed);
+}
+
+void CheckIdentityRanges() {
+    const auto original = IdentityPlants();
+    struct InvalidField {
+        const char* type;
+        const char* field;
+        nlohmann::json value;
+    };
+    const InvalidField cases[] = {
+        {"PlantRegion", "owner_x", -32769},
+        {"PlantRegion", "owner_z", 32768u},
+        {"PlantRegion", "owner_x", 1e38},
+        {"PlantRegion", "owner_z", 0},
+        {"PlantRegion", "region_stamp", -1},
+        {"PlantRegion", "region_stamp", 99u},
+        {"PlantGrowth", "planted_tick", 601u},
+        {"Transform", "x", 16777216.0},
+        {"Transform", "x", 0.1},
+        {"Transform", "x", 1},
+        {"Combustible", "fuel_milli", 1001},
+        {"Combustible", "moisture_milli", 1001},
+        {"Combustible", "burn_state", 3},
+        {"Combustible", "burn_ticks_remaining", 1e38},
+        {"Combustible", "ignition_radius", -1},
+        {"Mortal", "dead", 2},
+        {"Mortal", "age_ticks", -1},
+        {"Grazeable", "biomass", 1.01},
+        {"Grazeable", "biomass", 0.1},
+        {"Grazeable", "last_grazed_tick", 1e38},
+        {"WaterSource", "output", 65536},
+        {"IgnitionSource", "radius", 1e38},
+        {"IgnitionSource", "intensity", -1},
+        {"PlantGenome", "genes", nlohmann::json::array({0.5})},
+        {"PlantGenome", "genes", std::vector<double>(C::kPlantGeneCount, 0.1)},
+        {"Pollination", "next_genome", nlohmann::json::array({0.5})}};
+    for (const auto& invalid : cases) {
+        SCOPED_TRACE(std::string(invalid.type) + "." + invalid.field);
+        auto changed = original;
+        IdentityData(changed, invalid.type)[invalid.field] = invalid.value;
+        ExpectIdentityRefused(changed);
+    }
+}
+
+void CheckIdentityParserRefusals() {
+    const auto original = IdentityPlants();
+    const auto before = E::SerializeEntityRegistrySnapshotJson(original);
+    auto encoded = nlohmann::json::parse(before);
+    for (const auto& invalid : std::vector<nlohmann::json>{-1, 1.5, 1e38, "17", nullptr, true}) {
+        encoded["entities"][0]["entity_id"] = invalid;
+        auto loaded = original;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(E::LoadEntityRegistrySnapshotJson(encoded.dump(), loaded, errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), before);
+    }
+    encoded = nlohmann::json::parse(before);
+    encoded["identity_mode"] = "unknown";
+    auto loaded = original;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(E::LoadEntityRegistrySnapshotJson(encoded.dump(), loaded, errors));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), before);
+}
+
+void CheckLegacyIdentityOptOut() {
+    entt::registry plants;
+    const auto entity = barePlant(plants, 1.0f, 3, 500);
+    const auto before = E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(plants));
+    plants.emplace<C::PlantRegionComponent>(entity, C::PlantRegionComponent{17, 0, -1, 600});
+    plants.emplace<C::MortalComponent>(entity);
+    const auto legacy = F::BuildPlantEntitySnapshot(plants);
+    std::string bytes;
+    ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::prepare_plant_entities(legacy, bytes));
+    EXPECT_EQ(bytes, before);
+    EXPECT_EQ(bytes.find("identity_mode"), std::string::npos);
+    E::EntityRegistrySnapshot loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors));
+    EXPECT_FALSE(loaded.persistent_identity);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), before);
+    plants.remove<C::PlantRegionComponent>(entity);
+    std::string error;
+    EXPECT_FALSE(F::BuildPlantEntitySnapshot(plants, loaded, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), before);
+    ExpectIdentityRefused(F::BuildPlantEntitySnapshot(plants, true));
+    plants.emplace<C::PlantRegionComponent>(entity, C::PlantRegionComponent{0, 0, -1, 600});
+    EXPECT_FALSE(F::BuildPlantEntitySnapshot(plants, loaded, error));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), before);
+}
+
+void CheckIdentityBoundaryAndEmptyRoster() {
+    auto snapshot = IdentityPlants();
+    snapshot.entities.front().entity_id =
+        Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit - 1;
+    ASSERT_TRUE(F::ValidatePlantEntitySnapshot(snapshot));
+    entt::registry target;
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(target, snapshot));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(target, true)),
+              E::SerializeEntityRegistrySnapshotJson(snapshot));
+    entt::registry empty;
+    std::string error;
+    ASSERT_TRUE(F::BuildPlantEntitySnapshot(empty, snapshot, error));
+    EXPECT_TRUE(snapshot.persistent_identity);
+    EXPECT_TRUE(snapshot.entities.empty());
+    EXPECT_TRUE(F::ApplyPlantEntitySnapshot(target, snapshot));
+}
+} // namespace
+
+TEST(PlantPersistence, PersistentIdentityAndEnabledComponentsRoundTrip) {
+    CheckIdentityRoundtrip();
+    CheckIdentityBoundaryAndEmptyRoster();
+}
+TEST(PlantPersistence, PersistentIdentityRefusalsAreAtomic) {
+    CheckIdentityStructureRefusals();
+    CheckIdentityRanges();
+    CheckIdentityParserRefusals();
+}
+TEST(PlantPersistence, LegacyProjectionBytesStayUnchangedAndEnabledProjectionReturnsErrors) {
+    CheckLegacyIdentityOptOut();
+}
+
+TEST(PlantPersistence, GameplayProjectionKeepsAuthorityAndRefusesMixedRosters) {
+    entt::registry plants;
+    EXPECT_FALSE(F::HasPersistentPlantIdentity(plants));
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(plants, IdentityPlants()));
+    ASSERT_TRUE(F::HasPersistentPlantIdentity(plants));
+    E::EntityRegistrySnapshot snapshot;
+    std::string error;
+    ASSERT_TRUE(F::BuildPlantEntitySnapshot(plants, snapshot, error));
+    const auto before = E::SerializeEntityRegistrySnapshotJson(snapshot);
+    barePlant(plants, 3.0f, 1, 100);
+    EXPECT_FALSE(F::BuildPlantEntitySnapshot(plants, snapshot, error));
+    EXPECT_NE(error.find("Corrupt plant authority:"), std::string::npos);
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(snapshot), before);
+}
+
+TEST(PlantPersistence, IdentityMapUsesPayloadOrderAndExactLegacyProjection) {
+    entt::registry plants;
+    ASSERT_TRUE(F::ApplyPlantEntitySnapshot(plants, IdentityPlants()));
+    for (const auto entity : plants.view<C::PlantRegionComponent>()) {
+        auto& owner = plants.get<C::PlantRegionComponent>(entity);
+        owner.persistent_id = 35u - owner.persistent_id;
+    }
+    const auto legacy = F::BuildPlantEntitySnapshot(plants, false);
+    std::string payload;
+    std::string identity;
+    ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::prepare_plant_entities(
+        F::BuildPlantEntitySnapshot(plants, true), payload, nullptr, &identity));
+    EXPECT_EQ(payload, E::SerializeEntityRegistrySnapshotJson(legacy));
+    EXPECT_EQ(payload.find("identity_mode"), std::string::npos);
+    EXPECT_EQ(payload.find("PlantRegion"), std::string::npos);
+    E::EntityRegistrySnapshot parent;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(payload, parent, errors));
+    EXPECT_FALSE(parent.persistent_identity);
+    EXPECT_EQ(parent.entities.size(), 2u);
+    const auto map = nlohmann::json::parse(identity);
+    EXPECT_EQ(map.at("plants")[0].at("persistent_id"), 18u);
+    EXPECT_EQ(map.at("plants")[1].at("persistent_id"), 17u);
 }

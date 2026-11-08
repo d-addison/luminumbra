@@ -23,10 +23,13 @@ struct EntitySnapshotRecord {
     std::uint64_t entity_id = 0;
     std::string name;
     std::vector<EntityComponentSnapshot> components;
+    // Transient runtime handle for the legacy plant projection; never serialized here.
+    std::uint64_t legacy_entity_id = 0;
 };
 
 struct EntityRegistrySnapshot {
     std::vector<EntitySnapshotRecord> entities;
+    bool persistent_identity = false;
 };
 
 inline const char* EntitySnapshotSchema() {
@@ -83,12 +86,15 @@ inline std::string SerializeEntityRegistrySnapshotJson(EntityRegistrySnapshot sn
                              {"entity_count", snapshot.entities.size()},
                              {"component_count", component_count},
                              {"entities", std::move(entities)}};
+    if (snapshot.persistent_identity)
+        output["identity_mode"] = "shared_allocator_v1";
     return StableEntitySnapshotDump(output);
 }
 
 inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
                                            EntityRegistrySnapshot& out_snapshot,
-                                           std::vector<std::string>& errors) {
+                                           std::vector<std::string>& errors,
+                                           bool sort_entities = true) {
     if (!Persistence::SavedInputLimits::JsonDepthAllowed(json_text)) {
         errors.push_back(
             "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
@@ -106,10 +112,22 @@ inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
         }
 
         EntityRegistrySnapshot loaded;
+        if (snapshot.contains("identity_mode")) {
+            if (snapshot.at("identity_mode") != "shared_allocator_v1") {
+                errors.push_back("unknown entity identity mode");
+                return false;
+            }
+            loaded.persistent_identity = true;
+        }
         std::size_t component_count = 0;
         for (const nlohmann::json& entity_json : snapshot.at("entities")) {
             EntitySnapshotRecord entity;
+            if (loaded.persistent_identity && !entity_json.at("entity_id").is_number_unsigned()) {
+                errors.push_back("persistent entity ID must be an unsigned integer");
+                return false;
+            }
             entity.entity_id = entity_json.at("entity_id").get<std::uint64_t>();
+            entity.legacy_entity_id = entity.entity_id;
             entity.name = entity_json.at("name").get<std::string>();
 
             for (const nlohmann::json& component_json : entity_json.at("components")) {
@@ -129,7 +147,8 @@ inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
             return false;
         }
 
-        SortEntityRegistrySnapshot(loaded);
+        if (sort_entities)
+            SortEntityRegistrySnapshot(loaded);
         out_snapshot = std::move(loaded);
         return true;
     } catch (const std::exception& e) {

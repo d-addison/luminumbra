@@ -3499,8 +3499,14 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // BOTH the dirty-empty and the normal save path (plants are independent of chunk dirtiness). An
     // empty roster writes NO file, so a no-plant save stays byte-identical (the save-less path
     // holds).
-    const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
+    Ecs::EntityRegistrySnapshot plant_snapshot;
+    std::string plant_error;
+    const bool persistent_plants = luminumbra::foliage::HasPersistentPlantIdentity(m_registry);
+    if (!persistent_plants)
+        plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
+    if ((persistent_plants &&
+         !luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, plant_snapshot, plant_error)) ||
+        !luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
         LUMINUMBRA_CORE_ERROR("Saved-input admission refused: invalid plant component value.");
         return false;
     }
@@ -4106,7 +4112,13 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         }
     }
 
-    // Plant numeric projection was admitted before any live state changed.
+    // Plant numeric projection was admitted before any live state changed. A persistent
+    // roster replaces the live plants; its identities must not collide with stale entities.
+    if (saved.plants.persistent_identity) {
+        const auto stale_view = m_registry.view<Luminumbra::Components::PlantTag>();
+        const std::vector<entt::entity> stale(stale_view.begin(), stale_view.end());
+        m_registry.destroy(stale.begin(), stale.end());
+    }
     luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
 
     // Commit the validated cursor only after every refusing load step passes.
