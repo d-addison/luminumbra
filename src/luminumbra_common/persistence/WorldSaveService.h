@@ -132,7 +132,10 @@ public:
     // (region/plant-entities.json). Generic over the engine's EntityRegistrySnapshot; the plant
     // projection lives in foliage/PlantPersistence.h. An EMPTY snapshot writes NO file (and removes
     // a stale one) so a no-plant save is byte-identical. The chunk LMR1 path is UNTOUCHED.
+    // Persistent identities use a versioned plant-identities.json bound to the legacy payload
+    // bytes.
     static std::filesystem::path plant_entities_path(const std::filesystem::path& save_dir);
+    static std::filesystem::path plant_identities_path(const std::filesystem::path& save_dir);
     static bool save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
@@ -151,6 +154,7 @@ public:
     private:
         // Bounded by SavedInputLimits::kPlantFileBytes during preparation.
         std::string m_bytes;
+        std::string m_identity_bytes;
         bool m_prepared = false;
         bool m_empty = true;
     };
@@ -655,7 +659,8 @@ public:
                                      std::vector<std::string>* errors = nullptr);
     static bool prepare_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
                                        std::string& bytes,
-                                       std::vector<std::string>* errors = nullptr);
+                                       std::vector<std::string>* errors = nullptr,
+                                       std::string* identity_bytes = nullptr);
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in

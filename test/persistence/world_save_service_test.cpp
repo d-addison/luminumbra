@@ -4,13 +4,16 @@
 #include "../support/CalendarMetadataCases.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 
 #include "core/FilesystemPath.h"
+#include "core/JobSystem.h"
 #include "core/Log.h"
 #include "core/LogDispatcherSink.h"
 #include "fields/FieldPageState.h"
 #include "luminumbra/core/Types.h"
 #include "persistence/CreatedWorldArtifacts.h"
+#include "persistence/PlantPersistence.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -18,6 +21,7 @@
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
+#include "world/GameSession.h"
 #include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
 #include "world/WorldClock.h"
@@ -4144,4 +4148,633 @@ TEST(WorldSaveService, LegacyEnergyAdmissionRetainsTheReaderPageRange) {
         SCOPED_TRACE(pages);
         ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyReaderPageLimit(pages));
     }
+}
+
+namespace {
+enum class PlantAdmissionCase {
+    Valid,
+    MissingLedger,
+    Unallocated,
+    Collision,
+    Orphan,
+    FutureStamp,
+    FutureGrowth
+};
+
+Luminumbra::Ecs::EntityRegistrySnapshot
+WorldPlantSnapshot(bool persistent, PlantAdmissionCase admission = PlantAdmissionCase::Valid) {
+    namespace C = Luminumbra::Components;
+    entt::registry plants;
+    const auto plant = plants.create();
+    plants.emplace<C::PlantTag>(plant);
+    plants.emplace<C::TransformComponent>(plant).position = Vec3{1, 2, -1};
+    plants.emplace<C::PlantGenomeComponent>(plant);
+    plants.emplace<C::PlantGrowthComponent>(plant).last_tick =
+        admission == PlantAdmissionCase::FutureStamp ||
+                admission == PlantAdmissionCase::FutureGrowth
+            ? 32
+            : 31;
+    plants.emplace<C::PlantRegionComponent>(
+        plant,
+        C::PlantRegionComponent{
+            1, 0, -1, admission == PlantAdmissionCase::FutureStamp ? 32u : 31u});
+    plants.emplace<C::CombustibleComponent>(plant);
+    plants.emplace<C::MortalComponent>(plant);
+    plants.emplace<C::GrazeableComponent>(plant);
+    plants.emplace<C::WaterSourceComponent>(plant);
+    plants.emplace<C::IgnitionSourceComponent>(plant);
+    plants.emplace<C::PollinationTag>(plant);
+    return luminumbra::foliage::BuildPlantEntitySnapshot(plants, persistent);
+}
+
+void WriteIndexedPlants(const std::filesystem::path& directory,
+                        const Luminumbra::Ecs::EntityRegistrySnapshot& plants,
+                        PlantAdmissionCase admission,
+                        std::uint64_t tick = 31,
+                        bool idle_regions = false) {
+    namespace P = Luminumbra::Persistence;
+    using namespace Luminumbra::world;
+    const WorldClock clock(tick);
+    ActiveRegionLedger ledger({}, clock);
+    if (admission != PlantAdmissionCase::Orphan) {
+        if (idle_regions) {
+            ledger.activate_owned({0, -1}, clock);
+            ledger.activate_owned({1, 0}, clock);
+        } else {
+            ledger.mark_edited({0, -1}, clock);
+        }
+    }
+    if (admission != PlantAdmissionCase::Unallocated) {
+        for (std::size_t i = 0; i < std::max(std::size_t{1}, plants.entities.size()); ++i) {
+            std::uint64_t id = 0;
+            ASSERT_TRUE(ledger.allocate_persistent_id(id));
+            ASSERT_EQ(id, i + 1u);
+        }
+    }
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    WorldSaveService::SaveFactsScope facts(directory);
+    P::SaveTransaction transaction(directory, tick, {}, &WorldSaveService::member_digest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+    if (admission == PlantAdmissionCase::MissingLedger) {
+        // A repeat publication keeps the committed metadata member untouched.
+        if (!std::filesystem::exists(directory / "world_info.json")) {
+            ASSERT_TRUE(transaction.protect({"world_info.json"}, &errors)) << JoinErrors(errors);
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                directory, "world_info.json", metadata.dump(), &errors))
+                << JoinErrors(errors);
+        }
+    } else {
+        ASSERT_TRUE(
+            WorldSaveService::save_metadata_and_active_regions(metadata.dump(), ledger, directory));
+    }
+    if (admission == PlantAdmissionCase::Collision) {
+        GroundObjectStore ground;
+        ASSERT_TRUE(ground.insert({.id = 1, .type = 1, .z_mm = -1000}));
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(ground, directory, &errors))
+            << JoinErrors(errors);
+    }
+    ASSERT_TRUE(WorldSaveService::save_plant_entities(plants, directory, &errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(directory, &errors))
+        << JoinErrors(errors);
+    ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+}
+
+void CheckWorldPlantAdmission(PlantAdmissionCase admission, bool persistent = true) {
+    const TempSaveDir save("plant_identity");
+    auto original = WorldPlantSnapshot(persistent, admission);
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(save.path(), original, admission));
+    const auto path = WorldSaveService::plant_entities_path(save.path());
+    const auto before = ReadFileBytes(path);
+    std::string legacy_bytes;
+    ASSERT_TRUE(WorldSaveService::prepare_plant_entities(original, legacy_bytes));
+    EXPECT_EQ(before, legacy_bytes);
+    if (admission != PlantAdmissionCase::FutureStamp &&
+        admission != PlantAdmissionCase::FutureGrowth) {
+        EXPECT_EQ(before,
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(WorldPlantSnapshot(false)));
+    }
+    EXPECT_EQ(std::filesystem::exists(WorldSaveService::plant_identities_path(save.path())),
+              persistent);
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save.path(), index, nullptr));
+    EXPECT_EQ(std::any_of(index.members.begin(),
+                          index.members.end(),
+                          [](const auto& member) {
+                              return member.path == "chunks/region/plant-identities.json" &&
+                                     member.present;
+                          }),
+              persistent);
+    const bool valid = !persistent || admission == PlantAdmissionCase::Valid;
+    std::vector<std::string> errors;
+    WorldStreamingState chunks;
+    EXPECT_EQ(WorldSaveService{}.load_world(chunks, save.path(), errors), valid)
+        << JoinErrors(errors);
+    if (!valid) {
+        EXPECT_TRUE(chunks.empty());
+        EXPECT_NE(JoinErrors(errors).find("Corrupt plant authority:"), std::string::npos)
+            << JoinErrors(errors);
+    } else {
+        Luminumbra::Ecs::EntityRegistrySnapshot restored;
+        ASSERT_TRUE(WorldSaveService::load_plant_entities(restored, save.path(), &errors))
+            << JoinErrors(errors);
+        entt::registry registry;
+        static_cast<void>(registry.create());
+        ASSERT_TRUE(luminumbra::foliage::ApplyPlantEntitySnapshot(registry, restored));
+        const auto projected = luminumbra::foliage::BuildPlantEntitySnapshot(registry, persistent);
+        if (persistent) {
+            EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(projected),
+                      Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(original));
+        }
+        // Repeat publication preserves the exact bytes, including legacy worlds without identity.
+        ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(save.path(), restored, admission));
+        EXPECT_EQ(ReadFileBytes(path), before);
+        EXPECT_TRUE(WorldSaveService::validate_save(save.path(), &errors)) << JoinErrors(errors);
+    }
+    EXPECT_EQ(ReadFileBytes(path), before);
+}
+} // namespace
+
+TEST(WorldSaveService, PersistentPlantsReopenWithStableIdsOwnersAndEnabledComponents) {
+    CheckWorldPlantAdmission(PlantAdmissionCase::Valid);
+}
+TEST(WorldSaveService, PersistentPlantsRequireAllocatedUniqueIdsAndLedgerOwners) {
+    CheckWorldPlantAdmission(PlantAdmissionCase::MissingLedger);
+    CheckWorldPlantAdmission(PlantAdmissionCase::Unallocated);
+    CheckWorldPlantAdmission(PlantAdmissionCase::Collision);
+    CheckWorldPlantAdmission(PlantAdmissionCase::Orphan);
+    CheckWorldPlantAdmission(PlantAdmissionCase::FutureStamp);
+}
+TEST(WorldSaveService, PersistentPlantGrowthCannotBeAheadOfLedgerTick) {
+    CheckWorldPlantAdmission(PlantAdmissionCase::FutureGrowth);
+}
+TEST(WorldSaveService, LegacyPlantsRemainByteIdenticalWithoutIdentityOrLedger) {
+    CheckWorldPlantAdmission(PlantAdmissionCase::MissingLedger, false);
+}
+
+namespace {
+class PersistentPlantSessionTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        const std::filesystem::path source(LUMINUMBRA_SOURCE_ROOT);
+        const auto presets = root.path() / "worlds/atlas/presets";
+        std::filesystem::create_directories(presets);
+        std::filesystem::copy_file(source / "worlds/atlas/presets/default.json",
+                                   presets / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(source, root.path());
+        jobs.startup(1);
+        session.SetRootPath(root.path().string() +
+                            static_cast<char>(std::filesystem::path::preferred_separator));
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(true);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Plant authority", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(
+            root.path() / "valid", WorldPlantSnapshot(true), PlantAdmissionCase::Valid));
+        ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "valid"))
+            << session.GetWorldOpenError();
+    }
+    TempSaveDir root{"plant_session"};
+    Luminumbra::JobSystem jobs;
+    Luminumbra::world::GameSession session;
+};
+} // namespace
+
+TEST_F(PersistentPlantSessionTest, LegacyAndMissingRostersReplacePersistentPlants) {
+    namespace C = Luminumbra::Components;
+    for (const bool empty : {false, true}) {
+        SCOPED_TRACE(empty);
+        ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "valid"));
+        auto& registry = session.GetRegistry();
+        const auto old = *registry.view<C::PlantTag>().begin();
+        const auto candidate = root.path() / (empty ? "empty" : "legacy");
+        ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(candidate,
+                                                   empty ? Luminumbra::Ecs::EntityRegistrySnapshot{}
+                                                         : WorldPlantSnapshot(false),
+                                                   PlantAdmissionCase::Valid));
+        EXPECT_EQ(std::filesystem::exists(WorldSaveService::plant_entities_path(candidate)),
+                  !empty);
+        ASSERT_TRUE(session.LoadWorldStateFrom(candidate)) << session.GetWorldOpenError();
+        EXPECT_FALSE(registry.valid(old));
+        EXPECT_EQ(registry.view<C::PlantTag>().size(), empty ? 0u : 1u);
+        EXPECT_FALSE(luminumbra::foliage::HasPersistentPlantIdentity(registry));
+        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), 2u);
+        const auto output = root.path() / "replacement-save";
+        ASSERT_TRUE(session.SaveWorldStateTo(output));
+        EXPECT_TRUE(WorldSaveService::validate_save(output));
+    }
+}
+
+TEST_F(PersistentPlantSessionTest, LegacyRostersStillAppendAndMissingRosterPreservesLegacyPlants) {
+    namespace C = Luminumbra::Components;
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        session.SetActiveRegionsEnabled(enabled);
+        ASSERT_TRUE(session.CreateWorld("Legacy plants", "1337", "default"));
+        auto& registry = session.GetRegistry();
+        ASSERT_TRUE(
+            luminumbra::foliage::ApplyPlantEntitySnapshot(registry, WorldPlantSnapshot(false)));
+        const auto old = *registry.view<C::PlantTag>().begin();
+        for (const bool empty : {false, true}) {
+            const auto candidate = root.path() / (empty ? "empty" : "legacy");
+            ASSERT_TRUE(WorldSaveService::save_plant_entities(
+                empty ? Luminumbra::Ecs::EntityRegistrySnapshot{} : WorldPlantSnapshot(false),
+                candidate));
+            ASSERT_TRUE(session.LoadWorldStateFrom(candidate)) << session.GetWorldOpenError();
+            EXPECT_TRUE(registry.valid(old));
+            EXPECT_EQ(registry.view<C::PlantTag>().size(), 2u);
+            EXPECT_FALSE(luminumbra::foliage::HasPersistentPlantIdentity(registry));
+        }
+    }
+}
+
+TEST_F(PersistentPlantSessionTest, IdlePlantOnlyOwnerSurvivesSchedulingAndRoundTrips) {
+    namespace C = Luminumbra::Components;
+    using namespace Luminumbra::world;
+    const RegionKey owner{0, -1}, unowned{1, 0};
+    const auto input = root.path() / "idle";
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(input,
+                                               WorldPlantSnapshot(true),
+                                               PlantAdmissionCase::Valid,
+                                               ActiveRegionLedger::kIdleEvictionTicks,
+                                               true));
+    ASSERT_TRUE(session.LoadWorldStateFrom(input)) << session.GetWorldOpenError();
+    for (const auto key : {owner, unowned}) {
+        const auto& record = session.GetActiveRegionLedger().records().at(key);
+        ASSERT_FALSE(record.edited || record.pinned || record.populated);
+        ASSERT_EQ(record.water_cursor, 0u);
+        ASSERT_EQ(record.last_proximity, 0u);
+        ASSERT_FALSE(session.GetWorldSystem()->has_region_members(key.x, key.z));
+        ASSERT_FALSE(session.GetGroundObjects().owns_region(key));
+        ASSERT_FALSE(session.GetFieldPages().owns_region(key));
+    }
+    ASSERT_TRUE(session.GetActiveRegionLedger().energy_ages().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().water_debts().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    session.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(owner));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+    const auto plants = session.ComputePlantSubHash();
+    const auto output = root.path() / "idle-roundtrip";
+    ASSERT_TRUE(session.SaveWorldStateTo(output));
+    ASSERT_TRUE(session.LoadWorldStateFrom(output)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.ComputePlantSubHash(), plants);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(owner));
+    EXPECT_EQ(session.GetRegistry().view<C::PlantTag>().size(), 1u);
+    EXPECT_TRUE(luminumbra::foliage::HasPersistentPlantIdentity(session.GetRegistry()));
+}
+
+TEST_F(PersistentPlantSessionTest, PlantSubHashOrdersIdentifiedPlantsByPersistentIdNotHandle) {
+    namespace C = Luminumbra::Components;
+    auto& registry = session.GetRegistry();
+    const auto stale_view = registry.view<C::PlantTag>();
+    const std::vector<entt::entity> stale(stale_view.begin(), stale_view.end());
+    registry.destroy(stale.begin(), stale.end());
+    const auto spawn = [&registry](std::uint64_t id, std::uint16_t species) {
+        const auto plant = registry.create();
+        registry.emplace<C::PlantTag>(plant);
+        C::PlantGrowthComponent growth;
+        growth.species_id = species;
+        registry.emplace<C::PlantGrowthComponent>(plant, growth);
+        C::PlantRegionComponent owner;
+        owner.persistent_id = id;
+        registry.emplace<C::PlantRegionComponent>(plant, owner);
+    };
+    spawn(5, 1);
+    spawn(9, 2);
+    const std::string forward = session.ComputePlantSubHash();
+    ASSERT_FALSE(forward.empty());
+    const auto replaced_view = registry.view<C::PlantTag>();
+    const std::vector<entt::entity> replaced(replaced_view.begin(), replaced_view.end());
+    registry.destroy(replaced.begin(), replaced.end());
+    for (int i = 0; i < 3; ++i) {
+        registry.destroy(registry.create());
+    }
+    spawn(9, 2);
+    spawn(5, 1);
+    EXPECT_EQ(session.ComputePlantSubHash(), forward);
+}
+
+TEST_F(PersistentPlantSessionTest, WorldPlantAuthorityRefusalPreservesResidentChunksAndPlants) {
+    auto chunk = std::make_shared<Chunk>(IVec3{0, 0, 0});
+    chunk->set_state(ChunkState::Idle);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto chunks = session.GetWorldSystem()->snapshot_streamed_chunks();
+    ASSERT_FALSE(chunks.empty());
+    const auto plants = session.ComputePlantSubHash();
+    const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+    for (const auto admission : {PlantAdmissionCase::Unallocated,
+                                 PlantAdmissionCase::Collision,
+                                 PlantAdmissionCase::Orphan,
+                                 PlantAdmissionCase::FutureStamp,
+                                 PlantAdmissionCase::FutureGrowth}) {
+        const TempSaveDir candidate("refused_plant");
+        ASSERT_NO_FATAL_FAILURE(
+            WriteIndexedPlants(candidate.path(), WorldPlantSnapshot(true, admission), admission));
+        EXPECT_FALSE(session.LoadWorldStateFrom(candidate.path()));
+        EXPECT_EQ(session.GetWorldOpenError().find("Corrupt plant authority:"), 0u);
+        EXPECT_EQ(session.GetWorldSystem()->snapshot_streamed_chunks(), chunks);
+        EXPECT_EQ(session.ComputePlantSubHash(), plants);
+        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+        ASSERT_TRUE(session.SaveWorldStateTo(root.path() / "still-usable"));
+    }
+}
+
+TEST_F(PersistentPlantSessionTest,
+       InvalidPlantAuthorityRefusesSaveBeforeWritingAndValidRosterReloads) {
+    namespace C = Luminumbra::Components;
+    const auto plants = session.GetRegistry().view<C::PlantRegionComponent>();
+    ASSERT_NE(plants.begin(), plants.end());
+    auto& owner = plants.get<C::PlantRegionComponent>(*plants.begin());
+    const auto original = owner;
+    owner.persistent_id = session.GetActiveRegionLedger().next_persistent_id();
+    const auto unallocated = root.path() / "unallocated";
+    EXPECT_FALSE(session.SaveWorldStateTo(unallocated));
+    EXPECT_FALSE(std::filesystem::exists(unallocated));
+    const auto collision = session.SpawnGroundObject(1, 1000, 2000, -1000, 0, 0);
+    ASSERT_NE(collision, 0u);
+    owner.persistent_id = collision;
+    const auto duplicate = root.path() / "collision";
+    EXPECT_FALSE(session.SaveWorldStateTo(duplicate));
+    EXPECT_FALSE(std::filesystem::exists(duplicate));
+    owner = original;
+    auto& growth = session.GetRegistry().get<C::PlantGrowthComponent>(*plants.begin());
+    growth.last_tick = 32;
+    for (const std::uint64_t stamp : {31u, 32u}) {
+        owner.region_stamp = stamp;
+        const auto future = root.path() / "future";
+        EXPECT_FALSE(session.SaveWorldStateTo(future));
+        EXPECT_FALSE(std::filesystem::exists(future));
+    }
+    growth.last_tick = 31;
+    owner = original;
+    auto& position = session.GetRegistry().get<C::TransformComponent>(*plants.begin()).position;
+    position.x = 1025;
+    owner.owner_x = 2;
+    const auto orphan = root.path() / "orphan";
+    EXPECT_FALSE(session.SaveWorldStateTo(orphan));
+    EXPECT_FALSE(std::filesystem::exists(orphan));
+    position.x = 1;
+    owner = original;
+    const auto before = session.ComputePlantSubHash();
+    const auto valid = root.path() / "roundtrip";
+    ASSERT_TRUE(session.SaveWorldStateTo(valid));
+    ASSERT_TRUE(session.LoadWorldStateFrom(valid)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.ComputePlantSubHash(), before);
+}
+
+namespace {
+// Malformed fixtures still publish a complete index; admission, rather than fixture writing,
+// must reject the deliberately corrupt authority.
+bool RawPlantFixtureDigest(const std::filesystem::path& directory,
+                           std::string_view relative,
+                           Luminumbra::Persistence::MemberDigest& digest,
+                           std::string& error) {
+    bool exists = false;
+    std::vector<std::string> errors;
+    const bool read = Luminumbra::Persistence::hash_file(
+        directory / relative, digest.bytes, digest.fnv64, exists, &errors);
+    digest.present = exists;
+    if (!read && exists) {
+        error = JoinErrors(errors);
+        return false;
+    }
+    return true;
+}
+
+void PublishPlantFixture(const std::filesystem::path& directory,
+                         const std::string& payload,
+                         const std::string& identity) {
+    namespace P = Luminumbra::Persistence;
+    std::vector<std::string> errors;
+    P::SaveTransaction transaction(directory, 31, {}, &RawPlantFixtureDigest);
+    ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+    for (const auto& member : {std::pair{"chunks/region/plant-entities.json", &payload},
+                               std::pair{"chunks/region/plant-identities.json", &identity}}) {
+        ASSERT_TRUE(transaction.protect({member.first}, &errors)) << JoinErrors(errors);
+        if (member.second->empty()) {
+            ASSERT_TRUE(WorldSaveService::remove_member(directory, member.first, &errors))
+                << JoinErrors(errors);
+        } else {
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                directory, member.first, *member.second, &errors))
+                << JoinErrors(errors);
+        }
+    }
+    ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+}
+
+void CheckPlantMapRefusal(const std::string& kind) {
+    namespace E = Luminumbra::Ecs;
+    const TempSaveDir save("plant_map_refusal");
+    const auto original = WorldPlantSnapshot(true);
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(save.path(), original, PlantAdmissionCase::Valid));
+    auto payload = ReadFileBytes(WorldSaveService::plant_entities_path(save.path()));
+    auto map =
+        nlohmann::json::parse(ReadFileBytes(WorldSaveService::plant_identities_path(save.path())));
+    if (kind == "digest") {
+        payload += " ";
+    }
+    if (kind == "same_length_digest") {
+        std::swap(payload[0], payload[1]);
+    }
+    if (kind == "unknown_metadata") {
+        map["unknown"] = 0u;
+    }
+    if (kind == "unknown_component") {
+        map["plants"][0]["components"][0]["type"] = "Future";
+    }
+    if (kind == "count") {
+        map["plants"] = nlohmann::json::array();
+    }
+    if (kind == "version") {
+        map["version"] = 2u;
+    }
+    if (kind == "orphan") {
+        payload.clear();
+    }
+    if (kind == "empty") {
+        payload = E::SerializeEntityRegistrySnapshotJson({});
+        map["plants"] = nlohmann::json::array();
+    }
+    if (kind == "duplicate" || kind == "duplicate_payload") {
+        auto parsed = nlohmann::json::parse(payload);
+        parsed["entities"].push_back(parsed["entities"][0]);
+        parsed["entities"][1]["entity_id"] = 2u;
+        parsed["entity_count"] = 2u;
+        parsed["component_count"] = 2u * parsed["component_count"].get<unsigned>();
+        payload = E::StableEntitySnapshotDump(parsed);
+        map["plants"].push_back(map["plants"][0]);
+        if (kind == "duplicate_payload") {
+            parsed["entities"][1]["entity_id"] = parsed["entities"][0]["entity_id"];
+            payload = E::StableEntitySnapshotDump(parsed);
+            map["plants"][1]["persistent_id"] = 2u;
+        }
+    }
+    if (kind == "unallocated") {
+        map["plants"][0]["persistent_id"] = 2u;
+    }
+    if (kind == "negative") {
+        map["plants"][0]["persistent_id"] = -1;
+    }
+    if (kind == "missing") {
+        map["plants"][0].erase("owner_x");
+    }
+    if (kind == "component") {
+        map["plants"][0]["components"][0]["data"] = nullptr;
+    }
+    if (kind != "digest" && kind != "same_length_digest" && kind != "orphan") {
+        map["payload_bytes"] = payload.size();
+        map["payload_fnv64"] =
+            Luminumbra::Persistence::fnv1a64_bytes(payload.data(), payload.size());
+    }
+    const auto identity = kind == "partial" ? std::string("{") : map.dump();
+    ASSERT_NO_FATAL_FAILURE(PublishPlantFixture(save.path(), payload, identity));
+    auto loaded = original;
+    std::vector<std::string> errors;
+    if (kind != "unallocated") {
+        EXPECT_FALSE(WorldSaveService::load_plant_entities(loaded, save.path(), &errors));
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+                  E::SerializeEntityRegistrySnapshotJson(original));
+    }
+    WorldStreamingState chunks;
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(chunks, save.path(), errors));
+    EXPECT_TRUE(chunks.empty());
+    EXPECT_NE(JoinErrors(errors).find("Corrupt plant authority:"), std::string::npos)
+        << JoinErrors(errors);
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path()));
+}
+} // namespace
+
+TEST(WorldSaveService, MalformedPersistentPlantReadLeavesTheOutputUnchanged) {
+    for (const auto* kind : {"digest",
+                             "version",
+                             "orphan",
+                             "empty",
+                             "duplicate",
+                             "unallocated",
+                             "negative",
+                             "missing",
+                             "component",
+                             "partial",
+                             "same_length_digest",
+                             "unknown_metadata",
+                             "unknown_component",
+                             "count",
+                             "duplicate_payload"}) {
+        SCOPED_TRACE(kind);
+        ASSERT_NO_FATAL_FAILURE(CheckPlantMapRefusal(kind));
+    }
+}
+
+TEST(WorldSaveService, PersistentGameplayPlantsSurviveGrowthAndHandleHistory) {
+    namespace F = luminumbra::foliage;
+    namespace E = Luminumbra::Ecs;
+    namespace C = Luminumbra::Components;
+    const TempSaveDir save("plant_growth_identity");
+    auto original = WorldPlantSnapshot(true);
+    auto second = original.entities.front();
+    second.legacy_entity_id = 1u;
+    original.entities.front().entity_id = 2u;
+    original.entities.push_back(second);
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(save.path(), original, PlantAdmissionCase::Valid));
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(WorldSaveService::load_plant_entities(loaded, save.path()));
+    std::string continuation;
+    for (const unsigned history : {0u, 5u}) {
+        entt::registry registry;
+        for (unsigned i = 0; i < history; ++i) {
+            const auto dummy = registry.create();
+            registry.destroy(dummy);
+        }
+        ASSERT_TRUE(F::ApplyPlantEntitySnapshot(registry, loaded));
+        ASSERT_TRUE(F::HasPersistentPlantIdentity(registry));
+        for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+            ++registry.get<C::PlantGrowthComponent>(entity).last_tick;
+        }
+        E::EntityRegistrySnapshot gameplay;
+        std::string error;
+        ASSERT_TRUE(F::BuildPlantEntitySnapshot(registry, gameplay, error)) << error;
+        if (history == 0) {
+            continuation = E::SerializeEntityRegistrySnapshotJson(gameplay);
+        } else {
+            EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(gameplay), continuation);
+        }
+        ASSERT_NO_FATAL_FAILURE(
+            WriteIndexedPlants(save.path(), gameplay, PlantAdmissionCase::Valid, 32));
+        ASSERT_TRUE(std::filesystem::exists(WorldSaveService::plant_identities_path(save.path())));
+        E::EntityRegistrySnapshot reopened;
+        ASSERT_TRUE(WorldSaveService::load_plant_entities(reopened, save.path()));
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(reopened), continuation);
+        EXPECT_TRUE(WorldSaveService::validate_save(save.path()));
+    }
+}
+
+TEST(WorldSaveService, PlantMapRetiresForLegacyAndEmptyRosters) {
+    for (const bool empty : {false, true}) {
+        const TempSaveDir save("plant_map_retirement");
+        ASSERT_NO_FATAL_FAILURE(
+            WriteIndexedPlants(save.path(), WorldPlantSnapshot(true), PlantAdmissionCase::Valid));
+        const auto replacement =
+            empty ? Luminumbra::Ecs::EntityRegistrySnapshot{} : WorldPlantSnapshot(false);
+        ASSERT_NO_FATAL_FAILURE(
+            WriteIndexedPlants(save.path(), replacement, PlantAdmissionCase::Valid));
+        EXPECT_FALSE(std::filesystem::exists(WorldSaveService::plant_identities_path(save.path())));
+        EXPECT_TRUE(WorldSaveService::validate_save(save.path()));
+    }
+}
+
+TEST(WorldSaveService, PlantIdentityMapMustBeListedInTheCommitIndex) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("plant_map_index");
+    ASSERT_NO_FATAL_FAILURE(
+        WriteIndexedPlants(save.path(), WorldPlantSnapshot(true), PlantAdmissionCase::Valid));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+    std::erase_if(index.members, [](const auto& member) {
+        return member.path == "chunks/region/plant-identities.json";
+    });
+    // Deliberately corrupt the commit index after publishing the indexed fixture.
+    ASSERT_TRUE(WorldSaveService::write_file_durably(P::snapshot_index_path(save.path()),
+                                                     P::encode_snapshot_index(index)));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+    EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot:"), std::string::npos)
+        << JoinErrors(errors);
+}
+
+TEST(WorldSaveService, AbandonedPlantPublicationRestoresBothMembers) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("plant_map_rollback");
+    auto plants = WorldPlantSnapshot(true);
+    ASSERT_NO_FATAL_FAILURE(WriteIndexedPlants(save.path(), plants, PlantAdmissionCase::Valid));
+    const auto payload_path = WorldSaveService::plant_entities_path(save.path());
+    const auto map_path = WorldSaveService::plant_identities_path(save.path());
+    const auto payload = ReadFileBytes(payload_path);
+    const auto identity = ReadFileBytes(map_path);
+    const auto index = ReadFileBytes(P::snapshot_index_path(save.path()));
+    for (auto& component : plants.entities.front().components) {
+        if (component.type == "PlantGrowth") {
+            component.data["last_tick"] = 32u;
+        }
+        if (component.type == "Mortal") {
+            component.data["age_ticks"] = 1u;
+        }
+    }
+    {
+        P::SaveTransaction transaction(save.path(), 31, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService::save_plant_entities(plants, save.path()));
+        EXPECT_NE(ReadFileBytes(payload_path), payload);
+        EXPECT_NE(ReadFileBytes(map_path), identity);
+    }
+    EXPECT_EQ(ReadFileBytes(payload_path), payload);
+    EXPECT_EQ(ReadFileBytes(map_path), identity);
+    EXPECT_EQ(ReadFileBytes(P::snapshot_index_path(save.path())), index);
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path()));
 }

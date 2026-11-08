@@ -1922,7 +1922,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     }
                     return digest_operation->digest(key, inputs);
                 },
-                // Later slices extend this probe with creatures, plants and water debt.
+                // Future creature ownership must also participate in this probe.
                 [this, &owned_regions](RegionKey key) {
                     if (m_groundObjects.owns_region(key) || m_fieldPages.owns_region(key) ||
                         (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
@@ -1931,6 +1931,15 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
+                        const auto plants =
+                            m_registry.view<const Luminumbra::Components::PlantTag,
+                                            const Luminumbra::Components::PlantRegionComponent>();
+                        for (const auto entity : plants) {
+                            const auto& owner =
+                                plants.get<const Luminumbra::Components::PlantRegionComponent>(
+                                    entity);
+                            owned_regions->insert({owner.owner_x, owner.owner_z});
+                        }
                     }
                     return owned_regions->contains(key) ||
                            (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
@@ -3508,8 +3517,17 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     // BOTH the dirty-empty and the normal save path (plants are independent of chunk dirtiness). An
     // empty roster writes NO file, so a no-plant save stays byte-identical (the save-less path
     // holds).
-    const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
-    if (!luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot)) {
+    Ecs::EntityRegistrySnapshot plant_snapshot;
+    std::string plant_error;
+    const bool persistent_plants = luminumbra::foliage::HasPersistentPlantIdentity(m_registry);
+    if (!persistent_plants)
+        plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
+    if ((persistent_plants &&
+         !luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, plant_snapshot, plant_error)) ||
+        !(persistent_plants
+              ? luminumbra::foliage::ValidatePlantEntitySnapshot(
+                    plant_snapshot, m_activeRegionLedger, m_groundObjects, plant_error)
+              : luminumbra::foliage::ValidatePlantEntitySnapshot(plant_snapshot))) {
         LUMINUMBRA_CORE_ERROR("Saved-input admission refused: invalid plant component value.");
         return false;
     }
@@ -3894,7 +3912,8 @@ bool GameSession::ReadPreparedWorldState(
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
         state.input_refused = error.find("Saved-input admission refused:") == 0 ||
-                              error.find("Corrupt regional energy record:") == 0;
+                              error.find("Corrupt regional energy record:") == 0 ||
+                              error.find("Corrupt plant authority:") == 0;
         for (const std::string& diagnostic : errors)
             LUMINUMBRA_CORE_ERROR("World state load failed: {}", diagnostic);
         return false;
@@ -3915,7 +3934,9 @@ bool GameSession::ReadPreparedWorldState(
         error = errors.empty()
                     ? "Incompatible configuration: this world requires sim.active_regions."
                     : errors.front();
-        state.input_refused = error.find("Saved-input admission refused:") == 0;
+        state.input_refused = error.find("Saved-input admission refused:") == 0 ||
+                              error.find("Corrupt regional energy record:") == 0 ||
+                              error.find("Corrupt plant authority:") == 0;
         return false;
     }
     if (cancelled())
@@ -4115,7 +4136,14 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         }
     }
 
-    // Plant numeric projection was admitted before any live state changed.
+    // Plant numeric projection was admitted before any live state changed. A persistent
+    // roster on either side requires replacement so the restored ledger has no stale owners.
+    if (saved.plants.persistent_identity ||
+        luminumbra::foliage::HasPersistentPlantIdentity(m_registry)) {
+        const auto stale_view = m_registry.view<Luminumbra::Components::PlantTag>();
+        const std::vector<entt::entity> stale(stale_view.begin(), stale_view.end());
+        m_registry.destroy(stale.begin(), stale.end());
+    }
     luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
 
     // Commit the validated cursor only after every refusing load step passes.
@@ -4534,7 +4562,20 @@ std::string GameSession::ComputePlantSubHash() const {
     std::vector<entt::entity> ents;
     for (auto e : view)
         ents.push_back(e);
-    std::sort(ents.begin(), ents.end());
+    // Identified plants order by persistent ID so replay does not depend on handle history;
+    // legacy plants keep handle order after them.
+    const auto persistent_id = [this](entt::entity e) -> std::uint64_t {
+        const auto* owner =
+            m_registry.try_get<const Luminumbra::Components::PlantRegionComponent>(e);
+        return owner ? owner->persistent_id : 0;
+    };
+    std::sort(ents.begin(), ents.end(), [&persistent_id](entt::entity a, entt::entity b) {
+        const std::uint64_t id_a = persistent_id(a);
+        const std::uint64_t id_b = persistent_id(b);
+        if ((id_a != 0) != (id_b != 0))
+            return id_a != 0;
+        return id_a != id_b ? id_a < id_b : a < b;
+    });
     std::ostringstream bytes;
     bytes << "plant:v1:" << ents.size() << ':';
     for (auto e : ents) {
