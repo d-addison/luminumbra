@@ -814,7 +814,7 @@ TEST(RegionalEnergy, IntrinsicOneFireRoundingAndNoAbsoluteCatchup) {
 TEST(RegionalEnergy, EmptyEnergyAgeContinuesAcrossSaveAndReopenBeforeLaterDeposit) {
     ActiveRegionLedger ledger;
     ledger.mark_edited({0, 0}, WorldClock{});
-    EnergyFieldState field;
+    EnergyFieldState field(2);
     const std::array due{RegionKey{0, 0}};
     for (std::uint64_t tick = 1; tick <= 7; ++tick) {
         auto result = RegionalStep(field, tick, ledger.records(), due, ledger.energy_ages());
@@ -826,7 +826,7 @@ TEST(RegionalEnergy, EmptyEnergyAgeContinuesAcrossSaveAndReopenBeforeLaterDeposi
     ActiveRegionLedger restored;
     std::string error;
     ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
-    EnergyFieldState reopened; // indexed absent EFS; do not reset the ARL age
+    EnergyFieldState reopened(2); // indexed absent EFS; do not reset the ARL age
     field.QueueDeposit(1, 1, 1, 0, 1025);
     reopened.QueueDeposit(1, 1, 1, 0, 1025);
     const auto uninterrupted = RegionalStep(field, 8, ledger.records(), due, ledger.energy_ages());
@@ -978,7 +978,10 @@ TEST(RegionalEnergy, EmptyChannelRecordsRestoreOnlyCanonicalNondefaultCounts) {
         ASSERT_TRUE(field.DeserializeRegionalRecord("EFS2 " + std::to_string(channels) + " 0\n"));
         EXPECT_EQ(field.channels(), channels);
         EXPECT_EQ(field.page_count(), 0u);
-        EXPECT_TRUE(field.CanonicalRegionalBytes().empty());
+        EXPECT_FALSE(field.CanonicalRegionalBytes().empty());
+        EXPECT_TRUE(EnergyFieldState(2).CanonicalRegionalBytes().empty());
+        EXPECT_NE(field.CanonicalRegionalBytes(),
+                  EnergyFieldState(channels + 1).CanonicalRegionalBytes());
         EXPECT_TRUE(field.SerializeRegionalRecord().empty());
         EXPECT_FALSE(field.OwnsRegion({0, 0}));
         EXPECT_FALSE(field.ValidateRegionalOwners({}, {{{0, 0}, 5}}));

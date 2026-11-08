@@ -943,6 +943,10 @@ std::string EnergyFieldState::CanonicalRegionalBytes() const {
             if (page.values[i] != 0)
                 bytes << i << '=' << page.values[i] << ';';
     }
+    // A nondefault channel count changes future deposits and is saved as EFS2, so
+    // an empty layer must not hash like an absent one.
+    if (!any && m_channels != 2)
+        bytes << "aether_state:v1:" << m_channels << ':';
     return bytes.str();
 }
 
