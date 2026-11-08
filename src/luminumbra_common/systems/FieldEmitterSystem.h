@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -98,6 +100,110 @@ GatherFieldEmitterDeposits(entt::registry& registry,
         }
         if (queued)
             ++stats.emitters;
+    }
+    return stats;
+}
+
+struct RegionalEmitterGatherStats {
+    FieldEmitterGatherStats queued;
+    std::uint64_t visited_emitters = 0; // Component-view visits, including inert carriers.
+    bool accepted = false;
+};
+
+inline bool AppendRegionalEmitterFootprint(
+    std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit>& deposits,
+    entt::entity entity,
+    const Components::TransformComponent& transform,
+    const Components::FieldEmitterComponent& emitter,
+    int channels,
+    const luminumbra::fields::EnergyFieldState::RegionRecords& records,
+    bool clip_to_owners) {
+    using luminumbra::fields::EnergyFieldState;
+    if (!world::ActiveRegionLedger::valid_anchor(transform.position) || emitter.radius_cells < 0 ||
+        emitter.radius_cells > 31 || emitter.channel < 0 || emitter.channel >= channels)
+        return false;
+    const int cx = static_cast<int>(std::floor(transform.position.x / kAetherCellSizeM));
+    const int cz = static_cast<int>(std::floor(transform.position.z / kAetherCellSizeM));
+    // Checked anchors leave room for all offsets. At most 63x63 cells are visited;
+    // all larger uint32 falloff rings would be zero.
+    const int radius = emitter.radius_cells;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const auto distance = static_cast<unsigned>((std::max)(std::abs(dx), std::abs(dz)));
+            const auto amount = emitter.rate_raw_per_tick >> distance;
+            if (amount == 0)
+                continue;
+            if (clip_to_owners) {
+                const auto owner = EnergyFieldState::OwnerOfCell(cx + dx, cz + dz);
+                const auto found = records.find(owner);
+                if (owner.x < -32768 || owner.x >= 32768 || owner.z < -32768 || owner.z >= 32768 ||
+                    found == records.end() || found->second.state == world::RegionState::Frozen)
+                    continue;
+            }
+            if (deposits.size() >= EnergyFieldState::kMaxRegionalBatchDeposits)
+                return false;
+            deposits.push_back({static_cast<std::uint64_t>(entt::to_integral(entity)),
+                                cx + dx,
+                                cz + dz,
+                                emitter.channel,
+                                amount});
+        }
+    }
+    return true;
+}
+
+// One bounded roster batch; a refusal leaves all prior pending input intact.
+// Session clipping selects the in-world, nonfrozen ledger footprint first,
+// preserving the session's existing sealed halo behavior. Direct calls are strict.
+inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
+    entt::registry& registry,
+    luminumbra::fields::EnergyFieldState& field,
+    const luminumbra::fields::EnergyFieldState::RegionRecords& records,
+    bool clip_to_owners = false,
+    std::size_t available_slots = luminumbra::fields::EnergyFieldState::kMaxRegionalDeposits) {
+    using luminumbra::fields::EnergyFieldState;
+    RegionalEmitterGatherStats stats;
+    // Both scratch vectors are bounded by kMaxRegionalBatchDeposits, including
+    // a roster of emitters whose footprints eventually clip to nothing. They grow
+    // with the roster, so an ordinary tick with a few emitters allocates little.
+    std::vector<entt::entity> emitters;
+    const auto view =
+        registry
+            .view<const Components::TransformComponent, const Components::FieldEmitterComponent>();
+    emitters.reserve((std::min)(view.size_hint(), EnergyFieldState::kMaxRegionalBatchDeposits));
+    for (auto entity : view) {
+        ++stats.visited_emitters;
+        if (registry.get<const Components::FieldEmitterComponent>(entity).rate_raw_per_tick == 0)
+            continue;
+        if (emitters.size() == EnergyFieldState::kMaxRegionalBatchDeposits)
+            return stats;
+        emitters.push_back(entity);
+    }
+    std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    std::vector<EnergyFieldState::RegionalDeposit> deposits;
+    FieldEmitterGatherStats queued;
+    for (auto entity : emitters) {
+        const auto previous = deposits.size();
+        if (!AppendRegionalEmitterFootprint(
+                deposits,
+                entity,
+                registry.get<const Components::TransformComponent>(entity),
+                registry.get<const Components::FieldEmitterComponent>(entity),
+                field.channels(),
+                records,
+                clip_to_owners))
+            return stats;
+        queued.emitters += deposits.size() != previous ? 1u : 0u;
+    }
+    // The session stages emitter input separately from already queued live input.
+    if (deposits.size() > available_slots)
+        return stats;
+    stats.accepted = field.QueueRegionalDeposits(deposits, records);
+    if (stats.accepted) {
+        queued.deposits = static_cast<std::uint64_t>(deposits.size());
+        stats.queued = queued;
     }
     return stats;
 }

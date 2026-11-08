@@ -12556,6 +12556,29 @@ void CheckBoundaryEnergyEmitter(int x, int z) {
     }
 }
 
+void CheckRefusedEmitterBatchFaultsWithoutAdvancingEnergy() {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey owner{0, 0};
+    auto ledger = ScheduledFieldLedger(31, {{owner, RegionState::Active}});
+    ASSERT_TRUE(ledger.set_energy_age(owner, 0));
+    ASSERT_NO_FATAL_FAILURE(
+        LoadScheduledFieldFixture(session, root, jobs, ledger, {}, std::string{}));
+    const auto entity = session.GetRegistry().create();
+    session.GetRegistry().emplace<C::TransformComponent>(entity).position =
+        Luminumbra::Vec3(0, 0, 0);
+    // The session has two energy channels, so channel 7 makes the whole roster invalid.
+    session.GetRegistry().emplace<C::FieldEmitterComponent>(entity, 7, 1000u, 1);
+    const auto values = session.GetEnergyFieldState()->SerializeRegionalRecord();
+    const auto ages = session.GetActiveRegionLedger().energy_ages();
+    TickOnce(session);
+    EXPECT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetEnergyFieldState()->SerializeRegionalRecord(), values);
+    EXPECT_EQ(session.GetActiveRegionLedger().energy_ages(), ages);
+}
+
 void CheckEnergyRegistersSurviveSchedulerRefusal() {
     const RegionKey owner{30, 0};
     auto ledger = ScheduledFieldLedger(31, {{owner, RegionState::Reduced}}, {0, 1, 2});
@@ -12908,6 +12931,10 @@ TEST(GameSessionHeadlessWorldTest, RegionalEnergyClipsEmitterHaloAtWorldEdgesAnd
             ASSERT_NO_FATAL_FAILURE(CheckBoundaryEnergyEmitter(x, z));
         }
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, RefusedEmitterBatchFaultsTheSchedulerWithoutAdvancingEnergy) {
+    ASSERT_NO_FATAL_FAILURE(CheckRefusedEmitterBatchFaultsWithoutAdvancingEnergy());
 }
 
 TEST(GameSessionHeadlessWorldTest, SessionEnergyReusesRegistersAndPublishesOnlyParticipatingAges) {
