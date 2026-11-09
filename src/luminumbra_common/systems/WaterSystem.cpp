@@ -933,24 +933,48 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
     const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
     const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
     const bool have_terrain = (terrain.size() == sim_size); // main thread pre-read the heightmap
+    const auto cell_world_x = [&](int x) {
+        return static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
+               (static_cast<float>(x) + 0.5f) * cell_width_x;
+    };
+    const auto cell_world_z = [&](int z) {
+        return static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
+               (static_cast<float>(z) + 0.5f) * cell_width_z;
+    };
+    // Without a heightmap or prepared inputs, sample the whole grid in one batch.
+    // ComputeShapedHeightsAtPositions returns GetTerrainHeightAt's exact bits at every
+    // position (height_sampling_equivalence_test), but resolves each hydro region once
+    // per call instead of taking the shared hydro-cache lock four times per cell. That
+    // lock traffic contends with streaming workers and dominated the init tail.
+    std::vector<float> sampled_terrain;
+    if (!inputs && !have_terrain) {
+        std::vector<float> xs(sim_size);
+        std::vector<float> zs(sim_size);
+        for (int z = 0; z < initial_resolution; ++z) {
+            for (int x = 0; x < initial_resolution; ++x) {
+                const std::size_t cell = static_cast<std::size_t>(z * initial_resolution + x);
+                xs[cell] = cell_world_x(x);
+                zs[cell] = cell_world_z(z);
+            }
+        }
+        sampled_terrain.resize(sim_size);
+        m_shield_system->ComputeShapedHeightsAtPositions(
+            xs.data(), zs.data(), sim_size, sampled_terrain.data());
+    }
     for (int z = 0; z < initial_resolution; ++z) {
         for (int x = 0; x < initial_resolution; ++x) {
-            float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
-                            (static_cast<float>(x) + 0.5f) * cell_width_x;
-            float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
-                            (static_cast<float>(z) + 0.5f) * cell_width_z;
+            const float world_x = cell_world_x(x);
+            const float world_z = cell_world_z(z);
             const std::size_t cell = static_cast<std::size_t>(z * initial_resolution + x);
             // Seed the resting surface from worldgen: sea level, raised to the local lake
             // surface inside basins so perched lakes start (and stay) filled.
             const float rest =
                 inputs ? inputs->rest[cell] : m_shield_system->WaterLevelAt(world_x, world_z);
             // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
-            // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
+            // else use the batch sample above — same bits, so water_bed_mm is identical
             // either way.
-            const float terrain_h =
-                inputs ? inputs->terrain[cell]
-                       : (have_terrain ? terrain[cell]
-                                       : m_shield_system->GetTerrainHeightAt(world_x, world_z));
+            const float terrain_h = inputs ? inputs->terrain[cell]
+                                           : (have_terrain ? terrain[cell] : sampled_terrain[cell]);
             cp->water_level_data[cell] = rest;
             cp->water_rest_level[cell] = rest;
             cp->water_sim_terrain_height[cell] = terrain_h;
