@@ -378,15 +378,15 @@ No new required-check configuration is needed.
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
-branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
-and `edited`. Only `edited` events with `github.event.changes.base` present run
-normal CI, so retargeting a ready PR to main runs Windows/UCRT64 validation even
-for confirmed non-C++ changes. Its aggregate requires successful native producers.
-Title/body edits skip every CI job before runner allocation, use unique
-non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
-suffix. This keeps their skipped results separate from required check names on
-the same SHA. A pre-job dependency skip alone would still emit skipped checks
-under those required names. Other workflows retain their existing event types.
+branch and path filters still apply. CI also listens for `labeled` and
+`unlabeled`. It does not listen for `edited`, so title, body and base edits start
+no runs and cannot replace the latest run that required checks are evaluated
+against; required check names are plain strings. A PR retargeted to main must be
+re-triggered (label change, ready toggle or a new head) before landing, so that a
+run whose base is main enables Windows/UCRT64 validation even for confirmed
+non-C++ changes. Its aggregate requires successful native producers. Never land a
+retargeted PR on a run made for its previous base. Other workflows retain their
+existing event types.
 Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this
