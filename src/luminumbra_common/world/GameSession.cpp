@@ -954,6 +954,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            const auto foliage_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -981,15 +985,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     if (!m_soilGrid)
                         m_soilGrid =
                             std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
-                    fol::RunSoilNutrientOnTick(
-                        m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                    fol::RunSoilNutrientOnTick(m_registry,
+                                               *m_soilGrid,
+                                               foliageOriginX,
+                                               foliageOriginZ,
+                                               kFoliageFieldCell,
+                                               foliage_gate);
                 }
             }
 
-            const auto foliage_gate =
-                m_activeRegionsEnabled
-                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
-                    : RegionConsumerGate{};
             budget.Next(Stage::Plants, [&] {
                 return SimParticipantCount<TelemetryComp::PlantTag,
                                            TelemetryComp::PlantGrowthComponent,

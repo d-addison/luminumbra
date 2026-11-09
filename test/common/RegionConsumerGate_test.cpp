@@ -9,6 +9,7 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
 #include <gtest/gtest.h>
@@ -237,6 +238,142 @@ TEST(RegionConsumerGate, DefaultGateMatchesLegacyBytesAndTelemetry) {
     const auto before = PlantBytes(blocked);
     EXPECT_NE(StepConsumers(blocked, RegionConsumerGate(blocked, {})), legacy);
     EXPECT_EQ(PlantBytes(blocked), before);
+}
+
+TEST(RegionConsumerGate, CreatureMortalityStaysFullRateWhilePlantMortalityIsGated) {
+    for (const bool starvation : {false, true}) {
+        for (int owner_case = 0; owner_case < 4; ++owner_case) {
+            for (int mode = 0; mode < 3; ++mode) {
+                SCOPED_TRACE(::testing::Message()
+                             << starvation << ':' << owner_case << ':' << mode);
+                entt::registry registry;
+                const auto plant = Plant(registry, 513.0f);
+                registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 1u;
+                const auto creature = registry.create();
+                registry.emplace<C::CreatureComponent>(creature).hunger = 0.5f;
+                registry.emplace<C::MortalComponent>(creature).lifespan_ticks =
+                    starvation ? 10u : 2u;
+                registry.emplace<C::TransformComponent>(creature).position = {513.0f, 0.0f, 0.0f};
+                for (const auto entity : {plant, creature}) {
+                    if (owner_case == 1) {
+                        registry.remove<C::TransformComponent>(entity);
+                    } else if (owner_case == 2) {
+                        registry.get<C::TransformComponent>(entity).position.x =
+                            std::numeric_limits<float>::infinity();
+                    }
+                }
+                std::vector<RegionKey> due;
+                if (owner_case != 3) {
+                    due.push_back({0, 0});
+                }
+                const auto gate =
+                    mode == 2 ? RegionConsumerGate(registry, due) : RegionConsumerGate{};
+                for (const std::uint64_t tick :
+                     {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
+                    registry.get<C::CreatureComponent>(creature).hunger =
+                        starvation && tick >= 2u ? 1.0f : 0.5f;
+                    const auto stats =
+                        mode == 0 ? luminumbra::ai::RunLifespanOnTick(registry, tick)
+                                  : luminumbra::ai::RunLifespanOnTick(registry, tick, gate);
+                    const auto& mortal = registry.get<C::MortalComponent>(creature);
+                    EXPECT_EQ(mortal.age_ticks, tick == 1u ? 1u : 2u);
+                    EXPECT_EQ(mortal.dead, tick >= 2u ? 1u : 0u);
+                    EXPECT_EQ(registry.get<C::CreatureComponent>(creature).eaten, tick >= 2u);
+                    EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks,
+                              mode == 2 ? 0u : 1u);
+                    EXPECT_EQ(registry.get<C::MortalComponent>(plant).dead, mode == 2 ? 0u : 1u);
+                    EXPECT_EQ(stats.aged, tick == 1u ? (mode == 2 ? 1 : 2) : (tick == 2u ? 1 : 0));
+                    EXPECT_EQ(stats.died, tick == 1u ? (mode == 2 ? 0 : 1) : (tick == 2u ? 1 : 0));
+                }
+                EXPECT_EQ(gate.owner_visits(),
+                          mode == 2 && (owner_case == 0 || owner_case == 3) ? 3u + due.size() : 0u);
+            }
+        }
+    }
+}
+
+TEST(RegionConsumerGate, SoilConsumptionAndAbsorbedFollowPlantOwnerAdmission) {
+    for (int mode = 0; mode < 8; ++mode) {
+        SCOPED_TRACE(mode);
+        entt::registry registry;
+        F::SoilGrid soil(2, 1);
+        const auto plant = Plant(registry, 0.5f);
+        registry.emplace<C::SoilFeederComponent>(plant).absorbed = 7u;
+        // Persistent ownership wins over the position inside the soil field.
+        registry.emplace<C::PlantRegionComponent>(plant, std::uint64_t{1}, 1, 0, std::uint64_t{0});
+        if (mode >= 5) {
+            registry.remove<C::PlantRegionComponent>(plant);
+        }
+        if (mode == 5) {
+            registry.get<C::TransformComponent>(plant).position.x =
+                std::numeric_limits<float>::infinity();
+        } else if (mode == 6) {
+            registry.remove<C::TransformComponent>(plant);
+        }
+        std::vector<RegionKey> due;
+        if (mode != 4) {
+            due.push_back({mode == 2 ? 1 : 0, 0});
+        }
+        const auto gate = mode >= 2 ? RegionConsumerGate(registry, due) : RegionConsumerGate{};
+        for (int step = 0; step < 2; ++step) {
+            const auto stats =
+                mode == 0 ? F::RunSoilNutrientOnTick(registry, soil, 0.0f, 0.0f, 1.0f)
+                          : F::RunSoilNutrientOnTick(registry, soil, 0.0f, 0.0f, 1.0f, gate);
+            const bool admitted = mode <= 2 || mode == 7;
+            const auto steps = static_cast<std::uint32_t>(step + 1);
+            EXPECT_EQ(stats.participants, admitted ? 1 : 0);
+            EXPECT_EQ(stats.consumed, admitted ? 750 : 0);
+            EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed,
+                      7u + (admitted ? 750u * steps : 0u));
+            EXPECT_EQ(soil.AtCell(0, 0),
+                      F::kSoilBaseline -
+                          (admitted ? (750 - F::kSoilRegenPerTick) * (step + 1) : 0));
+            EXPECT_EQ(soil.AtCell(1, 0), F::kSoilBaseline);
+            EXPECT_EQ(gate.owner_visits(),
+                      mode >= 2 && mode != 5 && mode != 6 ? steps + due.size() : 0u);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, DeniedSoilDemandCannotStealFromAdmittedPlantAndFieldStillRegenerates) {
+    entt::registry registry;
+    F::SoilGrid soil(2, 1, 100);
+    const auto denied = Plant(registry, 0.5f);
+    registry.emplace<C::SoilFeederComponent>(denied);
+    registry.emplace<C::PlantRegionComponent>(denied, std::uint64_t{1}, 1, 0, std::uint64_t{0});
+    const auto admitted = Plant(registry, 0.5f);
+    registry.emplace<C::SoilFeederComponent>(admitted);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    const auto stats = F::RunSoilNutrientOnTick(registry, soil, 0.0f, 0.0f, 1.0f, gate);
+    EXPECT_EQ(stats.participants, 1);
+    EXPECT_EQ(stats.consumed, 100);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(denied).absorbed, 0u);
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(admitted).absorbed, 100u);
+    EXPECT_EQ(soil.AtCell(0, 0), F::kSoilRegenPerTick);
+    EXPECT_EQ(soil.AtCell(1, 0), 100 + F::kSoilRegenPerTick);
+    EXPECT_EQ(gate.owner_visits(), 3u);
+}
+
+TEST(RegionConsumerGate, SessionSoilConsumptionUsesSealedPlantOwners) {
+    for (const bool enabled : {false, true}) {
+        for (const int owner : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << enabled << ':' << owner);
+            W::GameSession session;
+            session.SetActiveRegionsEnabled(enabled);
+            session.SetReplicatedSimulationAnchors({});
+            session.PinActiveRegion({0, 0}, true);
+            auto& registry = session.GetRegistry();
+            const auto plant = Plant(registry, 0.0f);
+            registry.emplace<C::PlantRegionComponent>(
+                plant, std::uint64_t{1}, owner, 0, std::uint64_t{0});
+            registry.emplace<C::SoilFeederComponent>(plant).absorbed = 7u;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed,
+                      enabled && owner == 1 ? 7u : 757u);
+        }
+    }
 }
 
 TEST(RegionConsumerGate, SessionUsesSealedDueOwnersAndFlagOffRetainsLegacyProgress) {
