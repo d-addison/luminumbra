@@ -3366,15 +3366,18 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation
     // delta (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change
     // (LOD keys on continuous distance, so any sub-chunk anchor motion can flip a band — no
-    // threshold, no quantization), a chunk-count delta, an activation tick, or a previous pass that
-    // did not reach quiescence. On a settled static pose all are false, so the O(N) meshed_columns
-    // build + candidate scan + sort + dispatch are skipped entirely. Step 4 (collision) and the
+    // threshold, no quantization), a chunk-count delta, an activation tick, a water-mesh
+    // invalidation, or a previous pass that did not reach quiescence. On a settled static pose
+    // all are false, so the candidate scan + sort + dispatch are skipped entirely.
+    // Step 4 (collision) and the
     // telemetry scans run unchanged every tick.
     const bool anchor_changed = (anchor_positions != m_last_anchor_positions);
     const bool count_changed = (m_streaming_state.chunks.size() != m_last_chunk_count);
     const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
+    const bool water_mesh_dirty = m_water_system && m_water_system->take_mesh_invalidation();
     const bool streaming_dirty = generation_dirty || anchor_changed || count_changed ||
-                                 activation_ran_this_tick || !m_last_pass_drained;
+                                 activation_ran_this_tick || water_mesh_dirty ||
+                                 !m_last_pass_drained;
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
     if (streaming_dirty) {
@@ -4901,6 +4904,7 @@ void SHIELD_WorldSystem::debug_force_water_remesh() {
         if (c && c->has_water_sim.load(std::memory_order_acquire)) {
             c->water_mesh_generated.store(false);
             c->water_mesh_dirty_ticks = 0;
+            m_last_pass_drained = false;
         }
     }
 }
@@ -6440,6 +6444,11 @@ void SHIELD_WorldSystem::set_seed(int seed) {
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     wait_for_streaming_jobs();
+
+    // Replacement chunks can have the same count and anchors as the settled world.
+    // Invalidate both activation's generation key and meshing's quiescence latch.
+    ++m_dirty_generation;
+    m_last_pass_drained = false;
 
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;

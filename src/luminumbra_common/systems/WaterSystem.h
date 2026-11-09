@@ -83,6 +83,10 @@ public:
     void update(entt::registry& registry,
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
 
+    // Owner-thread handoff to the world meshing scheduler. Coalesces render invalidations
+    // until consumed, including edits between updates; never hashed or persisted.
+    [[nodiscard]] bool take_mesh_invalidation();
+
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
      * @param camera_entity The active camera entity, or entt::null to clear it.
@@ -309,6 +313,7 @@ private:
     std::int64_t m_debug_sources_seen = 0;
     std::int64_t m_debug_source_injected_mm = 0;
     std::uint64_t m_water_epoch = 0; //  (see water_epoch())
+    bool m_mesh_invalidated = false;
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
