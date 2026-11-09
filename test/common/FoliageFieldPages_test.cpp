@@ -517,3 +517,90 @@ TEST(FoliageFieldPages, PageActivationPreservesSparseValuesAndRefusesInvalidOrFu
     EXPECT_EQ(pages.irrigation().sample({17, 0}, -1), 0);
 }
 } // namespace
+
+namespace {
+TEST(FoliageFieldPages, ElapsedWindowsMatchIndependentSoilAndIrrigationSteps) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = {0.0f, 0.0f, 0.0f};
+    registry.emplace<C::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(C::PlantStage::Mature);
+    registry.emplace<C::SoilFeederComponent>(plant);
+    registry.emplace<C::WaterSourceComponent>(plant);
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, 1200));
+    ASSERT_TRUE(pages.set_irrigation({0, 0}, 3999999));
+    ASSERT_TRUE(pages.set_irrigation({1, 0}, 0));
+    ASSERT_TRUE(pages.set_soil({512, 0}, 37));
+    auto soil = FoliageCells(pages.soil());
+    auto moisture = FoliageCells(pages.irrigation());
+    std::uint32_t absorbed = 0;
+    for (int step = 0; step < 17; ++step) {
+        const auto draw = std::min(soil.at({0, 0}), 500);
+        soil.at({0, 0}) -= draw;
+        absorbed += static_cast<std::uint32_t>(draw);
+        soil.at({0, 0}) = std::min(kSoilBaseline, soil.at({0, 0}) + kSoilRegenPerTick);
+        moisture.at({0, 0}) = std::min(kMoistureMax, moisture.at({0, 0}) + 1000);
+        EvolveFoliageIrrigation(moisture);
+    }
+    AdvanceFoliageInteriors(registry, pages, {{{0, 0}, 17}, {{1, 0}, 0}, {{2, 0}, 65536}});
+    FieldPageState expected;
+    CommitReference(soil, moisture, expected);
+    EXPECT_EQ(pages.serialize(), expected.serialize());
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, absorbed);
+    const auto before = pages.serialize();
+    EXPECT_THROW(AdvanceFoliageInteriors(registry, pages, {{{0, 0}, 65537}}),
+                 std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+    EXPECT_TRUE(AdvanceFoliageInteriors(registry, pages, {}).empty());
+}
+TEST(FoliageFieldPages, BordersUsePriorHostValuesCommonPhaseAndBothOwners) {
+    ActiveRegionLedger ledger;
+    const WorldClock clock(32);
+    ledger.pin({0, 0}, true, clock);
+    ledger.pin({1, 0}, true, clock);
+    FieldPageState prior;
+    ASSERT_TRUE(prior.set_irrigation({511, 0}, 800));
+    ASSERT_TRUE(prior.set_irrigation({512, 0}, 0));
+    const std::vector<RegionKey> owners{{0, 0}, {1, 0}};
+    const auto edges = FoliageBorderEdges(prior, ledger.records(), owners, 32);
+    ASSERT_EQ(edges.size(), 1u);
+    auto next = prior;
+    ASSERT_TRUE(next.set_irrigation({511, 0}, 794));
+    const auto work = ExchangeFoliageBorders(next, prior, edges);
+    EXPECT_EQ(next.irrigation().sample({511, 0}, -1), 694);
+    EXPECT_EQ(next.irrigation().sample({512, 0}, -1), 100);
+    EXPECT_EQ(work.at({0, 0}), 1u);
+    EXPECT_EQ(work.at({1, 0}), 1u);
+    EXPECT_TRUE(FoliageBorderEdges(prior, {}, owners, 32).empty());
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records());
+    records.at({1, 0}).cadence_shift = 2;
+    EXPECT_TRUE(FoliageBorderEdges(prior, records, owners, 33).empty());
+    records.at({1, 0}).state = RegionState::Frozen;
+    EXPECT_TRUE(FoliageBorderEdges(prior, records, owners, 32).empty());
+}
+TEST(FoliageFieldPages, ZeroResumeAndStaleOrRepeatedTokensCannotReplayAWindow) {
+    ActiveRegionLedger ledger;
+    WorldClock clock(32);
+    ledger.pin({0, 0}, true, clock);
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({0, 0});
+    record.frozen_at = 32;
+    const std::set<RegionKey> pending{{0, 0}};
+    const std::map<RegionKey, std::uint64_t> previous{{{0, 0}, 32}};
+    const auto windows = BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock);
+    EXPECT_EQ(windows.elapsed.at({0, 0}), 0u);
+    EXPECT_EQ(windows.resumes.at({0, 0}), 32u);
+    EXPECT_FALSE(ledger.acknowledge_resume({0, 0}, 31));
+    EXPECT_TRUE(ledger.acknowledge_resume({0, 0}, 32));
+    const auto bytes = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume({0, 0}, 32));
+    EXPECT_EQ(ledger.encode(), bytes);
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock).elapsed.empty());
+    record.state = RegionState::Frozen;
+    record.frozen_at = 32;
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock).elapsed.empty());
+}
+} // namespace

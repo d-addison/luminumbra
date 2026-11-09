@@ -80,6 +80,7 @@
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/FoliageRegistryStage.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/RegionalFoliage.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
@@ -13209,3 +13210,119 @@ TEST(GameSessionHeadlessWorldTest, FoliageStagingKeepsEmptyDefaultAndFlagOffWorl
     }
     EXPECT_NE(SessionWorldHash(disabled), legacy_before);
 }
+namespace {
+TEST(GameSessionHeadlessWorldTest, DueFoliageSelectionMatchesWholeRegistryResultsAndOrder) {
+    entt::registry live;
+    for (int index = 0; index < 24; ++index) {
+        const auto entity = StagedMortal(live);
+        live.get<C::TransformComponent>(entity).position.x = index % 2 == 0 ? 0.0f : 512.0f;
+    }
+    Foliage::RegionalFoliageWindows windows;
+    windows.elapsed[{0, 0}] = 1;
+    auto selected = Foliage::SelectFoliageRegistry(live, windows, {});
+    Foliage::FoliageRegistryStage whole, due;
+    whole.Begin(live, 1);
+    due.Begin(selected, 1);
+    std::vector<entt::entity> expected_order, actual_order;
+    for (auto entity : whole.registry().view<C::MortalComponent>()) {
+        if (whole.registry().get<C::TransformComponent>(entity).position.x == 0.0f) {
+            expected_order.push_back(entity);
+        }
+    }
+    for (auto entity : due.registry().view<C::MortalComponent>()) {
+        actual_order.push_back(entity);
+    }
+    EXPECT_EQ(actual_order, expected_order);
+    EXPECT_EQ(due.entity_visits(), 12u);
+    const std::vector<RegionKey> owners{{0, 0}};
+    luminumbra::ai::RunLifespanOnTick(
+        whole.registry(), 1, Luminumbra::world::RegionConsumerGate(whole.registry(), owners));
+    luminumbra::ai::RunLifespanOnTick(due.registry(), 1);
+    for (auto entity : actual_order) {
+        EXPECT_EQ(due.registry().get<C::MortalComponent>(entity).age_ticks,
+                  whole.registry().get<C::MortalComponent>(entity).age_ticks);
+    }
+}
+void CheckFoliageResumeContinuation(bool fail) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    auto ledger =
+        ScheduledFieldLedger(31, {{{0, 0}, RegionState::Reduced}, {{1, 0}, RegionState::Active}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({0, 0});
+    record.frozen_at = 20;
+    const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({1, 0}).frozen_at =
+        20;
+    std::uint64_t plant_id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(plant_id));
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({511, 0}, 0));
+    ASSERT_TRUE(fields.set_irrigation({511, 0}, 8000));
+    ASSERT_TRUE(fields.set_irrigation({512, 0}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    ASSERT_TRUE(session.SetFoliageCell({-1.0f, 0.0f, 0.0f}, true, 0));
+    ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, {-1, 0}, true));
+    ASSERT_TRUE(fields.set_soil({-1, 0}, 0));
+    const auto fields_before = session.GetFieldPages().serialize();
+    EXPECT_FALSE(session.SetFoliageCell({0.0f, 0.0f, 0.0f}, true, -1));
+    EXPECT_FALSE(session.SetFoliageCell({16777216.0f, 0.0f, 0.0f}, false, 0));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields_before);
+    const auto plant = ClockTestPlant(session.GetRegistry(), {511.0f, 0.0f, 0.0f});
+    session.GetRegistry().emplace<C::PlantRegionComponent>(
+        plant, plant_id, 0, 0, std::uint64_t{20});
+    session.GetRegistry().get<C::PlantGrowthComponent>(plant).last_tick = 20;
+    const auto plants_before = FoliageSnapshot(session.GetRegistry());
+    if (fail) {
+        session.GetSimulationEventBus().subscribe([&](const auto&) {
+            EXPECT_FALSE(session.SetFoliageCell({0.0f, 0.0f, 0.0f}, true, 0));
+            throw std::runtime_error("injected resume failure");
+        });
+        session.GetSimulationEventBus().publish(32, "resume-test", "");
+    }
+    TickOnce(session);
+    if (fail) {
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at({0, 0}).frozen_at, 20u);
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+        EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), plants_before);
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at({1, 0}).frozen_at, 20u);
+        return;
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegistry().get<C::PlantRegionComponent>(plant).region_stamp, 32u);
+    EXPECT_EQ(session.GetRegistry().get<C::PlantGrowthComponent>(plant).last_tick, 32u);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at({1, 0}).frozen_at, 0u);
+    EXPECT_EQ(session.GetFieldPages().soil().sample({-1, 0}, -1), 4);
+    EXPECT_EQ(session.GetFieldPages().soil().sample({511, 0}, -1), 48);
+    EXPECT_GT(session.GetFieldPages().irrigation().sample({512, 0}, -1), 0);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at({0, 0}).frozen_at, 0u);
+    TickOnce(session);
+    TickOnce(session); // Save between Reduced due phases.
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at({0, 0}).last_ticked, 33u);
+    const auto save = root.path() / "foliage-continuation";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.CreateWorld("Foliage continuation", "1337", "default"));
+    ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    for (int step = 0; step < 9; ++step) {
+        TickOnce(session);
+        TickOnce(reopened);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+        EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), FoliageSnapshot(reopened.GetRegistry()));
+        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+                  reopened.GetActiveRegionLedger().canonical_bytes());
+    }
+}
+TEST(GameSessionHeadlessWorldTest, FoliageResumeIsOneShotAndContinuesAcrossSaveBetweenDuePhases) {
+    ASSERT_NO_FATAL_FAILURE(CheckFoliageResumeContinuation(false));
+}
+TEST(GameSessionHeadlessWorldTest, FoliageResumeFailurePreservesPagesAndPendingToken) {
+    ASSERT_NO_FATAL_FAILURE(CheckFoliageResumeContinuation(true));
+}
+} // namespace

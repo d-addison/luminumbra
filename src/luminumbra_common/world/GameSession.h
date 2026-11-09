@@ -529,6 +529,8 @@ public:
     // Observational foliage preparation/publication counts; excluded from identity and saves.
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Transactional page admission/edit outside simulation batches.
+    bool SetFoliageCell(const Vec3& position, bool soil, std::int32_t value);
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../fields/FieldPageState.h"
+#include "FoliageRegistryStage.h"
 #include "IrrigationSystem.h"
 #include "SoilNutrientSystem.h"
 
@@ -12,6 +13,8 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -278,7 +281,7 @@ inline bool ActivateFoliagePage(FieldPageState& pages, ScentCellKey cell, bool s
 // touched/due owners; each is prepared on first use. Storage topology must remain
 // unchanged for this object's lifetime. Recreate it after admissions or loading.
 // Each Step evolves once for nonzero entries; scheduling/window expansion is the
-// caller's responsibility. No registry, host clock or source enumeration is used.
+// caller's responsibility.
 class FoliageInteriorReplay {
 public:
     struct Work {
@@ -307,6 +310,74 @@ public:
         m_work.preparation_cells += soil_cells + moisture_cells;
         m_work.neighbor_cells += moisture_cells;
         return inserted.first->second;
+    }
+    std::map<RegionKey, std::uint64_t> Step(entt::registry& registry,
+                                            FieldPageState& pages,
+                                            const std::map<RegionKey, std::uint32_t>& due,
+                                            std::optional<std::uint64_t> subtick = {}) {
+        namespace C = ::Luminumbra::Components;
+        for (const auto& [key, ticks] : due) {
+            if (ticks != 0) {
+                Prepare(pages, key);
+            }
+        }
+        const auto existed = [&](entt::entity entity) {
+            const auto* owner = registry.try_get<const C::PlantRegionComponent>(entity);
+            const auto* growth = registry.try_get<const C::PlantGrowthComponent>(entity);
+            return !subtick || !owner || !growth || owner->region_stamp < *subtick ||
+                   growth->planted_tick == *subtick;
+        };
+        std::vector<entt::entity> feeders;
+        for (auto entity : registry.view<C::PlantTag,
+                                         C::SoilFeederComponent,
+                                         C::PlantGrowthComponent,
+                                         C::TransformComponent>()) {
+            feeders.push_back(entity);
+        }
+        std::sort(feeders.begin(), feeders.end(), [&registry](auto left, auto right) {
+            const auto* a = registry.template try_get<C::PlantRegionComponent>(left);
+            const auto* b = registry.template try_get<C::PlantRegionComponent>(right);
+            if (a && b) {
+                return a->persistent_id == b->persistent_id ? left < right
+                                                            : a->persistent_id < b->persistent_id;
+            }
+            return (a != nullptr) != (b != nullptr) ? a != nullptr : left < right;
+        });
+        for (auto entity : feeders) {
+            const auto cell = FoliageCell(registry.get<C::TransformComponent>(entity).position);
+            const auto key = FieldPageState::region_of_scent_cell(cell);
+            const auto window = due.find(key);
+            if (window == due.end() || window->second == 0 || !existed(entity)) {
+                continue;
+            }
+            auto& soil = m_owners.at(key).soil;
+            if (!soil.contains(cell)) {
+                continue;
+            }
+            auto& feeder = registry.get<C::SoilFeederComponent>(entity);
+            const auto draw = static_cast<std::int32_t>(feeder.uptake) *
+                              SoilStageWeight(registry.get<C::PlantGrowthComponent>(entity).stage) /
+                              16;
+            const auto got = std::min(soil.at(cell), draw);
+            soil.at(cell) -= got;
+            feeder.absorbed += static_cast<std::uint32_t>(got);
+        }
+        for (auto entity : registry.view<C::WaterSourceComponent, C::TransformComponent>()) {
+            const auto cell = FoliageCell(registry.get<C::TransformComponent>(entity).position);
+            const auto key = FieldPageState::region_of_scent_cell(cell);
+            const auto window = due.find(key);
+            if (window == due.end() || window->second == 0 || !existed(entity)) {
+                continue;
+            }
+            auto& moisture = m_owners.at(key).moisture;
+            if (moisture.contains(cell)) {
+                moisture.at(cell) = std::min(
+                    kMoistureMax,
+                    moisture.at(cell) + static_cast<std::int32_t>(
+                                            registry.get<C::WaterSourceComponent>(entity).output));
+            }
+        }
+        return Step(pages, due);
     }
     std::map<RegionKey, std::uint64_t> Step(FieldPageState& pages,
                                             const std::map<RegionKey, std::uint32_t>& due) {
@@ -343,4 +414,189 @@ private:
     std::map<RegionKey, Owner> m_owners;
     Work m_work;
 };
+struct RegionalFoliageWindows {
+    std::map<RegionKey, std::uint32_t> elapsed;
+    std::map<RegionKey, std::uint64_t> resumes;
+};
+inline RegionalFoliageWindows
+BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
+                            std::span<const RegionKey> due,
+                            const std::map<RegionKey, std::uint64_t>& previous,
+                            const std::set<RegionKey>& pending,
+                            const ::Luminumbra::world::WorldClock& clock) {
+    RegionalFoliageWindows result;
+    const auto add = [&](RegionKey key) {
+        const auto found = ledger.records().find(key);
+        if (found == ledger.records().end() ||
+            found->second.state == ::Luminumbra::world::RegionState::Frozen) {
+            return;
+        }
+        const auto& record = found->second;
+        const auto old = previous.find(key);
+        const auto prior = old == previous.end() ? record.first_active
+                                                 : std::max(old->second, record.first_active);
+        if (prior > clock.tick()) {
+            throw std::invalid_argument("Foliage window precedes owner stamp");
+        }
+        const auto elapsed =
+            record.frozen_at != 0
+                ? ActiveRegionLedger::resume_window(key, record.frozen_at, clock, 36000)
+                      .elapsed_ticks
+                : std::min<std::uint64_t>(clock.tick() - prior, 65536);
+        result.elapsed[key] = static_cast<std::uint32_t>(elapsed);
+        if (record.frozen_at != 0) {
+            result.resumes[key] = record.frozen_at;
+        }
+    };
+    for (const auto key : due) {
+        add(key);
+    }
+    for (const auto key : pending) {
+        const auto found = ledger.records().find(key);
+        if (found != ledger.records().end() && found->second.frozen_at != 0) {
+            add(key);
+        }
+    }
+    return result;
+}
+inline std::map<RegionKey, std::uint64_t>
+AdvanceFoliageInteriors(entt::registry& registry,
+                        FieldPageState& pages,
+                        const std::map<RegionKey, std::uint32_t>& windows,
+                        std::optional<std::uint64_t> tick = {}) {
+    std::uint32_t maximum = 0;
+    for (const auto& [key, ticks] : windows) {
+        if (ticks > 65536 || (tick && ticks > *tick)) {
+            throw std::invalid_argument("Unbounded foliage window");
+        }
+        if (pages.soil().owns_region(key) || pages.irrigation().owns_region(key)) {
+            maximum = std::max(maximum, ticks);
+        }
+    }
+    FoliageInteriorReplay replay;
+    std::map<RegionKey, std::uint64_t> work;
+    for (std::uint32_t step = 0; step < maximum; ++step) {
+        std::map<RegionKey, std::uint32_t> due;
+        for (const auto& [key, ticks] : windows) {
+            if (maximum - step <= ticks) {
+                due.emplace(key, 1);
+            }
+        }
+        for (const auto& [key, count] : replay.Step(
+                 registry,
+                 pages,
+                 due,
+                 tick ? std::optional<std::uint64_t>(*tick - maximum + step + 1) : std::nullopt)) {
+            work[key] += count;
+        }
+    }
+    return work;
+}
+using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
+inline FoliageEdges
+FoliageBorderEdges(const FieldPageState& pages,
+                   const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
+                   std::span<const RegionKey> owners,
+                   std::uint64_t tick) {
+    FoliageEdges edges;
+    // At most 1024 positive boundary cells per selected 512 m owner; storage
+    // admission limits initialized endpoints to kMaxPages * 256 cells.
+    for (const auto owner : owners) {
+        const auto a = records.find(owner);
+        if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
+            continue;
+        }
+        const auto x = static_cast<std::int64_t>(owner.x) * 512;
+        const auto z = static_cast<std::int64_t>(owner.z) * 512;
+        if (x < -16777216 || x > 16776704 || z < -16777216 || z > 16776704) {
+            continue;
+        }
+        for (int axis = 0; axis < 2; ++axis) {
+            const RegionKey other{owner.x + (axis == 0 ? 1 : 0), owner.z + (axis == 1 ? 1 : 0)};
+            const auto b = records.find(other);
+            if (b == records.end() || b->second.state == ::Luminumbra::world::RegionState::Frozen) {
+                continue;
+            }
+            const auto shift = std::max(a->second.cadence_shift, b->second.cadence_shift);
+            if (shift > 16 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0) {
+                continue;
+            }
+            for (int offset = 0; offset < 512; ++offset) {
+                const ScentCellKey cell{static_cast<std::int32_t>(x) + (axis == 0 ? 511 : offset),
+                                        static_cast<std::int32_t>(z) + (axis == 1 ? 511 : offset)};
+                const ScentCellKey next{cell.x + (axis == 0 ? 1 : 0), cell.z + (axis == 1 ? 1 : 0)};
+                if (pages.irrigation().initialized(cell) && pages.irrigation().initialized(next)) {
+                    edges.emplace_back(cell, next);
+                }
+            }
+        }
+    }
+    std::sort(edges.begin(), edges.end(), [](const auto& left, const auto& right) {
+        return left.first == right.first ? left.second.x > right.second.x
+                                         : left.first < right.first;
+    });
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    return edges;
+}
+inline std::map<RegionKey, std::uint64_t> ExchangeFoliageBorders(FieldPageState& pages,
+                                                                 const FieldPageState& previous,
+                                                                 const FoliageEdges& edges) {
+    std::map<RegionKey, std::uint64_t> work;
+    for (const auto& [cell, next] : edges) {
+        const auto flux =
+            previous.irrigation().sample(cell, 0) / 8 - previous.irrigation().sample(next, 0) / 8;
+        const auto donor = flux >= 0 ? cell : next, recipient = flux >= 0 ? next : cell;
+        const auto available = pages.irrigation().sample(donor, 0);
+        const auto balance = pages.irrigation().sample(recipient, 0);
+        const auto amount = std::min({flux >= 0 ? flux : -flux, available, kMoistureMax - balance});
+        if (!pages.set_irrigation(donor, available - amount) ||
+            !pages.set_irrigation(recipient, balance + amount)) {
+            throw std::runtime_error("Irrigation border commit refused");
+        }
+        ++work[FieldPageState::region_of_scent_cell(cell)];
+        ++work[FieldPageState::region_of_scent_cell(next)];
+    }
+    return work;
+}
+inline entt::registry SelectFoliageRegistry(const entt::registry& original,
+                                            const RegionalFoliageWindows& windows,
+                                            const std::set<FieldPageKey>& borders) {
+    entt::registry selected;
+    const auto collect = [&]<typename T>() {
+        for (auto entity : original.view<const T>()) {
+            if (selected.valid(entity)) {
+                continue;
+            }
+            const auto* owner = original.try_get<const Comp::PlantRegionComponent>(entity);
+            const auto* transform = original.try_get<const Comp::TransformComponent>(entity);
+            bool include = owner && windows.elapsed.contains({owner->owner_x, owner->owner_z});
+            if (!include && transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                const auto cell = FoliageCell(transform->position);
+                const auto found = windows.elapsed.find(FieldPageState::region_of_scent_cell(cell));
+                const auto page = [](int value) {
+                    return value >= 0 ? value / 16 : (value - 15) / 16;
+                };
+                include = (found != windows.elapsed.end() && found->second != 0) ||
+                          borders.contains({page(cell.x), page(cell.z)});
+            }
+            if (include) {
+                if (selected.create(entity) != entity) {
+                    throw std::runtime_error("Foliage handle refused");
+                }
+                stage_detail::CopyFoliage(original, entity, selected, entity);
+            }
+        }
+    };
+    collect.template operator()<Comp::PlantTag>();
+    collect.template operator()<Comp::SoilFeederComponent>();
+    collect.template operator()<Comp::WaterSourceComponent>();
+    collect.template operator()<Comp::CombustibleComponent>();
+    collect.template operator()<Comp::IgnitionSourceComponent>();
+    collect.template operator()<Comp::GrazeableComponent>();
+    collect.template operator()<Comp::MortalComponent>();
+    collect.template operator()<Comp::CreatureComponent>();
+    collect.template operator()<Comp::AlarmComponent>();
+    collect.template operator()<Comp::DecayComponent>();
+    return selected;
+}
 } // namespace luminumbra::foliage
