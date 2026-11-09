@@ -5,13 +5,17 @@
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <initializer_list>
+#include <latch>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 
 namespace {
@@ -702,5 +706,505 @@ TEST(RegionalWaterPlanning, WorldBoundariesNeverWrapFacesAndZeroSourcesDoNotWake
         sleeping, sources, ledger, schedule, {.cell_budget = 4 * kPlanningCapacity});
     EXPECT_TRUE(zero.sources.empty());
     EXPECT_TRUE(zero.participants.empty());
+}
+
+std::shared_ptr<Chunk> TransactionChunk(int x, std::int32_t depth = 1000, int resolution = 8) {
+    auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+    FillWater(*chunk, resolution, depth);
+    const auto cells = chunk->water_depth_mm.size();
+    chunk->water_flow_data.assign(cells, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(cells, 1.0f);
+    chunk->water_rest_level.assign(cells, 0.0f);
+    chunk->water_src_mm.assign(cells, 0);
+    return chunk;
+}
+
+// Preserve float bit patterns too, so a refused NaN input can be compared exactly.
+std::string TransactionBytes(const Chunk& chunk, bool metadata = true) {
+    std::string bytes;
+    const auto append = [&bytes](const auto& values) {
+        if (!values.empty()) {
+            bytes.append(reinterpret_cast<const char*>(values.data()),
+                         values.size() * sizeof(values.front()));
+        }
+    };
+    append(chunk.water_depth_mm);
+    append(chunk.water_bed_mm);
+    append(chunk.water_edge_flux);
+    append(chunk.water_level_data);
+    append(chunk.water_flow_data);
+    append(chunk.water_sim_terrain_height);
+    append(chunk.water_rest_level);
+    append(chunk.water_src_mm);
+    const std::array scalars{
+        static_cast<std::uint64_t>(chunk.has_water_sim.load()),
+        static_cast<std::uint64_t>(chunk.current_water_resolution.load()),
+        static_cast<std::uint64_t>(chunk.is_water_sleeping.load()),
+        static_cast<std::uint64_t>(chunk.water_mesh_generated.load()),
+        static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(chunk.max_water_delta_last_tick)),
+        static_cast<std::uint64_t>(chunk.ticks_below_threshold),
+        static_cast<std::uint64_t>(chunk.water_mesh_dirty_ticks)};
+    append(scalars);
+    if (!metadata) {
+        return bytes;
+    }
+    const std::array revisions{static_cast<std::uint64_t>(chunk.water_revision()),
+                               chunk.authority_hash_revision(),
+                               static_cast<std::uint64_t>(chunk.voxel_revision()),
+                               static_cast<std::uint64_t>(chunk.is_water_state_dirty()),
+                               static_cast<std::uint64_t>(chunk.has_water_authority()),
+                               static_cast<std::uint64_t>(chunk.is_voxel_data_dirty()),
+                               static_cast<std::uint64_t>(chunk.sdf_provenance())};
+    append(revisions);
+    return bytes;
+}
+
+TEST(RegionalWaterTransaction, LateKernelFailureDiscardsAllPartialWorkAndNotifications) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 19}, {{1, 0}, 23}}));
+    const std::vector chunks{TransactionChunk(0),
+                             TransactionChunk(32, std::numeric_limits<std::int32_t>::max())};
+    auto changes = std::make_shared<ChunkWaterChanges>();
+    chunks[0]->bind_water_changes(changes);
+    const auto before_a = TransactionBytes(*chunks[0]), before_b = TransactionBytes(*chunks[1]);
+    const auto before_ledger = ledger.encode();
+    const std::vector<Planning::RegionPlan> regions{
+        {.owner = {0, 0}, .next_cursor = 7, .debt = 0},
+        {.owner = {1, 0}, .next_cursor = 9, .debt = 29}};
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, regions);
+    ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 2}).applied);
+    ASSERT_NE(stage.staged(chunks[0]->get_id())->water_depth_mm, chunks[0]->water_depth_mm);
+    EXPECT_THROW(stage.StepInterior(chunks[1]->get_id(), shield, {.rain_mm = 1}),
+                 std::invalid_argument);
+    EXPECT_FALSE(stage.pending());
+    EXPECT_THROW(stage.Publish(), std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before_a);
+    EXPECT_EQ(TransactionBytes(*chunks[1]), before_b);
+    EXPECT_EQ(ledger.encode(), before_ledger);
+    std::vector<ChunkID> notifications;
+    changes->take(notifications);
+    EXPECT_TRUE(notifications.empty());
+}
+
+TEST(RegionalWaterTransaction, PublishCommitsAllFieldsAndSparseRegistersWithConservedMass) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}});
+    for (std::int32_t x = 3; x < 259; ++x) {
+        ledger.mark_edited({x, 0}, WorldClock{});
+    }
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 19}, {{2, 0}, 31}}));
+    const std::vector chunks{TransactionChunk(31, 1500), TransactionChunk(32, 500)};
+    const std::vector<Planning::RegionPlan> regions{
+        {.owner = {0, 0}, .next_cursor = 7}, {.owner = {1, 0}, .next_cursor = 9, .debt = 29}};
+    Planning::Transaction stage;
+    const auto before = Mass(*chunks[0]) + Mass(*chunks[1]);
+    const auto ledger_before = ledger.encode();
+    stage.Begin(ledger, 0, chunks, regions);
+    EXPECT_EQ(stage.participants_visited(), chunks.size());
+    ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {}).applied);
+    ASSERT_TRUE(stage.StepFace(chunks[0]->get_id(), chunks[1]->get_id(), true).applied);
+    EXPECT_EQ(ledger.encode(), ledger_before);
+    std::vector<std::string> expected;
+    for (const auto& chunk : chunks) {
+        const auto* staged = stage.staged(chunk->get_id());
+        ASSERT_NE(staged, nullptr);
+        expected.push_back(TransactionBytes(*staged, false));
+    }
+    EXPECT_EQ(Mass(*stage.staged(chunks[0]->get_id())) + Mass(*stage.staged(chunks[1]->get_id())),
+              before);
+    stage.Publish();
+    EXPECT_FALSE(stage.pending());
+    EXPECT_EQ(Mass(*chunks[0]) + Mass(*chunks[1]), before);
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        const auto& chunk = chunks[i];
+        EXPECT_EQ(chunk->water_revision(), 1u);
+        EXPECT_EQ(chunk->authority_hash_revision(), 1u);
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        EXPECT_EQ(TransactionBytes(*chunk, false), expected[i]);
+    }
+    EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 7u);
+    EXPECT_EQ(ledger.records().at({1, 0}).water_cursor, 9u);
+    EXPECT_FALSE(ledger.water_debts().contains({0, 0}));
+    EXPECT_EQ(ledger.water_debts().at({1, 0}), 29u);
+    EXPECT_EQ(ledger.water_debts().at({2, 0}), 31u);
+}
+
+TEST(RegionalWaterTransaction, RepeatedBackwardAndOverlappingStagesRefuseAndRollbackIsExplicit) {
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    EXPECT_THROW(stage.Begin(ledger, 0, chunks, {}), std::invalid_argument);
+    EXPECT_TRUE(stage.pending());
+    stage.Publish();
+    const auto before = TransactionBytes(*chunks[0]);
+    EXPECT_THROW(stage.Publish(), std::invalid_argument);
+    EXPECT_THROW(stage.Begin(ledger, 0, chunks, {}), std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    const WorldClock clock(1);
+    static_cast<void>(ledger.schedule(clock));
+    stage.Begin(ledger, clock.tick(), chunks, {});
+    stage.Rollback();
+    stage.Rollback();
+    EXPECT_FALSE(stage.pending());
+    EXPECT_THROW(stage.Begin(ledger, clock.tick(), chunks, {}), std::invalid_argument);
+    EXPECT_THROW(stage.Begin(ledger, 0, chunks, {}), std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+}
+
+// Occupy the sole worker until the owner has staged and published water.
+// Shared ownership and release during unwinding keep assertion exits safe.
+class TransactionMeshGate {
+public:
+    TransactionMeshGate(JobSystem& jobs, SHIELD_WorldSystem& shield)
+        : m_shield(shield) {
+        const auto state = m_state;
+        jobs.dispatch([state]() {
+            state->entered.count_down();
+            state->released.wait();
+        });
+        state->entered.wait();
+    }
+    TransactionMeshGate(const TransactionMeshGate&) = delete;
+    TransactionMeshGate& operator=(const TransactionMeshGate&) = delete;
+    ~TransactionMeshGate() {
+        Release();
+        m_shield.quiesce_streaming_jobs_for_save();
+    }
+    void Release() {
+        if (!m_released) {
+            m_released = true;
+            m_state->released.count_down();
+        }
+    }
+
+private:
+    struct State {
+        std::latch entered{1}, released{1};
+    };
+    SHIELD_WorldSystem& m_shield;
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+    bool m_released = false;
+};
+
+TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublish) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem shield(&jobs, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0, 999000)};
+    chunks[0]->water_level_data.assign(64, 1000.0f);
+    // Exact full terrain storage makes this an admitted mesh job, with a water
+    // surface high enough that procedural shoreline clipping cannot affect it.
+    chunks[0]->sdf_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                   static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
+                                   static_cast<std::size_t>(CHUNK_SIZE_Z + 1),
+                               -1.0f);
+    ASSERT_TRUE(shield.adopt_streamed_chunk(chunks[0]));
+    entt::registry registry;
+    TransactionMeshGate gate(jobs, shield);
+    shield.begin_tick(0);
+    shield.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_EQ(chunks[0]->pending_lod.load(), 0);
+    ASSERT_FALSE(chunks[0]->pending_mesh_ready.load());
+    const auto live_before = TransactionBytes(*chunks[0]);
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 3}).applied);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), live_before);
+    stage.Publish();
+    EXPECT_NE(TransactionBytes(*chunks[0]), live_before);
+    gate.Release();
+    shield.quiesce_streaming_jobs_for_save();
+    EXPECT_TRUE(chunks[0]->pending_mesh_ready.load());
+    EXPECT_FALSE(chunks[0]->pending_mesh_failed.load());
+    ASSERT_EQ(chunks[0]->pending_water_mesh_vertices.size(), 64u * 4u);
+    for (const auto& vertex : chunks[0]->pending_water_mesh_vertices) {
+        EXPECT_EQ(vertex.position.y, 1000.0f);
+    }
+}
+
+TEST(RegionalWaterTransaction, InvalidShapesAndNonfiniteInputsRefuseBeforeAnyWrite) {
+    for (int fault = 0; fault < 16; ++fault) {
+        SCOPED_TRACE(fault);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0), TransactionChunk(1)};
+        auto& chunk = *chunks[1];
+        if (fault == 0) {
+            chunk.water_bed_mm.pop_back();
+        }
+        if (fault == 1) {
+            chunk.water_edge_flux.pop_back();
+        }
+        if (fault == 2) {
+            chunk.water_depth_mm.front() = -1;
+        }
+        if (fault == 3) {
+            chunk.water_flow_data.clear();
+        }
+        if (fault == 4) {
+            chunk.current_water_resolution.store(3);
+        }
+        if (fault == 5) {
+            chunk.has_water_sim.store(false);
+        }
+        if (fault == 6) {
+            chunk.water_sim_terrain_height[0] = std::numeric_limits<float>::infinity();
+        }
+        if (fault == 7) {
+            chunk.water_level_data[0] = std::numeric_limits<float>::quiet_NaN();
+        }
+        if (fault == 8) {
+            chunk.water_rest_level[0] = std::numeric_limits<float>::infinity();
+        }
+        if (fault == 9) {
+            chunk.water_flow_data[0].y = std::numeric_limits<float>::infinity();
+        }
+        if (fault == 10) {
+            chunk.max_water_delta_last_tick = std::numeric_limits<float>::quiet_NaN();
+        }
+        if (fault == 11) {
+            chunk.water_src_mm.pop_back();
+        }
+        if (fault == 12) {
+            chunk.water_rest_level.pop_back();
+        }
+        if (fault == 13) {
+            chunk.ticks_below_threshold = -1;
+        }
+        if (fault == 14) {
+            chunk.water_mesh_dirty_ticks = 16;
+        }
+        if (fault == 15) {
+            chunk.max_water_delta_last_tick = -1.0f;
+        }
+        const auto before_a = TransactionBytes(*chunks[0]), before_b = TransactionBytes(chunk);
+        const auto before_ledger = ledger.encode();
+        Planning::Transaction stage;
+        EXPECT_THROW(stage.Begin(ledger, 0, chunks, {}), std::invalid_argument);
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before_a);
+        EXPECT_EQ(TransactionBytes(chunk), before_b);
+        EXPECT_EQ(ledger.encode(), before_ledger);
+    }
+}
+
+TEST(RegionalWaterTransaction, InvalidIdentitiesOwnersPatchesAndTicksRefuseUnchanged) {
+    for (int fault = 0; fault < 10; ++fault) {
+        SCOPED_TRACE(fault);
+        auto ledger = PlanningLedger({{0, 0}});
+        auto chunk = TransactionChunk(0);
+        std::vector chunks{chunk};
+        std::vector<Planning::RegionPlan> regions{{.owner = {0, 0}, .debt = 1}};
+        std::uint64_t tick = 0;
+        if (fault == 0) {
+            chunks.push_back(chunk);
+        }
+        if (fault == 1) {
+            chunks.push_back(nullptr);
+        }
+        if (fault == 2) {
+            chunks.push_back(TransactionChunk(32));
+        }
+        if (fault == 3) {
+            regions[0].owner = {1, 0};
+        }
+        if (fault == 4) {
+            regions.push_back(regions.front());
+        }
+        if (fault == 5) {
+            regions[0].debt = ActiveRegionLedger::kMaxWaterDebt + 1;
+        }
+        if (fault == 6) {
+            regions[0].cadence_shift = 1;
+        }
+        if (fault == 7) {
+            tick = 1;
+        }
+        if (fault == 8) {
+            tick = WorldClock::kTickLimit;
+        }
+        if (fault == 9) {
+            chunks.push_back(TransactionChunk(Chunk::kPackedMaxXz + 1));
+        }
+        const auto before = TransactionBytes(*chunk), before_ledger = ledger.encode();
+        Planning::Transaction stage;
+        EXPECT_THROW(stage.Begin(ledger, tick, chunks, regions), std::invalid_argument);
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunk), before);
+        EXPECT_EQ(ledger.encode(), before_ledger);
+    }
+}
+
+TEST(RegionalWaterTransaction, EmptyStagesUnchangedPublicationAndExplicitRollbackAreSafe) {
+    auto ledger = PlanningLedger({{0, 0}});
+    Planning::Transaction empty;
+    empty.Begin(ledger, 0, {}, {});
+    EXPECT_EQ(empty.participants_visited(), 0u);
+    EXPECT_EQ(empty.staged(0), nullptr);
+    empty.Publish();
+    const std::vector chunks{TransactionChunk(0)};
+    const auto before = TransactionBytes(*chunks[0]);
+    Planning::Transaction unchanged;
+    unchanged.Begin(ledger, 0, chunks, {});
+    unchanged.Publish();
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    Planning::Transaction cancelled;
+    cancelled.Begin(ledger, 0, chunks, {});
+    cancelled.Rollback();
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+}
+
+TEST(RegionalWaterTransaction, CountCapsRefuseBeforeVisitingOrCopyingParticipants) {
+    auto ledger = PlanningLedger({{0, 0}});
+    Planning::Transaction stage;
+    const std::vector<std::shared_ptr<Chunk>> oversized(Planning::kMaxResidents + 1);
+    EXPECT_THROW(stage.Begin(ledger, 0, oversized, {}), std::invalid_argument);
+    EXPECT_EQ(stage.participants_visited(), 0u);
+    const std::vector<Planning::RegionPlan> patches(
+        static_cast<std::size_t>(ActiveRegionLedger::kMaxRegions) + 1);
+    EXPECT_THROW(stage.Begin(ledger, 0, {}, patches), std::invalid_argument);
+    EXPECT_EQ(stage.participants_visited(), 0u);
+    EXPECT_FALSE(stage.pending());
+}
+
+TEST(RegionalWaterTransaction, SparseDebtPreparationRefusesTheFileCapBeforeAnyWrite) {
+    ActiveRegionLedger ledger;
+    for (std::uint32_t i = 0; i < ActiveRegionLedger::kMaxRegions; ++i) {
+        ledger.mark_edited(
+            {static_cast<std::int32_t>(i % 1024u), static_cast<std::int32_t>(i / 1024u)},
+            WorldClock{});
+    }
+    const std::vector<Planning::RegionPlan> patches{{.owner = {0, 0}, .next_cursor = 7, .debt = 1}};
+    Planning::Transaction stage;
+    EXPECT_THROW(stage.Begin(ledger, 0, {}, patches), std::invalid_argument);
+    EXPECT_FALSE(stage.pending());
+    EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 0u);
+    EXPECT_TRUE(ledger.water_debts().empty());
+}
+
+TEST(RegionalWaterTransaction, EmptyGridsCanStageButCannotExecuteAndFrozenOwnersRefuse) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{std::make_shared<Chunk>(IVec3(0))};
+    const auto before = TransactionBytes(*chunks[0]);
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    EXPECT_THROW(stage.StepInterior(chunks[0]->get_id(), shield, {}), std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    auto& record =
+        const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records()).at({0, 0});
+    record.state = RegionState::Frozen;
+    Planning::Transaction frozen;
+    EXPECT_THROW(frozen.Begin(ledger, 0, chunks, {}), std::invalid_argument);
+    const std::vector<Planning::RegionPlan> regions{{.owner = {0, 0}, .debt = 1}};
+    EXPECT_THROW(frozen.Begin(ledger, 0, {}, regions), std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+}
+
+TEST(RegionalWaterTransaction, NegativeKernelInputsAbort) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    const std::array<WaterKernels::InteriorInputs, 3> inputs{
+        WaterKernels::InteriorInputs{.rain_mm = -1},
+        WaterKernels::InteriorInputs{.evap_mm = -1},
+        WaterKernels::InteriorInputs{.weather_scale_mm = -1}};
+    for (const auto& input : inputs) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0), TransactionChunk(1)};
+        const auto before = TransactionBytes(*chunks[0]);
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        EXPECT_THROW(stage.StepInterior(chunks[0]->get_id(), shield, input), std::invalid_argument);
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    }
+}
+
+TEST(RegionalWaterTransaction, UnknownChunksAndReversedFacesAbort) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool interior : {false, true}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0), TransactionChunk(1)};
+        const auto before = TransactionBytes(*chunks[0]);
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        if (interior) {
+            EXPECT_THROW(stage.StepInterior(Chunk::calculate_id({2, 0, 0}), shield, {}),
+                         std::invalid_argument);
+        } else {
+            EXPECT_THROW(stage.StepFace(chunks[1]->get_id(), chunks[0]->get_id(), true),
+                         std::invalid_argument);
+        }
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    }
+}
+
+TEST(RegionalWaterTransaction, ChangedLedgerTickRefusesPublicationAfterStaging) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    const auto before = TransactionBytes(*chunks[0]);
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 1}).applied);
+    static_cast<void>(ledger.schedule(WorldClock(1)));
+    const auto scheduled = ledger.encode();
+    EXPECT_THROW(stage.Publish(), std::invalid_argument);
+    EXPECT_FALSE(stage.pending());
+    EXPECT_EQ(ledger.encode(), scheduled);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+}
+
+TEST(RegionalWaterTransaction, EveryResolutionAccountsRainEvaporationAndConservesPublication) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int resolution : {4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0, 1000, resolution)};
+        const auto before = Mass(*chunks[0]);
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        const auto result =
+            stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 3, .evap_mm = 2});
+        ASSERT_TRUE(result.applied);
+        EXPECT_GT(result.source_mm, 0);
+        EXPECT_GT(result.sink_mm, 0);
+        const auto expected = before + result.source_mm - result.sink_mm;
+        EXPECT_EQ(Mass(*stage.staged(chunks[0]->get_id())), expected);
+        EXPECT_EQ(Mass(*chunks[0]), before);
+        stage.Publish();
+        EXPECT_EQ(Mass(*chunks[0]), expected);
+    }
+}
+
+TEST(RegionalWaterTransaction, ExistingRevisionsAdvanceOnceAndStaleStagesRefuse) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool stale : {false, true}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0)};
+        chunks[0]->mark_water_state_dirty();
+        chunks[0]->mark_water_data_dirty();
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 2}).applied);
+        EXPECT_EQ(chunks[0]->water_revision(), 1u);
+        if (stale) {
+            chunks[0]->mark_water_state_dirty();
+            const auto before = TransactionBytes(*chunks[0]);
+            EXPECT_THROW(stage.Publish(), std::invalid_argument);
+            EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        } else {
+            stage.Publish();
+            EXPECT_EQ(chunks[0]->water_revision(), 2u);
+            EXPECT_EQ(chunks[0]->authority_hash_revision(), 2u);
+        }
+    }
 }
 } // namespace

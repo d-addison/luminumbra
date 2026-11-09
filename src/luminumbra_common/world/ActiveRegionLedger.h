@@ -188,6 +188,60 @@ public:
     // Sparse positive Q32 debt owned by known records; zero is represented by absence.
     // Validation/cap failure changes nothing. Explicitly retain absent due claims.
     bool set_water_debts(const WaterDebts& debts);
+    struct WaterPatch {
+        RegionKey key{};
+        std::uint64_t debt = 0, cursor = 0;
+    };
+    // Sparse preparation: ascending unique known owners only, at most kMaxRegions.
+    // Scratch owns replacement nodes; neither records nor unrelated debts are copied.
+    // Reserve projection bytes conservatively, avoiding a full record scan near
+    // the file cap. Refusal changes neither scratch nor live registers.
+    bool prepare_water_patch(std::span<const WaterPatch> patches, WaterDebts& scratch) const {
+        if (patches.size() > kMaxRegions || &scratch == &m_waterDebts) {
+            return false;
+        }
+        auto count = m_waterDebts.size();
+        for (std::size_t i = 0; i < patches.size(); ++i) {
+            const auto& patch = patches[i];
+            const auto record = m_records.find(patch.key);
+            if ((i != 0 && patches[i - 1].key >= patch.key) || record == m_records.end() ||
+                record->second.state == RegionState::Frozen || patch.debt > kMaxWaterDebt) {
+                return false;
+            }
+            count -= m_waterDebts.contains(patch.key) ? std::size_t{1} : std::size_t{0};
+            if (patch.debt != 0) {
+                ++count;
+            }
+        }
+        // Every count is <= 2^20; the full envelope sum fits even 32-bit size_t.
+        const auto extension_bytes = [](std::size_t owners) {
+            return owners == 0 ? std::size_t{0} : 10u + 16u * owners;
+        };
+        const auto bytes = kHeaderBytes + m_records.size() * kRecordBytes + 8u + 4u + 7u +
+                           (m_nextPersistentId == 1 ? 0u : 14u) +
+                           extension_bytes(energy_ages().size()) + extension_bytes(count) +
+                           extension_bytes(completed_work().size());
+        if (count > kMaxRegions || bytes > kMaxFileBytes) {
+            return false;
+        }
+        WaterDebts next;
+        for (const auto& patch : patches) {
+            if (patch.debt != 0) {
+                next.emplace(patch.key, patch.debt);
+            }
+        }
+        scratch.swap(next);
+        return true;
+    }
+    // Requires successful preparation and exclusive owner-thread access until commit.
+    // Node transfer, erasure and scalar writes allocate nothing and cannot refuse.
+    void commit_water_patch(std::span<const WaterPatch> patches, WaterDebts& scratch) noexcept {
+        for (const auto& patch : patches) {
+            m_records.find(patch.key)->second.water_cursor = patch.cursor;
+            m_waterDebts.erase(patch.key);
+        }
+        m_waterDebts.merge(scratch);
+    }
     // Apply only after every resume consumer succeeds. Refuses frozen/unknown or stale
     // stamps, so a saved frozen_at cannot cause catch-up twice. Commits last_ticked to tick(),
     // including a thaw between Reduced due phases, so consumers cannot replay that window.

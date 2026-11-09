@@ -246,6 +246,19 @@ public:
     u32 water_revision() const {
         return m_water_revision.load(std::memory_order_acquire);
     }
+    // Owner-thread transaction commit after all fallible authority preparation.
+    // Transfer divergence directly to sticky authority/save selection without an
+    // allocating change notification. Existing queued notifications remain drainable.
+    void publish_water_state() noexcept {
+        u32 revision = m_water_revision.load(std::memory_order_acquire);
+        while (revision != std::numeric_limits<u32>::max() &&
+               !m_water_revision.compare_exchange_weak(
+                   revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
+        set_water_authority();
+        mark_water_data_dirty();
+        clear_water_state_dirty();
+    }
     // Sticky: set once the chunk's water state has diverged from worldgen initialisation.
     void set_water_authority() {
         m_water_authority.store(true, std::memory_order_release);

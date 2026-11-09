@@ -372,4 +372,256 @@ Plan Build(std::span<const Resident> residents,
                        static_cast<std::uint64_t>(plan.faces.size()) * 2 * resolution;
     return plan;
 }
+
+namespace {
+void ValidateStageGrid(const Chunk& chunk) {
+    if (!chunk.has_water_sim.load()) {
+        if (!chunk.water_depth_mm.empty() || !chunk.water_bed_mm.empty() ||
+            !chunk.water_edge_flux.empty() || !chunk.water_level_data.empty() ||
+            !chunk.water_flow_data.empty() || !chunk.water_sim_terrain_height.empty() ||
+            !chunk.water_rest_level.empty() || !chunk.water_src_mm.empty()) {
+            Refuse();
+        }
+    } else if (!chunk.has_complete_water_state() ||
+               (!chunk.water_src_mm.empty() &&
+                chunk.water_src_mm.size() != chunk.water_depth_mm.size())) {
+        Refuse();
+    }
+    if (!LegalResolution(chunk.current_water_resolution.load()) ||
+        !std::isfinite(chunk.max_water_delta_last_tick) || chunk.max_water_delta_last_tick < 0.0f ||
+        chunk.ticks_below_threshold < 0 || chunk.water_mesh_dirty_ticks < 0 ||
+        chunk.water_mesh_dirty_ticks > 15) {
+        Refuse();
+    }
+}
+
+RegionKey StageOwner(const Chunk& chunk) {
+    const auto& coords = chunk.get_coords();
+    if (coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
+        coords.z < Chunk::kPackedMinXz || coords.z > Chunk::kPackedMaxXz ||
+        coords.y < Chunk::kPackedMinY || coords.y > Chunk::kPackedMaxY) {
+        Refuse();
+    }
+    return ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                          0.0f,
+                                          static_cast<float>(coords.z * CHUNK_SIZE_Z)});
+}
+
+void CaptureWater(const Chunk& original, Chunk& copy) {
+    copy.water_depth_mm = original.water_depth_mm;
+    copy.water_bed_mm = original.water_bed_mm;
+    copy.water_edge_flux = original.water_edge_flux;
+    copy.water_level_data = original.water_level_data;
+    copy.water_flow_data = original.water_flow_data;
+    copy.water_sim_terrain_height = original.water_sim_terrain_height;
+    copy.water_rest_level = original.water_rest_level;
+    copy.water_src_mm = original.water_src_mm;
+    copy.has_water_sim.store(original.has_water_sim.load());
+    copy.current_water_resolution.store(original.current_water_resolution.load());
+    copy.is_water_sleeping.store(original.is_water_sleeping.load());
+    copy.water_mesh_generated.store(original.water_mesh_generated.load());
+    copy.max_water_delta_last_tick = original.max_water_delta_last_tick;
+    copy.ticks_below_threshold = original.ticks_below_threshold;
+    copy.water_mesh_dirty_ticks = original.water_mesh_dirty_ticks;
+}
+
+void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
+    destination.water_depth_mm.swap(staged.water_depth_mm);
+    destination.water_bed_mm.swap(staged.water_bed_mm);
+    destination.water_edge_flux.swap(staged.water_edge_flux);
+    destination.water_level_data.swap(staged.water_level_data);
+    destination.water_flow_data.swap(staged.water_flow_data);
+    destination.water_sim_terrain_height.swap(staged.water_sim_terrain_height);
+    destination.water_rest_level.swap(staged.water_rest_level);
+    destination.water_src_mm.swap(staged.water_src_mm);
+    destination.has_water_sim.store(staged.has_water_sim.load());
+    destination.current_water_resolution.store(staged.current_water_resolution.load());
+    destination.is_water_sleeping.store(staged.is_water_sleeping.load());
+    destination.water_mesh_generated.store(staged.water_mesh_generated.load());
+    destination.max_water_delta_last_tick = staged.max_water_delta_last_tick;
+    destination.ticks_below_threshold = staged.ticks_below_threshold;
+    destination.water_mesh_dirty_ticks = staged.water_mesh_dirty_ticks;
+    if (changed) {
+        destination.publish_water_state();
+    }
+}
+
+std::int64_t CellArea(const Chunk& grid) {
+    const auto resolution = static_cast<std::int64_t>(grid.current_water_resolution.load());
+    return 4 * static_cast<std::int64_t>(CHUNK_SIZE_X) * CHUNK_SIZE_Z / (resolution * resolution);
+}
+
+std::int64_t Volume(const Chunk& grid) {
+    std::int64_t depth = 0;
+    for (const auto value : grid.water_depth_mm) {
+        depth += value;
+    }
+    // At most INT32_MAX * 1024 per chunk and 2^20 participants: totals fit i64,
+    // independent of the admitted resolution. Empty uninitialized grids contribute zero.
+    return depth * CellArea(grid);
+}
+} // namespace
+
+void Transaction::Begin(ActiveRegionLedger& ledger,
+                        std::uint64_t tick,
+                        std::span<const std::shared_ptr<Chunk>> participants,
+                        std::span<const RegionPlan> regions) {
+    if (pending() || (m_lastTick && tick <= *m_lastTick) || tick != ledger.tick() ||
+        tick >= world::WorldClock::kTickLimit || participants.size() > kMaxResidents ||
+        regions.size() > ActiveRegionLedger::kMaxRegions) {
+        Refuse();
+    }
+    try {
+        // Validate every shape and bound before any participant array is copied.
+        for (const auto& chunk : participants) {
+            ++m_visited;
+            if (!chunk) {
+                Refuse();
+            }
+            ValidateStageGrid(*chunk);
+            const auto* record = FindRecord(ledger, StageOwner(*chunk));
+            if (!record || record->state == RegionState::Frozen) {
+                Refuse();
+            }
+        }
+        m_entries.reserve(participants.size());
+        for (const auto& chunk : participants) {
+            m_entries.push_back({.live = chunk,
+                                 .grid = {},
+                                 .authority_revision = chunk->authority_hash_revision(),
+                                 .water_revision = chunk->water_revision(),
+                                 .changed = false});
+        }
+        std::sort(m_entries.begin(), m_entries.end(), [](const auto& a, const auto& b) {
+            return a.live->get_id() < b.live->get_id();
+        });
+        for (std::size_t i = 1; i < m_entries.size(); ++i) {
+            if (m_entries[i - 1].live->get_id() == m_entries[i].live->get_id()) {
+                Refuse();
+            }
+        }
+        m_patches.reserve(regions.size());
+        for (const auto& region : regions) {
+            const auto* record = FindRecord(ledger, region.owner);
+            if (!record || record->cadence_shift != region.cadence_shift ||
+                record->cadence_phase != region.cadence_phase) {
+                Refuse();
+            }
+            m_patches.push_back({region.owner, region.debt, region.next_cursor});
+        }
+        if (!ledger.prepare_water_patch(m_patches, m_debts)) {
+            Refuse();
+        }
+        for (auto& entry : m_entries) {
+            entry.grid = std::make_shared<Chunk>(entry.live->get_coords());
+            CaptureWater(*entry.live, *entry.grid);
+            m_expectedVolume += Volume(*entry.grid);
+        }
+        m_lastTick = tick;
+        m_ledger = &ledger;
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+const Chunk* Transaction::staged(ChunkID id) const noexcept {
+    const auto found = std::lower_bound(
+        m_entries.begin(), m_entries.end(), id, [](const auto& entry, ChunkID key) {
+            return entry.live->get_id() < key;
+        });
+    return found == m_entries.end() || found->live->get_id() != id ? nullptr : found->grid.get();
+}
+
+Chunk& Transaction::Grid(ChunkID id) {
+    const auto found = std::lower_bound(
+        m_entries.begin(), m_entries.end(), id, [](const auto& entry, ChunkID key) {
+            return entry.live->get_id() < key;
+        });
+    if (!pending() || found == m_entries.end() || found->live->get_id() != id) {
+        Refuse();
+    }
+    return *found->grid;
+}
+
+void Transaction::Account(const WaterKernels::Result& result, const Chunk& grid) {
+    if (!result.applied ||
+        result.depth_before + result.source_mm != result.depth_after + result.sink_mm) {
+        Refuse();
+    }
+    m_expectedVolume += (result.depth_after - result.depth_before) * CellArea(grid);
+}
+
+WaterKernels::Result Transaction::StepInterior(ChunkID id,
+                                               SHIELD_WorldSystem& shield,
+                                               const WaterKernels::InteriorInputs& inputs) {
+    try {
+        if (inputs.rain_mm < 0 || inputs.evap_mm < 0 || inputs.weather_scale_mm < 0) {
+            Refuse();
+        }
+        auto& grid = Grid(id);
+        const auto result = WaterKernels::StepInterior(grid, shield, inputs);
+        Account(result, grid);
+        return result;
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+WaterKernels::Result Transaction::StepFace(ChunkID positive, ChunkID other, bool is_x) {
+    try {
+        auto& a = Grid(positive);
+        auto& b = Grid(other);
+        const auto result = WaterKernels::StepSharedFace(a, b, is_x);
+        Account(result, a);
+        return result;
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+void Transaction::Publish() {
+    try {
+        if (!pending() || !m_lastTick || m_ledger->tick() != *m_lastTick) {
+            Refuse();
+        }
+        std::int64_t volume = 0;
+        for (auto& entry : m_entries) {
+            if (entry.live->authority_hash_revision() != entry.authority_revision ||
+                entry.live->water_revision() != entry.water_revision) {
+                Refuse();
+            }
+            ValidateStageGrid(*entry.grid);
+            volume += Volume(*entry.grid);
+            entry.changed = !entry.live->same_water_state(*entry.grid);
+        }
+        if (volume != m_expectedVolume) {
+            Refuse();
+        }
+        // Recheck ledger admission before the first live write. Everything below
+        // transfers prepared storage or writes scalars; there is no fallible tail.
+        if (!m_ledger->prepare_water_patch(m_patches, m_debts)) {
+            Refuse();
+        }
+        for (auto& entry : m_entries) {
+            PublishWater(*entry.live, *entry.grid, entry.changed);
+        }
+        m_ledger->commit_water_patch(m_patches, m_debts);
+        Rollback();
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+void Transaction::Rollback() noexcept {
+    m_ledger = nullptr;
+    m_entries.clear();
+    m_patches.clear();
+    m_debts.clear();
+    m_expectedVolume = 0;
+    m_visited = 0;
+}
 } // namespace Luminumbra::Systems::RegionalWater

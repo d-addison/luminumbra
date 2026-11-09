@@ -2,10 +2,13 @@
 
 #include "../core/WaterComponents.h"
 #include "../world/WaterShare.h"
+#include "WaterSystem.h"
 
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -86,5 +89,58 @@ struct Plan {
                          const world::ActiveRegionLedger& ledger,
                          const world::RegionSchedule& schedule,
                          const Inputs& inputs);
+
+// One owner-thread transaction per executor, with no live tick caller yet.
+// Begin captures only the supplied participants (<= kMaxResidents, <= 1024 cells
+// each) and owner patches (<= kMaxRegions). Hold exclusive mutation access to
+// those chunks and the ledger through Publish/Rollback; mesh workers use copies.
+// Kernel failure/exception discards all pending work. Publication validates every
+// stage before the first live write, then commits without allocating or refusing.
+// Accepted ticks are consumed even by Rollback; repeated/backward Begin refuses.
+// Begin costs O(P log P + P*1024 + D log N); Publish costs O(P*1024 + D log N).
+// Storage is O(P*1024 + D), never O(world).
+class Transaction {
+public:
+    Transaction() = default;
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+    Transaction(Transaction&&) = delete;
+    Transaction& operator=(Transaction&&) = delete;
+    void Begin(world::ActiveRegionLedger& ledger,
+               std::uint64_t tick,
+               std::span<const std::shared_ptr<Chunk>> participants,
+               std::span<const RegionPlan> regions);
+    WaterKernels::Result StepInterior(ChunkID id,
+                                      SHIELD_WorldSystem& shield,
+                                      const WaterKernels::InteriorInputs& inputs);
+    WaterKernels::Result StepFace(ChunkID positive, ChunkID other, bool is_x);
+    void Publish();
+    void Rollback() noexcept;
+    [[nodiscard]] bool pending() const noexcept {
+        return m_ledger != nullptr;
+    }
+    // Const diagnostics of private staged storage and actual capture visits.
+    [[nodiscard]] const Chunk* staged(ChunkID id) const noexcept;
+    [[nodiscard]] std::size_t participants_visited() const noexcept {
+        return m_visited;
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<Chunk> live, grid;
+        std::uint64_t authority_revision = 0;
+        std::uint32_t water_revision = 0;
+        bool changed = false;
+    };
+    Chunk& Grid(ChunkID id);
+    void Account(const WaterKernels::Result& result, const Chunk& grid);
+    std::vector<Entry> m_entries;
+    std::vector<world::ActiveRegionLedger::WaterPatch> m_patches;
+    world::ActiveRegionLedger::WaterDebts m_debts;
+    world::ActiveRegionLedger* m_ledger = nullptr;
+    std::optional<std::uint64_t> m_lastTick;
+    std::int64_t m_expectedVolume = 0;
+    std::size_t m_visited = 0;
+};
 
 } // namespace Luminumbra::Systems::RegionalWater
