@@ -526,6 +526,13 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Observational foliage preparation/publication counts; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
+    [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Read-only diagnostics of the live legacy foliage grids.
+    [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
+    [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
+
     // Observational candidate size during a tick; never persisted or hashed.
     [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
         return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
@@ -648,6 +655,8 @@ public:
 private:
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
+    struct FoliageStep;
+    std::unique_ptr<FoliageStep> m_foliageStep;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
         m_wildlifeFoliageTuning{}; // full-control: defaults preserved
