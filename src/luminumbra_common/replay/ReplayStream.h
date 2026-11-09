@@ -67,9 +67,10 @@ enum class RecordType : std::uint8_t {
 struct ReplayHeader {
     std::uint16_t version = kLrec1Version;
     std::uint16_t tick_rate_hz = 30; // canonical fixed tick rate
-    // Numeric seed (GameSession::StringToSeed of seed_string) -- the value the
-    // worldgen RNG is actually seeded with. seed_string is also stored so the
-    // boot path (which takes the string) is reproduced exactly.
+    // Numeric seed supplied by the replay producer. New worlds resolve nonnumeric text
+    // with seed conversion version 1 (FNV-1a 64, XOR-folded to uint32); legacy
+    // saved worlds retain std::hash. seed_string preserves the original input;
+    // it alone does not specify a saved world's conversion version.
     std::uint64_t seed = 0;
     std::string seed_string;
     std::string preset;            // preset name (worlds/atlas/presets/<preset>.json)

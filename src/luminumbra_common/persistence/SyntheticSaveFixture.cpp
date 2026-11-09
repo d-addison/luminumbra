@@ -4,6 +4,7 @@
 #include "SavedWorldCatalog.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
+#include "world/WorldMetadata.h"
 
 #include <nlohmann/json.hpp>
 
@@ -216,6 +217,8 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             {"presetIdentity", preset_identity},
             {"name", spec.world_name},
             {"seed", std::to_string(spec.seed)},
+            {"seedConversionVersion", world::kSeedConversionVersion},
+            {"resolvedSeed", static_cast<std::uint32_t>(spec.seed)},
             {"worldType", "default"},
             {"creationTime", 1},
             {"spawnPoint", {{"x", 8}, {"y", 18}, {"z", 8}}},

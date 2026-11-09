@@ -48,6 +48,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <limits>
 #include <map>
@@ -56,6 +57,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <system_error>
@@ -498,6 +500,229 @@ INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
 INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
+
+TEST(WorldSeedConversion, PinnedUtf8AndNumericCompatibility) {
+    EXPECT_EQ(world::ResolveWorldSeed("hello", 1), UINT32_C(614098253));
+    EXPECT_EQ(world::ResolveWorldSeed("portable-\xc3\xa9", 1), UINT32_C(3978087486));
+    EXPECT_EQ(world::ResolveWorldSeed("18446744073709551616", 1), UINT32_C(3574524678));
+    for (const auto& [text, expected] :
+         std::vector<std::pair<std::string, std::uint32_t>>{{"0", 0},
+                                                            {"1337", 1337},
+                                                            {"4294967295", UINT32_MAX},
+                                                            {"4294967296", 0},
+                                                            {"18446744073709551615", UINT32_MAX},
+                                                            {"-1", UINT32_MAX},
+                                                            {"  +42tail", 42},
+                                                            {"42text", 42}}) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(world::ResolveWorldSeed(text, 0), expected);
+        EXPECT_EQ(world::ResolveWorldSeed(text, 1), expected);
+    }
+    EXPECT_THROW(world::ResolveWorldSeed("hello", 2), std::invalid_argument);
+}
+
+TEST_F(WorldOpenRefusal, VersionedTextSeedGoldenRoundTripsBothSaveFormats) {
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        GameSession created;
+        created.SetRootPath(RootString());
+        created.SetJobSystem(&jobs);
+        created.SetActiveRegionsEnabled(indexed);
+        ASSERT_TRUE(created.CreateWorld("Text seed", "portable-\xc3\xa9", "default"));
+        const auto directory = created.GetWorldSaveDir();
+        const auto id = created.GetMetadata().worldId;
+        EXPECT_EQ(created.GetMetadata().seedConversionVersion, 1u);
+        EXPECT_EQ(created.GetMetadata().resolvedSeed, UINT32_C(3978087486));
+        EXPECT_EQ(static_cast<std::uint32_t>(created.GetWorldSystem()->get_seed()),
+                  UINT32_C(3978087486));
+        ASSERT_TRUE(created.SaveWorld());
+        auto metadata = nlohmann::json::parse(Read(directory / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+        EXPECT_EQ(metadata.at("container_version"), indexed ? 3 : 2);
+        const auto before = DiskBytes(directory);
+        const auto inspected = Persistence::InspectSavedWorld(root, id);
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.metadata.seedConversionVersion, 1u);
+        EXPECT_EQ(inspected.metadata.resolvedSeed, UINT32_C(3978087486));
+        GameSession reopened;
+        reopened.SetRootPath(RootString());
+        reopened.SetJobSystem(&jobs);
+        reopened.SetActiveRegionsEnabled(indexed);
+        ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetMetadata().seedConversionVersion, 1u);
+        EXPECT_EQ(reopened.GetMetadata().resolvedSeed, UINT32_C(3978087486));
+        EXPECT_EQ(static_cast<std::uint32_t>(reopened.GetWorldSystem()->get_seed()),
+                  UINT32_C(3978087486));
+        EXPECT_EQ(DiskBytes(directory), before);
+        ASSERT_TRUE(reopened.SaveWorld());
+        metadata = nlohmann::json::parse(Read(directory / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+        const auto exported = root / (indexed ? "export-indexed" : "export-unindexed");
+        ASSERT_TRUE(reopened.SaveWorldStateTo(exported, nullptr, true));
+        metadata = nlohmann::json::parse(Read(exported / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+    }
+}
+
+TEST_F(WorldOpenRefusal, UnmarkedTextSeedReopensAndResavesWithLegacyConversion) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["seed"] = "portable-\xc3\xa9";
+    Write(save / "world_info.json", metadata.dump());
+    const auto before = DiskBytes(save);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetMetadata().seedConversionVersion, 0u);
+    EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()),
+              static_cast<std::uint32_t>(std::hash<std::string>{}("portable-\xc3\xa9")));
+    EXPECT_EQ(DiskBytes(save), before);
+    ASSERT_TRUE(session.SaveWorld());
+    metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    EXPECT_FALSE(metadata.contains("seedConversionVersion"));
+    EXPECT_FALSE(metadata.contains("resolvedSeed"));
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()),
+              static_cast<std::uint32_t>(std::hash<std::string>{}("portable-\xc3\xa9")));
+}
+
+TEST_F(WorldOpenRefusal, NumericAndEmptyNewSeedsKeepTheirExistingBehavior) {
+    const std::array<std::string, 4> inputs = {"0", "4294967296", "42text", ""};
+    for (const std::string& text : inputs) {
+        SCOPED_TRACE(text);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Numeric seed", text, "default"));
+        const auto& metadata = session.GetMetadata();
+        ASSERT_FALSE(metadata.seed.empty());
+        const auto expected = static_cast<std::uint32_t>(std::stoull(metadata.seed));
+        EXPECT_EQ(metadata.resolvedSeed, expected);
+        EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()), expected);
+        EXPECT_EQ(metadata.seedConversionVersion, 1u);
+        if (!text.empty()) {
+            EXPECT_EQ(metadata.seed, text);
+        }
+        ASSERT_TRUE(session.LoadWorld(metadata.worldId)) << session.GetWorldOpenError();
+        EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()), expected);
+    }
+}
+
+TEST_F(WorldOpenRefusal, SyntheticWriterRecordsVersionAndTruncatedNumericSeed) {
+    Persistence::SyntheticSaveSpec spec;
+    spec.seed = UINT64_MAX;
+    spec.chunk_count = 1;
+    spec.world_id = "versioned-synthetic";
+    spec.preset_source = root / "worlds/atlas/presets/default.json";
+    const auto report = Persistence::WriteSyntheticSave(spec, root);
+    ASSERT_TRUE(report.ok) << report.error;
+    const auto metadata = nlohmann::json::parse(Read(report.save_dir / "world_info.json"));
+    EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+    EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_MAX);
+    const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.metadata.seedConversionVersion, 1u);
+    EXPECT_EQ(inspected.metadata.resolvedSeed, UINT32_MAX);
+}
+
+class SeedMetadataRefusal : public WorldOpenRefusal {};
+
+TEST_P(SeedMetadataRefusal, RefusesEveryReaderAndWriterWithoutPublishing) {
+    const auto [metadata_only, defect] = GetParam();
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    const auto* previous_world = session.GetWorldSystem();
+    const auto previous_seed = previous_world->get_seed();
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["seed"] = "hello";
+    metadata["seedConversionVersion"] = 1;
+    metadata["resolvedSeed"] = UINT32_C(614098253);
+    if (defect == 0)
+        metadata["resolvedSeed"] = UINT32_C(614098254);
+    else if (defect == 1)
+        metadata["seedConversionVersion"] = 2;
+    else if (defect == 2)
+        metadata.erase("resolvedSeed");
+    else if (defect == 3)
+        metadata.erase("seedConversionVersion");
+    else if (defect < 11) {
+        const std::array<nlohmann::json, 7> invalid = {0, -1, 1.0, true, "1", nullptr, UINT64_MAX};
+        metadata["seedConversionVersion"] = invalid.at(static_cast<std::size_t>(defect - 4));
+    } else if (defect < 18) {
+        const std::array<nlohmann::json, 7> invalid = {
+            -1, UINT64_C(4294967296), 614098253.0, true, "614098253", nullptr, 1e38};
+        metadata["resolvedSeed"] = invalid.at(static_cast<std::size_t>(defect - 11));
+    } else if (defect == 18)
+        metadata.erase("seed");
+    else if (defect == 19)
+        metadata["seed"] = "";
+    else if (defect == 20)
+        metadata["seed"] = false;
+    else if (defect == 21)
+        metadata["seed"] = "other text";
+    else
+        metadata["seedConversionVersion"] = 1e38;
+    const auto bytes = metadata.dump();
+    const auto writer_destination = root / "refused-destination";
+    const auto before_write = DiskBytes(root);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::admit_metadata_bytes(bytes, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_FALSE(WorldSaveService::save_metadata(bytes, writer_destination));
+    world::ActiveRegionLedger ledger;
+    EXPECT_FALSE(
+        WorldSaveService::save_metadata_and_active_regions(bytes, ledger, writer_destination));
+    const world::GroundObjectStore objects;
+    EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+        bytes, ledger, objects, {}, writer_destination));
+    EXPECT_EQ(DiskBytes(root), before_write);
+    Write(save / "world_info.json", bytes);
+    if (metadata_only != 0)
+        fs::remove_all(save / "chunks");
+    const auto before_read = DiskBytes(root);
+    EXPECT_FALSE(WorldSaveService::validate_save(save));
+    WorldSaveService::SaveFormat format;
+    EXPECT_FALSE(WorldSaveService::read_save_format(save, format));
+    world::WorldClock clock;
+    bool requires_regions = false;
+    EXPECT_FALSE(WorldSaveService::read_clock_metadata(save, clock, requires_regions));
+    Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(save, "world_info.json", digest, error));
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_FALSE(inspected.error.empty());
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_FALSE(catalog.worlds.front().error.empty());
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    EXPECT_EQ(session.GetWorldSystem(), previous_world);
+    EXPECT_EQ(session.GetWorldSystem()->get_seed(), previous_seed);
+    EXPECT_EQ(session.GetMetadata().seed, "1337");
+    EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.autosave_interval_ticks = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.Session(), nullptr);
+    runner.Shutdown();
+    EXPECT_EQ(DiskBytes(root), before_read);
+}
+
+INSTANTIATE_TEST_SUITE_P(InitializedAndMetadataOnly,
+                         SeedMetadataRefusal,
+                         testing::Combine(testing::Values(0, 1), testing::Range(0, 23)));
 
 TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
     ASSERT_TRUE(fs::remove(save / "world_info.json"));

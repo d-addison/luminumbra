@@ -1410,6 +1410,8 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
+    metadata.seedConversionVersion = kSeedConversionVersion;
+    metadata.resolvedSeed = StringToSeed(metadata.seed);
     metadata.worldType = worldType;
     metadata.worldId = options.transient_creation ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
@@ -1548,7 +1550,7 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
-    m_numericSeed = StringToSeed(m_metadata.seed);
+    m_numericSeed = m_metadata.resolvedSeed;
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
@@ -1741,7 +1743,9 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
     }
     // Resolve the same terrain-bounded wanted set before reading any chunks. Worker
     // preparation owns its sampler and never reads a live session or starts jobs.
-    prepared->world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    prepared->world_seed = static_cast<int>(saved.metadata.seedConversionVersion == 0
+                                                ? ResolveWorldSeed(saved.metadata.seed, 0)
+                                                : saved.metadata.resolvedSeed);
     auto state_options = options;
     if (options.active_regions) {
         TerrainGenParams params = preset.params;
@@ -3397,6 +3401,10 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
+    if (m_metadata.seedConversionVersion != 0) {
+        metadata_json["seedConversionVersion"] = m_metadata.seedConversionVersion;
+        metadata_json["resolvedSeed"] = m_metadata.resolvedSeed;
+    }
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
@@ -4170,6 +4178,12 @@ std::string GameSession::GenerateWorldId() {
 }
 
 uint32_t GameSession::StringToSeed(const std::string& seedStr) {
+    return ResolveWorldSeed(seedStr, kSeedConversionVersion);
+}
+
+std::uint32_t ResolveWorldSeed(const std::string& seedStr, std::uint32_t conversion_version) {
+    if (conversion_version != 0 && conversion_version != kSeedConversionVersion)
+        throw std::invalid_argument("Unsupported seed conversion version.");
     if (seedStr.empty()) {
         return std::random_device{}();
     }
@@ -4178,10 +4192,42 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
         // Use std::stoull for 64-bit seed range, then cast
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
-        // If not a number, hash the string
-        const std::hash<std::string> hasher;
-        return static_cast<uint32_t>(hasher(seedStr));
+        if (conversion_version == 0) {
+            const std::hash<std::string> hasher;
+            return static_cast<std::uint32_t>(hasher(seedStr));
+        }
+        std::uint64_t hash = UINT64_C(14695981039346656037);
+        for (const char byte : seedStr) {
+            hash ^= static_cast<unsigned char>(byte);
+            hash *= UINT64_C(1099511628211);
+        }
+        return static_cast<std::uint32_t>(hash ^ (hash >> 32));
     }
+}
+
+std::string ValidateWorldSeedMetadata(const nlohmann::json& metadata) {
+    const bool has_version = metadata.contains("seedConversionVersion");
+    const bool has_seed = metadata.contains("resolvedSeed");
+    if (!has_version && !has_seed)
+        return {};
+    if (!has_version || !has_seed)
+        return "Corrupt world metadata: incomplete seed conversion pair.";
+    const auto& version = metadata.at("seedConversionVersion");
+    if (!version.is_number_integer() || version < 1)
+        return "Corrupt world metadata: invalid seed conversion version.";
+    if (version != kSeedConversionVersion)
+        return "Unsupported future seed conversion version.";
+    const auto& resolved = metadata.at("resolvedSeed");
+    if (!resolved.is_number_integer() || resolved < 0 ||
+        resolved > std::numeric_limits<std::uint32_t>::max())
+        return "Corrupt world metadata: invalid resolved seed.";
+    if (!metadata.contains("seed") || !metadata.at("seed").is_string() ||
+        metadata.at("seed").get_ref<const std::string&>().empty())
+        return "Corrupt world metadata: versioned seed requires nonempty seed text.";
+    if (resolved.get<std::uint32_t>() !=
+        ResolveWorldSeed(metadata.at("seed").get_ref<const std::string&>(), kSeedConversionVersion))
+        return "Corrupt world metadata: resolved seed disagrees with seed conversion.";
+    return {};
 }
 
 // scent/foraging grid <-> world helpers. The field is kScentFieldCells wide, cell
