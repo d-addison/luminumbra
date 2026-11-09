@@ -2650,6 +2650,133 @@ class OwnedCommandLifetime(unittest.TestCase):
             self.assertIsNotNone(self.launched[0].poll())
             self.assertFalse((self.root / "child.pid").exists(), "fixture must have no descendant")
 
+    def drain_pipe_boundary(self, final_output, *, descendant=False, returncode=0,
+                            read_error=False, expire=False, close_at_deadline=False):
+        """Release real pipe writers only after observing an empty, live pipe."""
+        self.script.write_text(textwrap.dedent("""\
+            import os
+            import subprocess
+            import sys
+            import threading
+            watchdog = threading.Timer(3, lambda: os._exit(9))
+            watchdog.daemon = True
+            watchdog.start()
+            if os.read(0, 1) != b"x":
+                raise RuntimeError("release byte missing")
+            if sys.argv[1] == "writer":
+                os.write(1, b"tail\\n")
+                if sys.argv[2] == "ack":
+                    os.close(1)
+                    os.write(2, b"closed\\n")
+            else:
+                os.write(1, bytes.fromhex(sys.argv[2]))
+                if sys.argv[1] == "descendant":
+                    subprocess.Popen([sys.executable, "-I", "-B", __file__, "writer", sys.argv[4]])
+                sys.exit(int(sys.argv[3]))
+            """), encoding="utf-8")
+        original_read, original_available = os.read, M.WindowsJob.available
+        clock = mock.Mock(wraps=time)
+        if expire or close_at_deadline:
+            clock.monotonic.return_value = 0
+        observed = []
+        failed_read = False
+        def launch(argv, **kwargs):
+            kwargs["stdin"] = subprocess.PIPE
+            if close_at_deadline:
+                kwargs["stderr"] = subprocess.PIPE
+            process = self.process(argv, **kwargs)
+            self.launched.append(process)
+            return process
+        def empty_pipe():
+            process = self.launched[0]
+            if not observed:
+                self.assertIsNone(process.poll(), "empty read must precede leader exit")
+                self.assertEqual(process.stdin.write(b"x"), 1)
+                # The fixture's POSIX wait retains the leader with WNOWAIT.
+                self.assertEqual(process.wait(timeout=2), returncode)
+                observed.append("exited")
+            elif descendant and observed == ["exited"]:
+                if expire:
+                    clock.monotonic.return_value = 2
+                    observed.append("expired")
+                else:
+                    self.assertEqual(process.stdin.write(b"x"), 1)
+                    if close_at_deadline:
+                        clock.monotonic.return_value = 2
+                        self.assertEqual(process.stderr.read(7), b"closed\n")
+                    observed.append("released")
+        def read(fd, count):
+            nonlocal failed_read
+            if not self.launched or fd != self.launched[0].stdout.fileno():
+                return original_read(fd, count)
+            if read_error and observed and not failed_read:
+                failed_read = True
+                raise OSError("controlled drain read failure")
+            try:
+                # Force multiple reads, including a split UTF-8 sequence.
+                return original_read(fd, min(count, 13))
+            except BlockingIOError:
+                empty_pipe()
+                raise
+        def available(job, stream):
+            count = original_available(job, stream)
+            if count == 0:
+                empty_pipe()
+            return count
+        argv = [sys.executable, "-I", "-B", str(self.script),
+                "descendant" if descendant else "leader", final_output.hex(), str(returncode),
+                "ack" if close_at_deadline else "no"]
+        try:
+            with mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
+                    mock.patch.object(M.os, "read", side_effect=read), \
+                    mock.patch.object(M.WindowsJob, "available", available), \
+                    mock.patch.object(M, "time", clock):
+                result = M.run_command(self.root, argv, dict(os.environ))
+                self.assertEqual(observed, ["exited", "released"] if descendant else ["exited"])
+                return result
+        finally:
+            if close_at_deadline and self.launched:
+                self.launched[0].stderr.close()
+            self.assertTrue(observed and observed[0] == "exited")
+            if expire:
+                self.assertEqual(observed, ["exited", "expired"])
+            self.assertIsNotNone(self.launched[0].poll())
+
+    def test_bounded_drain_preserves_empty_exit_after_live_empty_read(self):
+        self.assertEqual(self.drain_pipe_boundary(b""), b"")
+
+    def test_bounded_drain_preserves_final_output_after_live_empty_read(self):
+        data = "final utf8: ö\r\n".encode("utf-8")
+        self.assertEqual(self.drain_pipe_boundary(data), data)
+
+    def test_bounded_drain_preserves_final_output_and_transient_writer(self):
+        data = "final utf8: ö\r\n".encode("utf-8")
+        self.assertEqual(self.drain_pipe_boundary(data, descendant=True), data + b"tail\n")
+
+    def test_bounded_drain_preserves_nonzero_refusal_and_final_output(self):
+        with self.assertRaisesRegex(M.Refusal, "Git command refused\nfinal failuretail"):
+            self.drain_pipe_boundary(b"final failure", descendant=True, returncode=7)
+
+    def test_bounded_drain_rechecks_empty_observation_before_deadline(self):
+        self.assertEqual(self.drain_pipe_boundary(b"", descendant=True, close_at_deadline=True), b"tail\n")
+
+    def test_bounded_drain_keeps_output_limit(self):
+        with mock.patch.object(M, "OUTPUT_BYTES", 16):
+            with self.assertRaisesRegex(M.Refusal, "Git output bound exceeded"):
+                self.drain_pipe_boundary(b"x" * 17)
+
+    def test_bounded_drain_accepts_exact_output_limit(self):
+        with mock.patch.object(M, "OUTPUT_BYTES", 16):
+            self.assertEqual(self.drain_pipe_boundary(b"x" * 16), b"x" * 16)
+
+    def test_bounded_drain_keeps_read_failure(self):
+        with self.assertRaisesRegex(OSError, "controlled drain read failure"):
+            self.drain_pipe_boundary(b"final output", read_error=True)
+
+    def test_bounded_drain_refuses_writer_at_deadline(self):
+        with self.assertRaisesRegex(M.Refusal, "Git descendant retained output"):
+            self.drain_pipe_boundary(b"", descendant=True, expire=True)
+
     def waitid_pipe_boundary(self, final_output=b"", returncode=0, descendant=False):
         if os.name != "posix":
             if descendant:
