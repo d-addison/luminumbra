@@ -839,7 +839,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         adopt.index("m_streaming_state.chunks.emplace("))
         self.assertLess(adopt.index("m_streaming_state.chunks.emplace("),
                         adopt.index("bump_far_lod_authority_revision("))
-        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty())", 1)[1]
+        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty() &&", 1)[1]
         self.assertLess(promotion.index("SaveOwnership ownership;"),
                         promotion.index("chunk->sdf_data ="))
         self.assertLess(promotion.index("chunk->sdf_data ="),
@@ -1195,6 +1195,12 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
         self.assertIn("CancelAt(index)", forget)
         self.assertNotIn("Find(", forget)
         self.assertNotIn("Cancel(", forget)
+
+
+def load_tests(loader, tests, pattern):
+    tests.addTests(loader.discover(str(ROOT / "test/tools"),
+                                   pattern="test_region_authority_wiring.py"))
+    return tests
 
 
 if __name__ == "__main__":
