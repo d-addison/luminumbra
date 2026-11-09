@@ -166,6 +166,28 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertNotIn('uiHotReload.WatchDirectory("data/ui","' + extension + '");',
                              self.client)
 
+    def test_creation_validates_selected_dependencies_before_adoption(self):
+        # Source ordering also covers asynchronous and transient creation.
+        source = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                             .read_text(encoding="utf-8"))
+        preparation = source.split("GameSession::PrepareWorldCreation(", 1)[1].split(
+            "boolGameSession::CreateWorldInternal(", 1)[0]
+        self.assertNotIn("ValidateWorldConfig(", preparation)
+        self.assertIn("ValidateWorldConfigInputs(options.root_path,worldType,"
+                      "options.required_assets)", preparation)
+        self.assertEqual(preparation.count("LoadTerrainPresetFromJson("), 1)
+        self.assertLess(preparation.index("ResolveEffectivePreset(resolved,presetUse)"),
+                        preparation.index("LoadTerrainPresetFromJson(resolved,"))
+        self.assertLess(preparation.index("if(!preset.ok)"),
+                        preparation.index("prepared->ready=true"))
+        self.assertNotIn("create_director", preparation)
+        self.assertNotIn("ResetWorldSystems(", preparation)
+        named = source.split("GameSession::ValidateWorldConfig(", 1)[1].split(
+            "boolGameSession::CreateWorld(", 1)[0]
+        self.assertIn("ValidateWorldConfigInputs(root_path,worldType,required_assets)", named)
+        self.assertIn("LoadTerrainPreset(result.preset_path,RuntimeRoot(root_path)/"
+                      '"data",stop)', named)
+
     def test_preset_rename_refuses_occupied_targets_before_publication(self):
         writer = compact_cpp((ROOT / "src/luminumbra_client/world/WorldgenOverride.cpp")
                              .read_text(encoding="utf-8"))

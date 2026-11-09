@@ -2099,6 +2099,86 @@ private:
     std::string ledger;
 };
 
+// The unused named dependency must not prevent custom-preset admission.
+TEST_P(SavedWorldPresetTest, CustomDependenciesUseResolvedPresetBeforeAdoption) {
+    const auto named = nlohmann::json::parse(
+        ReadClockTestFile(Root().path() / "worlds/atlas/presets/default.json"));
+    ASSERT_TRUE(named.at("generation_params").at("features").at("structures_enabled").get<bool>());
+    auto custom = named;
+    custom["generation_params"]["features"]["structures_enabled"] = false;
+    const auto text = custom.dump();
+    const auto required = named.dump();
+    ASSERT_GT(fs::remove_all(Root().path() / "data/common/structures"), 0u);
+    const auto resolved = Luminumbra::world::ResolveEffectivePreset(
+        custom, Luminumbra::world::TerrainPresetUse::NewWorld);
+    const auto expected =
+        Luminumbra::world::LoadTerrainPresetFromJson(resolved, Root().path() / "data");
+    ASSERT_TRUE(expected.ok);
+    EXPECT_FALSE(GameSession::ValidateWorldConfig(Root().root_string(), "default").ok);
+
+    GameSession session;
+    Configure(session);
+    const auto before = SavedPresetTestDiskBytes(Root().path());
+    // A cold refusal must not publish even a directory or start any world systems.
+    EXPECT_FALSE(session.CreateWorld("Required custom dependency", "1337", "default", &required));
+    EXPECT_NE(session.GetWorldOpenError().find("structure pools"), std::string::npos);
+    EXPECT_FALSE(session.CreateWorld("Required named dependency", "1337", "default"));
+    EXPECT_FALSE(session.CreateTransientWorld("Required transient dependency", "1337", "default"));
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(session.GetWaterSystem(), nullptr);
+    EXPECT_EQ(session.GetPhysicsSystem(), nullptr);
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), before);
+
+    ASSERT_TRUE(session.CreateWorld("Selected custom preset", "1337", "default", &text))
+        << session.GetWorldOpenError();
+    ASSERT_NE(session.GetWorldSystem(), nullptr);
+    EXPECT_FALSE(session.GetWorldSystem()->structures_enabled());
+    EXPECT_EQ(session.PresetContentHash(), expected.preset_content_hash);
+    const auto save = session.GetWorldSaveDir();
+    const auto id = session.GetMetadata().worldId;
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "preset.json")), resolved);
+
+    const RetainedCreationState retained(session);
+    const auto created = SavedPresetTestDiskBytes(Root().path());
+    // The same refusal on a live session must retain its systems, identity and save eligibility.
+    EXPECT_FALSE(session.CreateWorld("Required replacement", "999", "default", &required));
+    EXPECT_NE(session.GetWorldOpenError().find("structure pools"), std::string::npos);
+    retained.ExpectUnchanged(session);
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), created);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto inspected = P::InspectSavedWorld(Root().path(), id);
+    EXPECT_TRUE(inspected.error.empty()) << inspected.error;
+    GameSession reopened;
+    Configure(reopened);
+    ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
+    EXPECT_FALSE(reopened.GetWorldSystem()->structures_enabled());
+    EXPECT_EQ(reopened.PresetContentHash(), expected.preset_content_hash);
+}
+
+// Custom presets still require safe names, the base preset and client assets.
+TEST_P(SavedWorldPresetTest, CustomPresetKeepsUniversalAdmissionChecks) {
+    const auto custom = PrepareCreationRefusalBase(Root().path()).dump();
+    GameSession session;
+    Configure(session);
+    const auto before = SavedPresetTestDiskBytes(Root().path());
+    for (const std::string type : {"", "../default", "..\\default", "missing-preset"}) {
+        SCOPED_TRACE(type);
+        EXPECT_FALSE(session.CreateWorld("Unsafe or missing preset", "1337", type, &custom));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_EQ(session.GetWorldSystem(), nullptr);
+        EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), before);
+    }
+    session.SetRequiredClientAssets({"missing-required-asset"});
+    EXPECT_FALSE(session.CreateWorld("Missing client asset", "1337", "default", &custom));
+    EXPECT_NE(session.GetWorldOpenError().find("required runtime asset"), std::string::npos);
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(SavedPresetTestDiskBytes(Root().path()), before);
+    session.SetRequiredClientAssets({});
+    ASSERT_TRUE(session.CreateWorld("No client assets required", "1337", "default", &custom));
+}
+
 TEST_P(SavedWorldPresetTest, NormalCreationRefusalsRetainDirtySessionAndExitSave) {
     const auto base = PrepareCreationRefusalBase(Root().path());
     ASSERT_TRUE(GameSession::ValidateWorldConfig(Root().root_string(), "default").ok);
