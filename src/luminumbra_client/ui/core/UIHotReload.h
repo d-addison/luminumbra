@@ -24,6 +24,12 @@ public:
 
     UIHotReload();
     ~UIHotReload();
+    // The callback target is shared with in-flight reloads, so copies would
+    // alias one mutable target. Watchers are owned and moved, never copied.
+    UIHotReload(const UIHotReload&) = delete;
+    UIHotReload& operator=(const UIHotReload&) = delete;
+    UIHotReload(UIHotReload&&) = default;
+    UIHotReload& operator=(UIHotReload&&) = default;
 
     // Configuration
     void SetEnabled(bool enabled) {
