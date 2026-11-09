@@ -338,7 +338,7 @@ class PathGateTests(unittest.TestCase):
         for path in (
             "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
-            ".github/workflows/ci.yml", ".github/workflows/new.yml",
+            ".github/workflows/ci.yml", ".github/workflows/base-retarget.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
             *gate.CI_ENTRYPOINTS,
         ):

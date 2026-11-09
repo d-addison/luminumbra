@@ -379,14 +379,18 @@ Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
 branch and path filters still apply. CI also listens for `labeled` and
-`unlabeled`. It does not listen for `edited`, so title, body and base edits start
-no runs and cannot replace the latest run that required checks are evaluated
-against; required check names are plain strings. A PR retargeted to main must be
-re-triggered (label change, ready toggle or a new head) before landing, so that a
-run whose base is main enables Windows/UCRT64 validation even for confirmed
-non-C++ changes. Its aggregate requires successful native producers. Never land a
-retargeted PR on a run made for its previous base. Other workflows retain their
-existing event types.
+`unlabeled`. CI does not listen for `edited`; its required check names are plain
+strings. The separate Base retarget workflow listens only for `edited`. A base
+change produces a failing `Base retarget / fresh CI required` check that names
+the old and new base refs and asks the author to re-trigger CI on the new base
+(push a new head, toggle ready for review, or change a label). Title/body edits
+skip this static-named, non-required job and leave required check names intact.
+Landing must use a CI run whose base matches the PR's current base; rerunning a
+run made for the previous base reuses its stored event payload and is insufficient.
+Windows validation separately admits only same-repository PRs labelled
+`windows-proof`; admitted proof runs select full MSVC and UCRT64 validation,
+including for confirmed non-C++ changes. Their aggregates require successful
+native producers. Other workflows retain their existing event types.
 Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this

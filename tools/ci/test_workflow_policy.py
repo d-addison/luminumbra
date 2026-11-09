@@ -3154,6 +3154,79 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                 self.assertNotIn("github.event.action", value(job, "if", 4) or "")
                 self.assertNotIn(" (metadata edit)", value(job, "name", 4) or "")
 
+    @staticmethod
+    def retarget_workflow():
+        return (ROOT / ".github/workflows/base-retarget.yml").read_text(encoding="utf-8")
+
+    def test_base_retarget_workflow_subscribes_only_to_edited(self):
+        workflow = self.retarget_workflow()
+        trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(trigger.strip(), "pull_request:\n    types: [edited]")
+        self.assertEqual(set(jobs(workflow)), {"base-retarget"})
+        self.assertIsNone(value(workflow, "concurrency", 0))
+
+    def test_base_retarget_check_is_static_and_only_admits_base_changes(self):
+        job = jobs(self.retarget_workflow())["base-retarget"]
+        name = value(job, "name", 4)
+        self.assertEqual(name, "Base retarget / fresh CI required")
+        self.assertNotIn("${{", name)
+        required = {context for contexts in REQUIRED_CONTEXT_JOBS.values() for context in contexts.values()}
+        required.update(("Windows / MSVC", "Windows / MSYS2 UCRT64"))
+        self.assertNotIn(name, required)
+        self.assertEqual(value(job, "if", 4), "${{ github.event.changes.base }}")
+        self.assertIsNone(value(job, "needs", 4))
+        self.assertIsNone(value(job, "strategy", 4))
+        ignored = (None, {}, {"title": {"from": "old"}}, {"body": {"from": ""}},
+                   {"unknown": {}}, {"base": None}, {"base": ""}, {"base": False})
+        changed = ({"base": {}}, {"base": {"ref": {}}},
+                   {"base": {"ref": {"from": "devel"}}})
+        # 11 payloads x 2 bases x 3 draft states x 2 label sets x 3 path states.
+        for changes, base, draft, labels, paths in product(
+                (*ignored, *changed), ("main", "devel"), (False, True, None),
+                ((), ("windows-proof",)), ("true", "false", "")):
+            with self.subTest(changes=changes, base=base, draft=draft, labels=labels, paths=paths):
+                self.assertEqual(bool(self.admitted(job, self.context(
+                    changes=changes, base=base, draft=draft, labels=labels, paths=paths))),
+                    changes in changed)
+
+    def test_base_retarget_fails_safely_with_refs_and_retrigger_instructions(self):
+        workflow = self.retarget_workflow()
+        permissions = workflow.split("\npermissions:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertEqual(permissions.strip(), "contents: read")
+        job = jobs(workflow)["base-retarget"]
+        self.assertIsNone(value(job, "permissions", 4))
+        self.assertIsNone(value(job, "continue-on-error", 4))
+        self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
+        self.assertNotIn("uses:", job)
+        job_steps = steps(job)
+        self.assertEqual(len(job_steps), 1)
+        step = job_steps[0]
+        self.assertIsNone(value(step, "if", 8))
+        self.assertIsNone(value(step, "continue-on-error", 8))
+        self.assertEqual(value(step, "shell", 8), "bash")
+        self.assertEqual(value(step, "PREVIOUS_BASE", 10), "${{ github.event.changes.base.ref.from }}")
+        self.assertEqual(value(step, "CURRENT_BASE", 10), "${{ github.event.pull_request.base.ref }}")
+        script = value(step, "run", 8)
+        self.assertNotIn("${{", script)
+        instructions = ("Re-trigger CI on the new base: push a new head, toggle ready for review, "
+                        "or change a label. Land only with a CI run whose base matches the current PR base.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Empty/partial metadata and shell metacharacters must still fail safely.
+            for previous, current in (("devel", "main"), ("main", "devel"), ("", "main"),
+                                      ("devel", ""), ("", ""),
+                                      ('$(touch injected);`touch injected`', '"; touch injected; #')):
+                with self.subTest(previous=previous, current=current):
+                    process = run_bash_script(script, cwd=root, env={**os.environ,
+                        "PREVIOUS_BASE": previous, "CURRENT_BASE": current},
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(process.returncode, 1, process.stderr)
+                    self.assertEqual(process.stdout,
+                                     f'Base retargeted from "{previous}" to "{current}". Fresh CI required.\n'
+                                     + instructions + "\n")
+                    self.assertEqual(process.stderr, "")
+                    self.assertEqual(list(root.iterdir()), [])
+
     def test_required_context_job_names_are_literal_and_produced_on_pull_requests(self):
         for filename, required in REQUIRED_CONTEXT_JOBS.items():
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
