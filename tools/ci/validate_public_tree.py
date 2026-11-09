@@ -295,19 +295,59 @@ def _cpp_number_end(text: str, index: int) -> int:
     return index
 
 
-def cpp_mask(text: str, *, comments_only: bool = False) -> str:
+def _cpp_spliced_source(text: str) -> tuple[str, list[int] | range]:
+    """Return logical characters and their physical offsets, plus an EOF sentinel."""
+    if "\\\n" not in text and "\\\r\n" not in text:
+        return text, range(len(text) + 1)
+    pieces: list[str] = []
+    offsets: list[int] = []
+    start = 0
+    for splice in re.finditer(r"\\\r?\n", text):
+        pieces.append(text[start:splice.start()])
+        offsets.extend(range(start, splice.start()))
+        start = splice.end()
+    pieces.append(text[start:])
+    offsets.extend(range(start, len(text) + 1))
+    return "".join(pieces), offsets
+
+
+def _cpp_raw_end(source: str, quote: int) -> int | None:
+    """Read raw delimiters and bodies physically, undoing line splicing there."""
+    size = len(source)
+    delimiter_end = quote + 1
+    while (delimiter_end < min(size, quote + 18)
+           and "!" <= source[delimiter_end] <= "~"
+           and source[delimiter_end] not in "()\\"):
+        delimiter_end += 1
+    if (delimiter_end == size or delimiter_end - quote - 1 > 16
+            or source[delimiter_end] != "("):
+        return None
+    close = ")" + source[quote + 1:delimiter_end] + '"'
+    end = source.find(close, delimiter_end + 1)
+    return size if end == -1 else end + len(close)
+
+
+def cpp_mask(source: str, *, comments_only: bool = False) -> str:
     """Scan C++ tokens monotonically; retain source offsets and physical lines.
 
-    Storage and total work are bounded by the input length. Raw delimiters are
-    bounded by C++'s 16-character limit, including when the opener is invalid.
+    Token and escape recognition uses C++ LF/CRLF line splicing, including in
+    identifiers, numbers, encoding prefixes, character literals and suffixes.
+    Raw literals use physical characters between their quotes. Masks retain
+    physical spelling (also for prose and exemption consumers), never shifting
+    findings or joining prose words across a splice.
+
+    Storage and total work are bounded by the physical input length. Raw
+    delimiters are bounded by C++'s 16-character limit, even if invalid.
     """
-    masked = ["\n" if char == "\n" else " " for char in text] if comments_only else list(text)
+    text, offsets = _cpp_spliced_source(source)
+    masked = ["\n" if char == "\n" else " " for char in source] if comments_only else list(source)
     index, size = 0, len(text)
     while index < size:
         start = index
         char = text[index]
         is_comment = False
         raw = False
+        physical_end = None
         if char in "0123456789" or (char == "." and index + 1 < size
                                       and text[index + 1] in "0123456789"):
             index = _cpp_number_end(text, index)
@@ -328,40 +368,30 @@ def cpp_mask(text: str, *, comments_only: bool = False) -> str:
         if text.startswith("//", index):
             is_comment = True
             end = text.find("\n", index + 2)
-            while end != -1:
-                previous = end - 1 if end and text[end - 1] == "\r" else end
-                if previous == 0 or text[previous - 1] != "\\":
-                    break
-                end = text.find("\n", end + 1)
             index = size if end == -1 else end
+            physical_end = offsets[index]
         elif text.startswith("/*", index):
             is_comment = True
             end = text.find("*/", index + 2)
             index = size if end == -1 else end + 2
+            physical_end = len(source) if end == -1 else offsets[index - 1] + 1
         elif char in "'\"":
             if raw:
-                delimiter_end = index + 1
-                while (delimiter_end < min(size, index + 18)
-                       and "!" <= text[delimiter_end] <= "~"
-                       and text[delimiter_end] not in "()\\"):
-                    delimiter_end += 1
-                if (delimiter_end < size and delimiter_end - index - 1 <= 16
-                        and text[delimiter_end] == "("):
-                    close = ")" + text[index + 1:delimiter_end] + '"'
-                    end = text.find(close, delimiter_end + 1)
-                    index = size if end == -1 else end + len(close)
+                physical_end = _cpp_raw_end(source, offsets[index])
+                if physical_end is not None:
+                    while index < size and offsets[index] < physical_end:
+                        index += 1
                     char = ""  # The complete raw literal has been consumed.
             if char:
                 quote = char
                 index += 1
                 while index < size:
                     if text[index] in "\r\n":
-                        break  # Recover malformed ordinary literals at the physical line.
+                        break  # Recover at the next unspliced line boundary.
                     if text[index] == "\\":
                         index += 1
-                        if index < size and text.startswith("\r\n", index):
-                            index += 2
-                        elif index < size:
+                        # Splicing is nonrecursive; an exposed newline is still invalid.
+                        if index < size and text[index] not in "\r\n":
                             index += 1
                     elif text[index] == quote:
                         index += 1
@@ -371,7 +401,9 @@ def cpp_mask(text: str, *, comments_only: bool = False) -> str:
         else:
             index += 1
             continue
-        end = index
+        end = physical_end if physical_end is not None else (
+            len(source) if index == size else offsets[index - 1] + 1)
+        start = offsets[start]
         # Literal suffixes remain code in the mask, but cannot open raw strings.
         if not is_comment and index < size and (text[index].isalpha() or text[index] == "_"):
             index += 1
@@ -379,7 +411,7 @@ def cpp_mask(text: str, *, comments_only: bool = False) -> str:
                 index += 1
         if comments_only:
             if is_comment:
-                masked[start:end] = text[start:end]
+                masked[start:end] = source[start:end]
         else:
             for offset in range(start, end):
                 if masked[offset] != "\n":
