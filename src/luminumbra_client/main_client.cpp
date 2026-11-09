@@ -23,6 +23,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
 #include "app/GraphicsSessionOverrides.h"
+#include "app/GraphicsStartup.h"
 #include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
@@ -2173,16 +2174,9 @@ int main(int argc, char* argv[]) {
     const bool graphics_detect_requested =
         HasCommandLineFlag(argc, argv, "--detect-and-apply-graphics");
     if (graphics_first_launch || graphics_detect_requested) {
-        Luminumbra::Client::GraphicsEdit edit;
-        edit.kind = Luminumbra::Client::GraphicsEditKind::DetectApply;
-        luminumbra::core::GraphicsSettings detected;
         std::string error;
-        if (Luminumbra::Client::ReduceGraphicsSettings(g_systemConfig.user().graphics,
-                                                       edit,
-                                                       g_app.hardwareInfo->inputs,
-                                                       detected,
-                                                       error)) {
-            g_systemConfig.user().graphics = std::move(detected);
+        if (Luminumbra::Client::SelectStartupGraphicsPreset(
+                g_systemConfig, graphics_detect_requested, g_app.hardwareInfo->inputs, error)) {
             if (graphics_detect_requested) {
                 LUMINUMBRA_CORE_INFO(
                     "{} | Recommended and selected: {}",
