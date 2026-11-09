@@ -24,6 +24,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CropLifecycleComponents.h"
+#include "../components/GrazeableComponent.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../core/DeterministicMath.h"
@@ -75,6 +76,7 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
         bool perennial;
         std::uint32_t lifespan;
         std::uint16_t species;
+        bool grazeable;
     };
     std::vector<Birth> births;
     std::vector<entt::entity> deaths;
@@ -109,7 +111,12 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
         const auto& tf = view.get<const Comp::TransformComponent>(e);
         const ::Luminumbra::Vec3 childPos(
             tf.position.x + rad * dm::Cos(ang), tf.position.y, tf.position.z + rad * dm::Sin(ang));
-        births.push_back({childPos, childGenome, lc.perennial, lc.lifespan_ticks, lc.species_id});
+        births.push_back({childPos,
+                          childGenome,
+                          lc.perennial,
+                          lc.lifespan_ticks,
+                          lc.species_id,
+                          reg.all_of<Comp::GrazeableComponent>(e)});
         ++lc.generations;
         ++stats.reseeded;
 
@@ -133,6 +140,9 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
         clc.perennial = b.perennial;
         clc.lifespan_ticks = b.lifespan;
         clc.species_id = b.species;
+        if (b.grazeable) {
+            reg.emplace<Comp::GrazeableComponent>(child);
+        }
         // Carry the cross-pollination opt-in so the generational loop keeps drifting (a child that
         // could not itself be pollinated would freeze the field's genetics after one generation). A
         // fresh PollinationComponent starts unpollinated; it crosses once the child flowers near a
