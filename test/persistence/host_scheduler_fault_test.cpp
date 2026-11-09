@@ -6,11 +6,13 @@
 
 #include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/SessionExit.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
+#include <stdexcept>
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +22,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -355,6 +358,84 @@ TEST_F(HostSchedulerFault, HealthyRecordPublishesACompleteReplayAndRegionTrace) 
     ASSERT_EQ(trace.size(), options.ticks);
     EXPECT_EQ(trace.front().first, 1u);
     EXPECT_EQ(trace.back().first, options.ticks);
+}
+
+TEST_F(HostSchedulerFault, RefusedTracePublicationPreservesExistingReplay) {
+    observation.inject_fault = false;
+    auto record_options = Options();
+    record_options.ticks = 1;
+    WriteHostFile(record_options.record_path, "existing replay");
+    const auto companion = fs::path(record_options.record_path + ".regions.json");
+    fs::create_directory(companion);
+    WriteHostFile(companion / "retained", "existing trace entry");
+    EXPECT_EQ(RunSchedulerFaultRecord(record_options), 1);
+    EXPECT_EQ(ReadHostFile(record_options.record_path), "existing replay");
+    EXPECT_EQ(ReadHostFile(companion / "retained"), "existing trace entry");
+}
+
+TEST_F(HostSchedulerFault, RefusedStaleTraceRemovalPreservesExistingReplay) {
+    observation.inject_fault = false;
+    WriteHostFile(root / "data/common/systems.json",
+                  R"({"sim":{"active_regions":{"enabled":false}}})");
+    auto record_options = Options();
+    record_options.ticks = 1;
+    WriteHostFile(record_options.record_path, "existing replay");
+    const auto companion = fs::path(record_options.record_path + ".regions.json");
+    fs::create_directory(companion);
+    WriteHostFile(companion / "retained", "existing trace entry");
+    EXPECT_EQ(RunSchedulerFaultRecord(record_options), 1);
+    EXPECT_EQ(ReadHostFile(record_options.record_path), "existing replay");
+    EXPECT_EQ(ReadHostFile(companion / "retained"), "existing trace entry");
+}
+
+struct RecordPublicationObservation {
+    fs::path replay;
+    bool replay_refused = false;
+    bool trace_published_first = false;
+};
+RecordPublicationObservation*& RecordPublication() {
+    static RecordPublicationObservation* observation = nullptr;
+    return observation;
+}
+void ObserveRecordPublication(const char* step, const fs::path& path) {
+    auto* observation = RecordPublication();
+    if (!observation || std::string_view(step) != "output-publish")
+        return;
+    if (path == observation->replay) {
+        Luminumbra::Replay::RegionScheduleTrace trace;
+        std::string error;
+        observation->trace_published_first =
+            Luminumbra::Replay::ReadRegionScheduleTrace(path, 1, trace, error);
+        observation->replay_refused = true;
+        throw std::runtime_error("replay publication refused");
+    }
+    if (path == fs::path(observation->replay.string() + ".regions.json")) {
+        EXPECT_EQ(ReadHostFile(observation->replay), "existing replay");
+    }
+}
+class ScopedRecordPublication {
+public:
+    explicit ScopedRecordPublication(RecordPublicationObservation& observation) {
+        RecordPublication() = &observation;
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(ObserveRecordPublication);
+    }
+    ~ScopedRecordPublication() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        RecordPublication() = nullptr;
+    }
+};
+
+TEST_F(HostSchedulerFault, ReplayRefusalCanLeaveCompletedTraceWithoutReplacingReplay) {
+    observation.inject_fault = false;
+    auto record_options = Options();
+    record_options.ticks = 1;
+    WriteHostFile(record_options.record_path, "existing replay");
+    RecordPublicationObservation publication{record_options.record_path, false, false};
+    const ScopedRecordPublication control(publication);
+    EXPECT_EQ(RunSchedulerFaultRecord(record_options), 1);
+    EXPECT_TRUE(publication.trace_published_first);
+    EXPECT_TRUE(publication.replay_refused);
+    EXPECT_EQ(ReadHostFile(record_options.record_path), "existing replay");
 }
 
 TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetadata) {

@@ -1,10 +1,11 @@
 #include "RegionScheduleTrace.h"
 
+#include "persistence/ReplacementOutputFile.h"
 #include "persistence/SavedJsonAdmission.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
-#include "persistence/WorldSaveService.h"
 #include "world/WorldClock.h"
 
+#include <exception>
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Replay {
@@ -37,7 +38,13 @@ bool WriteRegionScheduleTrace(const std::filesystem::path& replay,
     bytes += '\n';
     auto path = replay;
     path += ".regions.json";
-    if (!Persistence::WorldSaveService::write_file_durably(path, bytes)) {
+    try {
+        Persistence::ReplacementOutputFile output(path);
+        if (!output.write(bytes) || !output.commit()) {
+            error = "Cannot write region schedule trace.";
+            return false;
+        }
+    } catch (const std::exception&) {
         error = "Cannot write region schedule trace.";
         return false;
     }

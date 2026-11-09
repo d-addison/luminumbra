@@ -111,11 +111,6 @@ int RunRecord(const ServerCliOptions& options) {
         }
     }
 
-    if (!writer.Finalize(executed)) {
-        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay stream '{}'", options.record_path);
-        return 1;
-    }
-
     if (runner.Session()->ActiveRegionsEnabled()) {
         std::string error;
         if (!Luminumbra::Replay::WriteRegionScheduleTrace(
@@ -134,6 +129,13 @@ int RunRecord(const ServerCliOptions& options) {
             return 1;
         }
     }
+    // Companion operations must succeed before the replay commit point. These
+    // are separate files: a refused replay may leave a completed new companion.
+    if (!writer.Finalize(executed)) {
+        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay stream '{}'", options.record_path);
+        return 1;
+    }
+
     const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();

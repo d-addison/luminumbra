@@ -244,7 +244,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertEqual(self.admission.count("!ReadPresetInput(options,"), 2)
         trace = compact_cpp((ROOT / "src/luminumbra_common/replay/RegionScheduleTrace.cpp").read_text())
         self.assertIn("ReadSavedJson(path,kMaxTraceBytes,value,missing,false)", trace)
-        self.assertLess(trace.index("BoundedJsonDump("), trace.index("write_file_durably(path,bytes)"))
+        self.assertLess(trace.index("BoundedJsonDump("), trace.index("ReplacementOutputFileoutput(path)"))
 
     def test_overlay_failure_regression_reaches_the_owned_staging_writer(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -469,8 +469,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
         publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
+        self.assertIn("constDWORDflags=durable_namespace?MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH:MOVEFILE_REPLACE_EXISTING;", publication)
         ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
-                   "::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)", "constDWORDattributes_error=::GetLastError()",
+                   "::MoveFileExW(temp.c_str(),destination.c_str(),flags)", "constDWORDattributes_error=::GetLastError()",
                    "if(retained_payload)retained_payload->retain_publication_identity();",
                    "autofile=::CreateFileW(temp.c_str(),",
                    "Detail::WindowsPublishWithoutReplacement(")
@@ -480,7 +481,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             position = publication.index(value, offset)
             positions.append(position)
             offset = position + len(value)
-        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)")
+        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),flags)")
         self.assertIn("if(retained_payload)retained_payload->retain_publication_identity();",
                       publication[:replacement])
         self.assertEqual(positions, sorted(positions))
@@ -540,10 +541,18 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("::renamex_np(m_path.c_str(),destination.c_str(),RENAME_EXCL)", posix)
         self.assertLess(posix.index("::link(m_path.c_str(),destination.c_str())"),
                         posix.index("!matches_name(2)||::unlink(m_path.c_str())"))
-        writer = service[service.index("boolwrite(conststd::string&bytes)"):
-                         service.index("boolpromote_seed(")]
+        staging = service[service.index("classStagingFile{"):
+                          service.index("classLedgerStaging{")]
+        writer = staging[staging.index("boolwrite(conststd::string&bytes)"):
+                         staging.index("boolappend(")]
+        self.assertIn("returnappend(bytes)&&flush();", writer)
+        flushing = staging[staging.index("boolflush()const{"):
+                           staging.index("boolreplace(")]
         for flush in ("::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
-            self.assertIn(flush, writer)
+            self.assertIn(flush, flushing)
+        windows, posix = flushing.split("#ifdefined(_WIN32)", 1)[1].split("#else", 1)
+        self.assertIn("return::FlushFileBuffers(m_handle)!=0;", windows)
+        self.assertIn("while(flushed!=0&&errno==EINTR);returnflushed==0;", posix)
         self.assertIn("if(!payload_remains&&m_claim_created&&!m_claim.remove())", transaction)
 
     def test_incomplete_ledger_reclaim_requires_reserved_identity_and_nofollow_inspection(self):

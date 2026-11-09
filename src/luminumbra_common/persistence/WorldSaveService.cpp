@@ -1,6 +1,7 @@
 #include "WorldSaveService.h"
 #include "CreatedWorldArtifacts.h"
 #include "RegionFileWriteGuard.h"
+#include "ReplacementOutputFile.h"
 #include "WorldSaveEncoding.h"
 #include "core/Profiler.h"
 
@@ -839,8 +840,12 @@ public:
     }
 
     bool write(const std::string& bytes) const {
+        return append(bytes) && flush();
+    }
+
+    bool append(std::string_view bytes) const {
         std::size_t offset = 0;
-        // Bounded by the admitted ledger size (or the 512-byte sidecar bound).
+        // Each transfer is capped at 64 KiB; no payload-sized scratch allocation.
         while (offset < bytes.size()) {
 #if defined(_WIN32)
             DWORD written = 0;
@@ -859,6 +864,10 @@ public:
 #endif
             offset += static_cast<std::size_t>(written);
         }
+        return true;
+    }
+
+    bool flush() const {
 #if defined(_WIN32)
         return ::FlushFileBuffers(m_handle) != 0;
 #else
@@ -869,6 +878,8 @@ public:
         return flushed == 0;
 #endif
     }
+
+    bool replace(const std::filesystem::path& destination);
 
     bool promote_seed(const std::filesystem::path& destination,
                       bool& occupied,
@@ -1793,33 +1804,39 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors,
                                  CreatedWorldArtifacts* artifacts = nullptr,
-                                 StagingFile* retained_payload = nullptr) {
+                                 StagingFile* retained_payload = nullptr,
+                                 bool durable_namespace = true) {
     LUMIN_PROFILE_ZONE_N("File save replace");
-    if (!FlushAncestorEntries(destination, errors))
-        return false;
+    if (durable_namespace) {
+        if (!FlushAncestorEntries(destination, errors))
+            return false;
+    }
     const auto publish = LockPublication(destination);
     if (!AllowPublication(destination, false, errors) ||
         !SaveTransaction::check_publication_target(destination, errors))
+        return false;
+    if (!durable_namespace && (!retained_payload || !retained_payload->matches_name()))
         return false;
     if (artifacts) {
         artifacts->publish_file(temp, destination);
         return true;
     }
     std::array<std::uint64_t, 3> expected{}, incoming{};
-    if (SaveTransaction::publication_identity(destination, expected, incoming)) {
+    if (durable_namespace &&
+        SaveTransaction::publication_identity(destination, expected, incoming)) {
         if (retained_payload)
             retained_payload->retain_publication_identity();
         return PublishProtectedMember(temp, destination, expected, incoming, errors);
     }
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
-    if (attributes != INVALID_FILE_ATTRIBUTES) {
-        if (retained_payload)
+    if (attributes != INVALID_FILE_ATTRIBUTES || !durable_namespace) {
+        if (retained_payload && durable_namespace)
             retained_payload->retain_publication_identity();
         // Payload and transaction undo bytes are flushed before publication.
         // ReplaceFileW does not support write-through; use the supported same-volume move.
-        if (::MoveFileExW(temp.c_str(),
-                          destination.c_str(),
-                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        const DWORD flags = durable_namespace ? MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+                                              : MOVEFILE_REPLACE_EXISTING;
+        if (::MoveFileExW(temp.c_str(), destination.c_str(), flags))
             return true;
         const DWORD error = ::GetLastError();
         AddError(errors,
@@ -1995,11 +2012,13 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors,
                                  CreatedWorldArtifacts* artifacts = nullptr,
-                                 StagingFile* retained_payload = nullptr) {
-    (void)retained_payload; // POSIX open descriptors do not delay source unlink.
+                                 StagingFile* retained_payload = nullptr,
+                                 bool durable_namespace = true) {
     LUMIN_PROFILE_ZONE_N("File save replace");
-    if (!FlushAncestorEntries(destination, errors))
-        return false;
+    if (durable_namespace) {
+        if (!FlushAncestorEntries(destination, errors))
+            return false;
+    }
     // Only publication excludes open readers, matching Windows semantics. Flush
     // both directory entries after releasing that lock when staging is elsewhere.
     {
@@ -2007,11 +2026,14 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         if (!AllowPublication(destination, false, errors) ||
             !SaveTransaction::check_publication_target(destination, errors))
             return false;
+        if (!durable_namespace && (!retained_payload || !retained_payload->matches_name()))
+            return false;
         if (artifacts) {
             artifacts->publish_file(temp, destination);
         } else {
             std::array<std::uint64_t, 3> expected{}, incoming{};
             const bool protected_member =
+                durable_namespace &&
                 SaveTransaction::publication_identity(destination, expected, incoming);
             if (protected_member &&
                 !PublishProtectedMember(temp, destination, expected, incoming, errors))
@@ -2026,6 +2048,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
             }
         }
     }
+
+    if (!durable_namespace)
+        return true;
 
     // Persist the directory entry update as well as the replacement bytes.
     // Without this fsync, rename is atomically visible to live processes but a
@@ -6715,6 +6740,102 @@ bool WriteFileDurably(const std::filesystem::path& destination,
     return true;
 }
 } // namespace
+
+namespace {
+bool StagingFile::replace(const std::filesystem::path& destination) {
+    // Payload flush and close have completed. Replay publication must not report
+    // a directory durability failure after the old artifact has been replaced.
+    return ReplaceRegionFileAtomically(m_path, destination, nullptr, nullptr, this, false);
+}
+} // namespace
+
+struct ReplacementOutputFile::State {
+    explicit State(const std::filesystem::path& destination_path)
+        : destination(destination_path.empty() ? destination_path
+                                               : Filesystem::AbsolutePath(destination_path)) {}
+    ~State() {
+        if (payload && !published)
+            payload->remove();
+    }
+    std::filesystem::path destination;
+    std::unique_ptr<StagingFile> payload;
+    // Batch small replay frames in at most 64 KiB, independent of artifact size.
+    std::array<char, std::size_t{64} * 1024> buffer{};
+    std::size_t buffered = 0;
+    bool failed = false;
+    bool published = false;
+};
+
+ReplacementOutputFile::ReplacementOutputFile(const std::filesystem::path& destination)
+    : m_state(std::make_unique<State>(destination)) {
+    const auto& output_path = m_state->destination;
+    report_snapshot_step("output-open", output_path);
+    if (output_path.empty())
+        return;
+    std::error_code error;
+    if (output_path.has_parent_path())
+        std::filesystem::create_directories(output_path.parent_path(), error);
+    if (error)
+        return;
+    // A random sibling is attempted once; an occupied name is never adopted.
+    const auto candidate = NextLedgerTempPath(output_path);
+    report_snapshot_step("output-create", candidate);
+    auto payload = std::make_unique<StagingFile>(candidate, StagingFile::Mode::Create);
+    StagingIdentity identity{};
+    if (payload->identity(identity))
+        m_state->payload = std::move(payload);
+}
+
+ReplacementOutputFile::~ReplacementOutputFile() = default;
+
+bool ReplacementOutputFile::is_open() const {
+    return m_state->payload && !m_state->failed && !m_state->published;
+}
+
+bool ReplacementOutputFile::write(std::string_view bytes) {
+    if (!is_open())
+        return false;
+    auto& state = *m_state;
+    while (!bytes.empty()) {
+        if (state.buffered == 0 && bytes.size() >= state.buffer.size()) {
+            state.failed = !state.payload->append(bytes);
+            break;
+        }
+        const auto count = std::min(bytes.size(), state.buffer.size() - state.buffered);
+        std::memcpy(state.buffer.data() + state.buffered, bytes.data(), count);
+        state.buffered += count;
+        bytes.remove_prefix(count);
+        if (state.buffered == state.buffer.size()) {
+            state.failed = !state.payload->append({state.buffer.data(), state.buffered});
+            state.buffered = 0;
+            if (state.failed)
+                break;
+        }
+    }
+    report_snapshot_step("output-write", m_state->destination);
+    return !m_state->failed;
+}
+
+bool ReplacementOutputFile::commit() {
+    if (!is_open())
+        return false;
+    m_state->failed = true;
+    if (m_state->buffered != 0 &&
+        !m_state->payload->append({m_state->buffer.data(), m_state->buffered}))
+        return false;
+    m_state->buffered = 0;
+    if (!m_state->payload->flush())
+        return false;
+    report_snapshot_step("output-flush", m_state->destination);
+    if (!m_state->payload->finish_write(StagingFile::RetainedAccess::Identity, nullptr))
+        return false;
+    report_snapshot_step("output-close", m_state->destination);
+    report_snapshot_step("output-publish", m_state->destination);
+    if (!m_state->payload->replace(m_state->destination))
+        return false;
+    m_state->published = true;
+    return true;
+}
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,

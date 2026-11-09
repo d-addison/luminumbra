@@ -31,6 +31,8 @@
 #include "core/FilesystemPath.h"
 #include "core/JobSystem.h"
 #include "core/Log.h"
+#include "persistence/ReplacementOutputFile.h"
+#include "persistence/SaveTransaction.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
@@ -308,34 +310,24 @@ void ReplayWriter::RecordCheckpoint(const CheckpointRecord& checkpoint) {
 bool ReplayWriter::Finalize(std::uint64_t tick_count) {
     if (!m_open)
         return false;
-
-    // Patch the header tick_count in place (fixed offset; see AppendHeader).
-    for (std::size_t i = 0; i < 8; ++i) {
-        m_buffer[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
-    }
-
-    // Trailer: magic + tick_count + input_count + checkpoint_count. A reader
-    // that reaches the trailer knows the stream was finalized (not truncated).
-    m_buffer.insert(m_buffer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
-    PutU64(m_buffer, tick_count);
-    PutU64(m_buffer, m_input_count);
-    PutU64(m_buffer, m_checkpoint_count);
-
-    std::error_code ec;
-    const fs::path out_path(m_path);
-    if (out_path.has_parent_path()) {
-        fs::create_directories(out_path.parent_path(), ec);
-    }
-    std::ofstream out(m_path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        LUMINUMBRA_CORE_ERROR("ReplayWriter: cannot open '{}' for write", m_path);
+    m_open = false;
+    auto buffer = std::move(m_buffer);
+    try {
+        // Patch the fixed header slot and append exactly one trailer per attempt.
+        for (std::size_t i = 0; i < 8; ++i) {
+            buffer[kTickCountOffset + i] =
+                static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
+        }
+        buffer.insert(buffer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
+        PutU64(buffer, tick_count);
+        PutU64(buffer, m_input_count);
+        PutU64(buffer, m_checkpoint_count);
+        Persistence::ReplacementOutputFile output(m_path);
+        return output.write({reinterpret_cast<const char*>(buffer.data()), buffer.size()}) &&
+               output.commit();
+    } catch (const std::exception&) {
         return false;
     }
-    out.write(reinterpret_cast<const char*>(m_buffer.data()),
-              static_cast<std::streamsize>(m_buffer.size()));
-    out.close();
-    m_open = false;
-    return out.good();
 }
 
 // --- BoundedReplayRecorder ---------------------------------------------------
@@ -580,85 +572,97 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
 bool BoundedReplayRecorder::Finalize(const std::string& destination,
                                      std::uint64_t tick_count,
                                      std::uint64_t divergence_tick) {
-    if (m_directory.empty() || divergence_tick <= m_elided_tick)
-        return false;
-    if (m_output.is_open()) {
-        m_output.close();
-        if (m_output.fail())
+    struct CloseOnExit {
+        BoundedReplayRecorder& recorder;
+        ~CloseOnExit() {
+            recorder.Close();
+        }
+    };
+    const CloseOnExit close{*this};
+    try {
+        if (m_directory.empty() || divergence_tick <= m_elided_tick)
             return false;
-    }
-    std::vector<std::uint8_t> header;
-    if (m_elided_tick != 0)
-        m_header.version = kLrec1ElidedVersion;
-    AppendHeader(header, m_header);
-    for (std::size_t i = 0; i < 8; ++i)
-        header[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
-    if (m_elided_tick != 0) {
-        PutU8(header, static_cast<std::uint8_t>(RecordType::ElidedPrefix));
-        PutU64(header, m_elided_tick);
-        PutU32(header, 8);
-        PutU64(header, m_elided_digest);
-    }
-    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
-    if (!out.is_open())
-        return false;
-    if (!out.write(reinterpret_cast<const char*>(header.data()),
-                   static_cast<std::streamsize>(header.size())))
-        return false;
-    std::uint64_t input_count = 0;
-    std::uint64_t checkpoint_count = 0;
-    // Finalization streams through a fixed 64 KiB scratch buffer; the replay
-    // artifact is never assembled in memory, regardless of the negotiated bound.
-    std::array<char, std::size_t{64} * 1024> scratch{};
-    for (const auto& segment : m_segments) {
-        std::ifstream in(segment.path, std::ios::binary);
-        if (!in.is_open())
+        if (m_output.is_open()) {
+            m_output.close();
+            if (m_output.fail())
+                return false;
+        }
+        Persistence::report_snapshot_step("replay-segment-close", destination);
+        std::vector<std::uint8_t> header;
+        if (m_elided_tick != 0)
+            m_header.version = kLrec1ElidedVersion;
+        AppendHeader(header, m_header);
+        for (std::size_t i = 0; i < 8; ++i)
+            header[kTickCountOffset + i] =
+                static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
+        if (m_elided_tick != 0) {
+            PutU8(header, static_cast<std::uint8_t>(RecordType::ElidedPrefix));
+            PutU64(header, m_elided_tick);
+            PutU32(header, 8);
+            PutU64(header, m_elided_digest);
+        }
+        Persistence::ReplacementOutputFile out(destination);
+        if (!out.is_open())
             return false;
-        std::size_t remaining = segment.bytes;
-        while (remaining != 0) {
-            std::array<std::uint8_t, 13> frame{};
-            if (remaining < frame.size() || !in.read(reinterpret_cast<char*>(frame.data()),
-                                                     static_cast<std::streamsize>(frame.size())))
+        if (!out.write({reinterpret_cast<const char*>(header.data()), header.size()}))
+            return false;
+        std::uint64_t input_count = 0;
+        std::uint64_t checkpoint_count = 0;
+        // Finalization streams through a fixed 64 KiB scratch buffer; the replay
+        // artifact is never assembled in memory, regardless of the negotiated bound.
+        std::array<char, std::size_t{64} * 1024> scratch{};
+        for (const auto& segment : m_segments) {
+            Persistence::report_snapshot_step("replay-segment", segment.path);
+            Filesystem::ReplacementSafeInputFile in;
+            in.open(segment.path);
+            if (!in.is_open())
                 return false;
-            Cursor cursor{frame.data(), frame.size(), 0, true};
-            std::uint8_t type = 0;
-            std::uint64_t tick = 0;
-            std::uint32_t payload = 0;
-            if (!cursor.GetU8(type) || !cursor.GetU64(tick) || !cursor.GetU32(payload) ||
-                payload > remaining - frame.size())
-                return false;
-            const bool keep = type != static_cast<std::uint8_t>(RecordType::Checkpoint) ||
-                              tick <= divergence_tick;
-            if (type == static_cast<std::uint8_t>(RecordType::Input))
-                ++input_count;
-            else if (type == static_cast<std::uint8_t>(RecordType::Checkpoint))
-                checkpoint_count += keep;
-            else
-                return false;
-            if (keep && !out.write(reinterpret_cast<const char*>(frame.data()),
-                                   static_cast<std::streamsize>(frame.size())))
-                return false;
-            remaining -= frame.size() + payload;
-            std::size_t pending = payload;
-            while (pending != 0) {
-                const auto count = std::min(pending, scratch.size());
-                if (!in.read(scratch.data(), static_cast<std::streamsize>(count)))
+            std::size_t remaining = segment.bytes;
+            while (remaining != 0) {
+                std::array<std::uint8_t, 13> frame{};
+                if (remaining < frame.size() ||
+                    !in.read(reinterpret_cast<char*>(frame.data()), frame.size()))
                     return false;
-                if (keep && !out.write(scratch.data(), static_cast<std::streamsize>(count)))
+                Persistence::report_snapshot_step("replay-read", segment.path);
+                Cursor cursor{frame.data(), frame.size(), 0, true};
+                std::uint8_t type = 0;
+                std::uint64_t tick = 0;
+                std::uint32_t payload = 0;
+                if (!cursor.GetU8(type) || !cursor.GetU64(tick) || !cursor.GetU32(payload) ||
+                    payload > remaining - frame.size())
                     return false;
-                pending -= count;
+                const bool keep = type != static_cast<std::uint8_t>(RecordType::Checkpoint) ||
+                                  tick <= divergence_tick;
+                if (type == static_cast<std::uint8_t>(RecordType::Input))
+                    ++input_count;
+                else if (type == static_cast<std::uint8_t>(RecordType::Checkpoint))
+                    checkpoint_count += keep;
+                else
+                    return false;
+                if (keep && !out.write({reinterpret_cast<const char*>(frame.data()), frame.size()}))
+                    return false;
+                remaining -= frame.size() + payload;
+                std::size_t pending = payload;
+                while (pending != 0) {
+                    const auto count = std::min(pending, scratch.size());
+                    if (!in.read(scratch.data(), count))
+                        return false;
+                    if (keep && !out.write({scratch.data(), count}))
+                        return false;
+                    pending -= count;
+                }
             }
         }
+        std::vector<std::uint8_t> trailer;
+        trailer.insert(trailer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
+        PutU64(trailer, tick_count);
+        PutU64(trailer, input_count);
+        PutU64(trailer, checkpoint_count);
+        return out.write({reinterpret_cast<const char*>(trailer.data()), trailer.size()}) &&
+               out.commit();
+    } catch (const std::exception&) {
+        return false;
     }
-    std::vector<std::uint8_t> trailer;
-    trailer.insert(trailer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
-    PutU64(trailer, tick_count);
-    PutU64(trailer, input_count);
-    PutU64(trailer, checkpoint_count);
-    out.write(reinterpret_cast<const char*>(trailer.data()),
-              static_cast<std::streamsize>(trailer.size()));
-    out.close();
-    return out.good();
 }
 
 void BoundedReplayRecorder::Close() {
@@ -948,24 +952,38 @@ bool QueuedReplayRecorder::State::Finalize(const std::string& destination,
     if (!state.open)
         return false;
     state.Stop();
-    if (state.failure == State::Failure::None &&
-        state.sink->Finalize(destination, tick_count, divergence_tick)) {
-        // A later successful recording at the same destination supersedes any
-        // earlier incomplete companion. All handles are closed before removal.
-        std::error_code ec;
-        fs::remove(destination + ".incomplete", ec);
-        if (!ec)
-            return true;
+    bool finalized = false;
+    try {
+        if (state.failure == State::Failure::None) {
+            // Clear a stale marker before the replay commit point. A removal
+            // refusal must not follow successful replacement of the replay.
+            std::error_code ec;
+            fs::remove(destination + ".incomplete", ec);
+            finalized = !ec && state.sink->Finalize(destination, tick_count, divergence_tick);
+        }
+    } catch (const std::exception&) {
+        finalized = false;
+    }
+    if (finalized) {
+        state.Close();
+        return true;
     }
     {
         const std::lock_guard lock(state.mutex);
         state.Fail(State::Failure::Finalization, divergence_tick);
     }
+    state.Close();
     // Never advertise a partial recording as a successful LREC1. The companion
     // is deliberately outside the versioned format and includes an explicit cause.
-    std::ofstream reason(destination + ".incomplete", std::ios::trunc);
-    reason << "Incomplete replay at tick " << state.failure_tick << ": " << FailureReason() << '\n';
-    reason.close();
+    try {
+        Persistence::ReplacementOutputFile reason(destination + ".incomplete");
+        const auto message = "Incomplete replay at tick " + std::to_string(state.failure_tick) +
+                             ": " + FailureReason() + '\n';
+        if (reason.write(message))
+            reason.commit();
+    } catch (const std::exception&) {
+        // The original failure remains authoritative if its diagnostic cannot be written.
+    }
     LUMINUMBRA_CORE_ERROR("Replay recording incomplete at tick {}: {} ({})",
                           state.failure_tick,
                           FailureReason(),
