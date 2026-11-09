@@ -23,6 +23,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
 #include "app/GraphicsSessionOverrides.h"
+#include "app/GraphicsStartup.h"
 #include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
@@ -2066,6 +2067,81 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // Owners stay empty until their normal initialization points. All refusals after
+    // GLFW initialization share the successful shutdown's context lifetime.
+    bool glfw_initialized = true;
+    GLFWwindow* window = nullptr;
+    bool imgui_started = false;
+    std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
+    std::unique_ptr<Luminumbra::Rendering::RenderPipeline> render_pipeline_owner;
+    std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
+    std::unique_ptr<Luminumbra::Client::WorldgenPreview> worldgenPreview;
+    // Preview orbit/drag bookkeeping consumed by app/MenuScreens.cpp.
+    MenuSceneState menuPreviewState;
+    const auto ignore_shutdown = [](const std::string&) {
+    };
+    const auto teardown_client = [&](const auto& record_shutdown, const auto& finish_shutdown) {
+        if (!glfw_initialized) {
+            return;
+        }
+        if (window) {
+            glfwMakeContextCurrent(window);
+        }
+        if (g_uiManager) {
+            g_uiManager->Shutdown();
+            g_uiManager.reset();
+            record_shutdown("ui_shutdown");
+        } else {
+            record_shutdown("ui_not_started");
+        }
+        if (g_loading_visualizer) {
+            g_loading_visualizer->Shutdown();
+            g_loading_visualizer.reset();
+            record_shutdown("loading_visualizer_shutdown");
+        }
+        if (audioManager) {
+            audioManager->Shutdown();
+            record_shutdown("audio_shutdown");
+        }
+        menuPreviewState.scene_image.release_scene_image();
+        // The preview destructor drains through the pipeline and deletes its GL targets.
+        worldgenPreview.reset();
+        if (render_pipeline_owner) {
+            render_pipeline_owner->shutdown();
+            render_pipeline_owner.reset();
+            record_shutdown("renderer_shutdown");
+        }
+        developerLogAttachment.Detach();
+        developerConsole.Shutdown();
+        worldGenViewer.reset();
+        if (window) {
+            glfwSetWindowCloseCallback(window, nullptr);
+            glfwSetKeyCallback(window, nullptr);
+            glfwSetCharCallback(window, nullptr);
+            glfwSetMouseButtonCallback(window, nullptr);
+            glfwSetCursorPosCallback(window, nullptr);
+            glfwSetScrollCallback(window, nullptr);
+            glfwSetWindowFocusCallback(window, nullptr);
+            glfwSetCursorEnterCallback(window, nullptr);
+        }
+        if (imgui_started) {
+            ImGui_ImplOpenGL3_Shutdown();
+            ImGui_ImplGlfw_Shutdown();
+            ImGui::DestroyContext();
+            imgui_started = false;
+            record_shutdown("imgui_shutdown");
+        } else {
+            record_shutdown("imgui_not_started");
+        }
+        finish_shutdown();
+        if (window) {
+            glfwDestroyWindow(window);
+            window = nullptr;
+        }
+        glfwTerminate();
+        glfw_initialized = false;
+    };
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -2093,6 +2169,7 @@ int main(int argc, char* argv[]) {
     if (!capture_size.empty()) {
         if (scenario_config.active()) {
             LUMINUMBRA_CORE_ERROR("--capture-size cannot change a scenario's pinned framebuffer");
+            teardown_client(ignore_shutdown, [] {});
             return 2;
         }
         create_width = capture_width;
@@ -2142,9 +2219,12 @@ int main(int argc, char* argv[]) {
 
     if (!capture_size.empty())
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
-    GLFWwindow* window =
-        glfwCreateWindow(create_width, create_height, "Luminumbra", nullptr, nullptr);
-    LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
+    window = glfwCreateWindow(create_width, create_height, "Luminumbra", nullptr, nullptr);
+    if (!window) {
+        LUMINUMBRA_CORE_ERROR("FATAL: Failed to create GLFW window!");
+        teardown_client(ignore_shutdown, [] {});
+        return -1;
+    }
     glfwMakeContextCurrent(window);
 
     // Extend the benchmark's presentation override to scenario/perf captures.
@@ -2162,10 +2242,11 @@ int main(int argc, char* argv[]) {
             : 0;
     glfwSwapInterval(applied_swap_interval);
 
-    // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds, which
-    // compile with warnings as errors.
-    [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
-    LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        LUMINUMBRA_CORE_ERROR("FATAL: Failed to initialize GLAD!");
+        teardown_client(ignore_shutdown, [] {});
+        return -1;
+    }
 
     g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
     const bool graphics_first_launch =
@@ -2173,16 +2254,9 @@ int main(int argc, char* argv[]) {
     const bool graphics_detect_requested =
         HasCommandLineFlag(argc, argv, "--detect-and-apply-graphics");
     if (graphics_first_launch || graphics_detect_requested) {
-        Luminumbra::Client::GraphicsEdit edit;
-        edit.kind = Luminumbra::Client::GraphicsEditKind::DetectApply;
-        luminumbra::core::GraphicsSettings detected;
         std::string error;
-        if (Luminumbra::Client::ReduceGraphicsSettings(g_systemConfig.user().graphics,
-                                                       edit,
-                                                       g_app.hardwareInfo->inputs,
-                                                       detected,
-                                                       error)) {
-            g_systemConfig.user().graphics = std::move(detected);
+        if (Luminumbra::Client::SelectStartupGraphicsPreset(
+                g_systemConfig, graphics_detect_requested, g_app.hardwareInfo->inputs, error)) {
             if (graphics_detect_requested) {
                 LUMINUMBRA_CORE_INFO(
                     "{} | Recommended and selected: {}",
@@ -2205,6 +2279,7 @@ int main(int argc, char* argv[]) {
         ImGui::StyleColorsDark();
         ImGui_ImplGlfw_InitForOpenGL(window, false);
         ImGui_ImplOpenGL3_Init("#version 450");
+        imgui_started = true;
     }
 
     // KHR_debug driver-error/warning callback -> engine log, for finding GL issues. Env-gated
@@ -2221,8 +2296,7 @@ int main(int argc, char* argv[]) {
                               capture_height,
                               framebufferWidth,
                               framebufferHeight);
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        teardown_client(ignore_shutdown, [] {});
         return 2;
     }
 
@@ -2263,7 +2337,6 @@ int main(int argc, char* argv[]) {
         std::filesystem::path("data") / "fonts" / "Lora" / "static" / "Lora-Regular.ttf",
     });
 
-    std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
     if (!scenario_config.audio_playback_enabled()) {
         audioManager = std::make_unique<Luminumbra::Client::NullAudioManager>(
             scenario_config.audio_telemetry_path,
@@ -2324,7 +2397,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    Luminumbra::Rendering::RenderPipeline renderPipeline;
+    render_pipeline_owner = std::make_unique<Luminumbra::Rendering::RenderPipeline>();
+    auto& renderPipeline = *render_pipeline_owner;
     //  isolation/layer mode: parse CLI strings -> IsolationConfig (default
     // {All, Scene} when both empty = no-op). Drives the SkyboxPass backdrop override
     // + (next slice) scenario spawn-suppression.
@@ -2455,18 +2529,10 @@ int main(int argc, char* argv[]) {
                                        &renderPipeline,
                                        0,
                                        {});
-        if (g_uiManager) {
-            g_uiManager->Shutdown();
-        }
-        audioManager->Shutdown();
-        jobSystem.shutdown();
-        if (g_app.overlay.imgui_enabled) {
-            ImGui_ImplOpenGL3_Shutdown();
-            ImGui_ImplGlfw_Shutdown();
-            ImGui::DestroyContext();
-        }
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        teardown_client(ignore_shutdown, [&] {
+            gameSession.reset();
+            jobSystem.shutdown();
+        });
         return Luminumbra::Filesystem::capture_content_paths().refused() ? 2 : -1;
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
@@ -3358,7 +3424,6 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
     const bool worldgenGraphAtBoot = HasCommandLineFlag(argc, argv, "--worldgen-graph");
     double observedFrameSeconds = 0.0;
     // Explicit registrations and current-service callbacks; no player/world pointers retained.
@@ -3716,19 +3781,22 @@ int main(int argc, char* argv[]) {
     // renders it to the FBO via the real pipeline, and blits it into the
     // #preview_pane screen rect under the transparent create panel. Built lazily
     // on first create-world activation so a headless/automated run pays nothing.
-    auto worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
-    // Preview orbit/drag bookkeeping consumed by the menu-branch renderer
-    // (app/MenuScreens.cpp).
-    MenuSceneState menuPreviewState;
+    worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
 
     if (runtime_boot_recorder.enabled() &&
         gameStateManager.GetCurrentState() == GameState::IN_GAME) {
         LUMINUMBRA_CORE_INFO(
             "Runtime boot metrics mode: capturing fixed frames through streaming scheduler.");
+        const auto release_capture_session = [&] {
+            gameSession.reset();
+            jobSystem.shutdown();
+        };
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
             if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
                     gameSession->GetMetadata().spawnPoint, gameSession->GetPhysicsSystem(), 4, 2)) {
                 LUMINUMBRA_CORE_ERROR("Runtime capture refused: surface preparation failed");
+                prepare_world_entry();
+                teardown_client(ignore_shutdown, release_capture_session);
                 return 2;
             }
         }
@@ -7521,60 +7589,24 @@ int main(int argc, char* argv[]) {
     mark_shutdown("player_controller_reset");
     g_camera.reset();
     mark_shutdown("camera_reset");
-    if (g_uiManager) {
-        g_uiManager->Shutdown();
-        g_uiManager.reset();
-        mark_shutdown("ui_shutdown");
-    } else {
-        mark_shutdown("ui_not_started");
-    }
-    if (g_loading_visualizer) {
-        g_loading_visualizer->Shutdown();
-        g_loading_visualizer.reset();
-        mark_shutdown("loading_visualizer_shutdown");
-    }
-    audioManager->Shutdown();
-    mark_shutdown("audio_shutdown");
-    menuPreviewState.scene_image.release_scene_image();
-    renderPipeline.shutdown();
-    mark_shutdown("renderer_shutdown");
-    developerLogAttachment.Detach();
-    developerConsole.Shutdown();
-    worldGenViewer.reset();
-    glfwSetWindowCloseCallback(window, nullptr);
-    glfwSetKeyCallback(window, nullptr);
-    glfwSetCharCallback(window, nullptr);
-    glfwSetMouseButtonCallback(window, nullptr);
-    glfwSetCursorPosCallback(window, nullptr);
-    glfwSetScrollCallback(window, nullptr);
-    glfwSetWindowFocusCallback(window, nullptr);
-    glfwSetCursorEnterCallback(window, nullptr);
-    if (g_app.overlay.imgui_enabled) {
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
-        ImGui::DestroyContext();
-        mark_shutdown("imgui_shutdown");
-    } else {
-        mark_shutdown("imgui_not_started");
-    }
-    // the  background scan holds a raw world pointer — drain
-    // it before the session (and its world) is destroyed.
-    DrainBackgroundWorldScan(jobSystem);
-    // the world-dressing placement job likewise queries the world
-    // through its callbacks — drain it too.
-    DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-    gameSession.reset();
-    mark_shutdown("game_session_reset");
-    jobSystem.shutdown();
-    mark_shutdown("job_system_shutdown");
-    const auto shutdown_job_stats = jobSystem.get_runtime_stats();
-    runtime_state_recorder.write_shutdown(shutdown_milestones, shutdown_job_stats);
-    if (hang_watchdog) {
-        CancelPendingHangReport();
-        hang_watchdog->stop();
-    }
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    teardown_client(mark_shutdown, [&] {
+        // the  background scan holds a raw world pointer — drain
+        // it before the session (and its world) is destroyed.
+        DrainBackgroundWorldScan(jobSystem);
+        // the world-dressing placement job likewise queries the world
+        // through its callbacks — drain it too.
+        DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
+        gameSession.reset();
+        mark_shutdown("game_session_reset");
+        jobSystem.shutdown();
+        mark_shutdown("job_system_shutdown");
+        const auto shutdown_job_stats = jobSystem.get_runtime_stats();
+        runtime_state_recorder.write_shutdown(shutdown_milestones, shutdown_job_stats);
+        if (hang_watchdog) {
+            CancelPendingHangReport();
+            hang_watchdog->stop();
+        }
+    });
     if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused())
         exit_code = 2;
     return exit_code;
