@@ -1137,6 +1137,8 @@ target_link_libraries(ui_layout_test PRIVATE gtest_main nlohmann_json::nlohmann_
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
+    ui/graphics_preset_startup_test.cpp
+    ui/graphics_blur_style_test.cpp
 ../src/luminumbra_client/ui/core/UIComponent.cpp
 ../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
