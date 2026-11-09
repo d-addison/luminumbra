@@ -232,7 +232,7 @@ TEST(FireHardening, BurnOutTransitionAndInert) {
     r.get<Comp::CombustibleComponent>(e).burn_ticks_remaining = 3;
     // No unburnt neighbours -> only the burn-down path runs.
     for (int i = 0; i < 3; ++i)
-        luminumbra::sim::RunFireSpreadOnTick(r, i, glm::vec2(0.0f));
+        luminumbra::sim::RunFireSpreadOnTick(r, static_cast<std::uint64_t>(i), glm::vec2(0.0f));
     const auto& cb = r.get<Comp::CombustibleComponent>(e);
     EXPECT_EQ(cb.state(), Comp::BurnState::Burnt);
     EXPECT_EQ(cb.fuel_milli, 0); // fuel consumed
@@ -659,7 +659,7 @@ TEST(DiseaseHardening, SoleHealthyStaysHealthy) {
     entt::registry r;
     auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy);
     for (int t = 0; t < 50; ++t)
-        RunPlantDiseaseOnTick(r, t);
+        RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
     const auto& h = r.get<Comp::PlantHealthComponent>(e);
     EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy));
     EXPECT_EQ(h.infection, 0); // SatSub floored at 0, no underflow wrap
@@ -676,7 +676,7 @@ TEST(DiseaseHardening, FixedPointBoundsUnderHeavyPressure) {
     }
     auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
     for (int t = 0; t < 200; ++t) {
-        RunPlantDiseaseOnTick(r, t);
+        RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
         const auto& h = r.get<Comp::PlantHealthComponent>(target);
         EXPECT_LE(h.infection, Comp::kDiseaseUnitScale);
         EXPECT_LE(h.resistance, Comp::kDiseaseUnitScale);
@@ -689,7 +689,7 @@ TEST(DiseaseHardening, FullyResistantNeverInfected) {
     makeDiseasePlant(r, 0.5f, 0.0f, Comp::PlantDiseaseState::Infected);
     auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 1000);
     for (int t = 0; t < 100; ++t)
-        RunPlantDiseaseOnTick(r, t);
+        RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
     EXPECT_EQ(r.get<Comp::PlantHealthComponent>(target).state,
               static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy));
 }
@@ -706,7 +706,7 @@ TEST(DiseaseHardening, InfectedResolvesRecoverOrDie) {
                                   Comp::PlantDiseaseState::Infected,
                                   /*res*/ kRecoverResistance);
         for (std::uint32_t t = 0; t < kSickTicks; ++t)
-            RunPlantDiseaseOnTick(r, t);
+            RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
         const auto& h = r.get<Comp::PlantHealthComponent>(e);
         EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Recovered));
         EXPECT_GT(h.resistance, kRecoverResistance); // acquired immunity raised it
@@ -717,7 +717,7 @@ TEST(DiseaseHardening, InfectedResolvesRecoverOrDie) {
         entt::registry r;
         auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Infected, /*res*/ 0);
         for (std::uint32_t t = 0; t < kSickTicks; ++t)
-            RunPlantDiseaseOnTick(r, t);
+            RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
         const auto& h = r.get<Comp::PlantHealthComponent>(e);
         EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead));
     }
@@ -730,7 +730,7 @@ TEST(DiseaseHardening, DeadPlantInert) {
     auto healthy = makeDiseasePlant(r, 0.5f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
     const std::uint16_t inf0 = r.get<Comp::PlantHealthComponent>(dead).infection;
     for (int t = 0; t < 100; ++t)
-        RunPlantDiseaseOnTick(r, t);
+        RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
     // Dead state unchanged; the dead plant did not infect the adjacent healthy plant.
     EXPECT_EQ(r.get<Comp::PlantHealthComponent>(dead).state,
               static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead));
@@ -752,7 +752,7 @@ TEST(DiseaseHardening, SpreadOrderIndependent) {
         makeDiseasePlant(r, 1.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
         makeDiseasePlant(r, 2.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
         for (int t = 0; t < 10; ++t)
-            RunPlantDiseaseOnTick(r, t);
+            RunPlantDiseaseOnTick(r, static_cast<std::uint64_t>(t));
         std::vector<std::pair<float, std::uint8_t>> v;
         auto view = r.view<Comp::PlantHealthComponent, Comp::TransformComponent>();
         for (auto e : view) {

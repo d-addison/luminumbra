@@ -90,7 +90,7 @@ void Populate(entt::registry& r) {
     pred(-6.0f, 9.0f);
     pred(6.0f, 9.0f);
     for (int i = 0; i < 6; ++i)
-        prey(-7.0f + i * 2.4f, -2.0f);
+        prey(-7.0f + static_cast<float>(i) * 2.4f, -2.0f);
 }
 
 // Snapshot all hashable creature state into a flat vector (entity-id sorted -> stable order).
