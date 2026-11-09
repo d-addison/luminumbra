@@ -631,7 +631,10 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return std::move(found->second.decoded)", handoff)
         activation = self.function(source, "read_chunk", "WorldSaveService::")
         self.assertIn("CurrentRecordMatches(path, *region, id)", activation)
-        self.assertIn("AdmitChunkRecord(record, path, &errors, facts, &result.chunk)", activation)
+        self.assertRegex(
+            activation,
+            r"AdmitChunkRecord\(\s*record,\s*path,\s*&errors,\s*facts,\s*&result.chunk,"
+            r"\s*false,\s*false,\s*admission->format.indexed\)")
         session = read_source("src/luminumbra_common/world/GameSession.cpp")
         for name in ("PrepareWorldLoad", "ReadPreparedWorldState"):
             self.assertIn("const Persistence::WorldSaveService::WorldReadScope chunk_reads;",

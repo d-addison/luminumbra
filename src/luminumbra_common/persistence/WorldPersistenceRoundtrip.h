@@ -87,6 +87,8 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
+    // Indexed authority requires complete, bounded water continuation; legacy stays permissive.
+    bool strict_water = false;
     bool terrain_edited = true;
     bool migrate_legacy_water = false;
     bool validate_record_authority = false;

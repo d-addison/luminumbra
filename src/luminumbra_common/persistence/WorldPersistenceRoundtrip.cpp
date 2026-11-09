@@ -720,6 +720,95 @@ struct EncodedChunkArrays {
     }
 };
 
+// Check widths and grid counts before conversion or allocation. Water grids contain at most
+// 32 * 32 cells and two flux values per cell, independent of the enclosing record byte cap.
+void RequireWaterInteger(const nlohmann::json& value, std::int64_t minimum, std::int64_t maximum) {
+    if (!value.is_number_integer() ||
+        (value.is_number_unsigned() &&
+         value.get<std::uint64_t>() > static_cast<std::uint64_t>(maximum)) ||
+        (!value.is_number_unsigned() &&
+         (value.get<std::int64_t>() < minimum || value.get<std::int64_t>() > maximum)))
+        throw std::invalid_argument("Saved water integer range refused");
+}
+
+void RequireWaterFloat(const nlohmann::json& value) {
+    if (!value.is_number())
+        throw std::invalid_argument("Saved water numeric value required");
+    const double number = value.get<double>();
+    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
+        throw std::invalid_argument("Saved water finite float range refused");
+}
+
+void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
+    const auto& coords = value.at("coords");
+    for (const char* axis : {"x", "y", "z"}) {
+        const std::int64_t limit = std::string_view(axis) == "y" ? 2097152 : 1048576;
+        RequireWaterInteger(coords.at(axis), -limit, limit - 1);
+    }
+    const auto& state = value.at("water_state");
+    for (const char* field :
+         {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"})
+        RequireWaterInteger(state.at(field), 0, std::numeric_limits<int>::max());
+    for (const char* field : {"has_water_sim", "water_mesh_generated", "is_water_sleeping"}) {
+        if (!state.at(field).is_boolean())
+            throw std::invalid_argument("Saved water boolean required");
+    }
+    RequireWaterFloat(state.at("max_water_delta_last_tick"));
+    if (state.at("max_water_delta_last_tick").get<double>() < 0.0 ||
+        state.at("water_mesh_dirty_ticks").get<int>() > 15)
+        throw std::invalid_argument("Saved water continuation range refused");
+    for (const char* field : {"has_water_sim",
+                              "water_mesh_generated",
+                              "is_water_sleeping",
+                              "current_water_resolution",
+                              "ticks_below_threshold",
+                              "water_mesh_dirty_ticks",
+                              "max_water_delta_last_tick"}) {
+        if (value.contains(field) && value.at(field) != state.at(field))
+            throw std::invalid_argument("Saved water continuation stamps disagree");
+    }
+    const int resolution = state.at("current_water_resolution").get<int>();
+    const bool initialized = state.at("has_water_sim").get<bool>();
+    if (initialized && (resolution < 2 || resolution > 32 || 32 % resolution != 0))
+        throw std::invalid_argument("Saved water resolution refused");
+    const std::size_t cells =
+        initialized ? static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)
+                    : 0u;
+    for (const char* field : {"water_depth_mm",
+                              "water_bed_mm",
+                              "water_edge_flux",
+                              "water_level_data",
+                              "water_flow_data",
+                              "water_sim_terrain_height"}) {
+        if (!value.contains(field))
+            throw std::invalid_argument("Saved water array required");
+        const auto& array = value.at(field);
+        const std::string_view name(field);
+        const auto expected = name == "water_edge_flux" ? 2u * cells : cells;
+        if (encoded) {
+            const auto& count = array.at("count");
+            if (!count.is_number_unsigned() || count.get<std::uint64_t>() != expected)
+                throw std::invalid_argument("Saved water grid shape refused");
+            continue;
+        }
+        if (!array.is_array() || array.size() != expected)
+            throw std::invalid_argument("Saved water grid shape refused");
+        for (const auto& cell : array) {
+            if (name == "water_depth_mm" || name == "water_bed_mm" || name == "water_edge_flux") {
+                RequireWaterInteger(
+                    cell,
+                    name == "water_depth_mm" ? 0 : std::numeric_limits<std::int32_t>::min(),
+                    std::numeric_limits<std::int32_t>::max());
+            } else if (name == "water_flow_data") {
+                RequireWaterFloat(cell.at("x"));
+                RequireWaterFloat(cell.at("y"));
+            } else {
+                RequireWaterFloat(cell);
+            }
+        }
+    }
+}
+
 template<typename Arrays>
 void ApplyChunkFields(const nlohmann::json& value,
                       const Arrays& arrays,
@@ -780,6 +869,10 @@ void ApplyChunkFields(const nlohmann::json& value,
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
+    if (policy.strict_water && std::any_of(chunk.water_depth_mm.begin(),
+                                           chunk.water_depth_mm.end(),
+                                           [](std::int32_t depth) { return depth < 0; }))
+        throw std::invalid_argument("Saved water negative depth refused");
     // Every accepted ownership encoding must agree with the region record header.
     const auto require_record_agreement = [&policy](bool terrain_edited, bool water_owned) {
         if (!policy.validate_record_authority)
@@ -1599,6 +1692,8 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         };
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+            if (authority.strict_water)
+                RequireWaterAuthority(chunk_json, encoded_arrays);
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)

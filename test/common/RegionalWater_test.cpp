@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "nlohmann/json.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -287,5 +289,110 @@ TEST(RegionalWater, MalformedGridsAndFacesRefuseWithoutRepairOrPartialTransfer) 
     FillWater(distant, 8);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, distant, true).applied);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, owner, true).applied);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterPersistence, StrictAdmissionChecksRawWidthsShapesAndContinuationBeforeAdoption) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState original;
+    auto chunk = original.get_or_create_chunk({-1, 0, 2});
+    FillWater(*chunk, 4);
+    chunk->water_flow_data.assign(16, Vec2(0.1f, -0.2f));
+    chunk->water_sim_terrain_height.assign(16, -0.1f);
+    const auto bytes = P::SerializeWorldStreamingStateSnapshotJson(original);
+    const auto snapshot = nlohmann::json::parse(bytes);
+    const std::vector<std::pair<std::string, nlohmann::json>> changes{
+        {"/water_depth_mm/0", -1},
+        {"/water_depth_mm/0", 2147483648ULL},
+        {"/water_bed_mm/0", -2147483649LL},
+        {"/water_edge_flux/0", 1.5},
+        {"/water_depth_mm", nlohmann::json::array()},
+        {"/water_bed_mm", nlohmann::json::array()},
+        {"/water_edge_flux", nlohmann::json::array()},
+        {"/water_level_data", nlohmann::json::array()},
+        {"/water_flow_data", nlohmann::json::array()},
+        {"/water_sim_terrain_height", nlohmann::json::array()},
+        {"/water_level_data/0", 1e100},
+        {"/water_flow_data/0/x", 1e100},
+        {"/water_flow_data/0/y", -1e100},
+        {"/water_sim_terrain_height/0", 1e100},
+        {"/water_state/current_water_resolution", 5},
+        {"/water_state/current_water_resolution", 4294967300ULL},
+        {"/water_state/has_water_sim", false},
+        {"/water_state/ticks_below_threshold", -1},
+        {"/water_state/water_mesh_dirty_ticks", 16},
+        {"/water_state/max_water_delta_last_tick", -0.1f},
+        {"/water_state/max_water_delta_last_tick", 1e100},
+        {"/current_water_resolution", 8}};
+    for (const auto& [pointer, replacement] : changes) {
+        SCOPED_TRACE(pointer);
+        auto malformed = snapshot;
+        malformed["chunks"][0][nlohmann::json::json_pointer(pointer)] = replacement;
+        if (pointer == "/water_state/current_water_resolution") {
+            malformed["chunks"][0]["current_water_resolution"] = replacement;
+        }
+        if (pointer == "/water_state/has_water_sim") {
+            malformed["chunks"][0]["has_water_sim"] = replacement;
+        }
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            malformed.dump(), restored, errors, {.strict_water = true}));
+        EXPECT_EQ(restored.size(), 0u);
+        EXPECT_FALSE(errors.empty());
+        errors.clear();
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(malformed.dump(), restored, errors));
+    }
+    auto missing = snapshot;
+    missing["chunks"][0].erase("water_edge_flux");
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+        missing.dump(), restored, errors, {.strict_water = true}));
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(missing.dump(), restored, errors));
+    ASSERT_EQ(restored.size(), 1u);
+    EXPECT_EQ(restored.snapshot_chunks().front()->water_edge_flux,
+              std::vector<std::int32_t>(32, 0));
+    ASSERT_TRUE(
+        P::LoadWorldStreamingStateSnapshotJson(bytes, restored, errors, {.strict_water = true}));
+    EXPECT_EQ(P::SerializeWorldStreamingStateSnapshotJson(restored), bytes);
+}
+
+TEST(RegionalWaterPersistence, StrictEncodedAdmissionPreservesAllLegalResolutionsAndDryState) {
+    namespace P = Luminumbra::Persistence;
+    for (const int resolution : {0, 2, 4, 8, 16, 32}) {
+        WorldStreamingState original;
+        auto chunk = original.get_or_create_chunk({0, 0, 0});
+        if (resolution != 0) {
+            FillWater(*chunk, resolution);
+            chunk->water_flow_data.assign(chunk->water_depth_mm.size(), Vec2(0.0f));
+            chunk->water_sim_terrain_height.assign(chunk->water_depth_mm.size(), -0.1f);
+            chunk->water_bed_mm.front() = std::numeric_limits<std::int32_t>::min();
+            chunk->water_edge_flux.back() = std::numeric_limits<std::int32_t>::max();
+        }
+        const auto bytes = P::SerializeChunkRecordPayloadJson(*chunk);
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            bytes, restored, errors, {.strict_water = true}));
+        EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*restored.snapshot_chunks().front()), bytes);
+        chunk->water_flow_data.assign(1, Vec2(0.0f));
+        const auto wrong_shape = P::SerializeChunkRecordPayloadJson(*chunk);
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            wrong_shape, restored, errors, {.strict_water = true}));
+        EXPECT_EQ(restored.size(), 0u);
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(wrong_shape, restored, errors));
+        if (resolution != 0) {
+            chunk->water_flow_data.assign(chunk->water_depth_mm.size(), Vec2(0.0f));
+            chunk->water_depth_mm.back() = -1;
+            EXPECT_FALSE(
+                P::LoadWorldStreamingStateSnapshotJson(P::SerializeChunkRecordPayloadJson(*chunk),
+                                                       restored,
+                                                       errors,
+                                                       {.strict_water = true}));
+            EXPECT_EQ(restored.size(), 0u);
+        }
+    }
 }
 } // namespace
