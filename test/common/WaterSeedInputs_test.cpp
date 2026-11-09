@@ -314,6 +314,52 @@ TEST(WaterSeedInputs, HighInitializationPreservesInlineRoundingAndCellLayout) {
     }
 }
 
+// Live fallback seeding samples terrain in one batch per chunk. With hydraulic
+// relief on, every cell must still carry GetTerrainHeightAt's exact bits, including
+// the chunks on both sides of the x = 0 hydro-region seam.
+TEST(WaterSeedInputs, BatchedFallbackTerrainMatchesScalarBitsWithHydro) {
+    for (const int resolution : {2, 4, 8}) {
+        SeedFixture fixture(6);
+        auto params = SeedParams();
+        params.hydro_enabled = true;
+        params.rivers_enabled = true;
+        params.cliffs_enabled = true;
+        fixture.world().set_params(params);
+        fixture.water().SetSimResolution(resolution);
+        ASSERT_EQ(fixture.water().sim_resolution(), resolution);
+        for (const auto& [id, chunk] : fixture.chunks())
+            chunk->is_water_sleeping.store(true);
+        fixture.tick();
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        for (const auto& [id, chunk] : fixture.chunks()) {
+            ASSERT_TRUE(chunk->has_water_sim.load());
+            ASSERT_TRUE(chunk->heightmap_data.empty());
+            ASSERT_EQ(chunk->water_sim_terrain_height.size(), cells);
+            ASSERT_EQ(chunk->water_bed_mm.size(), cells);
+            const auto coords = chunk->get_coords();
+            for (int z = 0; z < resolution; ++z) {
+                for (int x = 0; x < resolution; ++x) {
+                    const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                     (static_cast<float>(x) + 0.5f) *
+                                         (CHUNK_SIZE_X / static_cast<float>(resolution));
+                    const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                     (static_cast<float>(z) + 0.5f) *
+                                         (CHUNK_SIZE_Z / static_cast<float>(resolution));
+                    const float terrain = fixture.world().GetTerrainHeightAt(wx, wz);
+                    const auto cell =
+                        static_cast<std::size_t>(z) * static_cast<std::size_t>(resolution) +
+                        static_cast<std::size_t>(x);
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_sim_terrain_height[cell]),
+                              std::bit_cast<std::uint32_t>(terrain));
+                    EXPECT_EQ(chunk->water_bed_mm[cell],
+                              static_cast<std::int32_t>(std::lround(terrain * 1000)));
+                }
+            }
+        }
+    }
+}
+
 // A 32-cell session grid is unreachable: the setter refuses it, the default is
 // High, and session creation/loading select Medium or High. Exercise refusal via
 // the public API; the scalar wiring suite directly checks the defensive predicate
