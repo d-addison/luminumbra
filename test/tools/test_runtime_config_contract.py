@@ -668,7 +668,14 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("extensions.insert(extension);", watcher)
         self.assertIn("std::filesystem::recursive_directory_iterator(directoryPath)", watcher)
         self.assertIn("if(m_watchedFiles.contains(path))continue;", watcher)
-        self.assertIn("m_reloadCallback(Filesystem::GenericUtf8PathString(filePath));", watcher)
+        self.assertIn("(*callback)(Filesystem::GenericUtf8PathString(filePath));", watcher)
+        for method, next_method in (("TriggerReload", "ReloadAll"),
+                                    ("ReloadAll", "CheckFileChanged")):
+            delivery = watcher[watcher.index("UIHotReload::" + method):
+                               watcher.index("UIHotReload::" + next_method)]
+            self.assertIn("constautocallback=m_reloadCallback;", delivery)
+            self.assertLess(delivery.index("constautocallback=m_reloadCallback;"),
+                            delivery.index("(*callback)("))
         fixture = compact_cpp((ROOT / "test/persistence/world_open_refusal_test.cpp")
                               .read_text(encoding="utf-8"))
         start = fixture.index("TEST_F(WorldOpenRefusal,DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles)")
