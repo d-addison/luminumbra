@@ -2,6 +2,9 @@
 #include "Modes.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -278,7 +281,17 @@ int RunReplay(const ServerCliOptions& options) {
     std::uint64_t checkpoints_verified = 0;
 
     std::uint64_t executed = 0;
-    auto checkpoint = contents->checkpoints.cbegin();
+    // Recordings keep checkpoints in recorded order. A stable tick index keeps
+    // the first recorded checkpoint for a tick and visits each one at most once.
+    std::vector<const Luminumbra::Replay::CheckpointRecord*> checkpoint_order;
+    checkpoint_order.reserve(contents->checkpoints.size());
+    for (const auto& record : contents->checkpoints) {
+        checkpoint_order.push_back(&record);
+    }
+    std::stable_sort(checkpoint_order.begin(),
+                     checkpoint_order.end(),
+                     [](const auto* lhs, const auto* rhs) { return lhs->tick < rhs->tick; });
+    auto checkpoint = checkpoint_order.cbegin();
     if (!start_match) {
         diverged = true;
         divergence_tick = 0;
@@ -317,14 +330,12 @@ int RunReplay(const ServerCliOptions& options) {
         }
 
         if ((executed % kCheckpointIntervalTicks) == 0 || executed == contents->tick_count) {
-            // Checkpoints are tick-ordered in ReplayContents. Visit each at
-            // most once instead of rescanning the recording on every boundary.
-            while (checkpoint != contents->checkpoints.cend() && checkpoint->tick < executed) {
+            while (checkpoint != checkpoint_order.cend() && (*checkpoint)->tick < executed) {
                 ++checkpoint;
             }
             const auto* recorded =
-                checkpoint != contents->checkpoints.cend() && checkpoint->tick == executed
-                    ? &*checkpoint
+                checkpoint != checkpoint_order.cend() && (*checkpoint)->tick == executed
+                    ? *checkpoint
                     : nullptr;
             if (recorded == nullptr) {
                 LUMINUMBRA_CORE_ERROR("replay: missing recorded checkpoint at tick {}", executed);

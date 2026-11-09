@@ -370,6 +370,24 @@ TEST_F(ReplayModeAdmission, MissingCadenceCheckpointStillFails) {
     EXPECT_NE(logs.str().find("missing recorded checkpoint at tick 30"), std::string::npos);
 }
 
+TEST_F(ReplayModeAdmission, CheckpointsInReverseRecordedOrderStillVerify) {
+    options.ticks = 90;
+    ASSERT_EQ(RunRecord(options), 0);
+    auto contents = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value()) {
+        return;
+    }
+    ASSERT_EQ(contents->checkpoints.size(), 3u);
+    std::reverse(contents->checkpoints.begin(), contents->checkpoints.end());
+    Rewrite(*contents);
+    ASSERT_EQ(RunReplay(options), 0) << logs.str();
+    const auto artifact = Artifact();
+    EXPECT_EQ(artifact.at("passed"), true);
+    EXPECT_EQ(artifact.at("checkpoints_verified"), 3u);
+    EXPECT_EQ(artifact.at("end_hash_match"), true);
+}
+
 TEST_F(ReplayModeAdmission, UnreadableAndPartialStreamsRefuseBeforeConfiguration) {
     ExpectAdmissionRefused("invalid or has an unsupported LREC1 version");
     options.ticks = 30;
