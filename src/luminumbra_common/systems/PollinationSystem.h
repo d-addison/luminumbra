@@ -137,6 +137,30 @@ inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponen
     return BreedPlants(a, b, rng, mutation_frac);
 }
 
+// Collect admitted participants in identity order with storage bounded by the view.
+inline std::vector<entt::entity>
+CollectPollinationParticipants(entt::registry& reg,
+                               const ::Luminumbra::world::RegionConsumerGate& gate) {
+    auto view = reg.view<Comp::PollinationTag,
+                         Comp::PlantGenomeComponent,
+                         Comp::PlantGrowthComponent,
+                         Comp::TransformComponent,
+                         Comp::PollinationComponent>();
+
+    // id-ordered participant ids so donor-selection ties + apply order are deterministic.
+    std::vector<entt::entity> ents;
+    ents.reserve(view.size_hint()); // Bounded by the smallest participating component pool.
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
+    std::sort(ents.begin(), ents.end(), [&reg](entt::entity a, entt::entity b) {
+        return PlantIdentityLess(reg, a, b);
+    });
+    return ents;
+}
+
 // Advance pollination by one fixed tick. Pure function of registry state + the tick
 // (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
 // to still air). `world_seed` lets distinct worlds diverge.
@@ -148,23 +172,12 @@ RunPollinationOnTick(entt::registry& reg,
                      float mutation_frac = kPollinationMutationFrac,
                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     PollinationStats stats;
-
     auto view = reg.view<Comp::PollinationTag,
                          Comp::PlantGenomeComponent,
                          Comp::PlantGrowthComponent,
                          Comp::TransformComponent,
                          Comp::PollinationComponent>();
-
-    // id-ordered participant ids so donor-selection ties + apply order are deterministic.
-    std::vector<entt::entity> ents;
-    for (auto e : view) {
-        if (gate.Allows(e)) {
-            ents.push_back(e);
-        }
-    }
-    std::sort(ents.begin(), ents.end(), [&reg](entt::entity a, entt::entity b) {
-        return PlantIdentityLess(reg, a, b);
-    });
+    const auto ents = CollectPollinationParticipants(reg, gate);
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
     // effective distance within reach; ties -> lowest donor id). Snapshot the cross.
@@ -176,6 +189,7 @@ RunPollinationOnTick(entt::registry& reg,
         Comp::PlantGenomeComponent donor_genome;
     };
     std::vector<Cross> crosses;
+    crosses.reserve(ents.size()); // At most one cross per admitted receiver.
 
     for (auto r : ents) {
         ++stats.considered;

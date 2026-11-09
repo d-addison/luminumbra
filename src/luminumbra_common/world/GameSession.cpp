@@ -986,6 +986,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 }
             }
 
+            const auto foliage_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
             budget.Next(Stage::Plants, [&] {
                 return SimParticipantCount<TelemetryComp::PlantTag,
                                            TelemetryComp::PlantGrowthComponent,
@@ -1108,7 +1112,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         return s;
                     };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
-                    m_registry, current_tick, plant_env);
+                    m_registry, current_tick, plant_env, foliage_gate);
             }
 
             // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
@@ -1122,11 +1126,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
-                const auto foliage_gate = m_activeRegionsEnabled
-                                              ? RegionConsumerGate(m_registry,
-                                                                   m_regionSchedule.due,
-                                                                   m_consumerGateScratch)
-                                              : RegionConsumerGate{};
                 // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
                 // (already deterministic, already-hashed) wind field at the anchor.
                 const ::Luminumbra::Vec2 windXZ =

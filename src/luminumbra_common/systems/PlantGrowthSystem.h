@@ -16,6 +16,7 @@
 #include "../components/DiseaseComponents.h" // blight saps growth (opt-in PlantHealthComponent)
 #include "../components/PlantComponents.h"
 #include "../core/DeterministicRng.h"
+#include "RegionConsumerGate.h"
 
 #include <algorithm>
 #include <array>
@@ -34,9 +35,14 @@ inline std::uint64_t PlantPersistentId(const entt::registry& registry, entt::ent
     return identity ? identity->persistent_id : 0;
 }
 
+// The shared allocator stops before this bit; persistence rejects IDs at or above it.
+inline constexpr std::uint64_t kLegacyPlantIdTag = std::uint64_t{1} << 63;
+static_assert(::Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit == kLegacyPlantIdTag);
+static_assert(sizeof(entt::entity) < sizeof(std::uint64_t));
+
 inline std::uint64_t PlantSimulationId(const entt::registry& registry, entt::entity entity) {
     const auto id = PlantPersistentId(registry, entity);
-    return id != 0 ? id : static_cast<std::uint64_t>(entt::to_integral(entity));
+    return id != 0 ? id : kLegacyPlantIdTag | static_cast<std::uint64_t>(entt::to_integral(entity));
 }
 
 // Persistent plants precede legacy plants; handles break duplicate/absent identity ties.
@@ -135,20 +141,26 @@ struct PlantGrowthStats {
 
 using EnvSampler = std::function<PlantEnvSample(const Comp::TransformComponent&)>;
 
-// Advance every PlantTag plant by ONE fixed tick. Deterministic: entities are
+// Advance every admitted PlantTag plant by ONE fixed tick. Deterministic: entities are
 // visited in ascending-id order, all accumulation is integer, env is a pure
 // function of position. Returns telemetry (also useful for the world sub-hash).
-inline PlantGrowthStats RunPlantGrowthSystemOnTick(entt::registry& reg,
-                                                   std::uint64_t current_tick,
-                                                   const EnvSampler& sample_env) {
+inline PlantGrowthStats
+RunPlantGrowthSystemOnTick(entt::registry& reg,
+                           std::uint64_t current_tick,
+                           const EnvSampler& sample_env,
+                           const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     PlantGrowthStats stats;
     auto view = reg.view<Comp::PlantTag,
                          Comp::PlantGrowthComponent,
                          const Comp::PlantGenomeComponent,
                          const Comp::TransformComponent>();
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    ents.reserve(view.size_hint()); // Bounded by the smallest participating component pool.
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end());
 
     for (auto e : ents) {

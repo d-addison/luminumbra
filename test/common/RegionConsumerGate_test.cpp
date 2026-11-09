@@ -641,21 +641,155 @@ TEST(RegionConsumerGate, SessionLatchesExhaustedSharedAllocatorWithoutReseeding)
 TEST(RegionConsumerGate, GrowthStepsKeepPersistentStampCurrent) {
     entt::registry registry;
     const auto entity = Plant(registry, 100.0f);
-    Identify(registry, entity, 1);
-    F::RunPlantGrowthSystemOnTick(registry, 5, [](const auto&) { return F::PlantEnvSample{}; });
+    Identify(registry, entity, std::uint64_t{1});
+    F::RunPlantGrowthSystemOnTick(
+        registry, std::uint64_t{5}, [](const auto&) { return F::PlantEnvSample{}; });
     auto& identity = registry.get<C::PlantRegionComponent>(entity);
     EXPECT_EQ(identity.region_stamp, 5u);
     auto& growth = registry.get<C::PlantGrowthComponent>(entity);
     const auto& genome = registry.get<C::PlantGenomeComponent>(entity);
-    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 3, 8, &identity);
+    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 3, std::uint64_t{8}, &identity);
     EXPECT_EQ(identity.region_stamp, 8u);
-    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 0, 9, &identity);
-    EXPECT_EQ(identity.region_stamp, 8u);
-    EXPECT_EQ(growth.last_tick, 8u);
-    EXPECT_THROW(F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 36001, 9, &identity),
-                 std::invalid_argument);
+    F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 0, std::uint64_t{9}, &identity);
     EXPECT_EQ(identity.region_stamp, 8u);
     EXPECT_EQ(growth.last_tick, 8u);
+    const auto before = PlantBytes(registry);
+    EXPECT_THROW(
+        F::AdvancePlantGrowthCoarse(growth, genome, {}, 0, 36001, std::uint64_t{9}, &identity),
+        std::invalid_argument);
+    EXPECT_THROW(
+        F::AdvancePlantGrowthCoarse(growth, genome, {}, 1001, 1, std::uint64_t{9}, &identity),
+        std::invalid_argument);
+    EXPECT_EQ(PlantBytes(registry), before);
+    EXPECT_EQ(identity.region_stamp, 8u);
+    EXPECT_EQ(growth.last_tick, 8u);
+}
+
+TEST(RegionConsumerGate, GrowthAdmissionPreservesDeniedStateAndSkipsSampling) {
+    for (const bool persistent : {false, true}) {
+        for (const bool empty_due : {false, true}) {
+            entt::registry registry;
+            const auto admitted = Plant(registry, 100.0f);
+            const auto denied = Plant(registry, 513.0f);
+            registry.emplace<C::PlantTag>(registry.create());
+            for (int index = 0; index < 10; ++index) {
+                (void)registry.create();
+            }
+            if (persistent) {
+                Identify(registry, admitted, std::uint64_t{1});
+                Identify(registry, denied, std::uint64_t{2});
+                // Admission follows the saved owner even when the transform disagrees.
+                registry.get<C::TransformComponent>(denied).position.x = 100.0f;
+            }
+            registry.get<C::PlantGrowthComponent>(denied).tended = 20;
+            const auto before = PlantBytes(registry);
+            std::uint32_t samples = 0;
+            const auto sample = [&samples](const auto&) {
+                ++samples;
+                return F::PlantEnvSample{};
+            };
+            std::vector<RegionKey> due;
+            if (!empty_due) {
+                due.push_back({0, 0});
+            }
+            const RegionConsumerGate gate(registry, due);
+            EXPECT_EQ(
+                F::RunPlantGrowthSystemOnTick(registry, std::uint64_t{5}, sample, gate).updated,
+                empty_due ? 0 : 1);
+            EXPECT_EQ(samples, empty_due ? 0u : 1u);
+            EXPECT_EQ(gate.owner_visits(), due.size() + 2u);
+            const auto& growth = registry.get<C::PlantGrowthComponent>(denied);
+            EXPECT_EQ(growth.last_tick, 0u);
+            EXPECT_EQ(growth.growth_points, 0u);
+            EXPECT_EQ(growth.stress_points, 0u);
+            EXPECT_EQ(growth.tended, 20u);
+            if (persistent) {
+                EXPECT_EQ(registry.get<C::PlantRegionComponent>(denied).region_stamp, 0u);
+            }
+            if (empty_due) {
+                EXPECT_EQ(PlantBytes(registry), before);
+            }
+            EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, std::uint64_t{6}, sample).updated, 2);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, EmptyAndInvalidGrowthParticipantsDoNotSampleEnvironment) {
+    entt::registry registry;
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    std::uint32_t samples = 0;
+    const auto sample = [&samples](const auto&) {
+        ++samples;
+        return F::PlantEnvSample{};
+    };
+    EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, std::uint64_t{1}, sample, gate).updated, 0);
+    EXPECT_EQ(gate.owner_visits(), 0u);
+    const auto invalid = Plant(registry, std::numeric_limits<float>::infinity());
+    EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, std::uint64_t{2}, sample, gate).updated, 0);
+    EXPECT_EQ(samples, 0u);
+    EXPECT_EQ(gate.owner_visits(), 0u);
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(invalid).last_tick, 0u);
+}
+
+TEST(RegionConsumerGate, SessionGrowthUsesSealedOwnersAndDefaultGateKeepsFullRate) {
+    for (const bool enabled : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(enabled);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto plant = Plant(registry, 513.0f);
+        Identify(registry, plant, std::uint64_t{1});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        const auto expected_tick = enabled ? std::uint64_t{0} : std::uint64_t{1};
+        EXPECT_EQ(registry.get<C::PlantGrowthComponent>(plant).last_tick, expected_tick);
+        EXPECT_EQ(registry.get<C::PlantRegionComponent>(plant).region_stamp, expected_tick);
+    }
+}
+
+TEST(RegionConsumerGate, MixedPlantIdsHaveDisjointRngDomainsAndSymmetricCrosses) {
+    entt::registry registry;
+    const auto persistent = Plant(registry, 100.0f);
+    const auto legacy = Plant(registry, 101.0f);
+    const auto handle = static_cast<std::uint64_t>(entt::to_integral(legacy));
+    ASSERT_NE(handle, 0u);
+    Identify(registry, persistent, handle);
+    constexpr std::uint64_t legacy_tag = std::uint64_t{1} << 63;
+    EXPECT_EQ(W::ActiveRegionLedger::kPersistentIdLimit, legacy_tag);
+    EXPECT_EQ(F::PlantSimulationId(registry, persistent), handle);
+    EXPECT_EQ(F::PlantSimulationId(registry, legacy), legacy_tag | handle);
+    EXPECT_TRUE(F::PlantIdentityLess(registry, persistent, legacy));
+    EXPECT_EQ(F::CollectPollinationParticipants(registry, {}),
+              (std::vector<entt::entity>{persistent, legacy}));
+    registry.get<C::PlantGenomeComponent>(persistent).genes.fill(0.2f);
+    registry.get<C::PlantGenomeComponent>(legacy).genes.fill(0.8f);
+    const auto expected = F::PollinateCross(registry.get<C::PlantGenomeComponent>(persistent),
+                                            registry.get<C::PlantGenomeComponent>(legacy),
+                                            handle,
+                                            legacy_tag | handle,
+                                            std::uint64_t{1});
+    ASSERT_EQ(F::RunPollinationOnTick(registry, std::uint64_t{1}).crossed, 2);
+    EXPECT_EQ(registry.get<C::PollinationComponent>(persistent).next_genome.genes, expected.genes);
+    EXPECT_EQ(registry.get<C::PollinationComponent>(legacy).next_genome.genes, expected.genes);
+    registry.get<C::PlantRegionComponent>(persistent).persistent_id = legacy_tag - 1u;
+    EXPECT_LT(F::PlantSimulationId(registry, persistent), F::PlantSimulationId(registry, legacy));
+}
+
+TEST(RegionConsumerGate, PollinationReservesParticipantBoundEvenWhenAdmissionIsSparse) {
+    entt::registry registry;
+    EXPECT_TRUE(F::CollectPollinationParticipants(registry, {}).empty());
+    for (int index = 0; index < 8; ++index) {
+        Plant(registry, 100.0f);
+    }
+    const auto blocked =
+        F::CollectPollinationParticipants(registry, RegionConsumerGate(registry, {}));
+    EXPECT_TRUE(blocked.empty());
+    EXPECT_GE(blocked.capacity(), 8u);
+    const auto admitted = F::CollectPollinationParticipants(registry, {});
+    EXPECT_EQ(admitted.size(), 8u);
+    EXPECT_GE(admitted.capacity(), 8u);
 }
 
 TEST(RegionConsumerGate, LegacyReseedKeepsHandleSeedAndNeverUsesIdentityAllocator) {
@@ -669,15 +803,18 @@ TEST(RegionConsumerGate, LegacyReseedKeepsHandleSeedAndNeverUsesIdentityAllocato
         ++allocations;
         return false;
     };
-    EXPECT_EQ(F::RunCropLifecycleOnTick(legacy, 1).reseeded, 1);
-    EXPECT_EQ(F::RunCropLifecycleOnTick(supplied, 1, 0, {}, allocate).reseeded, 1);
+    EXPECT_EQ(F::RunCropLifecycleOnTick(legacy, std::uint64_t{1}).reseeded, 1);
+    EXPECT_EQ(F::RunCropLifecycleOnTick(supplied, std::uint64_t{1}, std::uint64_t{0}, {}, allocate)
+                  .reseeded,
+              1);
     EXPECT_EQ(allocations, 0u);
     const auto bytes = [](const entt::registry& registry) {
         return Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
             F::BuildPlantEntitySnapshot(registry));
     };
     EXPECT_EQ(bytes(legacy), bytes(supplied));
-    auto rng = luminumbra::core::DeterministicRng::seeded(F::kGerminationSeedOffset, 0, 1);
+    auto rng = luminumbra::core::DeterministicRng::seeded(
+        F::kGerminationSeedOffset, std::uint64_t{1} << 63, std::uint64_t{1});
     const float angle = rng.next_unit() * 6.2831853f;
     const float radius = 1.0f + rng.next_unit() * 2.0f;
     for (const auto entity : legacy.view<C::PlantGrowthComponent>()) {
@@ -695,10 +832,10 @@ TEST(RegionConsumerGate, IdentityOrderingIsStrictForMixedZeroAndDuplicateIds) {
     for (auto& entity : entities) {
         entity = Plant(registry, 100.0f);
     }
-    Identify(registry, entities[1], 8);
-    Identify(registry, entities[2], 0);
-    Identify(registry, entities[3], 3);
-    Identify(registry, entities[4], 3);
+    Identify(registry, entities[1], std::uint64_t{8});
+    Identify(registry, entities[2], std::uint64_t{0});
+    Identify(registry, entities[3], std::uint64_t{3});
+    Identify(registry, entities[4], std::uint64_t{3});
     const std::array expected{entities[3], entities[4], entities[1], entities[0], entities[2]};
     std::sort(entities.begin(), entities.end(), [&registry](auto a, auto b) {
         return F::PlantIdentityLess(registry, a, b);
@@ -710,7 +847,10 @@ TEST(RegionConsumerGate, IdentityOrderingIsStrictForMixedZeroAndDuplicateIds) {
         }
     }
     EXPECT_EQ(F::PlantSimulationId(registry, entities[0]), 3u);
-    EXPECT_EQ(F::PlantSimulationId(registry, entities[3]), entt::to_integral(entities[3]));
-    EXPECT_EQ(F::PlantSimulationId(registry, entities[4]), entt::to_integral(entities[4]));
+    constexpr std::uint64_t legacy_tag = std::uint64_t{1} << 63;
+    EXPECT_EQ(F::PlantSimulationId(registry, entities[3]),
+              legacy_tag | static_cast<std::uint64_t>(entt::to_integral(entities[3])));
+    EXPECT_EQ(F::PlantSimulationId(registry, entities[4]),
+              legacy_tag | static_cast<std::uint64_t>(entt::to_integral(entities[4])));
 }
 } // namespace
