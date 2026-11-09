@@ -505,61 +505,99 @@ enum class SupersedingChange : std::uint8_t {
 };
 
 TEST(AsyncWaterMeshing, StaleResultsCannotReplaceNewerMeshesOrVoxelEdits) {
-    for (const auto change : {SupersedingChange::TerrainMesh,
-                              SupersedingChange::WaterMesh,
-                              SupersedingChange::VoxelEdit}) {
-        SCOPED_TRACE(static_cast<int>(change));
-        JobSystem jobs;
-        jobs.startup(1);
-        auto params = Luminumbra::Test::SyntheticTerrainParams();
-        params.base_amplitude = 0.0f;
-        params.height_offset = 8.0f;
-        params.caves_enabled = false;
-        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
-        WaterSystem water(&jobs, &world);
-        water.SetSimResolution(8);
-        world.SetWaterSystem(&water);
-        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
-        FillDugPond(world, *chunk, 8);
-        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
-        PendingMeshGate gate(jobs, world);
-        entt::registry registry;
-        world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
-        ASSERT_EQ(chunk->pending_lod.load(), 0);
-        // Model a synchronous public mesh rebuild or a voxel edit while the
-        // asynchronous snapshot is queued. Its result must be retained.
-        if (change == SupersedingChange::TerrainMesh) {
-            chunk->mesh_version++;
-        } else if (change == SupersedingChange::WaterMesh) {
-            chunk->water_mesh_version++;
-        } else {
-            for (auto& density : chunk->sdf_data) {
-                density += 1.0f;
+    for (const bool due_publication : {false, true}) {
+        SCOPED_TRACE(due_publication);
+        for (const auto request :
+             {MeshRequest::Initial, MeshRequest::TerrainRemesh, MeshRequest::WaterOnly}) {
+            SCOPED_TRACE(static_cast<int>(request));
+            for (const auto change : {SupersedingChange::TerrainMesh,
+                                      SupersedingChange::WaterMesh,
+                                      SupersedingChange::VoxelEdit}) {
+                SCOPED_TRACE(static_cast<int>(change));
+                JobSystem jobs;
+                jobs.startup(1);
+                auto params = Luminumbra::Test::SyntheticTerrainParams();
+                params.base_amplitude = 0.0f;
+                params.height_offset = 8.0f;
+                params.caves_enabled = false;
+                SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+                WaterSystem water(&jobs, &world);
+                water.SetSimResolution(8);
+                water.SetBootPaused(true);
+                world.SetWaterSystem(&water);
+                auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+                FillDugPond(world, *chunk, 8);
+                if (request != MeshRequest::Initial) {
+                    World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+                    chunk->set_state(ChunkState::Ready);
+                    chunk->current_lod.store(request == MeshRequest::TerrainRemesh ? 1 : 0);
+                }
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+                PendingMeshGate gate(jobs, world);
+                if (due_publication) {
+                    world.begin_tick(0);
+                }
+                entt::registry registry;
+                world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
+                ASSERT_EQ(chunk->pending_lod.load(), 0);
+                // Model a synchronous public mesh rebuild or a voxel edit while the
+                // asynchronous snapshot is queued. Its result must be retained.
+                if (change == SupersedingChange::TerrainMesh) {
+                    chunk->mesh_version++;
+                } else if (change == SupersedingChange::WaterMesh) {
+                    chunk->water_mesh_version++;
+                } else {
+                    for (auto& density : chunk->sdf_data) {
+                        density += 1.0f;
+                    }
+                    chunk->mark_voxel_data_dirty();
+                    chunk->current_lod.store(-1);
+                }
+                auto newer = ReferenceMesh(world, water, *chunk);
+                chunk->mesh_vertices = newer->mesh_vertices;
+                chunk->mesh_indices = newer->mesh_indices;
+                chunk->water_mesh_vertices = newer->water_mesh_vertices;
+                chunk->water_mesh_indices = newer->water_mesh_indices;
+                const auto terrain_version = chunk->mesh_version.load();
+                const auto water_version = chunk->water_mesh_version.load();
+                chunk->has_collision.store(true);
+                chunk->water_mesh_dirty_ticks = 5;
+                if (due_publication) {
+                    gate.release();
+                    world.quiesce_streaming_jobs_for_save();
+                    world.activate_due(7);
+                    EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+                    EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+                    EXPECT_EQ(chunk->pending_lod.load(), 0);
+                    world.begin_tick(8);
+                    world.activate_due(8);
+                } else {
+                    gate.finish();
+                }
+                const bool terrain_published =
+                    request != MeshRequest::WaterOnly && change == SupersedingChange::WaterMesh;
+                const bool water_published =
+                    request == MeshRequest::WaterOnly && change != SupersedingChange::WaterMesh;
+                EXPECT_EQ(chunk->mesh_version.load(),
+                          terrain_version + (terrain_published ? 1u : 0u));
+                EXPECT_EQ(chunk->water_mesh_version.load(),
+                          water_version + (water_published ? 1u : 0u));
+                EXPECT_EQ(chunk->has_collision.load(), !terrain_published);
+                EXPECT_EQ(chunk->water_mesh_dirty_ticks, water_published ? 0 : 5);
+                EXPECT_FALSE(chunk->pending_water_mesh_generated.load());
+                EXPECT_EQ(chunk->pending_lod.load(), -1);
+                ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
+                EXPECT_EQ(chunk->mesh_indices, newer->mesh_indices);
+                ExpectVerticesEqual(chunk->water_mesh_vertices, newer->water_mesh_vertices);
+                EXPECT_EQ(chunk->water_mesh_indices, newer->water_mesh_indices);
+                if (change == SupersedingChange::VoxelEdit) {
+                    world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
+                    ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+                    world.wait_for_streaming_jobs();
+                    EXPECT_EQ(chunk->mesh_version.load(), terrain_version + 1u);
+                    ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
+                }
             }
-            chunk->mark_voxel_data_dirty();
-            chunk->current_lod.store(-1);
-        }
-        auto newer = ReferenceMesh(world, water, *chunk);
-        chunk->mesh_vertices = newer->mesh_vertices;
-        chunk->mesh_indices = newer->mesh_indices;
-        chunk->water_mesh_vertices = newer->water_mesh_vertices;
-        chunk->water_mesh_indices = newer->water_mesh_indices;
-        const auto terrain_version = chunk->mesh_version.load();
-        const auto water_version = chunk->water_mesh_version.load();
-        gate.finish();
-        EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
-        EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
-        EXPECT_EQ(chunk->pending_lod.load(), -1);
-        ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
-        EXPECT_EQ(chunk->mesh_indices, newer->mesh_indices);
-        ExpectVerticesEqual(chunk->water_mesh_vertices, newer->water_mesh_vertices);
-        EXPECT_EQ(chunk->water_mesh_indices, newer->water_mesh_indices);
-        if (change == SupersedingChange::VoxelEdit) {
-            world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
-            ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
-            world.wait_for_streaming_jobs();
-            EXPECT_EQ(chunk->mesh_version.load(), terrain_version + 1u);
-            ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
         }
     }
 }
@@ -725,6 +763,70 @@ TEST(AsyncWaterMeshing, SynchronousEditPreparationRejectsCompletedTerrainSnapsho
         EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
         ExpectVerticesEqual(chunk->mesh_vertices, expected->mesh_vertices);
         EXPECT_EQ(chunk->mesh_indices, expected->mesh_indices);
+    }
+}
+
+TEST(AsyncWaterMeshing, WaterOnlyCompletionDoesNotRequireTerrainGeometryOrCurrentLod) {
+    for (const bool due_publication : {false, true}) {
+        SCOPED_TRACE(due_publication);
+        JobSystem jobs;
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        WaterSystem water(&jobs, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        const auto wet_cells = FillDugPond(world, *chunk, 8);
+        chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
+        chunk->current_lod.store(0);
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(chunk->mesh_vertices.empty());
+        const auto expected = ReferenceMesh(world, water, *chunk);
+        ASSERT_TRUE(expected->mesh_vertices.empty());
+        ASSERT_EQ(expected->water_mesh_vertices.size(), wet_cells * 4u);
+        ASSERT_EQ(expected->water_mesh_indices.size(), wet_cells * 6u);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        PendingMeshGate gate(jobs, world);
+        if (due_publication) {
+            world.begin_tick(0);
+        }
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        chunk->sdf_data = {1.0f};
+        chunk->mark_voxel_data_dirty();
+        chunk->current_lod.store(-1);
+        chunk->mesh_version.store(7u);
+        chunk->has_collision.store(true);
+        if (due_publication) {
+            gate.release();
+            world.quiesce_streaming_jobs_for_save();
+            EXPECT_TRUE(chunk->pending_mesh_vertices.empty());
+            world.activate_due(7);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->pending_lod.load(), 0);
+            world.activate_due(8);
+        } else {
+            gate.finish();
+        }
+        EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        ExpectVerticesEqual(chunk->water_mesh_vertices, expected->water_mesh_vertices);
+        EXPECT_EQ(chunk->water_mesh_indices, expected->water_mesh_indices);
+        EXPECT_TRUE(chunk->mesh_vertices.empty());
+        EXPECT_TRUE(chunk->mesh_indices.empty());
+        EXPECT_EQ(chunk->mesh_version.load(), 7u);
+        EXPECT_EQ(chunk->current_lod.load(), -1);
+        EXPECT_TRUE(chunk->has_collision.load());
+        EXPECT_EQ(chunk->sdf_data, std::vector<float>{1.0f});
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_FALSE(chunk->pending_water_mesh_generated.load());
+        EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
     }
 }
 
@@ -922,7 +1024,7 @@ TEST(AsyncWaterMeshing, InvalidResolutionAndPartialSurfaceRejectBeforeAllocation
     for (const int resolution : {-1, 0, 1, 33, std::numeric_limits<int>::max(), 8}) {
         SCOPED_TRACE(resolution);
         chunk.current_water_resolution.store(resolution);
-        chunk.water_level_data.assign(resolution == 8 ? 63u : 0u, 6.0f);
+        chunk.water_level_data.assign(resolution == 8 ? 63u : (resolution == 1 ? 1u : 0u), 6.0f);
         chunk.water_mesh_vertices = {{Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), 0u}};
         chunk.water_mesh_indices = {0u};
         chunk.water_mesh_generated.store(true);
