@@ -16,12 +16,110 @@ def compact_cpp(source):
     return re.sub(r"\s+", "", source)
 
 
+def cpp_block(source, anchor):
+    if anchor not in source:
+        raise AssertionError("missing C++ block: " + anchor)
+    start = source.index("{", source.index(anchor))
+    depth = 0
+    for token in re.finditer(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', source[start:]):
+        if token[0] == "{":
+            depth += 1
+        elif token[0] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:start + token.end()]
+    raise AssertionError("unclosed C++ block: " + anchor)
+
+
 class RuntimeConfigSourceContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8"))
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
+
+    # Real UI/GL3 destruction needs a graphics context unavailable to the Python
+    # CI job. Pin the production ownership and refusal order here instead.
+    def test_pipeline_failure_destroys_ui_and_pass_owners_before_context(self):
+        failure = cpp_block(self.client, "if(!graphics_ready||!renderPipeline.startup(")
+        self.assertIn('runtime_state_recorder.capture("render_pipeline_startup_failed",', failure)
+        self.assertIn("teardown_client(ignore_shutdown,[&]{gameSession.reset();"
+                      "jobSystem.shutdown();});return", failure)
+        teardown = cpp_block(self.client, "constautoteardown_client=")
+        stages = ("glfwMakeContextCurrent(window);", "g_uiManager->Shutdown();",
+                  "g_uiManager.reset();", "g_loading_visualizer->Shutdown();",
+                  "g_loading_visualizer.reset();", "audioManager->Shutdown();",
+                  "menuPreviewState.scene_image.release_scene_image();",
+                  "worldgenPreview.reset();", "render_pipeline_owner->shutdown();",
+                  "render_pipeline_owner.reset();", "developerConsole.Shutdown();",
+                  "worldGenViewer.reset();", "ImGui_ImplOpenGL3_Shutdown();",
+                  "ImGui_ImplGlfw_Shutdown();", "ImGui::DestroyContext();",
+                  "finish_shutdown();", "glfwDestroyWindow(window);", "glfwTerminate();")
+        positions = [teardown.index(stage) for stage in stages]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("render_pipeline_owner=std::make_unique<"
+                      "Luminumbra::Rendering::RenderPipeline>();"
+                      "auto&renderPipeline=*render_pipeline_owner;", self.client)
+
+        ui_header = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.h")
+                                .read_text(encoding="utf-8"))
+        gl3_header = compact_cpp((ROOT / "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.h")
+                                 .read_text(encoding="utf-8"))
+        gl3_source = compact_cpp((ROOT / "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp")
+                                 .read_text(encoding="utf-8"))
+        self.assertIn("RenderInterface_GL3m_renderInterface;", ui_header)
+        self.assertIn("RenderLayerStackrender_layers;", gl3_header)
+        gl3_destructor = cpp_block(gl3_source, "RenderInterface_GL3::~RenderInterface_GL3()")
+        self.assertIn("Gfx::DestroyShaders(*program_data);", gl3_destructor)
+        layer_destructor = cpp_block(gl3_source, "RenderInterface_GL3::RenderLayerStack::~RenderLayerStack()")
+        self.assertIn("DestroyFramebuffers();", layer_destructor)
+
+    def test_partial_startup_and_repeated_cleanup_are_guarded(self):
+        teardown = cpp_block(self.client, "constautoteardown_client=")
+        self.assertTrue(teardown.startswith("{if(!glfw_initialized){return;}"))
+        for guard, release in (("if(g_uiManager)", "g_uiManager.reset();"),
+                               ("if(g_loading_visualizer)", "g_loading_visualizer.reset();"),
+                               ("if(audioManager)", "audioManager->Shutdown();"),
+                               ("if(render_pipeline_owner)", "render_pipeline_owner.reset();"),
+                               ("if(imgui_started)", "imgui_started=false;")):
+            self.assertIn(release, cpp_block(teardown, guard))
+        self.assertIn("if(window){glfwDestroyWindow(window);window=nullptr;}"
+                      "glfwTerminate();glfw_initialized=false;", teardown)
+        self.assertIn("GLFWwindow*window=nullptr;boolimgui_started=false;", self.client)
+        self.assertIn('ImGui_ImplOpenGL3_Init("#version450");imgui_started=true;', self.client)
+        self.assertIn("if(window){glfwMakeContextCurrent(window);}", teardown)
+        self.assertIn("if(window){glfwSetWindowCloseCallback(window,nullptr);", teardown)
+        for creation in ("g_uiManager=std::make_unique<", "render_pipeline_owner=std::make_unique<"):
+            self.assertGreater(self.client.index(creation),
+                               self.client.index("if(!gladLoadGLLoader("))
+        mismatch = cpp_block(self.client, "if(!capture_size.empty()&&")
+        self.assertIn("teardown_client(ignore_shutdown,[]{});return2;", mismatch)
+        self.assertLess(self.client.index('ImGui_ImplOpenGL3_Init("#version450");'),
+                        self.client.index("if(!capture_size.empty()&&"))
+        self.assertLess(self.client.index("if(!capture_size.empty()&&"),
+                        self.client.index("g_uiManager=std::make_unique<"))
+
+    def test_all_initialization_refusals_share_normal_teardown(self):
+        for anchor, code in (("if(!window)", "-1"),
+                             ("if(!gladLoadGLLoader(", "-1"),
+                             ('LUMINUMBRA_CORE_ERROR("--capture-size', "2")):
+            self.assertIn(anchor, self.client)
+            start = self.client.index(anchor)
+            refusal = self.client[start:self.client.index("return" + code + ";", start)]
+            self.assertIn("teardown_client(ignore_shutdown,[]{});", refusal)
+        surface = cpp_block(self.client, "if(!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(")
+        self.assertIn("prepare_world_entry();teardown_client(ignore_shutdown,"
+                      "release_capture_session);return2;", surface)
+        self.assertIn("constautorelease_capture_session=[&]{gameSession.reset();"
+                      "jobSystem.shutdown();};", self.client)
+        normal = cpp_block(self.client, "teardown_client(mark_shutdown,")
+        self.assertLess(normal.index("DrainWorldDressing("), normal.index("gameSession.reset();"))
+        self.assertLess(normal.index("gameSession.reset();"), normal.index("jobSystem.shutdown();"))
+        self.assertIn("runtime_state_recorder.write_shutdown(", normal)
+        self.assertIn("hang_watchdog->stop();", normal)
+        self.assertEqual(self.client.count("glfwDestroyWindow(window);"), 1)
+        self.assertEqual(self.client.count("glfwTerminate();"), 1)
+        self.assertEqual(self.client.count("teardown_client("), 7)
 
     def test_client_loads_runtime_defaults_before_explicit_override(self):
         load = ("g_systemConfig=luminumbra::core::SystemConfig::LoadFromRuntimeRoot("
