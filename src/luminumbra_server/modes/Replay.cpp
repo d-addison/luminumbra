@@ -111,6 +111,12 @@ int RunRecord(const ServerCliOptions& options) {
         }
     }
 
+    // Authenticate positive off-cadence runs without changing the bytes
+    // or checkpoint cadence of existing 30/90-tick recordings.
+    if (executed != 0 && (executed % kCheckpointIntervalTicks) != 0) {
+        writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+    }
+
     if (!writer.Finalize(executed)) {
         LUMINUMBRA_CORE_ERROR("record: failed to finalize replay stream '{}'", options.record_path);
         return 1;
@@ -189,6 +195,41 @@ int RunReplay(const ServerCliOptions& options) {
         return 1;
     }
 
+    // Mode admission precedes configuration resolution and session startup.
+    // The generic stream still accepts foreign engines and opaque/sparse inputs.
+    if (header.engine_version != engine_now) {
+        LUMINUMBRA_CORE_ERROR("replay: engine mismatch: recorded='{}' running='{}'",
+                              header.engine_version,
+                              engine_now);
+        return 1;
+    }
+    if (contents->inputs.size() != contents->tick_count) {
+        LUMINUMBRA_CORE_ERROR("replay: expected exactly one empty input per tick");
+        return 1;
+    }
+    // Bounded by the parsed input count, not an untrusted trailer tick count.
+    // Validate once in O(inputs); the empty-input tick path needs no lookup.
+    std::uint64_t admitted_inputs = 0;
+    for (const auto& input : contents->inputs) {
+        if (input.tick != admitted_inputs + 1 || !input.inputs.empty()) {
+            LUMINUMBRA_CORE_ERROR("replay: unsupported input at tick {}: expected empty tick {}",
+                                  input.tick,
+                                  admitted_inputs + 1);
+            return 1;
+        }
+        ++admitted_inputs;
+    }
+    const auto* terminal =
+        contents->tick_count == 0
+            ? nullptr
+            : Luminumbra::Replay::FindCheckpoint(*contents, contents->tick_count);
+    if (contents->tick_count != 0 && terminal == nullptr) {
+        LUMINUMBRA_CORE_ERROR("replay: missing authenticated terminal checkpoint at tick {}; "
+                              "older positive recordings without one cannot be replayed",
+                              contents->tick_count);
+        return 1;
+    }
+
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
     auto config = ReplayRunnerConfigFrom(options, header);
     if (!config) {
@@ -226,7 +267,7 @@ int RunReplay(const ServerCliOptions& options) {
     // The post-boot hash must match the recorded start_world_hash, else the boot
     // parameters or worldgen drifted before tick 1 (a tick-0 divergence).
     const std::string live_start = runner.ComputeWorldHash();
-    bool start_match = (live_start == header.start_world_hash);
+    const bool start_match = (live_start == header.start_world_hash);
 
     // Drive the recorded ticks. At each checkpoint, compare live vs recorded.
     bool diverged = false;
@@ -237,6 +278,7 @@ int RunReplay(const ServerCliOptions& options) {
     std::uint64_t checkpoints_verified = 0;
 
     std::uint64_t executed = 0;
+    auto checkpoint = contents->checkpoints.cbegin();
     if (!start_match) {
         diverged = true;
         divergence_tick = 0;
@@ -247,11 +289,7 @@ int RunReplay(const ServerCliOptions& options) {
 
     while (!diverged && executed < contents->tick_count) {
         const std::uint64_t next_tick = executed + 1;
-        // Feed the recorded input set for this tick (empty today; the replay
-        // driver applies it once  carries real inputs).
-        const Luminumbra::Replay::InputRecord* input =
-            Luminumbra::Replay::FindInput(*contents, next_tick);
-        (void)input; // applied by the transport in; no-op for empty sets
+        // Every input was admitted before boot; all are empty no-ops.
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
         if (step.region_fault) {
@@ -269,18 +307,25 @@ int RunReplay(const ServerCliOptions& options) {
 
         if (runner.Session()->ActiveRegionsEnabled() &&
             runner.Session()->GetRegionSchedule().digest !=
-                schedule_trace.at(executed - 1).second) {
+                schedule_trace.at(static_cast<std::size_t>(executed - 1)).second) {
             diverged = true;
             divergence_tick = executed;
             divergence_section = "region_schedule";
-            expected_hash = schedule_trace.at(executed - 1).second;
+            expected_hash = schedule_trace.at(static_cast<std::size_t>(executed - 1)).second;
             actual_hash = runner.Session()->GetRegionSchedule().digest;
             break;
         }
 
-        if ((executed % kCheckpointIntervalTicks) == 0) {
-            const Luminumbra::Replay::CheckpointRecord* recorded =
-                Luminumbra::Replay::FindCheckpoint(*contents, executed);
+        if ((executed % kCheckpointIntervalTicks) == 0 || executed == contents->tick_count) {
+            // Checkpoints are tick-ordered in ReplayContents. Visit each at
+            // most once instead of rescanning the recording on every boundary.
+            while (checkpoint != contents->checkpoints.cend() && checkpoint->tick < executed) {
+                ++checkpoint;
+            }
+            const auto* recorded =
+                checkpoint != contents->checkpoints.cend() && checkpoint->tick == executed
+                    ? &*checkpoint
+                    : nullptr;
             if (recorded == nullptr) {
                 LUMINUMBRA_CORE_ERROR("replay: missing recorded checkpoint at tick {}", executed);
                 runner.Shutdown();
@@ -288,7 +333,8 @@ int RunReplay(const ServerCliOptions& options) {
             }
             const auto live = CaptureCheckpoint(executed, runner);
             // Compare top-level hash, then localize via authoritative sub-hashes.
-            if (live.world_hash != recorded->world_hash) {
+            if (live.world_hash != recorded->world_hash || live.terrain != recorded->terrain ||
+                live.water != recorded->water || live.entities != recorded->entities) {
                 diverged = true;
                 divergence_tick = executed;
                 expected_hash = recorded->world_hash;
@@ -313,14 +359,10 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     const std::string live_end = diverged ? actual_hash : runner.ComputeWorldHash();
-    const bool end_hash_match = !diverged && (live_end == [&]() -> std::string {
-        // The recorded end-hash is the last checkpoint's world_hash if the run
-        // ends on a checkpoint boundary; otherwise re-derive from the trailer
-        // tick_count's checkpoint. For the 90-tick gate, 90 is a checkpoint.
-        const Luminumbra::Replay::CheckpointRecord* last =
-            Luminumbra::Replay::FindCheckpoint(*contents, contents->tick_count);
-        return last ? last->world_hash : std::string();
-    }());
+    // Zero ticks are authenticated by the existing boot hash; positive
+    // runs must have verified the terminal checkpoint, including off cadence.
+    const bool end_hash_match =
+        !diverged && live_end == (terminal ? terminal->world_hash : header.start_world_hash);
 
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();

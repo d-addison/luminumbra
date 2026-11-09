@@ -1640,6 +1640,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
