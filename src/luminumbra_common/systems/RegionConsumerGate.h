@@ -31,6 +31,11 @@ public:
         , m_due(due)
         , m_scratch(&scratch) {}
 
+    // Installed gates select persistent IDs and tagged legacy IDs for simulation streams.
+    [[nodiscard]] bool UsesPersistentPlantIdentity() const {
+        return m_registry != nullptr;
+    }
+
     [[nodiscard]] bool Allows(entt::entity entity) const {
         if (!m_registry) {
             return true;

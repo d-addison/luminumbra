@@ -233,7 +233,7 @@ TEST(RegionConsumerGate, DefaultGateMatchesLegacyBytesAndTelemetry) {
     EXPECT_EQ(StepConsumers(explicit_default, {}), legacy);
     EXPECT_EQ(StepConsumers(admitted, gate), legacy);
     EXPECT_EQ(PlantBytes(explicit_default), PlantBytes(implicit));
-    EXPECT_EQ(PlantBytes(admitted), PlantBytes(implicit));
+    EXPECT_NE(PlantBytes(admitted), PlantBytes(implicit));
     const auto before = PlantBytes(blocked);
     EXPECT_NE(StepConsumers(blocked, RegionConsumerGate(blocked, {})), legacy);
     EXPECT_EQ(PlantBytes(blocked), before);
@@ -325,6 +325,8 @@ TEST(RegionConsumerGate, EmptyUnknownAndInvalidOwnersAreBlockedOnlyWithInstalled
     entt::registry registry;
     const auto entity = registry.create();
     const RegionConsumerGate empty(registry, {});
+    EXPECT_FALSE(RegionConsumerGate{}.UsesPersistentPlantIdentity());
+    EXPECT_TRUE(empty.UsesPersistentPlantIdentity());
     EXPECT_TRUE(RegionConsumerGate{}.Allows(entity));
     EXPECT_FALSE(empty.Allows(entity));
     registry.emplace<C::TransformComponent>(entity).position = {-0.5f, 0.0f, -0.5f};
@@ -486,7 +488,15 @@ TEST(RegionConsumerGate, PersistedRosterIgnoresHandleHistoryForCrossesAndBirths)
     ASSERT_TRUE(F::ApplyPlantEntitySnapshot(other, snapshot));
     EXPECT_EQ(first.ComputePlantSubHash(), second.ComputePlantSubHash());
     for (auto* registry : {&first.GetRegistry(), &other}) {
-        EXPECT_EQ(F::RunPollinationOnTick(*registry, 1).crossed, 3);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        EXPECT_EQ(F::RunPollinationOnTick(*registry,
+                                          std::uint64_t{1},
+                                          {},
+                                          std::uint64_t{0},
+                                          0.05f,
+                                          RegionConsumerGate(*registry, due))
+                      .crossed,
+                  3);
         for (const auto entity : registry->view<C::PlantRegionComponent>()) {
             if (registry->get<C::PlantRegionComponent>(entity).persistent_id == 30u) {
                 C::PlantGenomeComponent donor;
@@ -508,7 +518,14 @@ TEST(RegionConsumerGate, PersistedRosterIgnoresHandleHistoryForCrossesAndBirths)
         const auto allocate = [&ledger](std::uint64_t& child_id) {
             return ledger.allocate_persistent_id(child_id);
         };
-        EXPECT_EQ(F::RunCropLifecycleOnTick(*registry, 1, 0, {}, allocate).reseeded, 3);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        EXPECT_EQ(F::RunCropLifecycleOnTick(*registry,
+                                            std::uint64_t{1},
+                                            std::uint64_t{0},
+                                            RegionConsumerGate(*registry, due),
+                                            allocate)
+                      .reseeded,
+                  3);
         EXPECT_TRUE(F::ValidatePlantEntitySnapshot(F::BuildPlantEntitySnapshot(*registry, true)));
     }
     EXPECT_EQ(PlantBytes(first.GetRegistry()), PlantBytes(other));
@@ -749,6 +766,50 @@ TEST(RegionConsumerGate, SessionGrowthUsesSealedOwnersAndDefaultGateKeepsFullRat
     }
 }
 
+TEST(RegionConsumerGate, InactiveGatePinsRawPollinationIdsAndHandleOrder) {
+    entt::registry registry;
+    const auto receiver = Plant(registry, 100.0f);
+    const auto donor = Plant(registry, 101.0f);
+    registry.get<C::PlantGenomeComponent>(receiver).genes.fill(0.2f);
+    registry.get<C::PlantGenomeComponent>(donor).genes.fill(0.8f);
+    EXPECT_EQ(F::CollectPollinationParticipants(registry, {}),
+              (std::vector<entt::entity>{receiver, donor}));
+    const auto expected = F::PollinateCross(registry.get<C::PlantGenomeComponent>(receiver),
+                                            registry.get<C::PlantGenomeComponent>(donor),
+                                            static_cast<std::uint64_t>(entt::to_integral(receiver)),
+                                            static_cast<std::uint64_t>(entt::to_integral(donor)),
+                                            std::uint64_t{1});
+    ASSERT_EQ(F::RunPollinationOnTick(registry, std::uint64_t{1}).crossed, 2);
+    EXPECT_EQ(registry.get<C::PollinationComponent>(receiver).next_genome.genes, expected.genes);
+    EXPECT_EQ(registry.get<C::PollinationComponent>(donor).next_genome.genes, expected.genes);
+}
+
+TEST(RegionConsumerGate, InactiveGatePinsRawGerminationAcrossGenerations) {
+    entt::registry registry;
+    auto parent = Plant(registry, 100.0f);
+    Ripen(registry, parent, false);
+    for (std::uint64_t tick = std::uint64_t{1}; tick <= std::uint64_t{3}; ++tick) {
+        const auto position = registry.get<C::TransformComponent>(parent).position;
+        const auto genome = registry.get<C::PlantGenomeComponent>(parent);
+        auto rng = luminumbra::core::DeterministicRng::seeded(
+            F::kGerminationSeedOffset, static_cast<std::uint64_t>(entt::to_integral(parent)), tick);
+        const float angle = rng.next_unit() * 6.2831853f;
+        const float radius = 1.0f + rng.next_unit() * 2.0f;
+        auto& growth = registry.get<C::PlantGrowthComponent>(parent);
+        growth.stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+        registry.get<C::CropLifecycleComponent>(parent).ripe_ticks = 1;
+        ASSERT_EQ(F::RunCropLifecycleOnTick(registry, tick, std::uint64_t{0}, {}).reseeded, 1);
+        ASSERT_FALSE(registry.valid(parent));
+        const auto children = F::CollectPollinationParticipants(registry, {});
+        ASSERT_EQ(children.size(), 1u);
+        parent = children.front();
+        const auto& child = registry.get<C::TransformComponent>(parent).position;
+        EXPECT_EQ(child.x, position.x + radius * Luminumbra::DeterministicMath::Cos(angle));
+        EXPECT_EQ(child.z, position.z + radius * Luminumbra::DeterministicMath::Sin(angle));
+        EXPECT_EQ(registry.get<C::PlantGenomeComponent>(parent).genes, genome.genes);
+    }
+}
+
 TEST(RegionConsumerGate, MixedPlantIdsHaveDisjointRngDomainsAndSymmetricCrosses) {
     entt::registry registry;
     const auto persistent = Plant(registry, 100.0f);
@@ -761,7 +822,9 @@ TEST(RegionConsumerGate, MixedPlantIdsHaveDisjointRngDomainsAndSymmetricCrosses)
     EXPECT_EQ(F::PlantSimulationId(registry, persistent), handle);
     EXPECT_EQ(F::PlantSimulationId(registry, legacy), legacy_tag | handle);
     EXPECT_TRUE(F::PlantIdentityLess(registry, persistent, legacy));
-    EXPECT_EQ(F::CollectPollinationParticipants(registry, {}),
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    EXPECT_EQ(F::CollectPollinationParticipants(registry, gate),
               (std::vector<entt::entity>{persistent, legacy}));
     registry.get<C::PlantGenomeComponent>(persistent).genes.fill(0.2f);
     registry.get<C::PlantGenomeComponent>(legacy).genes.fill(0.8f);
@@ -770,7 +833,9 @@ TEST(RegionConsumerGate, MixedPlantIdsHaveDisjointRngDomainsAndSymmetricCrosses)
                                             handle,
                                             legacy_tag | handle,
                                             std::uint64_t{1});
-    ASSERT_EQ(F::RunPollinationOnTick(registry, std::uint64_t{1}).crossed, 2);
+    ASSERT_EQ(F::RunPollinationOnTick(registry, std::uint64_t{1}, {}, std::uint64_t{0}, 0.05f, gate)
+                  .crossed,
+              2);
     EXPECT_EQ(registry.get<C::PollinationComponent>(persistent).next_genome.genes, expected.genes);
     EXPECT_EQ(registry.get<C::PollinationComponent>(legacy).next_genome.genes, expected.genes);
     registry.get<C::PlantRegionComponent>(persistent).persistent_id = legacy_tag - 1u;
@@ -814,7 +879,9 @@ TEST(RegionConsumerGate, LegacyReseedKeepsHandleSeedAndNeverUsesIdentityAllocato
     };
     EXPECT_EQ(bytes(legacy), bytes(supplied));
     auto rng = luminumbra::core::DeterministicRng::seeded(
-        F::kGerminationSeedOffset, std::uint64_t{1} << 63, std::uint64_t{1});
+        F::kGerminationSeedOffset,
+        static_cast<std::uint64_t>(entt::to_integral(entt::entity{0})),
+        std::uint64_t{1});
     const float angle = rng.next_unit() * 6.2831853f;
     const float radius = 1.0f + rng.next_unit() * 2.0f;
     for (const auto entity : legacy.view<C::PlantGrowthComponent>()) {
@@ -836,6 +903,8 @@ TEST(RegionConsumerGate, IdentityOrderingIsStrictForMixedZeroAndDuplicateIds) {
     Identify(registry, entities[2], std::uint64_t{0});
     Identify(registry, entities[3], std::uint64_t{3});
     Identify(registry, entities[4], std::uint64_t{3});
+    EXPECT_EQ(F::CollectPollinationParticipants(registry, {}),
+              (std::vector<entt::entity>(entities.begin(), entities.end())));
     const std::array expected{entities[3], entities[4], entities[1], entities[0], entities[2]};
     std::sort(entities.begin(), entities.end(), [&registry](auto a, auto b) {
         return F::PlantIdentityLess(registry, a, b);

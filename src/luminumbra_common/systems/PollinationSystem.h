@@ -155,8 +155,9 @@ CollectPollinationParticipants(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [&reg](entt::entity a, entt::entity b) {
-        return PlantIdentityLess(reg, a, b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return gate.UsesPersistentPlantIdentity() ? PlantIdentityLess(reg, a, b)
+                                                  : entt::to_integral(a) < entt::to_integral(b);
     });
     return ents;
 }
@@ -193,7 +194,9 @@ RunPollinationOnTick(entt::registry& reg,
 
     for (auto r : ents) {
         ++stats.considered;
-        const std::uint64_t rid = PlantSimulationId(reg, r);
+        const std::uint64_t rid =
+            (gate.UsesPersistentPlantIdentity() ? PlantSimulationId(reg, r)
+                                                : static_cast<std::uint64_t>(entt::to_integral(r)));
         const auto& r_tf = view.get<Comp::TransformComponent>(r);
         const auto& r_genome = view.get<Comp::PlantGenomeComponent>(r);
 
@@ -205,7 +208,9 @@ RunPollinationOnTick(entt::registry& reg,
         for (auto d : ents) { // already id-ordered -> deterministic tie-break
             if (d == r)
                 continue;
-            const std::uint64_t did = PlantSimulationId(reg, d);
+            const std::uint64_t did = (gate.UsesPersistentPlantIdentity()
+                                           ? PlantSimulationId(reg, d)
+                                           : static_cast<std::uint64_t>(entt::to_integral(d)));
             const auto& d_growth = view.get<Comp::PlantGrowthComponent>(d);
             if (!IsPollenDonor(d_growth))
                 continue; // only reproductive plants donate

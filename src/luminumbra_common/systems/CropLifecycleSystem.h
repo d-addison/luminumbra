@@ -81,8 +81,9 @@ RunCropLifecycleOnTick(entt::registry& reg,
     }
     if (ents.empty())
         return stats; // opt-in: no participants -> byte-identical no-op
-    std::sort(ents.begin(), ents.end(), [&reg](entt::entity a, entt::entity b) {
-        return PlantIdentityLess(reg, a, b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return gate.UsesPersistentPlantIdentity() ? PlantIdentityLess(reg, a, b)
+                                                  : entt::to_integral(a) < entt::to_integral(b);
     });
 
     const std::uint8_t kFruiting = static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
@@ -122,7 +123,10 @@ RunCropLifecycleOnTick(entt::registry& reg,
 
         // Deterministic seed DISPERSAL: a nearby cell from a per-plant integer-seeded RNG.
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
-            kGerminationSeedOffset ^ world_seed, PlantSimulationId(reg, e), tick);
+            kGerminationSeedOffset ^ world_seed,
+            (gate.UsesPersistentPlantIdentity() ? PlantSimulationId(reg, e)
+                                                : static_cast<std::uint64_t>(entt::to_integral(e))),
+            tick);
         const float ang = rng.next_unit() * 6.2831853f;
         const float rad = 1.0f + rng.next_unit() * 2.0f; // 1..3 m from the parent
         const auto& tf = view.get<const Comp::TransformComponent>(e);
