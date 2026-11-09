@@ -1280,11 +1280,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
     return ticks_executed;
 }
 
+namespace {
+// Keep universal admission separate from the selected preset's dependencies.
 WorldConfigValidationResult
-GameSession::ValidateWorldConfig(const std::string& root_path,
-                                 const std::string& worldType,
-                                 const std::vector<std::filesystem::path>& required_assets,
-                                 const std::stop_token& stop) {
+ValidateWorldConfigInputs(const std::string& root_path,
+                          const std::string& worldType,
+                          const std::vector<std::filesystem::path>& required_assets) {
     WorldConfigValidationResult result;
     result.ok = true;
 
@@ -1303,9 +1304,8 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
                                Filesystem::GenericUtf8PathString(result.preset_path));
     }
 
-    // Preset loading below validates simulation dependencies. Further runtime
-    // assets are caller-supplied (the client registers shaders/RML/fonts; a
-    // headless host registers none).
+    // Runtime assets apply to every preset (the client registers shaders/RML/fonts;
+    // a headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
@@ -1315,9 +1315,19 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         }
     }
 
+    return result;
+}
+} // namespace
+
+WorldConfigValidationResult
+GameSession::ValidateWorldConfig(const std::string& root_path,
+                                 const std::string& worldType,
+                                 const std::vector<std::filesystem::path>& required_assets,
+                                 const std::stop_token& stop) {
+    auto result = ValidateWorldConfigInputs(root_path, worldType, required_assets);
     if (result.ok) {
         const TerrainPresetLoadResult preset =
-            LoadTerrainPreset(result.preset_path, root / "data", stop);
+            LoadTerrainPreset(result.preset_path, RuntimeRoot(root_path) / "data", stop);
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1397,7 +1407,7 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
     }
 
     const WorldConfigValidationResult validation =
-        ValidateWorldConfig(options.root_path, worldType, options.required_assets, stop);
+        ValidateWorldConfigInputs(options.root_path, worldType, options.required_assets);
     if (!validation.ok) {
         prepared->error =
             validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
@@ -1454,6 +1464,7 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
         prepared->error = "Saved-input admission refused: preset compatibility limit.";
         return prepared;
     }
+    // Validate dependencies only for the resolved preset that will run.
     // Both persisted and transient worlds adopt the parameters and identity of
     // these same resolved bytes. Explicit revision 1 remains authoritative.
     TerrainPresetLoadResult preset =
