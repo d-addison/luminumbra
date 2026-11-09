@@ -38,6 +38,7 @@
 #include "../components/CoreComponents.h"  // TransformComponent
 #include "../components/PlantComponents.h" // PlantTag, PlantGrowthComponent, PlantStage
 #include "../components/SoilComponents.h"  // SoilFeederComponent
+#include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
 
@@ -191,8 +192,13 @@ inline void ApplyConsumptionAndRegen(SoilGrid& g, const std::vector<std::int32_t
 // (order-independent) then applied with the regen step. Plants that opt in
 // (PlantTag + SoilFeederComponent) draw from their cell proportional to growth
 // stage * feeder uptake; their `absorbed` integer accrues what they actually got.
-inline SoilNutrientStats RunSoilNutrientOnTick(
-    entt::registry& reg, SoilGrid& soil, float origin_x, float origin_z, float cell_size) {
+inline SoilNutrientStats
+RunSoilNutrientOnTick(entt::registry& reg,
+                      SoilGrid& soil,
+                      float origin_x,
+                      float origin_z,
+                      float cell_size,
+                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     SoilNutrientStats stats;
     if (cell_size <= 0.0f || soil.width() <= 0 || soil.height() <= 0) {
         return stats; // degenerate grid: nothing to do
@@ -210,8 +216,11 @@ inline SoilNutrientStats RunSoilNutrientOnTick(
 
     // id-ordered so `absorbed` accrual is deterministic per plant.
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
