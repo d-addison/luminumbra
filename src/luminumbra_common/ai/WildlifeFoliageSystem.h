@@ -116,6 +116,7 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
         std::vector<entt::entity> cents;
+        cents.reserve(cview.size_hint()); // Bounded by the smallest participating pool.
         for (auto e : cview) {
             if (gate.Allows(e)) {
                 cents.push_back(e);
@@ -138,6 +139,7 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     // --- 2. Gather grazeable plants, id-ordered. ---
     auto pview = reg.view<Comp::GrazeableComponent, const Comp::TransformComponent>();
     std::vector<entt::entity> pents;
+    pents.reserve(pview.size_hint()); // Bounded by the smallest participating pool.
     for (auto e : pview) {
         if (gate.Allows(e)) {
             pents.push_back(e);

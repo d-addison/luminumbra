@@ -78,6 +78,7 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg,
 
     // id-ordered traversal so death-marking is deterministic / order-stable.
     std::vector<entt::entity> ents;
+    ents.reserve(view.size()); // Single-storage view: exact upper bound.
     for (auto e : view) {
         // Creature mortality stays full-rate until the creature pipeline has regional scheduling.
         if (reg.all_of<Comp::CreatureComponent>(e) || gate.Allows(e)) {
