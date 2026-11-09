@@ -21,14 +21,17 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -37,7 +40,10 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
 #include "luminumbra_common/core/WaterComponents.h" // water-source: FlowingWaterSourceComponent
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -1023,3 +1029,81 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
 // The common test target enumerates this translation unit explicitly. Keep the cadence regression
 // in its contract-owned source file while compiling it through the existing Water test unit.
 #include "water_sim_cadence_test.cpp"
+
+TEST(WaterDeterminism, LegacyUpdateAndCheckedInteriorHaveIdenticalDepthFluxAndHashes) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Systems;
+    // Integer trajectory pins include depth, bed and momentum, using the legacy row order.
+    constexpr std::array<std::uint64_t, 8> medium{5313240684441164487ull,
+                                                  8344068029492443549ull,
+                                                  16218756357042292761ull,
+                                                  16284703027751081985ull,
+                                                  1968750873879301085ull,
+                                                  16957282062017329061ull,
+                                                  14600735460811788895ull,
+                                                  8329108724429194667ull};
+    constexpr std::array<std::uint64_t, 8> high{17232768481185814241ull,
+                                                13024647905508527031ull,
+                                                9765026122819311211ull,
+                                                6991996706295681435ull,
+                                                15369775980891977037ull,
+                                                3471168795583833503ull,
+                                                8477901240444202509ull,
+                                                3529320095017949617ull};
+    for (const int resolution : {8, 16}) {
+        SHIELD_WorldSystem legacy_world(nullptr, nullptr, TerrainGenParams{}, 1337);
+        SHIELD_WorldSystem kernel_world(nullptr, nullptr, TerrainGenParams{}, 1337);
+        WaterSystem legacy(nullptr, &legacy_world);
+        legacy.SetSimResolution(resolution);
+        legacy.SetHydrology(true, 3, 2);
+        auto a = std::make_shared<Chunk>(IVec3(-1, 0, -1));
+        auto b = std::make_shared<Chunk>(IVec3(-1, 0, -1));
+        for (const auto& chunk : {a, b}) {
+            chunk->set_state(ChunkState::Idle);
+            chunk->has_water_sim.store(true);
+            chunk->current_water_resolution.store(resolution);
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            chunk->water_depth_mm.assign(cells, 1000);
+            chunk->water_bed_mm.assign(cells, 1000);
+            chunk->water_bed_mm.back() = 500;
+            chunk->water_edge_flux.assign(2 * cells, 0);
+            chunk->water_level_data.assign(cells, 2.0f);
+            chunk->water_flow_data.assign(cells, Vec2(0.0f));
+            chunk->water_sim_terrain_height.assign(cells, 1.0f);
+            chunk->mark_water_data_dirty();
+        }
+        ASSERT_TRUE(legacy_world.adopt_streamed_chunk(a));
+        ASSERT_TRUE(kernel_world.adopt_streamed_chunk(b));
+        const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{{a->get_id(), a}};
+        entt::registry registry;
+        for (int tick = 0; tick < 8; ++tick) {
+            legacy.update(registry, chunks);
+            const auto result =
+                WaterKernels::StepInterior(*b, kernel_world, {.rain_mm = 3, .evap_mm = 2});
+            ASSERT_TRUE(result.applied);
+            std::uint64_t trajectory = 1469598103934665603ull;
+            for (const auto* values : {&b->water_depth_mm, &b->water_bed_mm, &b->water_edge_flux}) {
+                for (const auto value : *values) {
+                    trajectory ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(value));
+                    trajectory *= 1099511628211ull;
+                }
+            }
+            EXPECT_EQ(trajectory,
+                      (resolution == 8 ? medium : high)[static_cast<std::size_t>(tick)]);
+            EXPECT_EQ(a->water_depth_mm, b->water_depth_mm);
+            EXPECT_EQ(a->water_edge_flux, b->water_edge_flux);
+            EXPECT_EQ(a->water_level_data, b->water_level_data);
+            EXPECT_EQ(legacy_world.debug_water_state_hash().hash,
+                      kernel_world.debug_water_state_hash().hash);
+            Persistence::RegionContentHasher legacy_region, kernel_region;
+            legacy_region.append(*a);
+            kernel_region.append(*b);
+            EXPECT_FALSE(legacy_region.empty());
+            EXPECT_EQ(legacy_region.value(), kernel_region.value());
+            EXPECT_EQ(legacy_region.water_value(), kernel_region.water_value());
+            EXPECT_EQ(legacy.dbg_last_source_mm(), result.source_mm);
+            EXPECT_EQ(legacy.dbg_last_sink_mm(), result.sink_mm);
+        }
+    }
+}
