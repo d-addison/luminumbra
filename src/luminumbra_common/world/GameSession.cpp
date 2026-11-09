@@ -954,6 +954,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            const auto foliage_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -981,8 +985,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     if (!m_soilGrid)
                         m_soilGrid =
                             std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
-                    fol::RunSoilNutrientOnTick(
-                        m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                    fol::RunSoilNutrientOnTick(m_registry,
+                                               *m_soilGrid,
+                                               foliageOriginX,
+                                               foliageOriginZ,
+                                               kFoliageFieldCell,
+                                               foliage_gate);
                 }
             }
 
@@ -1108,7 +1116,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         return s;
                     };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
-                    m_registry, current_tick, plant_env);
+                    m_registry, current_tick, plant_env, foliage_gate);
             }
 
             // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
@@ -1137,14 +1145,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
                     fol::RunPollinationOnTick(
-                        m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+                        m_registry, current_tick, windXZ, 0, m_plantMutationRate, foliage_gate);
                 budget.Next(Stage::Disease, [&] {
                     return SimParticipantCount<TelemetryComp::PlantTag,
                                                TelemetryComp::PlantHealthComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+                    fol::RunPlantDiseaseOnTick(m_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -1155,8 +1163,25 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::PlantGenomeComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
-                if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                    fol::RunCropLifecycleOnTick(m_registry, current_tick);
+                if (!m_registry.view<Comp::CropLifecycleComponent>().empty()) {
+                    const auto allocate_identity = [this, current_tick](std::uint64_t& id) {
+                        try {
+                            if (!m_activeRegionLedger.allocate_persistent_id(id)) {
+                                LatchRegionFault(current_tick, "persistent id space exhausted");
+                                return false;
+                            }
+                        } catch (const std::length_error& error) {
+                            LatchRegionFault(current_tick, error.what());
+                            return false;
+                        }
+                        return true;
+                    };
+                    fol::RunCropLifecycleOnTick(
+                        m_registry, current_tick, 0, foliage_gate, allocate_identity);
+                    if (m_regionFault) {
+                        return i + 1;
+                    }
+                }
                 budget.Next(Stage::Fire, [&] {
                     return SimParticipantCount<TelemetryComp::CombustibleComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
@@ -1174,7 +1199,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         }
                     }
                     luminumbra::sim::RunFireSpreadOnTick(
-                        m_registry, current_tick, windXZ, weather_ignitions);
+                        m_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
                 }
                 budget.Next(Stage::Grazing, [&] {
                     return SimParticipantCount<TelemetryComp::GrazeableComponent,
@@ -1182,12 +1207,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!m_registry.view<Comp::GrazeableComponent>().empty())
                     luminumbra::ai::RunWildlifeFoliageOnTick(
-                        m_registry, current_tick, m_wildlifeFoliageTuning);
+                        m_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
@@ -1924,6 +1949,14 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     inputs.field_page_bytes = m_fieldPages.region_bytes(key);
                     if (m_energyFieldState)
                         inputs.field_page_bytes += m_energyFieldState->RegionBytes(key);
+                    const auto debt = m_activeRegionLedger.water_debts().find(key);
+                    if (debt != m_activeRegionLedger.water_debts().end()) {
+                        inputs.field_page_bytes += "|water_debt:";
+                        for (int i = 0; i < 8; ++i) {
+                            inputs.field_page_bytes.push_back(
+                                static_cast<char>((debt->second >> (8 * i)) & 255));
+                        }
+                    }
                     const auto age = m_activeRegionLedger.energy_ages().find(key);
                     if (age != m_activeRegionLedger.energy_ages().end()) {
                         inputs.field_page_bytes += "|energy_age:";
@@ -4575,17 +4608,8 @@ std::string GameSession::ComputePlantSubHash() const {
         ents.push_back(e);
     // Identified plants order by persistent ID so replay does not depend on handle history;
     // legacy plants keep handle order after them.
-    const auto persistent_id = [this](entt::entity e) -> std::uint64_t {
-        const auto* owner =
-            m_registry.try_get<const Luminumbra::Components::PlantRegionComponent>(e);
-        return owner ? owner->persistent_id : 0;
-    };
-    std::sort(ents.begin(), ents.end(), [&persistent_id](entt::entity a, entt::entity b) {
-        const std::uint64_t id_a = persistent_id(a);
-        const std::uint64_t id_b = persistent_id(b);
-        if ((id_a != 0) != (id_b != 0))
-            return id_a != 0;
-        return id_a != id_b ? id_a < id_b : a < b;
+    std::sort(ents.begin(), ents.end(), [this](entt::entity a, entt::entity b) {
+        return luminumbra::foliage::PlantIdentityLess(m_registry, a, b);
     });
     std::ostringstream bytes;
     bytes << "plant:v1:" << ents.size() << ':';

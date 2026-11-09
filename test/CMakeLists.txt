@@ -1576,6 +1576,7 @@ endif()
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    common/RegionConsumerGate_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp

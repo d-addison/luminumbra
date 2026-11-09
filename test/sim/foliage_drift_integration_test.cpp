@@ -122,8 +122,12 @@ TEST(FoliageDrift, SpawnedMonocultureDepletesSoil) {
     DeterministicRng rng = DeterministicRng::seeded(F::kPlantSeedOffset, 5);
     constexpr float kCell = 4.0f, kOrigin = 0.0f;
     for (int i = 0; i < 8; ++i) { // 8 feeders packed into the single cell [0,kCell)
-        const auto e =
-            F::MakePlantFromSpecies(r, Luminumbra::Vec3(0.1f * i, 0, 0.1f * i), testCrop(), rng, 0);
+        const auto e = F::MakePlantFromSpecies(
+            r,
+            Luminumbra::Vec3(0.1f * static_cast<float>(i), 0, 0.1f * static_cast<float>(i)),
+            testCrop(),
+            rng,
+            0);
         EXPECT_TRUE(r.all_of<C::SoilFeederComponent>(e)) << "a spawned plant must feed on soil";
         setStage(r, e, C::PlantStage::Fruiting); // fruiting plants feed hardest
     }
