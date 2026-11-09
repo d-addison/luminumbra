@@ -50,6 +50,10 @@ and content formats may still change.
 
   The resolution is baked into the hashed water grids, so every peer in a session
   must match and enabling the flag deliberately changes the world hash.
+  With active regions enabled, a regenerable chunk whose water was never promoted
+  to durable authority is not saved and reloads awake with `ticks_below_threshold` at 0,
+  while a saved neighbour retains its counter and can be woken for additional
+  calm steps until the regenerated neighbour sleeps.
 - **Determinism is pinned for x86 hosts only.** Terrain generation and the
   ambient (wind, weather, aether) fields cap FastNoise at its AVX2 implementation
   on x86, so AVX2 and AVX-512 hosts produce the same world hashes. Non-x86
