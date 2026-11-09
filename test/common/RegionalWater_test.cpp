@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <tuple>
 
 namespace {
@@ -287,5 +291,416 @@ TEST(RegionalWater, MalformedGridsAndFacesRefuseWithoutRepairOrPartialTransfer) 
     FillWater(distant, 8);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, distant, true).applied);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, owner, true).applied);
+}
+} // namespace
+
+namespace {
+namespace Planning = Luminumbra::Systems::RegionalWater;
+using Luminumbra::world::ActiveRegionLedger;
+using Luminumbra::world::RegionKey;
+using Luminumbra::world::RegionSchedule;
+using Luminumbra::world::RegionState;
+using Luminumbra::world::WorldClock;
+
+Planning::Resident ResidentAt(int x, int z = 0, int y = 0) {
+    return {.id = Chunk::calculate_id({x, y, z})};
+}
+
+Planning::SourceInput SourceAt(std::uint64_t id, const Vec3& position, float rate = 1.0f) {
+    return {.id = id, .position = position, .physical = {.flow_rate = rate}};
+}
+
+ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners) {
+    ActiveRegionLedger ledger;
+    for (const auto owner : owners) {
+        ledger.mark_edited(owner, WorldClock{});
+    }
+    return ledger;
+}
+
+constexpr std::uint64_t kPlanningCapacity = 2 * 64 + 4 * 8;
+
+TEST(RegionalWaterPlanning, EveryResidentSourceAndDuePermutationProducesTheSameCanonicalPlan) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    ledger.set_water_cursor({0, 0}, 1);
+    std::vector<Planning::Resident> residents{
+        ResidentAt(31), ResidentAt(32), ResidentAt(31, 1), ResidentAt(32, 1)};
+    const std::vector<Planning::SourceInput> sources{
+        SourceAt(1, {500, 0, 1}), SourceAt(2, {513, 0, 17}), SourceAt(3, {500, 0, 1}, 2.0f)};
+    RegionSchedule schedule;
+    schedule.due = {{1, 0}, {0, 0}};
+    const Planning::Inputs inputs{.cell_budget = 10 * kPlanningCapacity};
+    const auto expected = Planning::Build(residents, sources, ledger, schedule, inputs);
+    ASSERT_EQ(expected.faces.size(), 4u);
+    EXPECT_EQ(expected.border_windows, 4u);
+    EXPECT_EQ(expected.participants.size(), 4u);
+    EXPECT_EQ(expected.sources.size(), 3u);
+    EXPECT_TRUE(std::is_sorted(expected.participants.begin(), expected.participants.end()));
+    EXPECT_TRUE(std::is_sorted(expected.sources.begin(), expected.sources.end()));
+    const auto encoded = ledger.encode();
+    std::sort(residents.begin(), residents.end(), [](const auto& a, const auto& b) {
+        return a.id < b.id;
+    });
+    do {
+        auto permuted_sources = sources;
+        do {
+            EXPECT_EQ(Planning::Build(residents, permuted_sources, ledger, schedule, inputs),
+                      expected);
+            std::reverse(schedule.due.begin(), schedule.due.end());
+            EXPECT_EQ(Planning::Build(residents, permuted_sources, ledger, schedule, inputs),
+                      expected);
+        } while (std::next_permutation(permuted_sources.begin(),
+                                       permuted_sources.end(),
+                                       [](const auto& a, const auto& b) { return a.id < b.id; }));
+    } while (std::next_permutation(residents.begin(),
+                                   residents.end(),
+                                   [](const auto& a, const auto& b) { return a.id < b.id; }));
+    EXPECT_EQ(ledger.encode(), encoded);
+}
+
+TEST(RegionalWaterPlanning, InteriorCadenceAndCommonSeamPhaseExcludeUnavailableOwners) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+    auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+    records.at({0, 0}).state = RegionState::Reduced;
+    records.at({0, 0}).cadence_shift = 2;
+    records.at({0, 0}).cadence_phase = 3;
+    records.at({1, 0}).state = RegionState::Reduced;
+    records.at({1, 0}).cadence_shift = 1;
+    records.at({1, 0}).cadence_phase = 1;
+    records.at({2, 0}).state = RegionState::Frozen;
+    const std::vector<Planning::Resident> residents{
+        ResidentAt(31), ResidentAt(32), ResidentAt(64), ResidentAt(128)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}, {2, 0}, {4, 0}};
+    Planning::Inputs inputs{.cell_budget = 4 * kPlanningCapacity};
+    schedule.tick = 2;
+    EXPECT_TRUE(Planning::Build(residents, {}, ledger, schedule, inputs).participants.empty());
+    schedule.tick = 4;
+    const auto common = Planning::Build(residents, {}, ledger, schedule, inputs);
+    ASSERT_EQ(common.faces.size(), 1u);
+    EXPECT_EQ(common.faces[0].common_shift, 2u);
+    EXPECT_TRUE(common.interiors.empty());
+    EXPECT_EQ(common.participants, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
+    schedule.tick = 3;
+    const auto due = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_EQ(due.interiors, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
+    EXPECT_TRUE(due.faces.empty());
+}
+
+TEST(RegionalWaterPlanning, PreparationAdmissionRefusesTheOwnerWithoutSpendingItsBudget) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, world::water_share::kQ32}}));
+    std::vector<Planning::Resident> residents{ResidentAt(0), ResidentAt(1), ResidentAt(32)};
+    residents[0].initialized = false;
+    residents[0].preparation_ready = false;
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}};
+    const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+    const auto refused = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_EQ(refused.interiors, (std::vector<ChunkID>{residents[2].id}));
+    EXPECT_EQ(refused.refused_preparation, (std::vector<RegionKey>{{0, 0}}));
+    ASSERT_EQ(refused.regions.size(), 1u);
+    EXPECT_EQ(refused.regions[0].owner, (RegionKey{1, 0}));
+    residents[0].preparation_ready = true;
+    const auto admitted = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_TRUE(admitted.refused_preparation.empty());
+    EXPECT_EQ(admitted.interiors, (std::vector<ChunkID>{residents[0].id}));
+    EXPECT_EQ(admitted.preparation_cells, 64u);
+    residents[0].initialized = true;
+    residents[0].resolution = 4;
+    residents[0].preparation_ready = false;
+    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), refused);
+}
+
+TEST(RegionalWaterPlanning, FixedBudgetAndSavedCursorsServeEveryOwnerAndHighestChunkId) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}});
+    const std::vector<Planning::Resident> residents{
+        ResidentAt(0), ResidentAt(2), ResidentAt(4), ResidentAt(32), ResidentAt(64)};
+    RegionSchedule schedule;
+    schedule.due = {{2, 0}, {1, 0}, {0, 0}};
+    std::map<ChunkID, unsigned int> visits;
+    for (std::uint64_t tick = 0; tick < 60; ++tick) {
+        schedule.tick = tick;
+        const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+        const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+        EXPECT_LE(plan.total_cells, inputs.cell_budget);
+        EXPECT_LE(plan.allocated_windows + plan.border_windows, plan.global_windows);
+        for (const auto id : plan.interiors) {
+            ++visits[id];
+        }
+        auto debts = ledger.water_debts();
+        for (const auto& region : plan.regions) {
+            if (region.debt == 0) {
+                debts.erase(region.owner);
+            } else {
+                debts.insert_or_assign(region.owner, region.debt);
+            }
+            ledger.set_water_cursor(region.owner, region.next_cursor);
+        }
+        ASSERT_TRUE(ledger.set_water_debts(debts));
+    }
+    for (const auto& resident : residents) {
+        EXPECT_GT(visits[resident.id], 0u);
+    }
+    for (std::uint64_t budget = 0; budget < 8 * kPlanningCapacity; ++budget) {
+        const auto plan = Planning::Build(residents, {}, ledger, schedule, {.cell_budget = budget});
+        EXPECT_LE(plan.total_cells, budget);
+        EXPECT_LE(plan.allocated_windows + plan.border_windows, plan.global_windows);
+    }
+}
+
+TEST(RegionalWaterPlanning, SourceResolutionUsesResidentColumnsAndCanonicalQuantization) {
+    auto ledger = PlanningLedger({{-1, -1}, {0, 0}});
+    std::vector<Planning::Resident> residents{ResidentAt(-1, -1), ResidentAt(0, 0, 1)};
+    residents[0].awake = residents[1].awake = false;
+    RegionSchedule schedule;
+    schedule.due = {{-1, -1}, {0, 0}};
+    const std::vector<Planning::SourceInput> sources{
+        SourceAt(1, {-0.5f, 32, -0.5f}), SourceAt(2, {1, 17, 1}), SourceAt(3, {1024, 0, 1})};
+    const auto plan = Planning::Build(
+        residents, sources, ledger, schedule, {.cell_budget = 2 * kPlanningCapacity});
+    ASSERT_EQ(plan.sources.size(), 2u);
+    EXPECT_EQ(plan.sources[0].target, residents[0].id);
+    EXPECT_EQ(plan.sources[1].target, residents[1].id);
+    EXPECT_EQ(plan.sources[0].cell, 63u);
+    EXPECT_EQ(plan.sources[0].millimetres, 8);
+    EXPECT_EQ(plan.interiors.size(), 2u);
+    residents[1].initialized = false;
+    const auto no_column = Planning::Build(
+        residents, sources, ledger, schedule, {.cell_budget = 2 * kPlanningCapacity});
+    EXPECT_EQ(no_column.sources.size(), 1u);
+}
+
+TEST(RegionalWaterPlanning, PriorAwakeFlagsWakeOnlyOneHopAndRainWakesSleepingResidents) {
+    auto ledger = PlanningLedger({{0, 0}});
+    std::vector<Planning::Resident> residents{ResidentAt(0), ResidentAt(1), ResidentAt(2)};
+    residents[1].awake = residents[2].awake = false;
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    Planning::Inputs inputs{.cell_budget = 3 * kPlanningCapacity};
+    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_EQ(plan.interiors, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
+    inputs.raining = true;
+    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs).interiors.size(), 3u);
+    residents[0].available = false;
+    inputs.raining = false;
+    EXPECT_TRUE(Planning::Build(residents, {}, ledger, schedule, inputs).interiors.empty());
+}
+
+TEST(RegionalWaterPlanning, InvalidSourceRatesPositionsAndIdentitiesRefuseBeforeAllocation) {
+    auto ledger = PlanningLedger({{0, 0}});
+    std::vector<Planning::Resident> residents{ResidentAt(0)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+    const auto before = ledger.encode();
+    for (const float invalid : {-1.0f,
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max()}) {
+        const std::vector sources{SourceAt(1, {10000, 0, 1}, invalid)};
+        EXPECT_THROW(
+            static_cast<void>(Planning::Build(residents, sources, ledger, schedule, inputs)),
+            std::invalid_argument);
+    }
+    for (const Vec3 invalid : {Vec3(std::numeric_limits<float>::infinity()),
+                               Vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
+                               Vec3(16777216, 0, 0),
+                               Vec3(0, 33554432, 0)}) {
+        const std::vector sources{SourceAt(1, invalid)};
+        EXPECT_THROW(
+            static_cast<void>(Planning::Build(residents, sources, ledger, schedule, inputs)),
+            std::invalid_argument);
+    }
+    const std::vector duplicate_sources{SourceAt(1, {0, 0, 0}), SourceAt(1, {1, 0, 1})};
+    EXPECT_THROW(
+        static_cast<void>(Planning::Build(residents, duplicate_sources, ledger, schedule, inputs)),
+        std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, InvalidCountsDuplicateResidentsAndConfigurationRefuseBeforeAllocation) {
+    const auto ledger = PlanningLedger({{0, 0}});
+    std::vector<Planning::Resident> residents{ResidentAt(0)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+    const auto before = ledger.encode();
+    residents.push_back(residents.front());
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    residents.resize(1);
+    schedule.due.push_back({0, 0});
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    schedule.due.resize(1);
+    EXPECT_THROW(
+        static_cast<void>(Planning::Build(residents, {}, ledger, schedule, {.resolution = 3})),
+        std::invalid_argument);
+    residents[0].resolution = 3;
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    residents[0].resolution = 8;
+    EXPECT_THROW(
+        static_cast<void>(Planning::Build(
+            residents,
+            {},
+            ledger,
+            schedule,
+            {.cell_budget = (world::water_share::kMaxWindowBudget + 1) * kPlanningCapacity})),
+        std::invalid_argument);
+    std::vector<Planning::Resident> oversized(Planning::kMaxResidents + 1);
+    EXPECT_THROW(static_cast<void>(Planning::Build(oversized, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    std::vector<Planning::SourceInput> oversized_sources(Planning::kMaxSources + 1);
+    EXPECT_THROW(
+        static_cast<void>(Planning::Build(residents, oversized_sources, ledger, schedule, inputs)),
+        std::invalid_argument);
+    schedule.due.resize(static_cast<std::size_t>(ActiveRegionLedger::kMaxRegions) + 1);
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, PlanningLeavesWaterFixturesAndAbsentOwnerRegistersUnchanged) {
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 8);
+    auto ledger = PlanningLedger({{0, 0}, {4, 0}});
+    for (std::int32_t x = 5; x < 133; ++x) {
+        ledger.mark_edited({x, 0}, WorldClock{});
+    }
+    ASSERT_TRUE(ledger.set_water_debts({{{4, 0}, 19}}));
+    const auto encoded = ledger.encode();
+    const auto water_before = Snapshot(chunk);
+    const std::vector residents{ResidentAt(0)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const auto plan =
+        Planning::Build(residents, {}, ledger, schedule, {.cell_budget = kPlanningCapacity});
+    ASSERT_EQ(plan.regions.size(), 1u);
+    EXPECT_EQ(plan.regions[0].owner, (RegionKey{0, 0}));
+    EXPECT_EQ(Snapshot(chunk), water_before);
+    EXPECT_EQ(ledger.encode(), encoded);
+    const auto empty = Planning::Build({}, {}, ledger, schedule, {});
+    EXPECT_TRUE(empty.participants.empty());
+    EXPECT_EQ(empty.residents_visited, 0u);
+    EXPECT_EQ(plan.residents_visited, residents.size());
+}
+
+TEST(RegionalWaterPlanning, EveryResolutionSealsUnfundedOrResizingBordersAndPaysForPreparation) {
+    const auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}};
+    for (const int resolution : {4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        std::vector<Planning::Resident> residents{ResidentAt(30), ResidentAt(31), ResidentAt(32)};
+        for (auto& resident : residents) {
+            resident.resolution = resolution;
+        }
+        const auto side = static_cast<std::uint64_t>(resolution);
+        const auto capacity = 2 * side * side + 4 * side;
+        for (std::uint64_t windows = 0; windows <= 6; ++windows) {
+            const Planning::Inputs inputs{.resolution = resolution,
+                                          .cell_budget = windows * capacity};
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+            EXPECT_LE(plan.border_windows + plan.allocated_windows, windows);
+            EXPECT_EQ(plan.border_windows, windows >= 3 ? 2u : 0u);
+        }
+        residents[1].initialized = false;
+        residents[1].awake = false;
+        residents[0].initialized = false;
+        residents[0].awake = false;
+        const auto prepared =
+            Planning::Build(residents,
+                            {},
+                            ledger,
+                            schedule,
+                            {.resolution = resolution, .cell_budget = 6 * capacity});
+        EXPECT_EQ(prepared.border_windows, 0u);
+        EXPECT_EQ(prepared.preparation_cells, 2 * side * side);
+        ASSERT_EQ(prepared.faces.size(), 1u); // Selected preparations still share an interior face.
+        EXPECT_EQ(prepared.faces[0].owner, prepared.faces[0].neighbor);
+        EXPECT_LE(prepared.total_cells, 6 * capacity);
+    }
+}
+
+TEST(RegionalWaterPlanning, EmptyClaimsAndZeroBudgetPreserveCursorsAndServiceOnlyDueDebt) {
+    auto ledger = PlanningLedger({{0, 0}});
+    ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 2 * world::water_share::kQ32}}));
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const std::vector residents{ResidentAt(0)};
+    const auto zero = Planning::Build(residents, {}, ledger, schedule, {});
+    ASSERT_EQ(zero.regions.size(), 1u);
+    EXPECT_TRUE(zero.participants.empty());
+    EXPECT_EQ(zero.regions[0].next_cursor, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(zero.regions[0].debt, 2 * world::water_share::kQ32);
+    const auto empty =
+        Planning::Build({}, {}, ledger, schedule, {.cell_budget = kPlanningCapacity});
+    ASSERT_EQ(empty.regions.size(), 1u);
+    EXPECT_EQ(empty.allocated_windows, 1u);
+    EXPECT_TRUE(empty.participants.empty());
+    EXPECT_EQ(empty.regions[0].next_cursor, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(empty.regions[0].debt, world::water_share::kQ32);
+    EXPECT_TRUE(Planning::Build(residents, {}, ledger, {}, {.cell_budget = kPlanningCapacity})
+                    .interiors.empty());
+}
+
+TEST(RegionalWaterPlanning, InvalidCadenceTickOwnersAndDebtOverflowRefuseWithoutMutation) {
+    auto ledger = PlanningLedger({{0, 0}});
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const std::vector residents{ResidentAt(0)};
+    const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+    auto& record =
+        const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records()).at({0, 0});
+    record.cadence_shift = 17;
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    record.cadence_shift = 0;
+    record.cadence_phase = 1;
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    record.cadence_phase = 0;
+    record.state = static_cast<RegionState>(255);
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    record.state = RegionState::Active;
+    schedule.tick = WorldClock::kTickLimit;
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    schedule.tick = 0;
+    schedule.due = {{32768, 0}};
+    EXPECT_THROW(static_cast<void>(Planning::Build({}, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    schedule.due = {{0, 0}};
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, world::water_share::kMaxDebt}}));
+    const auto before = ledger.encode();
+    EXPECT_THROW(static_cast<void>(Planning::Build(residents, {}, ledger, schedule, inputs)),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, WorldBoundariesNeverWrapFacesAndZeroSourcesDoNotWakeResidents) {
+    auto ledger = PlanningLedger({{-32768, 0}, {32767, 0}});
+    const std::vector residents{ResidentAt(-1048576), ResidentAt(1048575)};
+    RegionSchedule schedule;
+    schedule.due = {{-32768, 0}, {32767, 0}};
+    const auto plan =
+        Planning::Build(residents, {}, ledger, schedule, {.cell_budget = 4 * kPlanningCapacity});
+    EXPECT_TRUE(plan.faces.empty());
+    EXPECT_EQ(plan.interiors.size(), 2u);
+    auto sleeping = residents;
+    for (auto& resident : sleeping) {
+        resident.awake = false;
+    }
+    const std::vector sources{SourceAt(1, {-16777216, -33554432, 0}, 0.0f),
+                              SourceAt(2, {16777215, 0, 0}, 0.00001f)};
+    const auto zero = Planning::Build(
+        sleeping, sources, ledger, schedule, {.cell_budget = 4 * kPlanningCapacity});
+    EXPECT_TRUE(zero.sources.empty());
+    EXPECT_TRUE(zero.participants.empty());
 }
 } // namespace
