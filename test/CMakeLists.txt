@@ -1742,6 +1742,9 @@ target_link_libraries(audio_propagation_metrics_test PRIVATE
     nlohmann_json
     glm
 )
+target_compile_definitions(audio_propagation_metrics_test PRIVATE
+    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1
+)
 luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 
 # prune guard — compile-sentinel that the SURVIVING audio headers still build
