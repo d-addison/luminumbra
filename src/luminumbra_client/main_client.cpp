@@ -5662,15 +5662,11 @@ int main(int argc, char* argv[]) {
                         // nothing back .
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                             if (const auto* lweather = gameSession->GetWeatherSystem()) {
+                                g_app.weather.consumedStrikes.AdvanceTo(sim_tick);
                                 for (const auto& strike : lweather->StrikeSchedule()) {
-                                    if (strike.strike_tick > sim_tick)
-                                        continue; // not due yet
-                                    if (strike.strike_tick + 2 < sim_tick)
-                                        continue; // window passed
-                                    if (strike.strike_tick <= g_app.weather.lastStrikeTickDone &&
-                                        g_app.weather.lastStrikeTickDone != 0)
+                                    if (!g_app.weather.consumedStrikes.TryConsume(strike)) {
                                         continue;
-                                    g_app.weather.lastStrikeTickDone = strike.strike_tick;
+                                    }
                                     auto* lws = gameSession->GetWorldSystem();
                                     const float gy = lws ? lws->GetTerrainHeightAt(strike.world_x,
                                                                                    strike.world_z)
