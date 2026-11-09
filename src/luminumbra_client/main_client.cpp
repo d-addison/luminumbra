@@ -5663,6 +5663,9 @@ int main(int argc, char* argv[]) {
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                             if (const auto* lweather = gameSession->GetWeatherSystem()) {
                                 g_app.weather.consumedStrikes.AdvanceTo(sim_tick);
+                                // Strikes consumed on the same frame share one bolt state:
+                                // every channel is drawn and the strongest flash wins.
+                                bool bolt_started = false;
                                 for (const auto& strike : lweather->StrikeSchedule()) {
                                     if (!g_app.weather.consumedStrikes.TryConsume(strike)) {
                                         continue;
@@ -5687,7 +5690,10 @@ int main(int argc, char* argv[]) {
                                         glm::perspective(
                                             glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
                                         g_camera->GetViewMatrix();
-                                    g_app.weather.liveBolt = {};
+                                    if (!bolt_started) {
+                                        g_app.weather.liveBolt = {};
+                                        bolt_started = true;
+                                    }
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
                                         if (clip.w <= 0.0f)
@@ -5714,12 +5720,15 @@ int main(int argc, char* argv[]) {
                                     g_app.weather.liveBolt.active = true;
                                     // Magnitude-scaled flash, attenuated with distance (a far
                                     // strike lights the sky, a near one lights the scene).
-                                    g_app.weather.liveBolt.pulse_intensity =
-                                        0.22f * std::clamp(strike.magnitude, 0.2f, 1.0f) /
-                                        (1.0f + dist / 400.0f);
+                                    const float pulse = 0.22f *
+                                                        std::clamp(strike.magnitude, 0.2f, 1.0f) /
+                                                        (1.0f + dist / 400.0f);
+                                    if (pulse >= g_app.weather.liveBolt.pulse_intensity) {
+                                        g_app.weather.liveBolt.pulse_intensity = pulse;
+                                        g_app.weather.liveBolt.strike_ndc = project(ground);
+                                    }
                                     g_app.weather.liveBolt.bolt_width_ndc = 0.010f;
                                     g_app.weather.liveBolt.bolt_glow_ndc = 0.034f;
-                                    g_app.weather.liveBolt.strike_ndc = project(ground);
                                     g_app.weather.boltFramesLeft = 3; // a few frames of flash
                                     //  hook: queue the physically-delayed thunder cue.
                                     g_app.audio.pendingThunder.push_back({strike.strike_tick,
