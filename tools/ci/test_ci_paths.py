@@ -490,8 +490,6 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
                                 expected = not cancelled and ready and cpp != "false"
-                            expected = expected and (workflow != "ci" or event != "pull_request"
-                                                     or action != "edited" or base_changed)
                             actual = expression.replace("github.event.action", repr(action)).replace(
                                 "github.event.changes.base", repr(base_changed))
                             actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(
