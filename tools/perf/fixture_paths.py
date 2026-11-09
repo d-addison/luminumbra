@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 import io
 import os
@@ -55,18 +56,70 @@ def contain_path(root: Path, path: Path) -> Path:
     relative = path.relative_to(root)
     if ".." in relative.parts:
         raise ValueError(f"fixture reference escapes root: {relative}")
+    selected_root = root.absolute()
     root = root.resolve()
     contained = root / relative
-    # Keep one prefix, not the quadratic collection of all ancestor parts.
+    # A final target outside the root refuses without walking its ancestors.
+    try:
+        final = contained.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"cannot resolve fixture reference: {relative}") from exc
+    if not final.is_relative_to(root):
+        raise ValueError(f"fixture reference resolves outside root: {relative}")
+    # Expand each link before following it. Completed targets are memoized so
+    # repeated links do not expand the same target graph exponentially.
+    pending: deque[str | Path] = deque(relative.parts)
+    active: set[Path] = set()
+    resolved: dict[Path, Path] = {}
     path = root
-    for part in relative.parts:
-        path = path / part
+    while pending:
+        part = pending.popleft()
+        if isinstance(part, Path):
+            active.remove(part)
+            resolved[part] = path
+            continue
+        if part == "..":
+            if path == root:
+                raise ValueError(f"fixture reference resolves outside root: {relative}")
+            path = path.parent
+            continue
+        candidate = path / part
+        if candidate in resolved:
+            path = resolved[candidate]
+            continue
         try:
-            target = path.resolve()
-        except (OSError, RuntimeError) as exc:
+            status = candidate.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            path = candidate
+            continue
+        # Junctions are reparse points rather than symbolic-link file modes.
+        if not (stat.S_ISLNK(status.st_mode)
+                or getattr(status, "st_file_attributes", 0) & 0x400):
+            path = candidate
+            continue
+        if candidate in active:
+            raise ValueError(f"cannot resolve fixture reference: {relative}")
+        try:
+            name = os.readlink(candidate)
+        except OSError as exc:
             raise ValueError(f"cannot resolve fixture reference: {relative}") from exc
-        if not target.is_relative_to(root):
+        target = _windows_path(name) if os.name == "nt" else Path(name)
+        if target.is_absolute():
+            if target.is_relative_to(selected_root):
+                target = root / target.relative_to(selected_root)
+            if os.name == "nt" and not target.is_relative_to(root):
+                # Expand DOS short names without resolving reparse points.
+                prefix = Path(*target.parts[:len(root.parts)])
+                target = _windows_long_path(prefix).joinpath(*target.parts[len(root.parts):])
+            if not target.is_relative_to(root):
+                raise ValueError(f"fixture reference resolves outside root: {relative}")
+            path = root
+            target = target.relative_to(root)
+        elif target.anchor:
             raise ValueError(f"fixture reference resolves outside root: {relative}")
+        active.add(candidate)
+        pending.appendleft(candidate)
+        pending.extendleft(reversed(target.parts))
     return contained
 
 
@@ -120,6 +173,24 @@ def _windows_path(name: str) -> Path:
     return Path(name)
 
 
+def _windows_long_path(path: Path) -> Path:
+    """Expand short names while retaining every link in the supplied spelling."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    long_path = kernel.GetLongPathNameW
+    long_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    long_path.restype = wintypes.DWORD
+    # Windows extended paths have at most 32767 characters plus a terminator.
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = long_path(str(path), buffer, len(buffer))
+    if length >= len(buffer):
+        raise ValueError("fixture link target exceeds platform bound")
+    # A missing or inaccessible prefix cannot establish an in-root short name.
+    return _windows_path(buffer.value) if length else path
+
+
 def _windows_final_path(descriptor: int) -> Path:
     """Obtain the normalized long path from the owning file handle."""
     import ctypes
@@ -149,9 +220,8 @@ def open_regular(root: Path, path: Path):
     Windows verifies the opened handle's long path, including ancestor swaps.
     Both branches compare file identity before permitting any bytes to be read.
     """
-    relative = path.relative_to(root)
+    checked = contain_path(root, path)
     root = root.resolve()
-    checked = contain_path(root, root / relative)
     target = checked.resolve(strict=True)
     if not target.is_relative_to(root):
         raise ValueError(f"fixture reference resolves outside root: {path}")
