@@ -16,6 +16,7 @@
 #include "../components/DiseaseComponents.h" // blight saps growth (opt-in PlantHealthComponent)
 #include "../components/PlantComponents.h"
 #include "../core/DeterministicRng.h"
+#include "RegionConsumerGate.h"
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,31 @@ namespace luminumbra::foliage {
 // The component types live in the capital-L `Luminumbra::Components` namespace
 // (the engine mixes `luminumbra::` for ai/core and `Luminumbra::` for components).
 namespace Comp = ::Luminumbra::Components;
+
+inline std::uint64_t PlantPersistentId(const entt::registry& registry, entt::entity entity) {
+    const auto* identity = registry.try_get<const Comp::PlantRegionComponent>(entity);
+    return identity ? identity->persistent_id : 0;
+}
+
+// The shared allocator stops before this bit; persistence rejects IDs at or above it.
+inline constexpr std::uint64_t kLegacyPlantIdTag = std::uint64_t{1} << 63;
+static_assert(::Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit == kLegacyPlantIdTag);
+static_assert(sizeof(entt::entity) < sizeof(std::uint64_t));
+
+inline std::uint64_t PlantSimulationId(const entt::registry& registry, entt::entity entity) {
+    const auto id = PlantPersistentId(registry, entity);
+    return id != 0 ? id : kLegacyPlantIdTag | static_cast<std::uint64_t>(entt::to_integral(entity));
+}
+
+// Persistent plants precede legacy plants; handles break duplicate/absent identity ties.
+inline bool PlantIdentityLess(const entt::registry& registry, entt::entity a, entt::entity b) {
+    const auto id_a = PlantPersistentId(registry, a);
+    const auto id_b = PlantPersistentId(registry, b);
+    if ((id_a != 0) != (id_b != 0)) {
+        return id_a != 0;
+    }
+    return id_a != id_b ? id_a < id_b : entt::to_integral(a) < entt::to_integral(b);
+}
 
 // Seed-stream offset for plant genomes/mutation (wind+11, weather+12/13, aether+14
 // taken; plants claim +15 in the stable subsystem allocation.
@@ -115,20 +141,26 @@ struct PlantGrowthStats {
 
 using EnvSampler = std::function<PlantEnvSample(const Comp::TransformComponent&)>;
 
-// Advance every PlantTag plant by ONE fixed tick. Deterministic: entities are
+// Advance every admitted PlantTag plant by ONE fixed tick. Deterministic: entities are
 // visited in ascending-id order, all accumulation is integer, env is a pure
 // function of position. Returns telemetry (also useful for the world sub-hash).
-inline PlantGrowthStats RunPlantGrowthSystemOnTick(entt::registry& reg,
-                                                   std::uint64_t current_tick,
-                                                   const EnvSampler& sample_env) {
+inline PlantGrowthStats
+RunPlantGrowthSystemOnTick(entt::registry& reg,
+                           std::uint64_t current_tick,
+                           const EnvSampler& sample_env,
+                           const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     PlantGrowthStats stats;
     auto view = reg.view<Comp::PlantTag,
                          Comp::PlantGrowthComponent,
                          const Comp::PlantGenomeComponent,
                          const Comp::TransformComponent>();
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    ents.reserve(view.size_hint()); // Bounded by the smallest participating component pool.
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end());
 
     for (auto e : ents) {
@@ -173,6 +205,9 @@ inline PlantGrowthStats RunPlantGrowthSystemOnTick(entt::registry& reg,
         const int q = 100 - static_cast<int>(growth.stress_points / 50u);
         growth.quality = static_cast<std::uint8_t>(q < 0 ? 0 : q);
         growth.last_tick = current_tick;
+        if (auto* identity = reg.try_get<Comp::PlantRegionComponent>(e)) {
+            identity->region_stamp = current_tick;
+        }
         ++stats.updated;
     }
     return stats;

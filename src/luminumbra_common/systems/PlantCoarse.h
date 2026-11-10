@@ -17,7 +17,8 @@ inline std::uint32_t AdvancePlantGrowthCoarse(Comp::PlantGrowthComponent& growth
                                               const PlantEnvSample& env,
                                               std::uint16_t infection,
                                               std::uint32_t elapsed,
-                                              std::uint64_t current_tick) {
+                                              std::uint64_t current_tick,
+                                              Comp::PlantRegionComponent* identity = nullptr) {
     if (elapsed > 36000 || infection > Comp::kDiseaseUnitScale)
         throw std::invalid_argument("Invalid coarse plant window");
     if (elapsed == 0)
@@ -70,6 +71,9 @@ inline std::uint32_t AdvancePlantGrowthCoarse(Comp::PlantGrowthComponent& growth
     const int quality = 100 - static_cast<int>(growth.stress_points / 50u);
     growth.quality = static_cast<std::uint8_t>(quality < 0 ? 0 : quality);
     growth.last_tick = current_tick;
+    if (identity) {
+        identity->region_stamp = current_tick;
+    }
     return advanced;
 }
 } // namespace luminumbra::foliage

@@ -40,6 +40,23 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_fixture_refusal_suite_is_in_standalone_plan(self):
+        path = "tools/perf/test_prepare_server_comparison.py"
+        self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        self.assertIn("python " + path, run_block(workflow, "Test performance result contract"))
+
+    def test_fixture_refusal_regressions_run_with_isolated_python(self):
+        result = subprocess.run([
+            sys.executable, "-I", "-B", str(ROOT / "tools/perf/test_prepare_server_comparison.py"),
+            "ComparisonFixtureTest.test_tree_contents_records_real_directory_links_and_cleanup",
+            "ComparisonFixtureTest.test_dependency_status_errors_refuse_before_any_preparation_write",
+        ], cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 2 tests", result.stderr)
+
     def test_rmlui_manifest_requires_python_and_native_lanes(self):
         manifest = "vendor/rmlui/rmlui-6.1-source.json"
         for paths in ([manifest], ["docs/dependency-source.md", manifest],
