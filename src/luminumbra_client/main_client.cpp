@@ -7297,6 +7297,10 @@ int main(int argc, char* argv[]) {
                 if (benchmark_v3) {
                     benchmark_queries->drain();
                     j["schema"] = "luminumbra.render_benchmark.v3";
+                    j["settings"]["effective_render"] = {
+                        {"window_mode", WindowModeName(g_windowState.mode)},
+                        {"window_visible",
+                         !hidden_window && glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_TRUE}};
                     Measurement::add_distributions(j, *measured_samples);
                     const auto gl_string = [](GLenum name) -> nlohmann::json {
                         const auto* value = glGetString(name);
@@ -7390,19 +7394,18 @@ int main(int argc, char* argv[]) {
                     j["settings"]["graphics_preset"] =
                         luminumbra::core::GraphicsPresetName(resolved_graphics.base_preset);
                     j["settings"]["graphics_preset_status"] = "named";
-                    j["settings"]["effective_render"] = {
-                        {"render_scale", renderPipeline.render_scale()},
-                        {"vsync", false},
-                        {"taau", renderPipeline.taau_enabled()},
-                        {"ssao_quality", renderPipeline.get_ssao_quality()},
-                        {"cloud_quality", renderPipeline.get_cloud_quality()},
-                        {"fov", g_camera->Zoom},
-                        {"ui_scale", g_systemConfig.user().ui_scale},
-                        {"window_mode", WindowModeName(g_windowState.mode)},
-                        {"volumetric_quality", renderPipeline.volumetric_quality()},
-                        {"width", renderPipeline.screen_width()},
-                        {"height", renderPipeline.screen_height()},
-                        {"systems", Measurement::render_systems(g_systemConfig)}};
+                    j["settings"]["effective_render"].update(
+                        {{"render_scale", renderPipeline.render_scale()},
+                         {"vsync", false},
+                         {"taau", renderPipeline.taau_enabled()},
+                         {"ssao_quality", renderPipeline.get_ssao_quality()},
+                         {"cloud_quality", renderPipeline.get_cloud_quality()},
+                         {"fov", g_camera->Zoom},
+                         {"ui_scale", g_systemConfig.user().ui_scale},
+                         {"volumetric_quality", renderPipeline.volumetric_quality()},
+                         {"width", renderPipeline.screen_width()},
+                         {"height", renderPipeline.screen_height()},
+                         {"systems", Measurement::render_systems(g_systemConfig)}});
                     j["settings"]["effective_render"]["graphics"] =
                         Measurement::graphics_configuration(graphics_state.Settings(),
                                                             resolved_graphics);

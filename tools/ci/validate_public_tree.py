@@ -251,18 +251,184 @@ def inspect_path(path: str) -> list[Finding]:
 
 
 CODE_TOKEN_START = re.compile(r"['\"/#<@`R\[]")
-CPP_TOKEN_START = re.compile(r"['\"/#<@`R\[]|(?<!\w)[0-9]")
-CPP_NUMBER = re.compile(r"[0-9][\w'.]*")
+CPP_SUFFIXES = frozenset({".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".inl"})
+
+
+def _cpp_number_end(text: str, index: int) -> int:
+    """Consume digits, valid separators, a fraction/exponent and a suffix."""
+    size = len(text)
+    digits = "0123456789"
+    exponent = "eE"
+    if text.startswith(("0x", "0X"), index):
+        digits, exponent = "0123456789abcdefABCDEF", "pP"
+        index += 2
+    elif text.startswith(("0b", "0B"), index):
+        digits, exponent = "01", ""
+        index += 2
+    fraction = False
+    while index < size:
+        char = text[index]
+        if char in digits:
+            index += 1
+        elif (char == "'" and index > 0 and text[index - 1] in digits
+              and index + 1 < size and text[index + 1] in digits):
+            index += 2
+        elif char == "." and exponent and not fraction:
+            fraction = True
+            index += 1
+        else:
+            break
+    if index < size and text[index] in exponent:
+        index += 1
+        if index < size and text[index] in "+-":
+            index += 1
+        while index < size:
+            if text[index] in "0123456789":
+                index += 1
+            elif (text[index] == "'" and text[index - 1] in "0123456789"
+                  and index + 1 < size and text[index + 1] in "0123456789"):
+                index += 2
+            else:
+                break
+    while index < size and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    return index
+
+
+def _cpp_spliced_source(text: str) -> tuple[str, list[int] | range]:
+    """Return logical characters and their physical offsets, plus an EOF sentinel."""
+    if "\\\n" not in text and "\\\r\n" not in text:
+        return text, range(len(text) + 1)
+    pieces: list[str] = []
+    offsets: list[int] = []
+    start = 0
+    for splice in re.finditer(r"\\\r?\n", text):
+        pieces.append(text[start:splice.start()])
+        offsets.extend(range(start, splice.start()))
+        start = splice.end()
+    pieces.append(text[start:])
+    offsets.extend(range(start, len(text) + 1))
+    return "".join(pieces), offsets
+
+
+def _cpp_raw_end(source: str, quote: int) -> int | None:
+    """Read raw delimiters and bodies physically, undoing line splicing there."""
+    size = len(source)
+    delimiter_end = quote + 1
+    while (delimiter_end < min(size, quote + 18)
+           and "!" <= source[delimiter_end] <= "~"
+           and source[delimiter_end] not in "()\\"):
+        delimiter_end += 1
+    if (delimiter_end == size or delimiter_end - quote - 1 > 16
+            or source[delimiter_end] != "("):
+        return None
+    close = ")" + source[quote + 1:delimiter_end] + '"'
+    end = source.find(close, delimiter_end + 1)
+    return size if end == -1 else end + len(close)
+
+
+def cpp_mask(source: str, *, comments_only: bool = False) -> str:
+    """Scan C++ tokens monotonically; retain source offsets and physical lines.
+
+    Token and escape recognition uses C++ LF/CRLF line splicing, including in
+    identifiers, numbers, encoding prefixes, character literals and suffixes.
+    Raw literals use physical characters between their quotes. Masks retain
+    physical spelling (also for prose and exemption consumers), never shifting
+    findings or joining prose words across a splice.
+
+    Storage and total work are bounded by the physical input length. Raw
+    delimiters are bounded by C++'s 16-character limit, even if invalid.
+    """
+    text, offsets = _cpp_spliced_source(source)
+    masked = ["\n" if char == "\n" else " " for char in source] if comments_only else list(source)
+    index, size = 0, len(text)
+    while index < size:
+        start = index
+        char = text[index]
+        is_comment = False
+        raw = False
+        physical_end = None
+        if char in "0123456789" or (char == "." and index + 1 < size
+                                      and text[index + 1] in "0123456789"):
+            index = _cpp_number_end(text, index)
+            continue
+        if char.isalpha() or char == "_":
+            index += 1
+            while index < size and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+            prefix = text[start:index]
+            if index == size or text[index] not in "'\"":
+                continue
+            raw = prefix in {"R", "u8R", "uR", "UR", "LR"} and text[index] == '"'
+            if not raw and prefix not in {"u8", "u", "U", "L"}:
+                continue
+            # Retain encoding prefixes in the code mask, as the C path does.
+            start = index - 1 if raw else index
+            char = text[index]
+        if text.startswith("//", index):
+            is_comment = True
+            end = text.find("\n", index + 2)
+            index = size if end == -1 else end
+            physical_end = offsets[index]
+        elif text.startswith("/*", index):
+            is_comment = True
+            end = text.find("*/", index + 2)
+            index = size if end == -1 else end + 2
+            physical_end = len(source) if end == -1 else offsets[index - 1] + 1
+        elif char in "'\"":
+            if raw:
+                physical_end = _cpp_raw_end(source, offsets[index])
+                if physical_end is not None:
+                    while index < size and offsets[index] < physical_end:
+                        index += 1
+                    char = ""  # The complete raw literal has been consumed.
+            if char:
+                quote = char
+                index += 1
+                while index < size:
+                    if text[index] in "\r\n":
+                        break  # Recover at the next unspliced line boundary.
+                    if text[index] == "\\":
+                        index += 1
+                        # Splicing is nonrecursive; an exposed newline is still invalid.
+                        if index < size and text[index] not in "\r\n":
+                            index += 1
+                    elif text[index] == quote:
+                        index += 1
+                        break
+                    else:
+                        index += 1
+        else:
+            index += 1
+            continue
+        end = physical_end if physical_end is not None else (
+            len(source) if index == size else offsets[index - 1] + 1)
+        start = offsets[start]
+        # Literal suffixes remain code in the mask, but cannot open raw strings.
+        if not is_comment and index < size and (text[index].isalpha() or text[index] == "_"):
+            index += 1
+            while index < size and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+        if comments_only:
+            if is_comment:
+                masked[start:end] = source[start:end]
+        else:
+            for offset in range(start, end):
+                if masked[offset] != "\n":
+                    masked[offset] = " "
+    return "".join(masked)
 
 
 def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
               hash_comments: bool = False, triple_quotes: bool = False,
               cmake: bool = False, cpp: bool = False, yaml: bool = False) -> str:
     """Preserve offsets in code, or retain only comments for prose inspection."""
+    if cpp:
+        return cpp_mask(text, comments_only=comments_only)
     masked = list(text if not comments_only else re.sub(
         r"[^\n]+", lambda match: " " * len(match[0]), text))
     index, size = 0, len(text)
-    token_start = CPP_TOKEN_START if cpp else CODE_TOKEN_START
+    token_start = CODE_TOKEN_START
     yaml_plain = False
     yaml_flow_depth = 0
 
@@ -283,12 +449,6 @@ def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
         is_comment = False
         if yaml and text[index] == "\n":
             yaml_plain = False
-        # Separators belong to C++ numeric tokens, including hex digits. Consume
-        # the entire token so its apostrophes cannot start character literals.
-        if cpp and text[index].isdigit() and (index == 0 or not re.match(r"\w", text[index - 1])):
-            number = CPP_NUMBER.match(text, index)
-            index = number.end()
-            continue
         # YAML quotes only open at the start of a scalar. Once a plain scalar
         # starts, embedded quotes are ordinary characters until the line ends.
         # Tags and anchors are scalar properties, not the scalar itself.
@@ -402,9 +562,9 @@ def candidate_prose(path: str, text: str) -> str:
         return ""
     if suffix in {".md", ".rst", ".txt"} and relative.name != "CMakeLists.txt":
         return text
-    if suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".js", ".ts"}:
+    if suffix in CPP_SUFFIXES | {".c", ".js", ".ts"}:
         return code_mask(text, False, comments_only=True,
-                         cpp=suffix not in {".c", ".js", ".ts"})
+                         cpp=suffix in CPP_SUFFIXES)
     if suffix in {".ps1", ".psm1"}:
         return code_mask(text, True, comments_only=True)
     if suffix in {".py", ".sh", ".bash", ".cmake", ".yaml", ".yml", ".toml"} or relative.name == "CMakeLists.txt":
@@ -460,7 +620,7 @@ PS_TUPLE_MEMBER = re.compile(
 
 def code_token_exemptions(path: str, text: str) -> set[tuple[int, int]]:
     suffix = PurePosixPath(path).suffix.lower()
-    if suffix in {".cpp", ".cc", ".cxx", ".h", ".hpp"}:
+    if suffix in CPP_SUFFIXES:
         pattern, powershell = CPP_INDEX, False
         token = "phase"
     elif suffix in {".ps1", ".psm1"}:

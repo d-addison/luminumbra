@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../TgaTexture.h"
 #include "RmlUi_Renderer_GL3.h"
 #include "UiFilterCache.h"
 #include <RmlUi/Core/Core.h>
@@ -83,7 +84,7 @@
     RMLUI_SHADER_HEADER_VERSION "#define MAX_NUM_STOPS " RMLUI_STRINGIFY(                          \
         MAX_NUM_STOPS) "\n#line " RMLUI_STRINGIFY(__LINE__) "\n"
 
-static const char* shader_vert_main = RMLUI_SHADER_HEADER R"(
+static const char* const shader_vert_main = RMLUI_SHADER_HEADER R"(
 uniform vec2 _translate;
 uniform mat4 _transform;
 
@@ -104,7 +105,7 @@ void main() {
     gl_Position = outPos;
 }
 )";
-static const char* shader_frag_texture = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_texture = RMLUI_SHADER_HEADER R"(
 uniform sampler2D _tex;
 in vec2 fragTexCoord;
 in vec4 fragColor;
@@ -116,7 +117,7 @@ void main() {
 	finalColor = fragColor * texColor;
 }
 )";
-static const char* shader_frag_color = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_color = RMLUI_SHADER_HEADER R"(
 in vec2 fragTexCoord;
 in vec4 fragColor;
 
@@ -136,7 +137,7 @@ enum class ShaderGradientFunction {
     RepeatingConic
 }; // Must match shader definitions below.
 
-static const char* shader_frag_gradient = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_gradient = RMLUI_SHADER_HEADER R"(
 #define LINEAR 0
 #define RADIAL 1
 #define CONIC 2
@@ -198,7 +199,7 @@ void main() {
 )";
 
 // "Creation" by Danilo Guanabara, based on: https://www.shadertoy.com/view/XsXXDn
-static const char* shader_frag_creation = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_creation = RMLUI_SHADER_HEADER R"(
 uniform float _value;
 uniform vec2 _dimensions;
 
@@ -224,7 +225,7 @@ void main() {
 }
 )";
 
-static const char* shader_vert_passthrough = RMLUI_SHADER_HEADER R"(
+static const char* const shader_vert_passthrough = RMLUI_SHADER_HEADER R"(
 in vec2 inPosition;
 in vec2 inTexCoord0;
 
@@ -235,7 +236,7 @@ void main() {
     gl_Position = vec4(inPosition, 0.0, 1.0);
 }
 )";
-static const char* shader_frag_passthrough = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_passthrough = RMLUI_SHADER_HEADER R"(
 uniform sampler2D _tex;
 in vec2 fragTexCoord;
 out vec4 finalColor;
@@ -244,7 +245,7 @@ void main() {
 	finalColor = texture(_tex, fragTexCoord);
 }
 )";
-static const char* shader_frag_color_matrix = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_color_matrix = RMLUI_SHADER_HEADER R"(
 uniform sampler2D _tex;
 uniform mat4 _color_matrix;
 
@@ -263,7 +264,7 @@ void main() {
 	finalColor = vec4(transformedColor, texColor.a);
 }
 )";
-static const char* shader_frag_blend_mask = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_blend_mask = RMLUI_SHADER_HEADER R"(
 uniform sampler2D _tex;
 uniform sampler2D _texMask;
 
@@ -281,7 +282,7 @@ void main() {
     RMLUI_SHADER_HEADER "\n#define BLUR_SIZE " RMLUI_STRINGIFY(                                    \
         BLUR_SIZE) "\n#define BLUR_NUM_WEIGHTS " RMLUI_STRINGIFY(BLUR_NUM_WEIGHTS)
 
-static const char* shader_vert_blur = RMLUI_SHADER_BLUR_HEADER R"(
+static const char* const shader_vert_blur = RMLUI_SHADER_BLUR_HEADER R"(
 uniform vec2 _texelOffset;
 
 in vec3 inPosition;
@@ -295,7 +296,7 @@ void main() {
     gl_Position = vec4(inPosition, 1.0);
 }
 )";
-static const char* shader_frag_blur = RMLUI_SHADER_BLUR_HEADER R"(
+static const char* const shader_frag_blur = RMLUI_SHADER_BLUR_HEADER R"(
 uniform sampler2D _tex;
 uniform float _weights[BLUR_NUM_WEIGHTS];
 uniform vec2 _texCoordMin;
@@ -314,7 +315,7 @@ void main() {
 	finalColor = color;
 }
 )";
-static const char* shader_frag_drop_shadow = RMLUI_SHADER_HEADER R"(
+static const char* const shader_frag_drop_shadow = RMLUI_SHADER_HEADER R"(
 uniform sampler2D _tex;
 uniform vec2 _texCoordMin;
 uniform vec2 _texCoordMax;
@@ -564,7 +565,7 @@ static bool CreateShader(GLuint& out_shader_id, GLenum shader_type, const char* 
     RMLUI_ASSERT(shader_type == GL_VERTEX_SHADER || shader_type == GL_FRAGMENT_SHADER);
 
     GLuint id = glCreateShader(shader_type);
-    glShaderSource(id, 1, (const GLchar**)&code_string, NULL);
+    glShaderSource(id, 1, (const GLchar**)&code_string, nullptr);
     {
         LUMIN_PROFILE_ZONE_N("Shader compile");
         glCompileShader(id);
@@ -576,7 +577,7 @@ static bool CreateShader(GLuint& out_shader_id, GLenum shader_type, const char* 
         GLint info_log_length = 0;
         glGetShaderiv(id, GL_INFO_LOG_LENGTH, &info_log_length);
         char* info_log_string = new char[info_log_length + 1];
-        glGetShaderInfoLog(id, info_log_length, NULL, info_log_string);
+        glGetShaderInfoLog(id, info_log_length, nullptr, info_log_string);
 
         Rml::Log::Message(
             Rml::Log::LT_ERROR, "Compile failure in OpenGL shader: %s", info_log_string);
@@ -622,7 +623,7 @@ static bool CreateProgram(Luminumbra::Rendering::AttributedGl::Program& out_prog
         GLint info_log_length = 0;
         glGetProgramiv(id, GL_INFO_LOG_LENGTH, &info_log_length);
         char* info_log_string = new char[info_log_length + 1];
-        glGetProgramInfoLog(id, info_log_length, NULL, info_log_string);
+        glGetProgramInfoLog(id, info_log_length, nullptr, info_log_string);
 
         Rml::Log::Message(
             Rml::Log::LT_ERROR, "OpenGL program linking failure: %s", info_log_string);
@@ -702,7 +703,7 @@ static bool CreateFramebuffer(FramebufferData& out_fb,
         glGenTextures(1, &color_tex_buffer);
         glBindTexture(GL_TEXTURE_2D, color_tex_buffer);
         glTexImage2D(
-            GL_TEXTURE_2D, 0, color_format, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            GL_TEXTURE_2D, 0, color_format, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_mag_filter);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, min_mag_filter);
@@ -1187,7 +1188,7 @@ void RenderInterface_GL3::RenderGeometry(Rml::CompiledGeometryHandle handle,
 
     glBindVertexArray(geometry->vao);
     Luminumbra::Rendering::AttributedGl::Submit(
-        glDrawElements, GL_TRIANGLES, geometry->draw_count, GL_UNSIGNED_INT, (const GLvoid*)0);
+        glDrawElements, GL_TRIANGLES, geometry->draw_count, GL_UNSIGNED_INT, nullptr);
 
     glBindVertexArray(0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -1302,109 +1303,31 @@ void RenderInterface_GL3::RenderToClipMask(Rml::ClipMaskOperation operation,
     glStencilFunc(GL_EQUAL, stencil_test_value, GLuint(-1));
 }
 
-// Set to byte packing, or the compiler will expand our struct, which means it won't read correctly
-// from file
-#pragma pack(1)
-struct TGAHeader {
-    char idLength;
-    char colourMapType;
-    char dataType;
-    short int colourMapOrigin;
-    short int colourMapLength;
-    char colourMapDepth;
-    short int xOrigin;
-    short int yOrigin;
-    short int width;
-    short int height;
-    char bitsPerPixel;
-    char imageDescriptor;
-};
-// Restore packing
-#pragma pack()
-
 Rml::TextureHandle RenderInterface_GL3::LoadTexture(Rml::Vector2i& texture_dimensions,
                                                     const Rml::String& source) {
     const Luminumbra::Client::Attribution::PhaseScope phase_scope(
         Luminumbra::Client::Attribution::Phase::TextureLoad);
-    Rml::FileInterface* file_interface = Rml::GetFileInterface();
-    Rml::FileHandle file_handle = file_interface->Open(source);
-    if (!file_handle) {
-        return false;
+    auto image = Luminumbra::Client::UiTexture::LoadTga(*Rml::GetFileInterface(), source);
+    if (image.pixels.empty()) {
+        Rml::Log::Message(Rml::Log::LT_ERROR, "Invalid or incomplete 24/32-bit TGA texture.");
+        return {};
     }
-
-    file_interface->Seek(file_handle, 0, SEEK_END);
-    size_t buffer_size = file_interface->Tell(file_handle);
-    file_interface->Seek(file_handle, 0, SEEK_SET);
-
-    if (buffer_size <= sizeof(TGAHeader)) {
-        Rml::Log::Message(
-            Rml::Log::LT_ERROR,
-            "Texture file size is smaller than TGAHeader, file is not a valid TGA image.");
-        file_interface->Close(file_handle);
-        return false;
+    const Rml::Vector2i dimensions(image.width, image.height);
+    const auto texture = GenerateTexture({image.pixels.data(), image.pixels.size()}, dimensions);
+    if (texture) {
+        texture_dimensions = dimensions;
     }
-
-    using Rml::byte;
-    Rml::UniquePtr<byte[]> buffer(new byte[buffer_size]);
-    file_interface->Read(buffer.get(), buffer_size, file_handle);
-    file_interface->Close(file_handle);
-
-    TGAHeader header;
-    memcpy(&header, buffer.get(), sizeof(TGAHeader));
-
-    int color_mode = header.bitsPerPixel / 8;
-    const size_t image_size = header.width * header.height * 4; // We always make 32bit textures
-
-    if (header.dataType != 2) {
-        Rml::Log::Message(Rml::Log::LT_ERROR, "Only 24/32bit uncompressed TGAs are supported.");
-        return false;
-    }
-
-    // Ensure we have at least 3 colors
-    if (color_mode < 3) {
-        Rml::Log::Message(Rml::Log::LT_ERROR, "Only 24 and 32bit textures are supported.");
-        return false;
-    }
-
-    const byte* image_src = buffer.get() + sizeof(TGAHeader);
-    Rml::UniquePtr<byte[]> image_dest_buffer(new byte[image_size]);
-    byte* image_dest = image_dest_buffer.get();
-
-    // Targa is BGR, swap to RGB, flip Y axis, and convert to premultiplied alpha.
-    for (long y = 0; y < header.height; y++) {
-        long read_index = y * header.width * color_mode;
-        long write_index = ((header.imageDescriptor & 32) != 0)
-                               ? read_index
-                               : (header.height - y - 1) * header.width * 4;
-        for (long x = 0; x < header.width; x++) {
-            image_dest[write_index] = image_src[read_index + 2];
-            image_dest[write_index + 1] = image_src[read_index + 1];
-            image_dest[write_index + 2] = image_src[read_index];
-            if (color_mode == 4) {
-                const byte alpha = image_src[read_index + 3];
-                for (size_t j = 0; j < 3; j++)
-                    image_dest[write_index + j] = byte((image_dest[write_index + j] * alpha) / 255);
-                image_dest[write_index + 3] = alpha;
-            } else
-                image_dest[write_index + 3] = 255;
-
-            write_index += 4;
-            read_index += color_mode;
-        }
-    }
-
-    texture_dimensions.x = header.width;
-    texture_dimensions.y = header.height;
-
-    return GenerateTexture({image_dest, image_size}, texture_dimensions);
+    return texture;
 }
 
 Rml::TextureHandle RenderInterface_GL3::GenerateTexture(Rml::Span<const Rml::byte> source_data,
                                                         Rml::Vector2i source_dimensions) {
     const Luminumbra::Client::Attribution::PhaseScope texture_phase(
         Luminumbra::Client::Attribution::Phase::TextureLoad);
-    RMLUI_ASSERT(source_data.data() &&
-                 source_data.size() == size_t(source_dimensions.x * source_dimensions.y * 4));
+    if (!Luminumbra::Client::UiTexture::ValidRgbaData(
+            source_data.data(), source_data.size(), source_dimensions.x, source_dimensions.y)) {
+        return {};
+    }
 
     GLuint texture_id = Gfx::CreateTexture(source_data, source_dimensions);
     if (texture_id == 0) {
@@ -1887,11 +1810,8 @@ void RenderInterface_GL3::RenderShader(Rml::CompiledShaderHandle shader_handle,
 
             SubmitTransformUniform(translation);
             glBindVertexArray(geometry.vao);
-            Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
-                                                        GL_TRIANGLES,
-                                                        geometry.draw_count,
-                                                        GL_UNSIGNED_INT,
-                                                        (const GLvoid*)0);
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawElements, GL_TRIANGLES, geometry.draw_count, GL_UNSIGNED_INT, nullptr);
             glBindVertexArray(0);
         } break;
         case CompiledShaderType::Creation: {
@@ -1905,11 +1825,8 @@ void RenderInterface_GL3::RenderShader(Rml::CompiledShaderHandle shader_handle,
 
             SubmitTransformUniform(translation);
             glBindVertexArray(geometry.vao);
-            Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
-                                                        GL_TRIANGLES,
-                                                        geometry.draw_count,
-                                                        GL_UNSIGNED_INT,
-                                                        (const GLvoid*)0);
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawElements, GL_TRIANGLES, geometry.draw_count, GL_UNSIGNED_INT, nullptr);
             glBindVertexArray(0);
         } break;
         case CompiledShaderType::Invalid: {
