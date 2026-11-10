@@ -32,6 +32,7 @@
 namespace luminumbra::ai {
 
 class StimulusChannelRegistry;
+class CreatureTickAdmission;
 
 struct InstinctSystemTickStats {
     std::uint64_t agents_seen = 0;
@@ -60,6 +61,7 @@ struct InstinctSystemTickStats {
 InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
                                                 std::uint64_t tick,
                                                 const StimulusChannelRegistry* stimulus = nullptr,
-                                                bool use_perception_substrate = true);
+                                                bool use_perception_substrate = true,
+                                                const CreatureTickAdmission* admission = nullptr);
 
 } // namespace luminumbra::ai
