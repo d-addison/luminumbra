@@ -103,11 +103,13 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 // Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
 // (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
 // below accepts this form and the plain-JSON form.
-std::string SerializeChunkRecordPayloadJson(const Chunk& chunk);
+// Optional diagnostics reuse the writer/loader DOM; legacy acceptance stays unchanged.
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid = nullptr);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
-                                         const ChunkAuthorityLoadPolicy& authority = {});
+                                         const ChunkAuthorityLoadPolicy& authority = {},
+                                         bool* strict_water_valid = nullptr);
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same

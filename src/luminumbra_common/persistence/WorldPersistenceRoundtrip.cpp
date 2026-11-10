@@ -783,6 +783,10 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
     std::array<std::size_t, fields.size()> counts{};
     for (std::size_t index = 0; index < fields.size(); ++index) {
         const char* field = fields[index];
+        if (!encoded && std::string_view(field) == "water_edge_flux" && !value.contains(field)) {
+            counts[index] = 2u * counts[0];
+            continue;
+        }
         if (!value.contains(field))
             throw std::invalid_argument("Saved water array required");
         const auto& array = value.at(field);
@@ -821,9 +825,41 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
         counts[0] == cells && counts[1] == cells && counts[2] == 2u * cells;
     const bool no_mirrors = counts[3] == 0u && counts[4] == 0u && counts[5] == 0u;
     const bool complete_mirrors = counts[3] == cells && counts[4] == cells && counts[5] == cells;
-    if ((initialized && !no_integers && !complete_integers) ||
+    const bool dormant_integers = !initialized && counts[0] == counts[1] &&
+                                  (counts[0] == 0u || counts[0] == 4u || counts[0] == 16u ||
+                                   counts[0] == 64u || counts[0] == 256u || counts[0] == 1024u) &&
+                                  (resolution == 0 || counts[0] == cells) &&
+                                  (counts[2] == 0u || counts[2] == 2u * counts[0]);
+    if ((!no_integers && !complete_integers && !dormant_integers) ||
         (!no_mirrors && (!initialized || !complete_mirrors)))
         throw std::invalid_argument("Saved water grid shape refused");
+}
+
+// A successful array decode has already checked encoded types and finite values. The writer
+// uses the same bounded water values before encoding, without parsing its output again.
+bool WaterValuesValid(const Chunk& chunk) {
+    if (!std::all_of(chunk.water_depth_mm.begin(),
+                     chunk.water_depth_mm.end(),
+                     [](std::int32_t depth) { return depth >= 0; }))
+        return false;
+    for (const auto* mirror : {&chunk.water_level_data, &chunk.water_sim_terrain_height}) {
+        if (!std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); }))
+            return false;
+    }
+    return std::all_of(
+        chunk.water_flow_data.begin(), chunk.water_flow_data.end(), [](const Vec2& flow) {
+            return std::isfinite(flow.x) && std::isfinite(flow.y);
+        });
+}
+
+bool WaterAuthorityValid(const nlohmann::json& value, bool encoded) {
+    try {
+        RequireWaterAuthority(value, encoded);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 template<typename Arrays>
@@ -1578,7 +1614,9 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk) {
                                      {"chunks", std::move(chunks)}});
 }
 
-std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid) {
+    if (strict_water_valid)
+        *strict_water_valid = false;
     nlohmann::json object = ChunkToJson(chunk, false, true);
     object["sdf_data"] = EncodedArrayToJson(chunk.sdf_data);
     object["heightmap_data"] = EncodedArrayToJson(chunk.heightmap_data);
@@ -1597,6 +1635,8 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
     object["water_depth_mm"] = EncodedArrayToJson(chunk.water_depth_mm);
     object["water_bed_mm"] = EncodedArrayToJson(chunk.water_bed_mm);
     object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
+    if (strict_water_valid)
+        *strict_water_valid = WaterAuthorityValid(object, true) && WaterValuesValid(chunk);
     nlohmann::json chunks = nlohmann::json::array();
     chunks.push_back(std::move(object));
     const nlohmann::json snapshot{{"schema", kSnapshotSchema},
@@ -1667,7 +1707,10 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
-                                         const ChunkAuthorityLoadPolicy& authority) {
+                                         const ChunkAuthorityLoadPolicy& authority,
+                                         bool* strict_water_valid) {
+    if (strict_water_valid)
+        *strict_water_valid = false;
     out_state.clear();
     if (!SavedInputLimits::JsonDepthAllowed(json_text)) {
         errors.push_back(
@@ -1708,7 +1751,10 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             out_state.clear();
             return false;
         };
+        bool water_valid = true;
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+            if (strict_water_valid && !authority.strict_water)
+                water_valid = WaterAuthorityValid(chunk_json, encoded_arrays) && water_valid;
             if (authority.strict_water)
                 RequireWaterAuthority(chunk_json, encoded_arrays);
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
@@ -1717,6 +1763,8 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                 ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
             else
                 ApplyChunkJson(chunk_json, *chunk, authority);
+            if (strict_water_valid)
+                water_valid = WaterValuesValid(*chunk) && water_valid;
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
@@ -1731,6 +1779,8 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
             return reject();
         }
+        if (strict_water_valid)
+            *strict_water_valid = water_valid;
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());

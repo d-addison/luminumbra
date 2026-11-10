@@ -4812,7 +4812,7 @@ std::string MalformedSavedWaterFixture(const IVec3& coords, int variant) {
         water["water_bed_mm"] = nlohmann::json::array();
     }
     if (variant == 2) {
-        water.erase("water_edge_flux");
+        water["water_edge_flux"].erase(water["water_edge_flux"].begin());
     }
     if (variant == 3) {
         water["water_flow_data"][0]["x"] = 1e100;
@@ -5135,6 +5135,90 @@ TEST(WorldSaveService, IndexedWaterOffAndPromotedEmptyMirrorsReopenThroughEveryR
     }
 }
 
+TEST(WorldSaveService, IndexedWriterCacheRefusesInvalidWaterWithoutAnotherDecode) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool nonfinite_flow : {false, true}) {
+        SCOPED_TRACE(nonfinite_flow);
+        const TempSaveDir save("water_writer_refusal");
+        WorldStreamingState state;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(
+            P::LoadWorldStreamingStateSnapshotJson(SavedWaterFixture({0, 0, 0}), state, errors));
+        const auto chunk = state.find_chunk(IVec3{0, 0, 0});
+        ASSERT_NE(chunk, nullptr);
+        if (nonfinite_flow) {
+            chunk->water_flow_data.front().x = std::numeric_limits<float>::infinity();
+        } else {
+            chunk->water_depth_mm.front() = -1;
+        }
+        {
+            P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors));
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path(), &errors))
+                << JoinErrors(errors);
+            ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
+            ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+        }
+        const auto before = WorldSaveService::chunk_record_decode_count_for_testing();
+        WorldStreamingState loaded;
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+        EXPECT_EQ(loaded.size(), 0u);
+        EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), before);
+    }
+}
+
+TEST(WorldSaveService, IndexedRetainedWaterWithoutFluxReopensWithZeroMomentum) {
+    namespace P = Luminumbra::Persistence;
+    const IVec3 good{0, 0, 0}, retained{32, 0, 0};
+    for (const int shape : {0, 1, 2}) {
+        SCOPED_TRACE(shape);
+        const TempSaveDir save("water_missing_flux");
+        auto payload = nlohmann::json::parse(SavedWaterFixture(retained));
+        auto& water = payload["chunks"][0];
+        water.erase("water_edge_flux");
+        if (shape == 1) {
+            water["water_depth_mm"] = nlohmann::json::array();
+            water["water_bed_mm"] = nlohmann::json::array();
+        }
+        if (shape == 2) {
+            for (const char* field :
+                 {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+                water[field] = nlohmann::json::array();
+            }
+            water["has_water_sim"] = false;
+            water["water_state"]["has_water_sim"] = false;
+            water["current_water_resolution"] = 0;
+            water["water_state"]["current_water_resolution"] = 0;
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), good, SavedWaterFixture(good)));
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), retained, payload.dump()));
+        const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+        const auto before = ReadFileBytes(region);
+        WorldStreamingState expected;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(payload.dump(), expected, errors));
+        const auto chunk = expected.find_chunk(retained);
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(shape == 1 ? 0u : 32u, 0));
+        {
+            P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors));
+            ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
+            ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+        }
+        EXPECT_EQ(ReadFileBytes(region), before);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors))
+            << JoinErrors(errors);
+        WorldSaveService::AuthorityWindowReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        ASSERT_NO_FATAL_FAILURE(CheckIndexedWaterRecord(save.path(), *chunk, reader, loaded));
+        EXPECT_EQ(ReadFileBytes(region), before);
+    }
+}
+
 TEST(WorldSaveService, IndexedWaterRoundTripsBytesAndRefusesMissingRecords) {
     namespace P = Luminumbra::Persistence;
     const TempSaveDir save("water_roundtrip");
@@ -5403,10 +5487,14 @@ TEST(WorldSaveService, AuthorityWindowRefusesMalformedPartialAndUnsupportedConta
 }
 
 TEST(WorldSaveService, AuthorityWindowRefusesPartialLatticeAndWaterBeforeReturningAuthority) {
-    for (const int damage : {0, 1, 2, 3, 4}) {
+    for (const int damage : {0, 1, 2, 3, 4, 5, 6}) {
+        SCOPED_TRACE(damage);
         const TempSaveDir save("authority_window_partial_truth");
         WorldStreamingState state;
         auto chunk = AddWindowChunk(state, {0, 0, 0}, damage >= 2);
+        if (damage >= 2) {
+            chunk->water_edge_flux.assign(128, 0);
+        }
         if (damage == 0)
             chunk->sdf_data.pop_back();
         else if (damage == 1)
@@ -5415,8 +5503,12 @@ TEST(WorldSaveService, AuthorityWindowRefusesPartialLatticeAndWaterBeforeReturni
             chunk->water_depth_mm.pop_back();
         else if (damage == 3)
             chunk->current_water_resolution.store(3, std::memory_order_release);
-        else
+        else if (damage == 4)
             chunk->water_depth_mm.front() = -1;
+        else if (damage == 5)
+            chunk->water_edge_flux.pop_back();
+        else
+            chunk->water_bed_mm.clear();
         // Raw container writing deliberately bypasses the ordinary writer's semantic gate.
         const WorldSaveService::ContainerRecord record{
             chunk->get_id(),
