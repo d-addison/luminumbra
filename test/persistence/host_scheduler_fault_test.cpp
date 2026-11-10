@@ -384,6 +384,8 @@ TEST_F(HostSchedulerFault, RefusedStaleTraceRemovalPreservesExistingReplay) {
     fs::create_directory(companion);
     WriteHostFile(companion / "retained", "existing trace entry");
     EXPECT_EQ(RunSchedulerFaultRecord(record_options), 1);
+    EXPECT_NE(log_output.str().find("cannot remove stale region schedule trace"),
+              std::string::npos);
     EXPECT_EQ(ReadHostFile(record_options.record_path), "existing replay");
     EXPECT_EQ(ReadHostFile(companion / "retained"), "existing trace entry");
 }

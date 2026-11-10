@@ -6756,6 +6756,16 @@ constexpr std::size_t kPairHeaderBytes = 4096;
 constexpr const char* kPairUndo = ".replay-pair.undo";
 using PairIdentity = std::array<std::uint64_t, 3>;
 
+bool ValidPairFilename(const std::filesystem::path& filename) {
+    const auto name = Filesystem::GenericUtf8PathString(filename);
+    // Use the same portable leaf contract before publication and during recovery.
+    // Trailing dots/spaces can alias the journal name through Win32 normalization.
+    return !name.empty() && name.find_first_of("/\\:") == std::string::npos &&
+           name.find('\0') == std::string::npos && filename == filename.filename() &&
+           name.back() != '.' && name.back() != ' ' && !StagingNameEquals(filename, kPairUndo) &&
+           !StagingNameEquals(filename, ".replay-pair.lock");
+}
+
 std::mutex& PairMutex() {
     static std::mutex mutex;
     return mutex;
@@ -6818,8 +6828,10 @@ bool RestorePairTrace(const std::filesystem::path& companion,
     }
 }
 
-// The journal is a bounded JSON header followed by the exact old companion
-// bytes (at most 96 MiB). No replay payload is copied or scanned for recovery.
+// The journal has eight JSON fields: schema, replay, previous, incoming,
+// old_trace, new_trace, undo_bytes and undo_checksum. The header (including its
+// newline) is at most 4096 bytes, followed by at most 96 MiB of exact old trace
+// bytes. No replay payload is copied or scanned for recovery.
 bool RecoverReplayPair(const std::filesystem::path& directory) {
     const auto journal_path = directory / kPairUndo;
     StagingFile journal(journal_path, StagingFile::Mode::Inspect);
@@ -6830,7 +6842,7 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
     if (!journal.read_record(record, kPairTraceBytes + kPairHeaderBytes))
         return false;
     const auto separator = record.find('\n');
-    if (separator == std::string::npos || separator > kPairHeaderBytes ||
+    if (separator == std::string::npos || separator >= kPairHeaderBytes ||
         record.size() - separator - 1 > kPairTraceBytes)
         return false;
     const auto header =
@@ -6838,15 +6850,13 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
                               record.begin() + static_cast<std::string::difference_type>(separator),
                               nullptr,
                               false);
-    if (!header.is_object() || header.size() != 9 ||
+    if (!header.is_object() || header.size() != 8 ||
         header.value("schema", std::string{}) != "luminumbra.replay_pair.v1" ||
         !header.contains("replay") || !header["replay"].is_string())
         return false;
     const auto name = header["replay"].get<std::string>();
     const auto filename = Filesystem::PathFromUtf8(name);
-    if (name.empty() || name.find_first_of("/\\:") != std::string::npos ||
-        name.find('\0') != std::string::npos || filename != filename.filename() || name == "." ||
-        name == ".." || StagingNameEquals(filename, kPairUndo))
+    if (!ValidPairFilename(filename))
         return false;
     PairIdentity previous{}, incoming{}, old_trace{}, new_trace{};
     if (!header.contains("previous") || !DecodePairIdentity(header["previous"], previous) ||
@@ -7082,7 +7092,7 @@ bool ReplacementOutputFile::commit_with_companion(const std::string* bytes) {
     const auto& destination = m_state->destination;
     const auto directory = destination.parent_path();
     const auto name = Filesystem::GenericUtf8PathString(destination.filename());
-    if (StagingNameEquals(destination.filename(), kPairUndo))
+    if (!ValidPairFilename(destination.filename()))
         return false;
     const ReplayPairReadGuard ownership(destination);
     if (!ownership.is_open())

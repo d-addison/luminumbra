@@ -453,6 +453,153 @@ protected:
     fs::path m_directory;
 };
 
+struct PairJournalCapture {
+    fs::path replay;
+    std::string record;
+    bool refuse = false;
+};
+PairJournalCapture*& CurrentPairJournalCapture() {
+    static PairJournalCapture* capture = nullptr;
+    return capture;
+}
+void CapturePairJournal(const char* step, const fs::path& path) {
+    auto* capture = CurrentPairJournalCapture();
+    if (!capture || std::string_view(step) != "output-publish" || path != capture->replay) {
+        return;
+    }
+    const Luminumbra::Persistence::SavedInputFile journal(path.parent_path() / ".replay-pair.undo");
+    ASSERT_TRUE(journal.read(capture->record, 4096));
+    if (capture->refuse) {
+        throw std::runtime_error("replay publication refused");
+    }
+}
+class ScopedPairJournalCapture {
+public:
+    explicit ScopedPairJournalCapture(PairJournalCapture& capture) {
+        CurrentPairJournalCapture() = &capture;
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(CapturePairJournal);
+    }
+    ~ScopedPairJournalCapture() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        CurrentPairJournalCapture() = nullptr;
+    }
+};
+
+TEST_F(ReplayPairRecoveryTest, RealWriterJournalRoundTripsAcrossCommitAndRollback) {
+    // Sixteen bounded cases cover replay/trace presence on both sides of commit.
+    for (const bool committed : {false, true}) {
+        for (const bool previous : {false, true}) {
+            for (const bool old_trace : {false, true}) {
+                for (const bool new_trace : {false, true}) {
+                    SCOPED_TRACE(testing::Message()
+                                 << committed << previous << old_trace << new_trace);
+                    fs::remove_all(m_directory);
+                    fs::create_directory(m_directory);
+                    if (previous) {
+                        Write(m_path, "old replay");
+                    }
+                    const auto companion = m_path + ".regions.json";
+                    if (old_trace) {
+                        Write(companion, "old trace");
+                    }
+                    PairJournalCapture capture{m_path, {}, !committed};
+                    {
+                        const ScopedPairJournalCapture control(capture);
+                        Luminumbra::Persistence::ReplacementOutputFile output(m_path);
+                        ASSERT_TRUE(output.write("new replay"));
+                        const std::string trace = "new trace";
+                        EXPECT_EQ(output.commit_with_companion(new_trace ? &trace : nullptr),
+                                  committed);
+                    }
+                    ASSERT_FALSE(capture.record.empty());
+                    const auto header =
+                        nlohmann::json::parse(capture.record.substr(0, capture.record.find('\n')));
+                    EXPECT_EQ(header.size(), 8u);
+                    EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+                    // Re-admit the exact bytes emitted by the real writer, including
+                    // the already-restored rollback case and committed cleanup.
+                    Write(m_directory / ".replay-pair.undo", capture.record);
+                    for (int admission = 0; admission < 2; ++admission) {
+                        const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
+                        ASSERT_TRUE(guard.is_open());
+                        if (committed || previous) {
+                            EXPECT_EQ(ReadBytes(), committed ? "new replay" : "old replay");
+                        } else {
+                            EXPECT_FALSE(fs::exists(m_path));
+                        }
+                        const Luminumbra::Persistence::SavedInputFile trace(companion);
+                        if (committed ? new_trace : old_trace) {
+                            std::string bytes;
+                            ASSERT_TRUE(trace.read(bytes, 64));
+                            EXPECT_EQ(bytes, committed ? "new trace" : "old trace");
+                        } else {
+                            EXPECT_TRUE(trace.missing());
+                        }
+                        EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(ReplayPairRecoveryTest, PublicationRefusesUnrecoverableFilenamesBeforeChangingThePair) {
+    std::vector<std::string> names{
+        ".replay-pair.undo", ".replay-pair.lock", ".replay-pair.undo.", ".replay-pair.undo "};
+#if !defined(_WIN32)
+    // These are leaf filenames on POSIX, but separators/streams on Windows.
+    names.emplace_back("recording:stream");
+    names.emplace_back("recording\\trace");
+#endif
+    for (const auto& name : names) {
+        SCOPED_TRACE(name);
+        fs::remove_all(m_directory);
+        fs::create_directory(m_directory);
+        const auto destination = m_directory / name;
+        Write(m_path, "old replay");
+        Write(m_path + ".regions.json", "old trace");
+        {
+            Luminumbra::Persistence::ReplacementOutputFile output(destination);
+            ASSERT_TRUE(output.write("new replay"));
+            const std::string trace = "new trace";
+            EXPECT_FALSE(output.commit_with_companion(&trace));
+        }
+        EXPECT_EQ(ReadBytes(), "old replay");
+        const Luminumbra::Persistence::SavedInputFile trace(m_path + ".regions.json");
+        std::string bytes;
+        ASSERT_TRUE(trace.read(bytes, 64));
+        EXPECT_EQ(bytes, "old trace");
+        EXPECT_FALSE(fs::exists(destination));
+        EXPECT_FALSE(fs::exists(destination.string() + ".regions.json"));
+        EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+    }
+#if !defined(_WIN32)
+    // Existing POSIX pairs must also survive refusal, with or without a new trace.
+    for (const char* name : {"recording:stream", "recording\\trace"}) {
+        fs::remove_all(m_directory);
+        fs::create_directory(m_directory);
+        const auto destination = m_directory / name;
+        const auto companion = destination.string() + ".regions.json";
+        Write(destination, "old replay");
+        Write(companion, "old trace");
+        for (const bool remove_trace : {false, true}) {
+            Luminumbra::Persistence::ReplacementOutputFile output(destination);
+            ASSERT_TRUE(output.write("new replay"));
+            const std::string replacement = "new trace";
+            EXPECT_FALSE(output.commit_with_companion(remove_trace ? nullptr : &replacement));
+            const Luminumbra::Persistence::SavedInputFile replay_file(destination);
+            const Luminumbra::Persistence::SavedInputFile trace_file(companion);
+            std::string bytes;
+            ASSERT_TRUE(replay_file.read(bytes, 64));
+            EXPECT_EQ(bytes, "old replay");
+            ASSERT_TRUE(trace_file.read(bytes, 64));
+            EXPECT_EQ(bytes, "old trace");
+            EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+        }
+    }
+#endif
+}
+
 TEST_F(ReplayPairRecoveryTest, InterruptedReplacementRecoversOnlyMatchingPairs) {
     // All presence transitions on both sides of the replay commit point.
     for (const bool committed : {false, true}) {
@@ -556,6 +703,7 @@ TEST_F(ReplayPairRecoveryTest, MalformedOrPartialUndoRefusesWithoutChangingEithe
     refuse("{\"schema\":");
     refuse(valid.dump() + "\nold trac");
     refuse(valid.dump() + "\nold tracE");
+    refuse(std::string(4096 - valid.dump().size(), ' ') + valid.dump() + "\nold trace");
     refuse(std::string(4097, ' ') + "\nold trace");
     for (const char* field : {"schema",
                               "replay",
@@ -568,14 +716,20 @@ TEST_F(ReplayPairRecoveryTest, MalformedOrPartialUndoRefusesWithoutChangingEithe
         auto invalid = valid;
         invalid[field] = nullptr;
         refuse(invalid.dump() + "\nold trace");
+        invalid = valid;
+        invalid.erase(field);
+        refuse(invalid.dump() + "\nold trace");
     }
     for (const char* name : {"../escape",
                              "nested/recording",
                              "C:recording",
+                             "recording\\trace",
                              ".",
                              "..",
                              ".replay-pair.lock",
                              ".replay-pair.undo",
+                             ".replay-pair.undo.",
+                             ".replay-pair.undo ",
                              ""}) {
         auto invalid = valid;
         invalid["replay"] = name;
@@ -596,7 +750,9 @@ TEST_F(ReplayPairRecoveryTest, MalformedOrPartialUndoRefusesWithoutChangingEithe
         const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
         EXPECT_FALSE(guard.is_open());
     }
-    Write(m_directory / ".replay-pair.undo", valid.dump() + "\nold trace");
+    // A header at the writer's inclusive 4096-byte bound remains recoverable.
+    Write(m_directory / ".replay-pair.undo",
+          std::string(4095 - valid.dump().size(), ' ') + valid.dump() + "\nold trace");
     const Luminumbra::Persistence::ReplayPairReadGuard recovered(m_path);
     EXPECT_TRUE(recovered.is_open());
 }

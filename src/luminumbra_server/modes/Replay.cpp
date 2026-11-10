@@ -123,7 +123,11 @@ int RunRecord(const ServerCliOptions& options) {
 
     const auto* trace = runner.Session()->ActiveRegionsEnabled() ? &schedule_trace : nullptr;
     if (!writer.Finalize(executed, trace)) {
-        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay pair '{}'", options.record_path);
+        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay pair '{}': {}",
+                              options.record_path,
+                              trace
+                                  ? "cannot publish replay or region schedule trace"
+                                  : "cannot remove stale region schedule trace or publish replay");
         return 1;
     }
 
