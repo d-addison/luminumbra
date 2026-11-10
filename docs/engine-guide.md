@@ -78,6 +78,17 @@ conversion for nonnumeric text on the toolchain that created the world; reopenin
 and resaving retain that absence. This additive conversion version is independent
 of the metadata envelope and leaves world-hash encoding unchanged.
 
+LREC1 server recordings store `(uint64(1) << 32) | resolvedSeed` in the existing
+`seed` slot and retain the original `seed_string`, including empty input. Playback
+uses the low uint32 word when the upper word is 1; otherwise it resolves the
+original text with legacy conversion before creating the world. Legacy text that
+`std::stoull` cannot parse recorded `std::strtoull` as 0 or UINT64_MAX, so it cannot
+match this tag. Legacy numeric seeds whose upper word is 1 already resolve to the
+same low uint32 word. Numeric parsing, lockstep numeric headers, LREC1 versions
+3/4, header layout, and world-hash encoding remain unchanged. Untagged text replays
+retain their original toolchain dependency; new recordings carry the resolved
+seed and are portable.
+
 Metadata is checked before a missing chunk directory can count as a fresh save.
 Unversioned metadata is refused even alongside current containers. A higher
 metadata version reports `unsupported future world metadata container version`;

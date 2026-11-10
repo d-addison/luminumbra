@@ -54,6 +54,8 @@ inline constexpr std::uint16_t kLrec1Version = 3;
 // streams with ElidedPrefix require version 4; readers accept both layouts.
 inline constexpr std::uint16_t kLrec1ElidedVersion = 4;
 inline constexpr char kLrec1Trailer[8] = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
+// Upper word 1 tags a resolved uint32 seed in the existing u64 header slot.
+inline constexpr std::uint64_t kResolvedSeedTag = UINT64_C(1) << 32;
 
 // Record type tags (u8 on the wire).
 enum class RecordType : std::uint8_t {
@@ -67,10 +69,12 @@ enum class RecordType : std::uint8_t {
 struct ReplayHeader {
     std::uint16_t version = kLrec1Version;
     std::uint16_t tick_rate_hz = 30; // canonical fixed tick rate
-    // Numeric seed supplied by the replay producer. New worlds resolve nonnumeric text
-    // with seed conversion version 1 (FNV-1a 64, XOR-folded to uint32); legacy
-    // saved worlds retain std::hash. seed_string preserves the original input;
-    // it alone does not specify a saved world's conversion version.
+    // Server recordings store kResolvedSeedTag | resolved uint32 seed (conversion
+    // version 1); seed_string preserves the original input. Other headers resolve
+    // seed_string with legacy conversion. Legacy strtoull returns 0 or UINT64_MAX
+    // when stoull cannot parse the text, so it cannot collide with the tag. A legacy
+    // numeric seed with upper word 1 already has the same resolved low word.
+    // Lockstep producers continue storing untagged numeric seeds.
     std::uint64_t seed = 0;
     std::string seed_string;
     std::string preset;            // preset name (worlds/atlas/presets/<preset>.json)

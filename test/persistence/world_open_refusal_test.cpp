@@ -3,6 +3,7 @@
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
 #include "../support/WorldgenTestData.h"
+#include "core/EngineVersion.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
 #include <chrono>
@@ -38,6 +39,7 @@
 #include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
+#include "luminumbra_server/modes/Modes.h"
 
 #include <algorithm>
 #include <array>
@@ -46,6 +48,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -610,6 +613,145 @@ TEST_F(WorldOpenRefusal, NumericAndEmptyNewSeedsKeepTheirExistingBehavior) {
         }
         ASSERT_TRUE(session.LoadWorld(metadata.worldId)) << session.GetWorldOpenError();
         EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()), expected);
+    }
+}
+
+class ReplaySeedCompatibility : public WorldOpenRefusal {};
+
+TEST_P(ReplaySeedCompatibility, RecordedSeedReproducesTheStartingWorld) {
+    const auto [seed_case, new_recording] = GetParam();
+    const std::array<std::string, 15> seeds = {"portable-\xc3\xa9",
+                                               "18446744073709551616",
+                                               "0",
+                                               "4294967295",
+                                               "4294967296",
+                                               "4294967296tail",
+                                               "8589934591",
+                                               "8589934592",
+                                               "18446744073709551615",
+                                               "-1",
+                                               "  +42tail",
+                                               "42text",
+                                               "+",
+                                               " ",
+                                               ""};
+    ServerCliOptions options;
+    options.root = RootString();
+    options.seed = seeds.at(static_cast<std::size_t>(seed_case));
+    options.surface_radius = 0;
+    options.collision_radius = 0;
+    options.test_streaming_radius_cap = 1;
+    options.ticks = 0;
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":false}}})");
+    options.record_path = Filesystem::GenericUtf8PathString(root / "seed.lrec");
+    std::uint32_t expected_seed = 0;
+    if (new_recording != 0) {
+        ASSERT_EQ(RunRecord(options), 0);
+    } else {
+        // Empty legacy headers discarded the random seed; retain their boot policy.
+        if (!options.seed.empty()) {
+            try {
+                expected_seed = static_cast<std::uint32_t>(std::stoull(options.seed));
+            } catch (const std::exception&) {
+                expected_seed = static_cast<std::uint32_t>(std::hash<std::string>{}(options.seed));
+            }
+        }
+        auto reference_config = RunnerConfigFrom(options);
+        reference_config.seed = std::to_string(expected_seed);
+        reference_config.autosave_interval_ticks = 0;
+        Server::ServerWorldRunner reference(std::move(reference_config));
+        ASSERT_TRUE(reference.Boot()) << reference.GetBootError();
+        Replay::ReplayHeader header;
+        header.seed_string = options.seed;
+        header.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
+        header.preset = options.preset;
+        header.surface_radius = 0;
+        header.collision_radius = 0;
+        header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+        header.system_config_identity = reference.Session()->SystemConfigIdentity();
+        header.preset_content_hash = reference.Session()->PresetContentHash();
+        header.start_world_hash = reference.ComputeWorldHash();
+        Replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(options.record_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+    }
+    const auto recording = Replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recording.has_value());
+    if (!recording)
+        return;
+    const auto& header = recording->header;
+    EXPECT_EQ(header.version, Replay::kLrec1Version);
+    EXPECT_EQ(header.seed_string, options.seed);
+    if (new_recording != 0) {
+        EXPECT_EQ(header.seed >> 32, 1u);
+        expected_seed = static_cast<std::uint32_t>(header.seed);
+        if (!options.seed.empty()) {
+            EXPECT_EQ(expected_seed, world::ResolveWorldSeed(options.seed, 1));
+        }
+    }
+    const auto config = ReplayRunnerConfigFrom(options, header);
+    ASSERT_TRUE(config.has_value());
+    if (!config)
+        return;
+    if (new_recording == 0 && options.seed.empty()) {
+        EXPECT_TRUE(config->seed.empty());
+    } else {
+        EXPECT_EQ(world::ResolveWorldSeed(config->seed, 1), expected_seed);
+        Server::ServerWorldRunner playback(*config);
+        ASSERT_TRUE(playback.Boot()) << playback.GetBootError();
+        EXPECT_EQ(static_cast<std::uint32_t>(playback.Session()->GetWorldSystem()->get_seed()),
+                  expected_seed);
+        EXPECT_EQ(playback.ComputeWorldHash(), header.start_world_hash);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(LegacyAndResolvedHeaders,
+                         ReplaySeedCompatibility,
+                         testing::Combine(testing::Range(0, 15), testing::Values(0, 1)));
+
+TEST_F(WorldOpenRefusal, ReplaySeedTagBoundariesAndUnknownTagsKeepLegacyFallback) {
+    ServerCliOptions options;
+    options.root = RootString();
+    const auto hello = RuntimeHelloFrom(options);
+    Replay::ReplayHeader header;
+    header.seed_string = "portable-\xc3\xa9";
+    header.preset = options.preset;
+    header.surface_radius = 0;
+    header.collision_radius = 0;
+    header.system_config_identity = hello.system_config_identity;
+    header.preset_content_hash = hello.preset_content_hash;
+    const auto legacy_seed =
+        static_cast<std::uint32_t>(std::hash<std::string>{}(header.seed_string));
+    for (const auto version : {Replay::kLrec1Version, Replay::kLrec1ElidedVersion}) {
+        header.version = version;
+        for (const auto seed : {UINT64_C(0),
+                                Replay::kResolvedSeedTag - 1,
+                                Replay::kResolvedSeedTag,
+                                (Replay::kResolvedSeedTag << 1) - 1,
+                                Replay::kResolvedSeedTag << 1,
+                                UINT64_MAX}) {
+            SCOPED_TRACE(seed);
+            header.seed = seed;
+            const auto config = ReplayRunnerConfigFrom(options, header);
+            ASSERT_TRUE(config.has_value());
+            if (config) {
+                const bool tagged =
+                    seed >= Replay::kResolvedSeedTag && seed < (Replay::kResolvedSeedTag << 1);
+                EXPECT_EQ(world::ResolveWorldSeed(config->seed, 1),
+                          tagged ? static_cast<std::uint32_t>(seed) : legacy_seed);
+            }
+        }
+        for (const auto seed : {UINT64_C(0), Replay::kResolvedSeedTag}) {
+            header.seed = seed;
+            header.seed_string.assign(Persistence::SavedInputLimits::kWorldSeedBytes, 'x');
+            EXPECT_TRUE(ReplayRunnerConfigFrom(options, header).has_value());
+            header.seed_string.push_back('x');
+            const auto before = DiskBytes(root);
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        header.seed_string = "portable-\xc3\xa9";
     }
 }
 
