@@ -268,29 +268,33 @@ void Allocate(Groups& groups,
     auto grant = grants.begin();
     for (const auto& claim : claims) {
         const auto& group = groups.at(claim.key);
-        const auto awarded =
+        const auto granted =
             grant != grants.end() && grant->key == claim.key ? (grant++)->windows : 0;
-        plan.allocated_windows += awarded;
         const auto count = static_cast<std::uint64_t>(group.candidates.size());
-        const auto used = std::min(awarded, count);
+        const auto awarded = std::min(granted, count);
+        plan.allocated_windows += awarded;
         auto cursor = group.record->water_cursor;
-        if (used != 0) {
+        if (awarded != 0) {
             const auto start = cursor % count;
-            for (std::uint64_t j = 0; j < used; ++j) {
+            for (std::uint64_t j = 0; j < awarded; ++j) {
                 auto& entry =
                     entries[group.candidates[static_cast<std::size_t>((start + j) % count)]];
                 entry.selected = true;
             }
-            cursor = (start + used) % count;
+            cursor = (start + awarded) % count;
         }
         const auto debt = debts.find(claim.key);
+        // Grants are budget-bounded. Restoring their unselected Q32 units cannot
+        // exceed the allocator's checked post-credit debt (at most kMaxDebt).
+        const auto carried_debt = (debt == debts.end() ? 0 : debt->second) +
+                                  (granted - awarded) * world::water_share::kQ32;
         plan.regions.push_back({claim.key,
                                 group.record->cadence_shift,
                                 group.record->cadence_phase,
                                 count,
                                 awarded,
                                 cursor,
-                                debt == debts.end() ? 0 : debt->second});
+                                carried_debt});
     }
 }
 } // namespace

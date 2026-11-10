@@ -74,9 +74,11 @@ struct Plan {
 // Each window pays for preparation, one interior and four face endpoints. Keep
 // one interior window when claims exist, then reserve cross-owner pairs atomically.
 // Region outputs are patches for due admitted owners only (debt zero means erase);
-// all other registers must be retained by the eventual publisher. Fixed positive
-// eligibility inherits water_share's service bound; cursor rollover serves every
-// candidate under fixed eligibility. Changing eligibility has no such guarantee.
+// all other registers must be retained by the eventual publisher. Region windows
+// and allocated_windows count selected interiors only. Unselected grants retain
+// their Q32 debt; unused windows are global_windows-border_windows-allocated_windows.
+// Cursor rollover serves every candidate under fixed eligibility and recurring
+// positive awards. Changing eligibility has no such guarantee.
 // Work: O((R+S+D) log(kMaxRegions+R+S+D)). Storage is bounded by the input
 // caps: at most R entries, S sources, D region outputs, 2*R topology faces and
 // 5*R participant IDs before deduplication. All products fit 32-bit size_t.

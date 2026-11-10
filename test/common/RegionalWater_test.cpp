@@ -640,12 +640,94 @@ TEST(RegionalWaterPlanning, EmptyClaimsAndZeroBudgetPreserveCursorsAndServiceOnl
     const auto empty =
         Planning::Build({}, {}, ledger, schedule, {.cell_budget = kPlanningCapacity});
     ASSERT_EQ(empty.regions.size(), 1u);
-    EXPECT_EQ(empty.allocated_windows, 1u);
+    EXPECT_EQ(empty.allocated_windows, 0u);
+    EXPECT_EQ(empty.regions[0].windows, 0u);
     EXPECT_TRUE(empty.participants.empty());
     EXPECT_EQ(empty.regions[0].next_cursor, std::numeric_limits<std::uint64_t>::max());
-    EXPECT_EQ(empty.regions[0].debt, world::water_share::kQ32);
+    EXPECT_EQ(empty.regions[0].debt, 2 * world::water_share::kQ32);
     EXPECT_TRUE(Planning::Build(residents, {}, ledger, {}, {.cell_budget = kPlanningCapacity})
                     .interiors.empty());
+}
+
+TEST(RegionalWaterPlanning, DebtDrivenExcessGrantsRemainUnallocatedAndCarryUnservedDebt) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    constexpr auto unit = world::water_share::kQ32;
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 4 * unit}}));
+    const auto before = ledger.encode();
+    std::vector residents{ResidentAt(0), ResidentAt(32), ResidentAt(34), ResidentAt(36)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}};
+    const Planning::Inputs inputs{.cell_budget = 4 * kPlanningCapacity};
+    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+    ASSERT_EQ(plan.regions.size(), 2u);
+    EXPECT_EQ(plan.regions[0].candidates, 1u);
+    EXPECT_EQ(plan.regions[0].windows, 1u);
+    EXPECT_EQ(plan.regions[0].debt, 4 * unit);
+    EXPECT_EQ(plan.regions[1].windows, 0u);
+    EXPECT_EQ(plan.regions[1].debt, 3 * unit);
+    for (const auto& region : plan.regions) {
+        const auto selected =
+            std::count_if(plan.interiors.begin(), plan.interiors.end(), [&region](ChunkID id) {
+                return Chunk::decode_id(id).x / 32 == region.owner.x;
+            });
+        EXPECT_EQ(region.windows, static_cast<std::uint64_t>(selected));
+    }
+    EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+    EXPECT_EQ(plan.global_windows - plan.border_windows - plan.allocated_windows, 3u);
+    EXPECT_EQ(plan.regions[0].debt + plan.regions[1].debt + plan.allocated_windows * unit,
+              4 * unit + plan.global_windows * unit);
+    std::reverse(residents.begin(), residents.end());
+    std::reverse(schedule.due.begin(), schedule.due.end());
+    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, CandidateCapsPreserveFractionalAndMaximumDebtAcrossBudgets) {
+    constexpr auto unit = world::water_share::kQ32;
+    for (const std::uint64_t count : {0u, 1u, 3u}) {
+        std::vector<Planning::Resident> residents;
+        for (std::uint64_t index = 0; index < count; ++index) {
+            residents.push_back(ResidentAt(static_cast<int>(2 * index)));
+        }
+        for (const std::uint64_t windows : {std::uint64_t{0},
+                                            std::uint64_t{1},
+                                            std::uint64_t{2},
+                                            std::uint64_t{4},
+                                            world::water_share::kMaxWindowBudget}) {
+            const auto credit = count == 0 ? 0 : windows * unit;
+            for (const auto saved :
+                 {std::uint64_t{0}, unit / 2, 4 * unit, world::water_share::kMaxDebt - credit}) {
+                SCOPED_TRACE(::testing::Message() << count << ',' << windows << ',' << saved);
+                auto ledger = PlanningLedger({{0, 0}});
+                if (saved != 0) {
+                    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+                }
+                ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+                const auto before = ledger.encode();
+                RegionSchedule schedule;
+                schedule.due = {{0, 0}};
+                const auto plan = Planning::Build(
+                    residents, {}, ledger, schedule, {.cell_budget = windows * kPlanningCapacity});
+                ASSERT_EQ(plan.regions.size(), 1u);
+                const auto selected = std::min(count, windows);
+                EXPECT_EQ(plan.interiors.size(), selected);
+                EXPECT_EQ(plan.regions[0].windows, selected);
+                EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+                EXPECT_EQ(plan.regions[0].debt, saved + credit - selected * unit);
+                EXPECT_EQ(plan.global_windows - plan.border_windows - plan.allocated_windows,
+                          windows - selected);
+                if (selected == 0) {
+                    EXPECT_EQ(plan.regions[0].next_cursor,
+                              std::numeric_limits<std::uint64_t>::max());
+                } else {
+                    EXPECT_EQ(plan.regions[0].next_cursor,
+                              (std::numeric_limits<std::uint64_t>::max() % count + selected) %
+                                  count);
+                }
+                EXPECT_EQ(ledger.encode(), before);
+            }
+        }
+    }
 }
 
 TEST(RegionalWaterPlanning, InvalidCadenceTickOwnersAndDebtOverflowRefuseWithoutMutation) {
