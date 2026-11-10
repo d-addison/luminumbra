@@ -2429,6 +2429,8 @@ void AddSecondaryState(entt::registry& registry,
     auto& player = registry.emplace<Anim::AnimationPlayerComponent>(entity);
     player.skeleton = &skeleton;
     player.clip = &clip;
+    player.pose = Anim::SamplePose(skeleton, clip, 0.0f);
+    Anim::ComputeJointPalette(skeleton, player.pose, player.palette);
     registry.emplace<C::ThirstComponent>(entity) = {0.8f, 7.0f, 8.0f, 1u, 0.6f};
     registry.emplace<C::ScavengerComponent>(entity) = {7.0f, 8.0f, 1u};
     registry.emplace<C::AlarmComponent>(entity) = {.level = 0.8f, .alarmed = 1u};
@@ -2540,6 +2542,43 @@ TEST(RegionConsumerGate, SessionSecondaryConsumersFreezeAndResumeAlongsidePlant)
         EXPECT_DOUBLE_EQ(registry.get<Anim::AnimationPlayerComponent>(creature).time,
                          (active ? 1.0 : 2.0) * session.GetSimulationClock().fixed_dt());
     }
+}
+
+TEST(RegionConsumerGate, RigAttachedInDeniedRegionGetsPoseWithoutAdvancingItsClock) {
+    const Anim::Skeleton skeleton{{Anim::SkeletonJoint{}}};
+    const Anim::AnimationClip clip{.duration = 1.0f, .tracks = {}};
+    entt::registry registry;
+    const auto creature = Creature(registry, 513.0f);
+    auto& player = registry.emplace<Anim::AnimationPlayerComponent>(creature);
+    player.skeleton = &skeleton;
+    player.clip = &clip;
+    player.time = 0.25;
+    const auto plant = Plant(registry, 513.0f);
+    registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    ASSERT_FALSE(admission.Allows(creature));
+    const auto expected_pose = Anim::SamplePose(skeleton, clip, 0.25f);
+    std::vector<float> expected_palette;
+    Anim::ComputeJointPalette(skeleton, expected_pose, expected_palette);
+    ASSERT_FALSE(expected_palette.empty());
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        Anim::SamplePosesOnTick(registry, 1.0 / 30.0, &admission);
+        AI::RunLifespanOnTick(registry, tick, gate, &admission);
+        const auto& frozen = registry.get<Anim::AnimationPlayerComponent>(creature);
+        EXPECT_DOUBLE_EQ(frozen.time, 0.25);
+        EXPECT_EQ(Anim::PoseChecksum(frozen.pose), Anim::PoseChecksum(expected_pose));
+        EXPECT_EQ(frozen.palette, expected_palette);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+    }
+    admission.Capture(registry, {});
+    Anim::SamplePosesOnTick(registry, 1.0 / 30.0, &admission);
+    AI::RunLifespanOnTick(registry, 4u, {}, &admission);
+    EXPECT_DOUBLE_EQ(registry.get<Anim::AnimationPlayerComponent>(creature).time,
+                     0.25 + 1.0 / 30.0);
+    EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
 }
 
 TEST(RegionConsumerGate, SecondaryConsumersDenyInvalidMissingAndEmptyOwnersBeforeAnyWrite) {

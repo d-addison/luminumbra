@@ -349,12 +349,19 @@ void SamplePosesOnTick(entt::registry& registry,
                        const ai::CreatureTickAdmission* admission) {
     const auto view = registry.view<AnimationPlayerComponent>();
     for (const entt::entity entity : view) {
-        if (admission && !admission->Allows(entity)) {
-            continue;
-        }
         AnimationPlayerComponent& player = view.get<AnimationPlayerComponent>(entity);
         if (!player.skeleton || !player.clip)
             continue;
+        if (admission && !admission->Allows(entity)) {
+            // A frozen clock does not advance, but a rig attached while frozen
+            // still needs its pose at that time: the renderer skips empty palettes.
+            if (player.palette.empty()) {
+                player.pose =
+                    SamplePose(*player.skeleton, *player.clip, static_cast<float>(player.time));
+                ComputeJointPalette(*player.skeleton, player.pose, player.palette);
+            }
+            continue;
+        }
 
         player.time += fixed_dt;
         if (player.looping && player.clip->duration > 0.0f) {
