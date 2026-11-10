@@ -28,6 +28,110 @@ def workflow_sources():
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_networking_fixture_reuses_outer_compiler_probes_before_project(self):
+        production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        start = production.index("    if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)")
+        end = production.index("    endif()", start) + len("    endif()")
+        fixture = ROOT / "tools/ci/networking_runtime_fixture/CMakeLists.txt"
+        driver = ROOT / "tools/ci/test_networking_runtime_integration.cmake"
+        with tempfile.TemporaryDirectory(prefix="network compiler reuse ") as temporary:
+            root = Path(temporary)
+            info = root / "outer compiler" / "CMakeCXXCompiler.cmake"
+            info.parent.mkdir()
+            info.write_text(
+                'set(CMAKE_CXX_COMPILER "outer-compiler")\n'
+                'set(CMAKE_CXX_COMPILER_ID "outer-id")\n'
+                'set(CMAKE_CXX_COMPILER_ID_RUN TRUE)\n'
+                'set(CMAKE_CXX_COMPILER_LOADED TRUE)\n'
+                'set(CMAKE_CXX_COMPILER_WORKS TRUE)\n'
+                'set(CMAKE_CXX_ABI_COMPILED TRUE)\n'
+                'set(CMAKE_CXX_COMPILE_FEATURES "outer-features")\n'
+                'set(CMAKE_CXX_IMPLICIT_LINK_LIBRARIES "outer-libraries")\n', encoding="utf-8")
+            block = production[start:end].replace("${CMAKE_CURRENT_SOURCE_DIR}",
+                                                   (ROOT / "tools").as_posix())
+            (root / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.20)\n'
+                'project(NetworkRegistration LANGUAGES NONE)\nenable_testing()\n'
+                'set(WIN32 TRUE)\nset(CMAKE_VERSION 3.21)\n'
+                'set(CMAKE_CXX_COMPILER "outer-compiler")\n'
+                f'set(CMAKE_PLATFORM_INFO_DIR [==[{info.parent.as_posix()}]==])\n'
+                + block, encoding="utf-8")
+            build = root / "build"
+            subprocess.run(["cmake", "-S", str(root), "-B", str(build), "-G", "Ninja"],
+                           check=True, capture_output=True, text=True)
+            discovery = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                       check=True, capture_output=True, text=True)
+            test, = json.loads(discovery.stdout)["tests"]
+            self.assertEqual(test["name"], "NetworkingRuntimeBuildIntegration")
+            command = test["command"]
+            info_argument = f"-DNETWORK_TEST_COMPILER_INFO={info.as_posix()}"
+            self.assertIn(info_argument, command)
+            self.assertEqual(command[-2:], ["-P", driver.as_posix()])
+
+            # Stop at the first configure launch, before any native work. This
+            # intercepts the real driver's expanded argv inside its subprocess.
+            # Only pre-project script commands run, so the boundary checks also
+            # work on CMake 3.20 hosts without generating the Windows fixture.
+            boundary = (
+                'cmake_minimum_required(VERSION 3.20)\n'
+                'macro(cmake_minimum_required)\n'
+                '  if(NOT "${ARGV}" STREQUAL "VERSION;3.21")\n'
+                '    message(FATAL_ERROR "Unexpected Windows fixture version requirement")\n'
+                '  endif()\n'
+                'endmacro()\n')
+            wrapper = root / "driver boundary.cmake"
+            wrapper.write_text(
+                boundary +
+                'macro(execute_process)\n'
+                '  set(_arguments ${ARGV})\n'
+                f'  if(NOT [==[{info_argument}]==] IN_LIST _arguments)\n'
+                '    message(FATAL_ERROR "Compiler information was not forwarded")\n'
+                '  endif()\n'
+                '  message(FATAL_ERROR "Configure received outer compiler information")\n'
+                'endmacro()\n'
+                f'include([==[{driver.as_posix()}]==])\n', encoding="utf-8")
+            result = subprocess.run(command[:-2] + ["-P", str(wrapper)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Configure received outer compiler information", result.stderr)
+            result = subprocess.run([arg for arg in command[:-2] if arg != info_argument]
+                                    + ["-P", str(wrapper)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Pass NETWORK_TEST_COMPILER_INFO", result.stderr)
+
+            # Inspect restored metadata at project(), which normally enables
+            # CXX. Replacing only that boundary keeps this contract compiler-free.
+            wrapper = root / "project boundary.cmake"
+            wrapper.write_text(
+                boundary +
+                'macro(project)\n'
+                '  if(NOT CMAKE_CXX_COMPILER STREQUAL "outer-compiler"\n'
+                '     OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "outer-id"\n'
+                '     OR NOT CMAKE_CXX_COMPILER_ID_RUN OR CMAKE_CXX_COMPILER_LOADED\n'
+                '     OR NOT CMAKE_CXX_COMPILER_WORKS OR NOT CMAKE_CXX_ABI_COMPILED\n'
+                '     OR NOT CMAKE_CXX_COMPILE_FEATURES STREQUAL "outer-features"\n'
+                '     OR NOT CMAKE_CXX_IMPLICIT_LINK_LIBRARIES STREQUAL "outer-libraries"\n'
+                '     OR NOT CMAKE_CXX_COMPILER_FORCED)\n'
+                '    message(FATAL_ERROR "Outer compiler information was not restored")\n'
+                '  endif()\n'
+                '  message(FATAL_ERROR "Project received outer compiler information")\n'
+                'endmacro()\n'
+                f'include([==[{fixture.as_posix()}]==])\n', encoding="utf-8")
+            result = subprocess.run(["cmake", info_argument, "-P", str(wrapper)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Project received outer compiler information", result.stderr)
+            for contents in (None, 'set(CMAKE_CXX_COMPILER "outer-compiler")\n'):
+                with self.subTest(contents=contents):
+                    if contents is None:
+                        info.unlink()
+                    else:
+                        info.write_text(contents, encoding="utf-8")
+                    result = subprocess.run(["cmake", info_argument, "-P", str(wrapper)],
+                                            capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("Project received outer compiler information", result.stderr)
+
     def test_borrowed_source_contracts_share_an_effective_resource_lock(self):
         production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         start = production.index("    add_test(\n        NAME RmlUiSourceScriptContract")
