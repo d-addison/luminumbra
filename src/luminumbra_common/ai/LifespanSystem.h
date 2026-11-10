@@ -35,6 +35,8 @@
 // creature-repro+16, fire+17, soil+18, pollination+19, disease+20 taken;
 // LIFESPAN CLAIMS +22 (reserved; unused — death is a deterministic threshold).
 
+#include "CreatureTickAdmission.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -43,6 +45,8 @@
 
 #include "../components/CreatureComponents.h" // CreatureComponent (starvation + carcass seam)
 #include "../components/MortalComponents.h"   // MortalComponent (the opt-in)
+
+#include "../systems/RegionConsumerGate.h"
 
 namespace luminumbra::ai {
 
@@ -67,13 +71,25 @@ struct LifespanStats {
 // of registry state. id-ordered so the death-marking order (and thus any derived
 // telemetry) is deterministic. No creation/destruction -> no two-phase needed,
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
-inline LifespanStats RunLifespanOnTick(entt::registry& reg, std::uint64_t /*tick*/ = 0) {
+inline LifespanStats RunLifespanOnTick(entt::registry& reg,
+                                       std::uint64_t /*tick*/ = 0,
+                                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                                       const CreatureTickAdmission* admission = nullptr) {
     LifespanStats stats;
 
     auto view = reg.view<Comp::MortalComponent>();
 
     // id-ordered traversal so death-marking is deterministic / order-stable.
-    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::vector<entt::entity> ents;
+    for (auto e : view) {
+        // Creature decisions survive movement across an owner boundary within this tick.
+        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
+                                 ? admission->Allows(e)
+                                 : gate.Allows(e);
+        if (allowed) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });

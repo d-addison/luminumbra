@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <deque>
 #include <fstream>
+#include <iosfwd>
 #include <memory>
 #include <optional>
 #include <string>
@@ -305,8 +306,7 @@ private:
 };
 
 // --- Reader: sequential read on playback. -----------------------------------
-// Parses the whole stream up front (replay files are small: ~tens of bytes per
-// tick) and exposes the header, the ordered records, and a truncation flag.
+// Owns the parsed header and ordered records, with an explicit truncation flag.
 struct ReplayContents {
     ReplayHeader header;
     std::vector<InputRecord> inputs;           // tick-ordered as recorded
@@ -318,11 +318,29 @@ struct ReplayContents {
     std::uint64_t elided_prefix_digest = 0;    // FNV-1a over elided record bytes
 };
 
-// Reads and parses an LREC1 stream. Returns nullopt only if the file cannot be
-// opened or the HEADER is malformed (not a valid LREC1 stream at all). A stream
-// whose RECORD region is truncated still parses what it can and sets
-// `truncated=true` / `trailer_present=false` -- callers MUST check those.
+// Admission limits for the owned result, independent of encoded file size,
+// recorder queues, and opaque input encoding. Defaults support 1 GiB of field
+// bytes and one million records; callers can explicitly budget larger recordings.
+// Record vectors retain at most twice the record limit in slots (three times
+// during growth). No whole-file or per-frame payload buffer is retained.
+// Allocator bookkeeping is additional.
+struct ReplayReadLimits {
+    std::uint64_t field_bytes = std::uint64_t{1} << 30;
+    std::size_t records = 1'000'000;
+};
+
+// The one-argument ReadReplay uses the defaults above. Versions 3 and 4, opaque
+// blobs (including blobs larger than 64 MiB), sparse ticks, and field encodings
+// are unchanged. Limits do not constrain tick values or the encoded file size.
+// Admission, resource, seek, read, and allocation failures return nullopt;
+// malformed record tails retain their parsed prefix with truncated=true.
 std::optional<ReplayContents> ReadReplay(const std::string& path);
+std::optional<ReplayContents> ReadReplay(const std::string& path, ReplayReadLimits limits);
+
+// Reads a seekable binary provider from offset zero through its measured end.
+// The caller retains ownership and must prevent concurrent modification. Stream
+// exceptions are contained by the same refusal boundary as file reads.
+std::optional<ReplayContents> ReadReplay(std::istream& input, ReplayReadLimits limits = {});
 
 // Returns the input record for `tick`, or nullptr if none was recorded. O(n)
 // scan; replay drives ticks in order so callers typically iterate `inputs`.
