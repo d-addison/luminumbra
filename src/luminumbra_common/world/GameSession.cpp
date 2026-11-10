@@ -547,6 +547,22 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
+namespace {
+
+// Captures this tick's creature admission before any movement, reusing the cache in the
+// registry context. Returns null when active regions are off, so every creature runs.
+luminumbra::ai::CreatureTickAdmission* CaptureCreatureTickAdmission(
+    entt::registry& registry, bool active_regions_enabled, const RegionConsumerGate& gate) {
+    if (!active_regions_enabled) {
+        return nullptr;
+    }
+    auto& admission = registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
+    admission.Capture(registry, gate);
+    return &admission;
+}
+
+} // namespace
+
 std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
@@ -610,12 +626,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_activeRegionsEnabled
                     ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
                     : RegionConsumerGate{};
-            luminumbra::ai::CreatureTickAdmission* creature_admission = nullptr;
-            if (m_activeRegionsEnabled) {
-                creature_admission =
-                    &m_registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
-                creature_admission->Capture(m_registry, foliage_gate);
-            }
+            luminumbra::ai::CreatureTickAdmission* const creature_admission =
+                CaptureCreatureTickAdmission(m_registry, m_activeRegionsEnabled, foliage_gate);
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
             m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
             // Deterministic per-tick system order. The ordered event bus drains everything
