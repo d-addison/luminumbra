@@ -93,8 +93,9 @@ def contain_path(root: Path, path: Path) -> Path:
             path = candidate
             continue
         # Junctions are reparse points rather than symbolic-link file modes.
-        if not (stat.S_ISLNK(status.st_mode)
-                or getattr(status, "st_file_attributes", 0) & 0x400):
+        # Windows reports None attributes for statuses without that field.
+        attributes = getattr(status, "st_file_attributes", None) or 0
+        if not (stat.S_ISLNK(status.st_mode) or attributes & 0x400):
             path = candidate
             continue
         if candidate in active:
