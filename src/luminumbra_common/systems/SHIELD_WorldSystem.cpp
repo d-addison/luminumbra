@@ -614,6 +614,9 @@ std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     // Teardown fences every owned callback without publishing or admitting work.
     quiesce_streaming_jobs_for_save();
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
@@ -663,6 +666,10 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
             chunk->pending_generation_ready.store(false, std::memory_order_release);
             if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
                 chunk->set_state(Luminumbra::ChunkState::Idle);
+            }
+            if (m_far_world_changes) {
+                m_far_world_changes->notify(chunk->get_coords(),
+                                            World::FarWorldAuthorityChange::Membership);
             }
             // Publish invalidation with authority, never from the generating job.
             const auto it = m_streaming_state.chunks.find(chunk->get_id());
@@ -6440,6 +6447,9 @@ void SHIELD_WorldSystem::set_seed(int seed) {
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     wait_for_streaming_jobs();
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
 
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
@@ -6846,11 +6856,46 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
     }
 }
 
+bool SHIELD_WorldSystem::set_far_world_authority_changes(
+    std::shared_ptr<World::FarWorldAuthorityChanges> changes) {
+    wait_for_streaming_jobs();
+    if (changes == m_far_world_changes) {
+        return true;
+    }
+    if (changes) {
+        const auto limit = changes->record_limit();
+        if (m_streaming_state.chunks.size() > limit ||
+            m_parked.size() > limit - m_streaming_state.chunks.size()) {
+            return false;
+        }
+    }
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
+    m_far_world_changes = std::move(changes);
+    if (!m_far_world_changes) {
+        return true;
+    }
+    // One bounded inventory at attachment; ticks consume only typed changes.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        m_far_world_changes->membership(chunk, false, true);
+    }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        m_far_world_changes->membership(parked.chunk, true, true);
+    }
+    return true;
+}
+
 void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
                                            bool parked,
                                            bool present) {
     if (!chunk)
         return;
+    if (m_far_world_changes) {
+        m_far_world_changes->membership(chunk, parked, present);
+    }
     // Every resident chunk reports water changes, so ownership promotion visits only the chunks
     // that changed. The regional membership index below stays durable-residency only.
     if (present)
