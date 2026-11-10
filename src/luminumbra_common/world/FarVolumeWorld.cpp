@@ -4,6 +4,7 @@
 
 #include "luminumbra/core/Types.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/FarLodStore.h"
 #include "world/FarVolumeMemory.h"
 #include "world/FarVolumeMesher.h"
 #include "world/FarVolumeTile.h"
@@ -14,6 +15,59 @@
 #include <new>
 
 namespace Luminumbra::World {
+namespace {
+std::uint64_t ScopedIdentity(const Systems::SHIELD_WorldSystem& world,
+                             FarCaveMode caves,
+                             FarVolumeNumericProfile numeric,
+                             int water_resolution) {
+    const auto& params = world.get_params();
+    if ((caves != FarCaveMode::BandLimited && caves != FarCaveMode::BoxFiltered) ||
+        (numeric != FarVolumeNumericProfile::RawFloat &&
+         numeric != FarVolumeNumericProfile::LegacySigned16) ||
+        (water_resolution != 4 && water_resolution != 8 && water_resolution != 16 &&
+         water_resolution != 32) ||
+        ((params.biomes_enabled || params.structures_enabled) && !params.worldgen_dependencies)) {
+        return 0;
+    }
+    auto identity = ComputeTerrainParamsHash(params, world.get_seed());
+    const auto mix = [&identity](std::uint64_t value) {
+        for (unsigned byte = 0; byte < 8; ++byte) {
+            identity ^= (value >> (8u * byte)) & 255u;
+            identity *= 1099511628211ULL;
+        }
+    };
+    mix(static_cast<std::uint64_t>(params.surface_sampling_revision));
+    mix(params.biomes_enabled ? 1u : 0u);
+    mix(params.structures_enabled ? 1u : 0u);
+    mix(static_cast<std::uint8_t>(caves));
+    mix(static_cast<std::uint8_t>(numeric));
+    mix(static_cast<std::uint64_t>(water_resolution));
+    mix(params.worldgen_dependencies ? 1u : 0u);
+    if (params.worldgen_dependencies) {
+        const auto& manifest = params.worldgen_dependencies->manifest;
+        mix(manifest.size());
+        for (const auto& record : manifest) {
+            mix(record.size());
+            for (const auto& field : record) {
+                mix(field.size());
+                for (const char byte : field) {
+                    identity ^= static_cast<unsigned char>(byte);
+                    identity *= 1099511628211ULL;
+                }
+            }
+        }
+    }
+    return identity;
+}
+} // namespace
+
+std::uint64_t WorldFarVolumeIdentity(const Systems::SHIELD_WorldSystem& world,
+                                     FarCaveMode caves,
+                                     FarVolumeNumericProfile numeric,
+                                     int water_resolution) {
+    const auto scope = world.acquire_worldgen_sample_scope();
+    return ScopedIdentity(world, caves, numeric, water_resolution);
+}
 
 FarFrozenCaptureError
 CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
@@ -24,6 +78,14 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
                                  std::shared_ptr<const FarFrozenObservation>& output) {
     try {
         const auto scope = world.acquire_worldgen_sample_scope();
+        if (source.use == FarFrozenUse::SessionRender &&
+            (source.pristine.field_identity == 0 ||
+             source.pristine.field_identity != ScopedIdentity(world,
+                                                              source.pristine.caves,
+                                                              source.pristine.numeric,
+                                                              source.session_water_resolution))) {
+            return FarFrozenCaptureError::IdentityMismatch;
+        }
         const auto height_sampler = [&world](std::int64_t x, std::int64_t z) {
             return world.GetTerrainHeightAt(static_cast<float>(x), static_cast<float>(z));
         };
@@ -52,6 +114,7 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
         production.durable = source.durable;
         production.content_identity = source.content_identity;
         production.use = source.use;
+        production.session_water_resolution = source.session_water_resolution;
         const auto borrow = [](auto& target, const auto& callback) {
             if (callback)
                 target = std::cref(callback);

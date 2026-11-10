@@ -1,5 +1,6 @@
 #include "FarWorldAuthorityProducer.h"
 #include "Chunk.h"
+#include "systems/SHIELD_WorldSystem.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -125,6 +126,181 @@ Validate(const Chunk& chunk, bool terrain, bool water, std::uint64_t limit, std:
         }
     }
     return Producer::Error::None;
+}
+
+std::int64_t Floor(std::int64_t value, int edge) {
+    const auto quotient = value / edge;
+    return quotient - (value % edge < 0 ? 1 : 0);
+}
+struct FrozenRecord {
+    IVec3 coords{};
+    unsigned layer = 0;
+    bool terrain = false;
+    int resolution = 0;
+    std::span<const float> sdf;
+    std::span<const std::uint8_t> material;
+    std::span<const std::int32_t> bed, depth;
+};
+auto RecordKey(const FrozenRecord& record) {
+    return std::tuple(record.layer, record.coords.x, record.coords.z, record.coords.y);
+}
+bool ValidRecord(const FrozenRecord& record) {
+    constexpr std::size_t samples =
+        std::size_t{CHUNK_SIZE_X + 1} * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    return !record.terrain || (record.sdf.size() == samples &&
+                               (record.material.empty() || record.material.size() == samples) &&
+                               std::all_of(record.sdf.begin(), record.sdf.end(), [](float value) {
+                                   return std::isfinite(value);
+                               }));
+}
+bool ValidWater(const FrozenRecord& record) {
+    if (record.resolution != 4 && record.resolution != 8 && record.resolution != 16 &&
+        record.resolution != 32) {
+        return false;
+    }
+    const auto cells = std::size_t(record.resolution) * std::size_t(record.resolution);
+    return record.bed.size() == cells && record.depth.size() == cells &&
+           std::all_of(record.depth.begin(), record.depth.end(), [](std::int32_t value) {
+               return value >= 0;
+           });
+}
+FarVolumeSample Node(const FrozenRecord& record, const FarVolumePosition& p) {
+    const auto index = static_cast<std::size_t>(
+        p.x - std::int64_t(record.coords.x) * CHUNK_SIZE_X +
+        (CHUNK_SIZE_X + 1) *
+            (p.y - std::int64_t(record.coords.y) * CHUNK_SIZE_Y +
+             (CHUNK_SIZE_Y + 1) * (p.z - std::int64_t(record.coords.z) * CHUNK_SIZE_Z)));
+    const auto density = record.sdf[index];
+    return {density == 0 ? 0.0f : density,
+            record.material.empty() ? std::uint8_t{0} : record.material[index]};
+}
+bool SharedNodesAgree(std::span<const FrozenRecord> records, const FrozenRecord& record) {
+    // At most 26 neighbours per record; each intersection has at most 17x17
+    // lod-0 nodes. Validate even nodes skipped by the requested far-tier lattice.
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto key = std::tuple(record.layer,
+                                            std::int64_t(record.coords.x) + dx,
+                                            std::int64_t(record.coords.z) + dz,
+                                            std::int64_t(record.coords.y) + dy);
+                if (key <= RecordKey(record)) {
+                    continue;
+                }
+                const auto found = std::lower_bound(records.begin(),
+                                                    records.end(),
+                                                    key,
+                                                    [](const auto& candidate, const auto& value) {
+                                                        return RecordKey(candidate) < value;
+                                                    });
+                if (found == records.end() || RecordKey(*found) != key || !found->terrain) {
+                    continue;
+                }
+                const FarVolumePosition lo{
+                    std::int64_t(std::max(record.coords.x, found->coords.x)) * CHUNK_SIZE_X,
+                    std::int64_t(std::max(record.coords.y, found->coords.y)) * CHUNK_SIZE_Y,
+                    std::int64_t(std::max(record.coords.z, found->coords.z)) * CHUNK_SIZE_Z};
+                const FarVolumePosition hi{
+                    (std::int64_t(std::min(record.coords.x, found->coords.x)) + 1) * CHUNK_SIZE_X,
+                    (std::int64_t(std::min(record.coords.y, found->coords.y)) + 1) * CHUNK_SIZE_Y,
+                    (std::int64_t(std::min(record.coords.z, found->coords.z)) + 1) * CHUNK_SIZE_Z};
+                for (auto z = lo.z; z <= hi.z; ++z) {
+                    for (auto y = lo.y; y <= hi.y; ++y) {
+                        for (auto x = lo.x; x <= hi.x; ++x) {
+                            if (Node(record, {x, y, z}) != Node(*found, {x, y, z})) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+FarFrozenOverride<FarVolumeSample> TerrainAt(std::span<const FrozenRecord> records,
+                                             unsigned layer,
+                                             const FarVolumePosition& position) {
+    FarFrozenOverride<FarVolumeSample> result;
+    const auto cx = Floor(position.x, CHUNK_SIZE_X), cy = Floor(position.y, CHUNK_SIZE_Y),
+               cz = Floor(position.z, CHUNK_SIZE_Z);
+    // Closed lod-0 lattices: at most eight contributors, including negative boundaries.
+    for (auto z = cz - (position.z % CHUNK_SIZE_Z == 0 ? 1 : 0); z <= cz; ++z) {
+        for (auto y = cy - (position.y % CHUNK_SIZE_Y == 0 ? 1 : 0); y <= cy; ++y) {
+            for (auto x = cx - (position.x % CHUNK_SIZE_X == 0 ? 1 : 0); x <= cx; ++x) {
+                const auto key = std::tuple(layer, x, z, y);
+                const auto found = std::lower_bound(
+                    records.begin(), records.end(), key, [](const auto& record, const auto& value) {
+                        return RecordKey(record) < value;
+                    });
+                if (found == records.end() || RecordKey(*found) != key || !found->terrain) {
+                    continue;
+                }
+                // Every requested position is an integer lod-0 node. This is the
+                // existing edited interpolation's exact-node and material-tie result.
+                const auto sample = Node(*found, position);
+                if (result.presence == FarFrozenPresence::Present && result.sample != sample) {
+                    return {FarFrozenPresence::Unavailable, {}};
+                }
+                result = {FarFrozenPresence::Present, sample};
+            }
+        }
+    }
+    return result;
+}
+FarFrozenOverride<FarFrozenWaterSample> WaterAt(std::span<const FrozenRecord* const> records,
+                                                unsigned layer,
+                                                std::int64_t x,
+                                                std::int64_t z) {
+    const auto cx = Floor(x, CHUNK_SIZE_X), cz = Floor(z, CHUNK_SIZE_Z);
+    const auto key = std::tuple(layer, cx, cz);
+    const auto found = std::lower_bound(
+        records.begin(), records.end(), key, [](const auto* record, const auto& value) {
+            return std::tuple(record->layer, record->coords.x, record->coords.z) < value;
+        });
+    if (found == records.end() ||
+        std::tuple((*found)->layer, (*found)->coords.x, (*found)->coords.z) != key) {
+        return {};
+    }
+    const auto& record = **found;
+    // Water cells own half-open XZ supports. Exact chunk edges select the
+    // positive-side owner, independently of lookup order or residency.
+    const auto ix = (x - cx * CHUNK_SIZE_X) * record.resolution / CHUNK_SIZE_X;
+    const auto iz = (z - cz * CHUNK_SIZE_Z) * record.resolution / CHUNK_SIZE_Z;
+    const auto cell = static_cast<std::size_t>(ix + iz * record.resolution);
+    const bool wet = record.depth[cell] > 0;
+    return {FarFrozenPresence::Present,
+            {wet,
+             wet ? static_cast<float>(std::int64_t(record.bed[cell]) + record.depth[cell]) / 1000.0f
+                 : 0.0f}};
+}
+std::optional<FarFrozenWaterSample> BaseWater(const Systems::SHIELD_WorldSystem& world,
+                                              int resolution,
+                                              std::int64_t x,
+                                              std::int64_t z) {
+    const auto center = [resolution](std::int64_t value, int edge) {
+        const auto chunk = Floor(value, edge);
+        const auto cell = (value - chunk * edge) * resolution / edge;
+        return static_cast<float>(chunk * edge) +
+               (static_cast<float>(cell) + 0.5f) *
+                   (static_cast<float>(edge) / static_cast<float>(resolution));
+    };
+    const auto wx = center(x, CHUNK_SIZE_X), wz = center(z, CHUNK_SIZE_Z);
+    const float terrain = world.GetTerrainHeightAt(wx, wz), rest = world.WaterLevelAt(wx, wz);
+    if (!std::isfinite(terrain) || !std::isfinite(rest)) {
+        return {};
+    }
+    const auto quantize = [](double value) {
+        return static_cast<std::int32_t>(
+            std::clamp(value,
+                       static_cast<double>(std::numeric_limits<std::int32_t>::min()),
+                       static_cast<double>(std::numeric_limits<std::int32_t>::max())));
+    };
+    const auto bed = quantize(std::round(terrain * 1000.0f));
+    const auto depth =
+        std::max(0, quantize(std::round(static_cast<double>(rest - terrain) * 1000)));
+    return FarFrozenWaterSample{
+        depth > 0, depth > 0 ? static_cast<float>(std::int64_t(bed) + depth) / 1000.0f : 0.0f};
 }
 } // namespace
 
@@ -552,5 +728,149 @@ FarWorldAuthorityProducer::CaptureStatus FarWorldAuthorityProducer::capture_stat
 }
 const std::string& FarWorldAuthorityProducer::capture_read_error() const {
     return impl_->read_error;
+}
+
+FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_frozen(
+    const Systems::SHIELD_WorldSystem& world,
+    const FarVolumeRequest& request,
+    const FrozenPolicy& policy,
+    const FarFrozenCaptureLimits& limits,
+    const std::shared_ptr<FarVolumeMemoryPool>& pool,
+    std::shared_ptr<const FarFrozenObservation>& output) const {
+    const auto* source = capture();
+    if (impl_->error != Error::None) {
+        return {impl_->error, FarFrozenCaptureError::None};
+    }
+    if (!source || !impl_->source_ready || impl_->paused ||
+        source->committed.membership == Save::AuthorityMembership::Unavailable) {
+        return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+    }
+    if (policy.water_resolution != 4 && policy.water_resolution != 8 &&
+        policy.water_resolution != 16 && policy.water_resolution != 32) {
+        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+    }
+    const auto tier = FarTierAt(request.key.tier);
+    if (!tier || request.key.x <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+        request.key.x >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+        request.key.z <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+        request.key.z >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters) {
+        return {Error::None, FarFrozenCaptureError::InvalidRegion};
+    }
+    const auto edge = std::int64_t(tier->tile_edge_meters),
+               step = std::int64_t(tier->sample_spacing_meters);
+    const auto& window = source->window;
+    // Lower shared lattice contributors must also have been copied at the source boundary.
+    if (Floor(request.key.x * edge - step - 1, CHUNK_SIZE_X) < window.min_chunk_x ||
+        Floor((request.key.x + 1) * edge + step, CHUNK_SIZE_X) > window.max_chunk_x ||
+        Floor(request.key.z * edge - step - 1, CHUNK_SIZE_Z) < window.min_chunk_z ||
+        Floor((request.key.z + 1) * edge + step, CHUNK_SIZE_Z) > window.max_chunk_z) {
+        return {Error::InvalidWindow, FarFrozenCaptureError::None};
+    }
+    if (source->published.size() > 2u * kSlots || source->committed.chunks.size() > kSlots) {
+        return {Error::None, FarFrozenCaptureError::WorkLimit};
+    }
+    // Fixed scratch: two published owners per index slot plus 512 committed records.
+    std::array<FrozenRecord, 3u * kSlots> storage{};
+    std::array<const FrozenRecord*, 3u * kSlots> water_storage{};
+    std::size_t count = 0, water_count = 0;
+    for (const auto& image : source->published) {
+        storage[count++] = {image.coords,
+                            image.parked ? 1u : 0u,
+                            image.terrain_authority,
+                            image.water_authority ? image.water_resolution : 0,
+                            image.sdf,
+                            image.material,
+                            image.bed,
+                            image.depth};
+    }
+    for (const auto& chunk : source->committed.chunks) {
+        if (!chunk) {
+            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+        }
+        storage[count++] = {chunk->get_coords(),
+                            2,
+                            chunk->has_terrain_authority(),
+                            chunk->has_water_authority() ? chunk->current_water_resolution.load()
+                                                         : 0,
+                            chunk->sdf_data,
+                            chunk->material_data,
+                            chunk->water_bed_mm,
+                            chunk->water_depth_mm};
+    }
+    const std::span<FrozenRecord> records(storage.data(), count);
+    std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+        return RecordKey(a) < RecordKey(b);
+    });
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& record = records[i];
+        if (!ValidRecord(record) || (i != 0 && RecordKey(records[i - 1]) == RecordKey(record))) {
+            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+        }
+        if (record.resolution != 0) {
+            if (!ValidWater(record)) {
+                return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+            }
+            water_storage[water_count++] = &record;
+        }
+    }
+    const std::span<const FrozenRecord* const> water_records(water_storage.data(), water_count);
+    for (const auto& record : records) {
+        if (record.terrain && !SharedNodesAgree(records, record)) {
+            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+        }
+    }
+    for (std::size_t i = 1; i < water_count; ++i) {
+        const auto& a = *water_records[i - 1];
+        const auto& b = *water_records[i];
+        if (a.layer == b.layer && a.coords.x == b.coords.x && a.coords.z == b.coords.z) {
+            return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+        }
+    }
+    const auto committed = [&records](std::uint8_t, const FarVolumePosition& p) {
+        return TerrainAt(records, 2, p);
+    };
+    const auto parked = [&records](std::uint8_t, const FarVolumePosition& p) {
+        return TerrainAt(records, 1, p);
+    };
+    const auto live = [&records](std::uint8_t, const FarVolumePosition& p) {
+        return TerrainAt(records, 0, p);
+    };
+    bool water_failed = false;
+    const auto water = [&](std::int64_t x, std::int64_t z) -> std::optional<FarFrozenWaterSample> {
+        const auto value = WaterAt(water_records, 2, x, z);
+        const auto result = value.presence == FarFrozenPresence::Present
+                                ? std::optional{value.sample}
+                                : BaseWater(world, policy.water_resolution, x, z);
+        water_failed = water_failed || !result;
+        return result;
+    };
+    const auto parked_water = [&water_records](std::int64_t x, std::int64_t z) {
+        return WaterAt(water_records, 1, x, z);
+    };
+    const auto live_water = [&water_records](std::int64_t x, std::int64_t z) {
+        return WaterAt(water_records, 0, x, z);
+    };
+    FarFrozenCaptureSource frozen;
+    frozen.pristine.field_identity = policy.pristine_identity;
+    frozen.pristine.caves = policy.caves;
+    frozen.pristine.numeric = policy.numeric;
+    frozen.durable = {source->committed.generation, FarEditedImageState::Committed};
+    frozen.content_identity = policy.pristine_identity;
+    frozen.use = FarFrozenUse::SessionRender;
+    frozen.session_water_resolution = policy.water_resolution;
+    frozen.committed = std::cref(committed);
+    frozen.parked = std::cref(parked);
+    frozen.live = std::cref(live);
+    frozen.water = std::cref(water);
+    frozen.parked_water = std::cref(parked_water);
+    frozen.live_water = std::cref(live_water);
+    auto bounded = limits;
+    // In addition to the frozen seam, base water may call both pristine height
+    // and rest-level projection once per column. Admit their worst case too.
+    bounded.max_height_samples /= 2;
+    bounded.max_water_samples /= 3;
+    const auto error =
+        CaptureWorldFarVolumeObservation(world, request, frozen, bounded, pool, output);
+    return {water_failed ? Error::WaterUnavailable : Error::None, error};
 }
 } // namespace Luminumbra::World

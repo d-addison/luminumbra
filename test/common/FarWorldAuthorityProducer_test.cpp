@@ -582,4 +582,225 @@ TEST_F(FarWorldSourceCaptureTest, MalformedVolatileCaptureRefusesBeforeReadingAn
     producer.pump_capture();
     ASSERT_NE(producer.capture(), nullptr);
 }
+
+class FarWorldFrozenComposeTest : public testing::Test {
+protected:
+    std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("frozen_compose_");
+    Producer producer{{512, 4u * 1024u * 1024u, 8192}};
+    Save::AuthorityReadLimits reads{
+        64, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    World::FarFrozenCaptureLimits limits{1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
+    std::shared_ptr<World::FarVolumeMemoryPool> pool =
+        std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+    std::unique_ptr<Systems::SHIELD_WorldSystem> world;
+    Producer::FrozenPolicy policy;
+    void SetUp() override {
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.caves_enabled = false;
+        params.base_amplitude = params.peaks_amplitude = 0;
+        params.continental_spline = {{-1, 0}, {1, 0}};
+        world = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+        policy = {World::WorldFarVolumeIdentity(*world,
+                                                World::FarCaveMode::BandLimited,
+                                                World::FarVolumeNumericProfile::RawFloat,
+                                                4),
+                  World::FarCaveMode::BandLimited,
+                  World::FarVolumeNumericProfile::RawFloat,
+                  4};
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+    void Capture(const WorldStreamingState& disk) {
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.configure_capture({reads, 4}));
+        const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_NE(producer.capture(), nullptr);
+    }
+    World::FarVolumeRequest Request(std::int64_t x = 0) const {
+        return {{1, x, 0}, {-16, 16}, policy.pristine_identity};
+    }
+    Producer::FrozenResult Compose(std::shared_ptr<const World::FarFrozenObservation>& output,
+                                   std::int64_t x = 0) {
+        return producer.compose_frozen(*world, Request(x), policy, limits, pool, output);
+    }
+};
+
+TEST_F(FarWorldFrozenComposeTest, OwnedSessionLayersComposeTerrainWaterAndDryWithoutRereading) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0}, 3)));
+    ASSERT_TRUE(disk.insert_chunk(Edited({2, 0, 0}, 6)));
+    auto live = Edited({0, 0, 0}, 9);
+    auto parked = Edited({1, 0, 0}, 8);
+    live->set_water_authority();
+    live->current_water_resolution.store(4);
+    live->water_bed_mm.assign(16, 1000);
+    live->water_depth_mm.assign(16, 2000);
+    producer.changes()->membership(live, false, true);
+    producer.changes()->membership(parked, true, true);
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    live->sdf_data.assign(live->sdf_data.size(), 20);
+    live->water_depth_mm.assign(16, 7000);
+    parked->sdf_data.assign(parked->sdf_data.size(), 21);
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    const auto result = Compose(image);
+    ASSERT_TRUE(result.ok()) << static_cast<int>(result.capture);
+    ASSERT_TRUE(image);
+    EXPECT_EQ(image->use(), World::FarFrozenUse::SessionRender);
+    EXPECT_EQ(image->durable_identity().generation, producer.capture()->committed.generation);
+    EXPECT_EQ(image->Sample(1, {4, 4, 4}), (std::optional<World::FarVolumeSample>{{9, 0}}));
+    EXPECT_EQ(image->Sample(1, {20, 4, 4}), (std::optional<World::FarVolumeSample>{{8, 0}}));
+    EXPECT_EQ(image->Sample(1, {36, 4, 4}), (std::optional<World::FarVolumeSample>{{6, 0}}));
+    EXPECT_EQ(image->WaterSample(0, 4, 4), (std::optional<World::FarFrozenWaterSample>{{true, 3}}));
+    EXPECT_EQ(image->WaterSample(0, 100, 100),
+              (std::optional<World::FarFrozenWaterSample>{{false, 0}}));
+    const auto fingerprint = image->content_identity();
+    producer.invalidate_source();
+    EXPECT_EQ(image->content_identity(), fingerprint);
+    EXPECT_EQ(image->Sample(1, {4, 4, 4}), (std::optional<World::FarVolumeSample>{{9, 0}}));
+}
+
+TEST_F(FarWorldFrozenComposeTest, NegativeOffLatticeSharedConflictRefusesWithoutReplacingImage) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image, -1).ok());
+    producer.changes()->membership(Edited({-2, 0, 0}, 1), false, true);
+    auto neighbour = Edited({-1, 0, 0}, 1);
+    producer.changes()->membership(neighbour, false, true);
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(Compose(image, -1).ok());
+    const auto accepted = image;
+    // The requested four-metre grid never visits this shared node.
+    neighbour->sdf_data[(CHUNK_SIZE_X + 1) * (1 + CHUNK_SIZE_Y + 1)] = 2;
+    neighbour->mark_voxel_data_dirty();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto bytes = pool->used();
+    const auto result = Compose(image, -1);
+    EXPECT_EQ(result.source, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(image, accepted);
+    EXPECT_EQ(pool->used(), bytes);
+}
+
+TEST_F(FarWorldFrozenComposeTest, IntegerWaterLayersUseDryOverridesHalfOpenEdgesAndBaseProjection) {
+    const auto water_chunk = [](const IVec3& coords, std::int32_t bed, std::int32_t depth) {
+        auto chunk = Edited(coords);
+        chunk->set_water_authority();
+        chunk->current_water_resolution.store(4);
+        chunk->water_bed_mm.assign(16, bed);
+        chunk->water_depth_mm.assign(16, depth);
+        return chunk;
+    };
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(water_chunk({0, 0, 0}, 5000, 1000)));
+    ASSERT_TRUE(disk.insert_chunk(water_chunk({2, 0, 0}, 6000, 1000)));
+    producer.changes()->membership(water_chunk({0, 0, 0}, 9000, 0), false, true);
+    producer.changes()->membership(water_chunk({1, 0, 0}, 7000, 1000), true, true);
+    producer.changes()->membership(water_chunk({-1, 0, 0}, -3000, 1000), false, true);
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    EXPECT_EQ(image->WaterSample(0, 4, 4),
+              (std::optional<World::FarFrozenWaterSample>{{false, 0}}));
+    EXPECT_EQ(image->WaterSample(0, 16, 4),
+              (std::optional<World::FarFrozenWaterSample>{{true, 8}}));
+    EXPECT_EQ(image->WaterSample(0, 36, 4),
+              (std::optional<World::FarFrozenWaterSample>{{true, 7}}));
+    EXPECT_EQ(image->WaterSample(0, -4, 4),
+              (std::optional<World::FarFrozenWaterSample>{{true, -2}}));
+    auto params = world->get_params();
+    params.height_offset = -1;
+    world->set_params(params);
+    policy.pristine_identity =
+        World::WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, 4);
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    ASSERT_TRUE(Compose(image).ok());
+    EXPECT_EQ(image->WaterSample(0, 100, 100),
+              (std::optional<World::FarFrozenWaterSample>{{true, 256}}));
+}
+
+TEST_F(FarWorldFrozenComposeTest, PartialAndAmbiguousExpectedWaterRefusesInsteadOfBecomingBase) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    const auto accepted = image;
+    auto chunk = Edited({0, 0, 0});
+    chunk->set_water_authority();
+    chunk->current_water_resolution.store(4);
+    chunk->water_bed_mm.assign(16, 1000);
+    chunk->water_depth_mm.assign(15, 0);
+    producer.changes()->membership(chunk, false, true);
+    producer.pump_capture();
+    EXPECT_EQ(Compose(image).source, Producer::Error::WaterUnavailable);
+    EXPECT_EQ(image, accepted);
+    chunk->water_depth_mm.assign(16, 0);
+    chunk->mark_water_state_dirty();
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(Compose(image).ok());
+    ASSERT_TRUE(disk.insert_chunk(chunk));
+    auto other = Edited({0, 1, 0});
+    other->set_water_authority();
+    other->current_water_resolution.store(4);
+    other->water_bed_mm.assign(16, 1000);
+    other->water_depth_mm.assign(16, 0);
+    ASSERT_TRUE(disk.insert_chunk(other));
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto dry = image;
+    EXPECT_EQ(Compose(image).source, Producer::Error::WaterUnavailable);
+    EXPECT_EQ(image, dry);
+}
+
+TEST_F(FarWorldFrozenComposeTest, HaloIdentityWorkAndMemoryRefusalsPreserveAcceptedOutput) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    EXPECT_EQ(image->WaterCapability(0), World::FarFrozenWaterCapability::ExplicitlyDry);
+    const auto accepted = image;
+    const auto bytes = pool->used();
+    EXPECT_EQ(Compose(image, 2).source, Producer::Error::InvalidWindow);
+    auto request = Request();
+    request.field_identity ^= 1;
+    EXPECT_EQ(producer.compose_frozen(*world, request, policy, limits, pool, image).capture,
+              World::FarFrozenCaptureError::IdentityMismatch);
+    world->set_seed(2);
+    EXPECT_EQ(Compose(image).capture, World::FarFrozenCaptureError::IdentityMismatch);
+    world->set_seed(1337);
+    for (unsigned cap = 0; cap < 4; ++cap) {
+        auto limited = limits;
+        if (cap == 0) {
+            limited.max_height_samples = 1;
+        } else if (cap == 1) {
+            limited.max_density_samples = 1;
+        } else if (cap == 2) {
+            limited.max_water_samples = 1;
+        } else {
+            limited.max_bytes = 1;
+        }
+        const auto attempts = pool->attempts();
+        EXPECT_EQ(producer.compose_frozen(*world, Request(), policy, limited, pool, image).capture,
+                  cap == 3 ? World::FarFrozenCaptureError::ByteLimit
+                           : World::FarFrozenCaptureError::WorkLimit);
+        EXPECT_EQ(pool->attempts(), attempts);
+        EXPECT_EQ(image, accepted);
+        EXPECT_EQ(pool->used(), bytes);
+    }
+    auto refused = std::make_shared<World::FarVolumeMemoryPool>(0);
+    EXPECT_EQ(producer.compose_frozen(*world, Request(), policy, limits, refused, image).capture,
+              World::FarFrozenCaptureError::ByteLimit);
+    EXPECT_EQ(image, accepted);
+    producer.invalidate_source();
+    EXPECT_EQ(Compose(image).source, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(image, accepted);
+}
 } // namespace
