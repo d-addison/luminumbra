@@ -215,6 +215,18 @@ struct FarWorldAuthorityProducer::Impl {
     std::shared_ptr<FarWorldAuthorityState> state;
     std::shared_ptr<FarWorldAuthorityChanges> changes;
     Save::AuthorityWindowReader reader;
+    CaptureLimits capture_limits{};
+    Save::AuthorityWindow capture_window{};
+    // At most one active and one serving capture. Volatile arrays in each are
+    // bounded by copy_bytes; committed arrays and parser scratch by read limits.
+    // The successor retains only the fixed wanted descriptors, never source data.
+    std::unique_ptr<SourceCapture> active, serving;
+    std::uint64_t serial = 0;
+    std::uint32_t age = 0;
+    Error error = Error::None;
+    std::string read_error;
+    bool configured = false, source_ready = false, queued = false, paused = false,
+         requested = false;
 };
 FarWorldAuthorityProducer::FarWorldAuthorityProducer(const Limits& limits)
     : impl_(std::make_unique<Impl>(limits)) {}
@@ -371,11 +383,174 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window,
 bool FarWorldAuthorityProducer::admit_saved_source(const std::filesystem::path& root,
                                                    const Save::AuthorityReadLimits& limits,
                                                    std::string& error) {
-    return impl_->reader.admit(root, limits, error);
+    if (impl_->paused) {
+        error = "Source reads are paused.";
+        return false;
+    }
+    if (!impl_->reader.admit(root, limits, error)) {
+        return false;
+    }
+    impl_->source_ready = true;
+    if (impl_->requested) {
+        impl_->active.reset();
+        impl_->queued = true;
+    }
+    return true;
 }
 Save::AuthorityWindowResult
 FarWorldAuthorityProducer::read_committed(const Save::AuthorityWindow& window,
                                           const Save::AuthorityReadLimits& limits) const {
+    if (impl_->paused || !impl_->source_ready) {
+        Save::AuthorityWindowResult refused;
+        refused.error = impl_->paused ? "Source reads are paused." : "Source is unavailable.";
+        return refused;
+    }
     return impl_->reader.read(window, limits);
+}
+bool FarWorldAuthorityProducer::configure_capture(const CaptureLimits& limits) {
+    const auto& read = limits.read;
+    if (!ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 || read.members == 0 ||
+        read.records == 0 || read.headers == 0 || read.probes == 0 ||
+        read.compressed_member_bytes == 0 || read.compressed_total_bytes == 0 ||
+        read.decoded_member_bytes == 0 || read.decoded_total_bytes == 0 ||
+        read.control_bytes == 0 || read.compressed_member_bytes > read.compressed_total_bytes ||
+        read.decoded_member_bytes > read.decoded_total_bytes || impl_->active) {
+        return false;
+    }
+    impl_->capture_limits = limits;
+    impl_->configured = true;
+    return true;
+}
+
+bool FarWorldAuthorityProducer::request_capture(std::span<const Save::AuthorityWindow> windows) {
+    if (!impl_->configured || !impl_->source_ready || windows.empty() || windows.size() > kSlots) {
+        return false;
+    }
+    auto combined = windows.front();
+    for (const auto& window : windows) {
+        if (!ValidWindow(window, impl_->state->limits.query_columns)) {
+            return false;
+        }
+        combined.min_chunk_x = std::min(combined.min_chunk_x, window.min_chunk_x);
+        combined.max_chunk_x = std::max(combined.max_chunk_x, window.max_chunk_x);
+        combined.min_chunk_z = std::min(combined.min_chunk_z, window.min_chunk_z);
+        combined.max_chunk_z = std::max(combined.max_chunk_z, window.max_chunk_z);
+    }
+    if (!ValidWindow(combined, impl_->state->limits.query_columns) || !set_wanted(windows)) {
+        return false;
+    }
+    impl_->requested = true;
+    impl_->capture_window = combined;
+    impl_->queued = true;
+    return true;
+}
+
+bool FarWorldAuthorityProducer::needs_capture_boundary() const {
+    if (!impl_->requested || !impl_->source_ready || impl_->paused || impl_->active) {
+        return false;
+    }
+    const auto& state = *impl_->state;
+    const std::lock_guard lock(state.mutex);
+    return impl_->queued || state.all_dirty || state.overflow || state.pending_count != 0;
+}
+
+void FarWorldAuthorityProducer::pump_capture() {
+    if (!impl_->requested) {
+        return;
+    }
+    const auto dirty = tick();
+    impl_->queued = impl_->queued || dirty.tiles.any();
+    if (impl_->active) {
+        // Check before increment so even the maximum finite deadline cannot wrap.
+        if (impl_->age >= impl_->capture_limits.deadline_frames) {
+            impl_->active.reset();
+            impl_->error = Error::DeadlineExceeded;
+            return;
+        }
+        ++impl_->age;
+        if (impl_->paused) {
+            return;
+        }
+        auto committed = read_committed(impl_->active->window, impl_->capture_limits.read);
+        if (committed.membership == Save::AuthorityMembership::Unavailable) {
+            impl_->active.reset();
+            impl_->error = Error::CommittedReadRefused;
+            impl_->read_error = std::move(committed.error);
+            return;
+        }
+        impl_->active->committed = std::move(committed);
+        impl_->serving = std::move(impl_->active);
+        impl_->error = Error::None;
+        return;
+    }
+    if (impl_->paused || !impl_->queued || !impl_->source_ready) {
+        return;
+    }
+    impl_->queued = false;
+    if (impl_->serial == std::numeric_limits<std::uint64_t>::max()) {
+        impl_->error = Error::AuthorityUnavailable;
+        return;
+    }
+    try {
+        auto candidate = std::make_unique<SourceCapture>();
+        candidate->window = impl_->capture_window;
+        const auto error = copy_published(candidate->window, candidate->published);
+        if (error != Error::None) {
+            impl_->error = error;
+            return;
+        }
+        candidate->serial = ++impl_->serial;
+        impl_->active = std::move(candidate);
+        impl_->age = 1;
+        impl_->error = Error::None;
+        impl_->read_error.clear();
+    } catch (const std::bad_alloc&) {
+        impl_->error = Error::AllocationFailure;
+    }
+}
+
+void FarWorldAuthorityProducer::fence_source_reads(bool paused) {
+    // Reads are synchronous and retain no handles. Returning closes admission;
+    // there are no outstanding completions or workers to discard or join.
+    impl_->paused = paused;
+}
+void FarWorldAuthorityProducer::invalidate_source() {
+    impl_->active.reset();
+    impl_->source_ready = false;
+    impl_->queued = true;
+    impl_->error = Error::AuthorityUnavailable;
+}
+bool FarWorldAuthorityProducer::refresh_saved_source(const std::filesystem::path& root,
+                                                     std::string& error) {
+    if (impl_->paused) {
+        error = "Source reads are paused.";
+        return false;
+    }
+    invalidate_source();
+    const bool admitted = admit_saved_source(root, impl_->capture_limits.read, error);
+    if (!admitted) {
+        impl_->read_error = error;
+    }
+    return admitted;
+}
+const FarWorldAuthorityProducer::SourceCapture* FarWorldAuthorityProducer::capture() const {
+    return impl_->serving.get();
+}
+FarWorldAuthorityProducer::CaptureStatus FarWorldAuthorityProducer::capture_status() const {
+    const auto serving = impl_->serving ? impl_->serving->serial : 0;
+    return {.error = impl_->error,
+            .serving_serial = serving,
+            .target_serial =
+                impl_->queued && impl_->serial < std::numeric_limits<std::uint64_t>::max()
+                    ? impl_->serial + 1
+                    : impl_->serial,
+            .active = impl_->active != nullptr,
+            .queued = impl_->queued,
+            .paused = impl_->paused,
+            .latest_ready = serving != 0 && !impl_->active && !impl_->queued &&
+                            impl_->source_ready && impl_->error == Error::None};
+}
+const std::string& FarWorldAuthorityProducer::capture_read_error() const {
+    return impl_->read_error;
 }
 } // namespace Luminumbra::World
