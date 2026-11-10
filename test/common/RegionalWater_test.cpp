@@ -358,7 +358,7 @@ TEST(RegionalWaterPlanning, EveryResidentSourceAndDuePermutationProducesTheSameC
     EXPECT_EQ(ledger.encode(), encoded);
 }
 
-TEST(RegionalWaterPlanning, InteriorCadenceAndCommonSeamPhaseExcludeUnavailableOwners) {
+TEST(RegionalWaterPlanning, InteriorAndSeamCadenceExcludeUnavailableOwners) {
     auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
     auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
     records.at({0, 0}).state = RegionState::Reduced;
@@ -376,15 +376,213 @@ TEST(RegionalWaterPlanning, InteriorCadenceAndCommonSeamPhaseExcludeUnavailableO
     schedule.tick = 2;
     EXPECT_TRUE(Planning::Build(residents, {}, ledger, schedule, inputs).participants.empty());
     schedule.tick = 4;
-    const auto common = Planning::Build(residents, {}, ledger, schedule, inputs);
-    ASSERT_EQ(common.faces.size(), 1u);
-    EXPECT_EQ(common.faces[0].common_shift, 2u);
-    EXPECT_TRUE(common.interiors.empty());
-    EXPECT_EQ(common.participants, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
+    const auto off_phase = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_TRUE(off_phase.faces.empty());
+    EXPECT_TRUE(off_phase.interiors.empty());
+    EXPECT_TRUE(off_phase.participants.empty());
     schedule.tick = 3;
     const auto due = Planning::Build(residents, {}, ledger, schedule, inputs);
     EXPECT_EQ(due.interiors, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
-    EXPECT_TRUE(due.faces.empty());
+    ASSERT_EQ(due.faces.size(), 1u);
+    EXPECT_EQ(due.faces[0].common_shift, 2u);
+    EXPECT_EQ(due.participants, due.interiors);
+}
+
+TEST(RegionalWaterPlanning, EveryFaceRequiresBothPersistedPhasesAndScheduleMembership) {
+    struct Cadences {
+        std::uint8_t left_shift, right_shift;
+        std::uint32_t left_phase, right_phase;
+    };
+    for (const auto cadence : {Cadences{0, 0, 0, 0},
+                               Cadences{1, 1, 1, 1},
+                               Cadences{1, 1, 0, 1},
+                               Cadences{2, 1, 3, 1},
+                               Cadences{1, 2, 1, 2},
+                               Cadences{16, 16, 65535, 65535}}) {
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+        auto& records =
+            const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+        records.at({0, 0}).cadence_shift = cadence.left_shift;
+        records.at({0, 0}).cadence_phase = cadence.left_phase;
+        records.at({1, 0}).cadence_shift = cadence.right_shift;
+        records.at({1, 0}).cadence_phase = cadence.right_phase;
+        const auto before = ledger.encode();
+        const std::vector residents{ResidentAt(30), ResidentAt(31), ResidentAt(32), ResidentAt(33)};
+        for (const std::uint64_t tick : {std::uint64_t{0},
+                                         std::uint64_t{1},
+                                         std::uint64_t{2},
+                                         std::uint64_t{3},
+                                         std::uint64_t{4},
+                                         std::uint64_t{5},
+                                         std::uint64_t{6},
+                                         std::uint64_t{7},
+                                         std::uint64_t{65535},
+                                         WorldClock::kTickLimit - 1}) {
+            for (unsigned int membership = 0; membership < 4; ++membership) {
+                SCOPED_TRACE(::testing::Message()
+                             << static_cast<unsigned int>(cadence.left_shift) << ','
+                             << static_cast<unsigned int>(cadence.right_shift) << ','
+                             << cadence.left_phase << ',' << cadence.right_phase << ',' << tick
+                             << ',' << membership);
+                RegionSchedule schedule;
+                schedule.tick = tick;
+                if ((membership & 1u) != 0) {
+                    schedule.due.push_back({0, 0});
+                }
+                if ((membership & 2u) != 0) {
+                    schedule.due.push_back({1, 0});
+                }
+                const bool left_due =
+                    (membership & 1u) != 0 &&
+                    tick % (std::uint64_t{1} << cadence.left_shift) == cadence.left_phase;
+                const bool right_due =
+                    (membership & 2u) != 0 &&
+                    tick % (std::uint64_t{1} << cadence.right_shift) == cadence.right_phase;
+                const auto plan = Planning::Build(
+                    residents, {}, ledger, schedule, {.cell_budget = 10 * kPlanningCapacity});
+                const auto owner_count =
+                    static_cast<std::size_t>(left_due) + static_cast<std::size_t>(right_due);
+                EXPECT_EQ(plan.interiors.size(), 2 * owner_count);
+                EXPECT_EQ(plan.regions.size(), owner_count);
+                EXPECT_EQ(plan.faces.size(), owner_count + (left_due && right_due ? 1u : 0u));
+                EXPECT_EQ(plan.border_windows, left_due && right_due ? 2u : 0u);
+                EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+                EXPECT_EQ(plan.participants, plan.interiors);
+                for (const auto& face : plan.faces) {
+                    EXPECT_TRUE(face.owner.x == 0 ? left_due : right_due);
+                    EXPECT_TRUE(face.neighbor.x == 0 ? left_due : right_due);
+                }
+                EXPECT_LE(plan.total_cells, 10 * kPlanningCapacity);
+                EXPECT_EQ(ledger.encode(), before);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, ThreeWindowsServeEveryEligibleSeamWithinItsFaceCountTicks) {
+    for (const int seam_count : {1, 2, 3, 5}) {
+        for (const bool is_x : {false, true}) {
+            auto ledger = PlanningLedger({});
+            RegionSchedule schedule;
+            std::vector<Planning::Resident> residents;
+            for (int seam = 0; seam < seam_count; ++seam) {
+                for (const int coordinate : {64 * seam + 31, 64 * seam + 32}) {
+                    const RegionKey owner =
+                        is_x ? RegionKey{coordinate / 32, 0} : RegionKey{0, coordinate / 32};
+                    ledger.mark_edited(owner, WorldClock{});
+                    schedule.due.push_back(owner);
+                    residents.push_back(is_x ? ResidentAt(coordinate) : ResidentAt(0, coordinate));
+                }
+            }
+            const auto count = static_cast<std::uint64_t>(seam_count);
+            for (const std::uint64_t windows : {0u, 1u, 2u, 3u, 4u, 5u, 12u}) {
+                std::vector<Planning::Face> served;
+                const auto funded = std::min(count, windows == 0 ? 0 : (windows - 1) / 2);
+                for (std::uint64_t step = 0; step < 3 * count; ++step) {
+                    // Start near the tick limit to cover a large non-zero rotation offset.
+                    schedule.tick = WorldClock::kTickLimit - 3 * count + step;
+                    SCOPED_TRACE(::testing::Message() << seam_count << ',' << is_x << ',' << windows
+                                                      << ',' << schedule.tick);
+                    const Planning::Inputs inputs{.cell_budget = windows * kPlanningCapacity,
+                                                  .raining = true};
+                    const auto before = ledger.encode();
+                    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+                    EXPECT_EQ(plan.faces.size(), funded);
+                    EXPECT_EQ(plan.border_windows, 2 * funded);
+                    EXPECT_GE(plan.allocated_windows, windows == 0 ? 0u : 1u);
+                    EXPECT_LE(plan.border_windows + plan.allocated_windows, windows);
+                    EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                    EXPECT_EQ(plan.residents_visited, residents.size());
+                    EXPECT_TRUE(std::is_sorted(plan.faces.begin(), plan.faces.end()));
+                    for (const auto& face : plan.faces) {
+                        EXPECT_NE(face.owner, face.neighbor);
+                        EXPECT_EQ(face.is_x, is_x);
+                        EXPECT_TRUE(std::binary_search(
+                            plan.participants.begin(), plan.participants.end(), face.positive));
+                        EXPECT_TRUE(std::binary_search(
+                            plan.participants.begin(), plan.participants.end(), face.other));
+                        served.push_back(face);
+                    }
+                    std::reverse(residents.begin(), residents.end());
+                    std::reverse(schedule.due.begin(), schedule.due.end());
+                    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+                    EXPECT_EQ(ledger.encode(), before);
+                    auto debts = ledger.water_debts();
+                    for (const auto& region : plan.regions) {
+                        if (region.debt == 0) {
+                            debts.erase(region.owner);
+                        } else {
+                            debts.insert_or_assign(region.owner, region.debt);
+                        }
+                        ledger.set_water_cursor(region.owner, region.next_cursor);
+                    }
+                    ASSERT_TRUE(ledger.set_water_debts(debts));
+                    if ((step + 1) % count == 0) {
+                        std::sort(served.begin(), served.end());
+                        served.erase(std::unique(served.begin(), served.end()), served.end());
+                        EXPECT_EQ(served.size(), funded == 0 ? 0 : count);
+                        served.clear();
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, IneligibleAndSameOwnerFacesDoNotConsumeBorderRotationSlots) {
+    const auto baseline_ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+    const std::vector baseline{ResidentAt(31), ResidentAt(32), ResidentAt(95), ResidentAt(96)};
+    for (int fault = 0; fault < 8; ++fault) {
+        SCOPED_TRACE(fault);
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}});
+        auto& records =
+            const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+        auto residents = baseline;
+        residents.push_back(ResidentAt(fault == 0 ? 160 : 159));
+        residents.push_back(ResidentAt(fault == 0 ? 161 : 160));
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}};
+        switch (fault) {
+            case 0: // Same-owner faces require both interiors; only one can be funded.
+                break;
+            case 1:
+                residents[4].initialized = false;
+                break;
+            case 2:
+                residents[4].awake = residents[5].awake = false;
+                break;
+            case 3:
+                schedule.due.pop_back();
+                break;
+            case 4:
+                records.at({5, 0}).state = RegionState::Frozen;
+                break;
+            case 5:
+                residents[4].initialized = false;
+                residents[4].preparation_ready = false;
+                break;
+            case 6:
+                residents[4].available = false;
+                break;
+            case 7:
+                records.erase({5, 0});
+                break;
+        }
+        for (std::uint64_t tick = 0; tick < 4; ++tick) {
+            schedule.tick = tick;
+            RegionSchedule baseline_schedule;
+            baseline_schedule.tick = tick;
+            baseline_schedule.due = {{0, 0}, {1, 0}, {2, 0}, {3, 0}};
+            const Planning::Inputs inputs{.cell_budget = 3 * kPlanningCapacity};
+            const auto expected =
+                Planning::Build(baseline, {}, baseline_ledger, baseline_schedule, inputs);
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            EXPECT_EQ(plan.faces, expected.faces);
+            EXPECT_EQ(plan.border_windows, 2u);
+            EXPECT_EQ(plan.allocated_windows, 1u);
+            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+        }
+    }
 }
 
 TEST(RegionalWaterPlanning, PreparationAdmissionRefusesTheOwnerWithoutSpendingItsBudget) {

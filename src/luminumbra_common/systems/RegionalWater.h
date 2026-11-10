@@ -43,7 +43,7 @@ struct Face {
     world::RegionKey owner{}, neighbor{};
     ChunkID positive = 0, other = 0;
     bool is_x = false;
-    std::uint8_t common_shift = 0; // Cross-owner phase is zero modulo 2^shift.
+    std::uint8_t common_shift = 0; // Coarser owner cadence; eligibility uses both persisted phases.
     auto operator<=>(const Face&) const = default;
 };
 struct RegionPlan {
@@ -69,10 +69,13 @@ struct Plan {
 // Pure planning: no chunk, ledger, cursor, debt or revision is changed. Invalid
 // inputs throw invalid_argument before budget allocation. Unready preparation seals the
 // whole owner without spending windows or crediting debt. Unknown/frozen owners
-// are excluded. Interiors require due membership and the owner's cadence phase;
-// cross-owner seams use their common zero phase, even off the interior cadence.
+// are excluded. Interiors and both owners of a face require due membership and
+// their persisted cadence phase.
 // Each window pays for preparation, one interior and four face endpoints. Keep
 // one interior window when claims exist, then reserve cross-owner pairs atomically.
+// Sorted eligible cross-owner faces start at tick modulo their count. With fixed
+// eligibility every tick and at least one funded pair, all N faces are served
+// within N ticks. Face outputs are sorted again after reservation.
 // Region outputs are patches for due admitted owners only (debt zero means erase);
 // all other registers must be retained by the eventual publisher. Region windows
 // and allocated_windows count selected interiors only. Unselected grants retain
@@ -80,7 +83,8 @@ struct Plan {
 // Cursor rollover serves every candidate under fixed eligibility and recurring
 // positive awards. Changing eligibility has no such guarantee.
 // Work: O((R+S+D) log(kMaxRegions+R+S+D)). Storage is bounded by the input
-// caps: at most R entries, S sources, D region outputs, 2*R topology faces and
+// caps: at most R entries, S sources, D region outputs, 2*R topology faces,
+// 2*R output faces (including eligible borders before budget truncation) and
 // 5*R participant IDs before deduplication. All products fit 32-bit size_t.
 // Callers supply participating snapshots; this API has no production tick caller.
 [[nodiscard]] Plan Build(std::span<const Resident> residents,

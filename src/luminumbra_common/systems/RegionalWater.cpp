@@ -217,16 +217,16 @@ void PlanCandidates(std::vector<Entry>& entries,
     }
 }
 
-std::vector<Face> Topology(std::vector<Entry>& entries) {
+std::vector<Face> Topology(std::vector<Entry>& entries, const Groups& groups) {
     std::vector<Face> faces;
     for (const auto& entry : entries) {
-        if (!entry.admitted) {
+        if (!entry.admitted || !groups.at(entry.owner).due) {
             continue;
         }
         for (const bool is_x : {false, true}) {
             const auto* other =
                 Find(entries, entry.coords + (is_x ? IVec3(1, 0, 0) : IVec3(0, 0, 1)));
-            if (!other || !other->admitted) {
+            if (!other || !other->admitted || !groups.at(other->owner).due) {
                 continue;
             }
             faces.push_back({entry.owner,
@@ -328,22 +328,29 @@ Plan Build(std::span<const Resident> residents,
         }
         positive_claim = positive_claim || !group.candidates.empty();
     }
-    const auto faces = Topology(entries);
+    const auto faces = Topology(entries, groups);
     auto remaining = plan.global_windows;
     const std::uint64_t keep = positive_claim && remaining > 0 ? 1 : 0;
     for (const auto& face : faces) {
-        if (face.owner == face.neighbor ||
-            schedule.tick % (std::uint64_t{1} << face.common_shift) != 0) {
+        if (face.owner == face.neighbor) {
             continue;
         }
         const auto* a = Find(entries, Chunk::decode_id(face.positive));
         const auto* b = Find(entries, Chunk::decode_id(face.other));
-        if (a->preparation || b->preparation || remaining - keep < 2 ||
+        if (a->preparation || b->preparation ||
             (!Awake(*a) && !Awake(*b) && !inputs.raining && !a->source && !b->source)) {
             continue;
         }
         plan.faces.push_back(face);
-        remaining -= 2;
+    }
+    if (!plan.faces.empty()) {
+        const auto start =
+            static_cast<std::vector<Face>::difference_type>(schedule.tick % plan.faces.size());
+        std::rotate(plan.faces.begin(), plan.faces.begin() + start, plan.faces.end());
+        const auto pairs =
+            std::min(static_cast<std::uint64_t>(plan.faces.size()), (remaining - keep) / 2);
+        plan.faces.resize(static_cast<std::size_t>(pairs));
+        remaining -= 2 * pairs;
     }
     plan.border_windows = plan.global_windows - remaining;
     Allocate(groups, ledger, remaining, entries, plan);
