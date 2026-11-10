@@ -342,6 +342,7 @@ void GameSession::ResetWorldSystems() {
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionalFieldView = nullptr;
     m_scentRecenterPending = false;
     m_regionalFieldsBound = false;
@@ -606,7 +607,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return i + 1;
             }
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
-            m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
+            auto* field_candidate = scheduled_fields ? &*scheduled_fields : nullptr;
+            m_regionalFieldView = field_candidate;
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
@@ -694,7 +696,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                  kScentFieldChannels
                            : 0ull;
             });
-            const bool scent_active = AdvanceNearScent(scheduled_fields);
+            const bool scent_active = AdvanceNearScent(field_candidate);
 
             budget.Next(Stage::Locomotion, [&] {
                 return SimParticipantCount<TelemetryComp::ActionPlanComponent,
@@ -867,7 +869,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                            static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
                                Systems::kWeatherExtentCells;
                 });
-                StepRegionalWeather(scheduled_fields, current_tick);
+                StepRegionalWeather(field_candidate, current_tick);
                 m_weatherSystem->UpdateFromClock(
                     current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
             } else {
@@ -1287,7 +1289,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                PublishRegionCompletedWork(std::move(scheduled_fields), scheduled_energy);
+                PublishRegionCompletedWork(field_candidate, scheduled_energy);
             }
             SettleWaterAuthority(defer_water_authority);
         } catch (const std::exception& error) {
@@ -2180,8 +2182,7 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
     return &step;
 }
 
-void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields,
-                                             RegionalEnergyStep* energy) {
+void GameSession::PublishRegionCompletedWork(FieldPageState* fields, RegionalEnergyStep* energy) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
     if (energy) {
         if (!m_activeRegionLedger.prepare_energy_work(energy->transaction.ages(),
@@ -2472,7 +2473,7 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
     }
 }
 
-void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick) {
+void GameSession::StepRegionalWeather(FieldPageState* fields, std::uint64_t tick) {
     if (!m_regionalWeatherParticipating || !fields) {
         if (m_regionalFieldsBound && m_weatherSystem)
             m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
@@ -2754,6 +2755,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionSchedulerOverride = config;
 }
 void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
@@ -4385,7 +4387,7 @@ void GameSession::RestoreRegionalScent() {
     }
 }
 
-void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
+void GameSession::CaptureRegionalScent(FieldPageState*& fields) {
     m_scentCapture.resize(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
     auto& cells = m_scentCapture;
     for (int x = 0; x < kScentFieldCells; ++x)
@@ -4395,7 +4397,10 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                      [static_cast<std::size_t>(channel)] =
                          std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
     if (!fields) {
-        fields.emplace();
+        if (!m_scentCandidate) {
+            m_scentCandidate = std::make_unique<FieldPageState>();
+        }
+        fields = m_scentCandidate.get();
         fields->begin_weather_update(m_fieldPages);
     }
     fields->reuse_scent_buffers(m_scentChangeBuffers);
@@ -4417,6 +4422,9 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
         // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
         // and retry on a later tick, preserving both frozen bytes and the live projection.
         fields->reuse_scent_buffers(m_scentChangeBuffers);
+        if (fields == m_scentCandidate.get()) {
+            fields = nullptr;
+        }
         RestoreRegionalScent();
         return;
     }
@@ -4425,7 +4433,7 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
     m_regionalFieldView = &*fields;
 }
 
-bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {
+bool GameSession::AdvanceNearScent(FieldPageState*& fields) {
     const bool scent_active = HasScentParticipants();
     const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
     const bool foraging_active =

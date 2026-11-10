@@ -1336,6 +1336,8 @@ private:
     std::vector<MeshingWorkItem> m_deferred_meshing;
     std::size_t m_deferred_meshing_cursor = 0;
     std::int64_t m_deferred_meshing_due_tick = -1;
+    void update_meshing_schedule(const std::vector<Vec3>& anchor_positions,
+                                 bool activation_ran_this_tick);
     bool deferred_meshing_pending() const;
     MeshingDispatchResult dispatch_deferred_meshing();
     // Returns consumed and admitted counts, including current-candidate admissions.

@@ -13035,6 +13035,165 @@ void CheckEnergyTransactionCapacityRefusal() {
     EXPECT_TRUE(ledger.completed_work().empty());
 }
 
+std::string EnergyTransactionByteBoundaryRecord(std::map<RegionKey, RegionState>& owners,
+                                                std::size_t byte_limit,
+                                                int& last_page) {
+    constexpr std::size_t values_per_page = 256u * 64u;
+    // The active page is isolated from the dense frozen filler. Both channels stay
+    // below the diffusion outflow threshold, even after their one-unit deposits.
+    std::string record = "EFS1 64 0\nP 0 0 0:9 1:9\n";
+    // The caller caps this text allocation at kMaxRegionalRecordBytes.
+    record.reserve(byte_limit);
+    std::string dense_values;
+    for (std::size_t index = 0; index < values_per_page; ++index) {
+        dense_values += " " + std::to_string(index) + ":65535";
+    }
+    bool complete = false;
+    // At most the decoded page budget; build the dense tokens only once. Only the
+    // final partial row needs individual tokens to reach the exact encoded bound.
+    for (int px = 4; !complete && px < static_cast<int>(EnergyState::kMaxRegionalValueBytes /
+                                                        (values_per_page * sizeof(std::uint16_t)));
+         ++px) {
+        std::string row = "P " + std::to_string(px) + " 0";
+        const auto remaining = byte_limit - record.size();
+        if (row.size() + dense_values.size() + 1 <= remaining) {
+            row += dense_values;
+            complete = row.size() + 1 == remaining;
+        } else {
+            std::vector<std::size_t> value_offsets;
+            for (std::size_t index = 0; index < values_per_page; ++index) {
+                const auto prefix = " " + std::to_string(index) + ":";
+                value_offsets.push_back(row.size() + prefix.size());
+                row += prefix;
+                row += "65535";
+                if (row.size() + 1 >= remaining) {
+                    auto excess = row.size() + 1 - remaining;
+                    // A token adds at most twelve bytes; at most three values lose digits.
+                    for (auto offset = value_offsets.rbegin();
+                         excess != 0 && offset != value_offsets.rend();
+                         ++offset) {
+                        const auto removed = (std::min)(excess, std::size_t{4});
+                        row.erase(*offset, removed);
+                        excess -= removed;
+                    }
+                    EXPECT_EQ(excess, 0u);
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        record += row + '\n';
+        last_page = px;
+        for (int x = 0; x < luminumbra::fields::kEnergyPageCells; ++x) {
+            owners.try_emplace(EnergyState::OwnerOfCell(px * 16 + x, 0), RegionState::Frozen);
+        }
+    }
+    EXPECT_TRUE(complete);
+    return record;
+}
+
+void ExpectEnergyTransactionBoundaryValues(const EnergyState& live,
+                                           int last_page,
+                                           std::uint64_t total,
+                                           const std::string& active,
+                                           const std::map<RegionKey, std::string>& tail) {
+    EXPECT_EQ(live.RegionBytes({0, 0}), active);
+    for (const auto& [owner, bytes] : tail) {
+        EXPECT_TRUE(live.RegionBytes(owner) == bytes);
+    }
+    // These nonzero sentinels and the page count prove the exact page-key set.
+    // All values outside the two sparse boundary pages started at UINT16_MAX.
+    // With the boundary values pinned above, an unchanged total proves every
+    // other value is unchanged too: none can increase to compensate a decrease.
+    EXPECT_NE(live.at_cell(0, 0), 0u);
+    for (int px = 4; px <= last_page; ++px) {
+        EXPECT_NE(live.at_cell(px * 16, 0), 0u);
+    }
+    EXPECT_EQ(live.page_count(), static_cast<std::size_t>(last_page - 2));
+    EXPECT_EQ(live.total_raw(), total);
+}
+
+void CheckEnergyTransactionEncodedByteBoundary(EnergyState& live,
+                                               ActiveRegionLedger& ledger,
+                                               int last_page,
+                                               bool refuse) {
+    const auto limit = EnergyState::kMaxRegionalRecordBytes;
+    const auto initial_size = limit - (refuse ? 0u : 1u);
+    ASSERT_TRUE(live.ValidateRegionalOwners(ledger.records(), ledger.energy_ages()));
+    const auto pages = live.page_count();
+    ASSERT_LT(pages * 256u * 64u * sizeof(std::uint16_t), EnergyState::kMaxRegionalValueBytes);
+    const int channel = refuse ? 1 : 0;
+    ASSERT_EQ(live.at_cell(0, 0, channel), 9u);
+    ASSERT_TRUE(live.QueueRegionalDeposit(1, 0, 0, channel, 1));
+    const auto capacity = live.regional_deposit_capacity();
+    const auto active = live.RegionBytes({0, 0});
+    std::map<RegionKey, std::string> tail;
+    for (int x = 0; x < luminumbra::fields::kEnergyPageCells; ++x) {
+        const auto owner = EnergyState::OwnerOfCell(last_page * 16 + x, 0);
+        if (!tail.contains(owner)) {
+            tail.emplace(owner, live.RegionBytes(owner));
+        }
+    }
+    const auto total = live.total_raw();
+    const auto ledger_before = ledger.encode();
+    const auto work_before = ledger.completed_work();
+    const std::array due{RegionKey{0, 0}};
+    EnergyState::RegionalTick transaction;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool accepted = live.BeginRegionalTick(1, ledger, due, transaction);
+        EXPECT_EQ(accepted, !refuse);
+        if (accepted) {
+            EXPECT_EQ(live.at_cell(0, 0, channel), 10u);
+            // Only a value digit changes: delimiters/indices have the same width
+            // in RegionBytes and the exact-size canonical input record.
+            EXPECT_EQ(initial_size + live.RegionBytes({0, 0}).size(), limit + active.size());
+        }
+        transaction.rollback();
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectEnergyTransactionBoundaryValues(live, last_page, total, active, tail));
+        EXPECT_EQ(live.at_cell(0, 0, channel), 9u);
+        EXPECT_EQ(live.page_count(), pages);
+        EXPECT_EQ(live.regional_deposit_capacity(), capacity);
+        EXPECT_EQ(ledger.encode(), ledger_before);
+        EXPECT_EQ(ledger.completed_work(), work_before);
+    }
+    if (refuse) {
+        // The retained deposit makes channel 1 go 9 -> 10. At age 8 both
+        // channels decay 10 -> 9, and 9 >> 4 == 0 seals every diffusion flux.
+        // Starting at the limit, +1 -2 digits leaves the record one byte below it.
+        ASSERT_TRUE(ledger.set_energy_age({0, 0}, 7));
+    }
+    auto reference = live;
+    EnergyState::RegionalResult expected;
+    ASSERT_TRUE(reference.TickRegional(1, ledger.records(), due, ledger.energy_ages(), expected));
+    ASSERT_TRUE(live.BeginRegionalTick(1, ledger, due, transaction));
+    ASSERT_NO_FATAL_FAILURE(ExpectEnergyTransactionBoundaryValues(
+        live, last_page, reference.total_raw(), reference.RegionBytes({0, 0}), tail));
+    // Frozen values and all page keys are pinned by the whole-state check above,
+    // so the active region's digit delta gives the exact complete record size.
+    const auto final_size = refuse ? limit - 1 : limit;
+    EXPECT_EQ(initial_size + live.RegionBytes({0, 0}).size(), final_size + active.size());
+    EXPECT_EQ(live.at_cell(0, 0, 0), refuse ? 9u : 10u);
+    EXPECT_EQ(live.at_cell(0, 0, 1), 9u);
+    if (refuse) {
+        EXPECT_EQ(live.RegionBytes({0, 0}).size() + 1, active.size());
+        EXPECT_EQ(reference.total_raw() + 1, total);
+    } else {
+        EXPECT_EQ(live.RegionBytes({0, 0}).size(), active.size() + 1);
+        EXPECT_EQ(reference.total_raw(), total + 1);
+    }
+    ASSERT_TRUE(ledger.prepare_energy_work(transaction.ages(), transaction.work()));
+    ledger.commit_energy_work();
+    transaction.commit();
+    EXPECT_EQ(ledger.energy_ages(), expected.ages);
+    EXPECT_EQ(ledger.energy_ages().at({0, 0}), refuse ? 8u : 1u);
+    auto work_oracle = ledger;
+    work_oracle.publish_completed_work(expected.work);
+    EXPECT_EQ(ledger.completed_work(), work_oracle.completed_work());
+    EXPECT_EQ(live.regional_deposit_capacity(), EnergyState::kMaxRegionalDeposits);
+    EXPECT_EQ(live.page_count(), pages);
+}
+
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, EnergyTransactionMatchesRegionalKernelAndRestoresRefusedTicks) {
@@ -13057,6 +13216,32 @@ TEST(GameSessionHeadlessWorldTest, EnergyTransactionRefusesInvalidOwnersAndPubli
 
 TEST(GameSessionHeadlessWorldTest, EnergyTransactionCapacityRefusalLeavesValuesAndAgesUntouched) {
     ASSERT_NO_FATAL_FAILURE(CheckEnergyTransactionCapacityRefusal());
+}
+
+TEST(GameSessionHeadlessWorldTest, EnergyTransactionChecksExactEncodedByteLimitAndRetries) {
+    std::map<RegionKey, RegionState> owners{{{0, 0}, RegionState::Active}};
+    EnergyState live(64);
+    int last_page = 0;
+    {
+        // Decode once. Admission itself checks exact canonical reencoding; release
+        // the large text before the transaction/rollback and public-kernel checks.
+        const auto record = EnergyTransactionByteBoundaryRecord(
+            owners, EnergyState::kMaxRegionalRecordBytes - 1, last_page);
+        ASSERT_EQ(record.size(), EnergyState::kMaxRegionalRecordBytes - 1);
+        ASSERT_TRUE(live.DeserializeRegionalRecord(record));
+    }
+    auto ledger = ScheduledFieldLedger(0, owners);
+    for (const auto& [owner, state] : owners) {
+        (void)state;
+        ASSERT_TRUE(ledger.set_energy_age(owner, 0));
+    }
+    EXPECT_TRUE(ledger.completed_work().empty());
+    // Commit the first channel's exact-limit acceptance, then try the other
+    // channel's retained deposit against that same record at the limit.
+    for (const bool refuse : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(
+            CheckEnergyTransactionEncodedByteBoundary(live, ledger, last_page, refuse));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, LegacyEnergyMigratesToOwnerAgesAndSealsFrozenOwners) {

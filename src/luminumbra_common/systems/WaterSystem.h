@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra {
@@ -67,6 +68,7 @@ struct InteriorInputs {
 struct Result {
     bool applied = false;
     bool saturated = false;
+    bool water_mesh_invalidated = false; // The step reached the water remesh interval.
     std::int64_t source_mm = 0;
     std::int64_t sink_mm = 0;
     std::int64_t depth_before = 0;
@@ -131,6 +133,14 @@ public:
     // Incomplete terrain falls back to world generation. Generation workers must hold
     // the world's sampling scope, as for other world-generation queries.
     void InitializeGeneratedWater(Chunk& chunk, std::span<const float> terrain = {}) const;
+
+    // Owner-thread meshing work set: one id per changed chunk until publication or
+    // loss of residency/eligibility. Never hashed or persisted. Retaining ids lets
+    // water-only scheduler passes visit changed chunks rather than all residents.
+    // Storage is bounded by pending residents plus distinct changes since the last pass.
+    [[nodiscard]] const std::unordered_set<ChunkID>& mesh_invalidations() const;
+    void retain_mesh_invalidation(ChunkID id);
+    void acknowledge_mesh_invalidation(ChunkID id);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -375,6 +385,7 @@ private:
     std::int64_t m_debug_sources_seen = 0;
     std::int64_t m_debug_source_injected_mm = 0;
     std::uint64_t m_water_epoch = 0; //  (see water_epoch())
+    std::unordered_set<ChunkID> m_mesh_invalidations;
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
