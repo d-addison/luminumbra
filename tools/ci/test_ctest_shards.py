@@ -798,7 +798,11 @@ class CTestShardTests(unittest.TestCase):
             shards.partition(rows, names[:-1], "asan")
 
     def test_asan_observations_and_isolated_gl_reduce_synthetic_maximum_weight(self):
-        timings = shards.read_json(ROOT / "tools/ci/asan_timings.json") | {"SimBudgetAutosave": 361}
+        timings = {"RenderBenchmarkIsolationSubmission": 166,
+                   "RenderBenchmarkOverrideCollection": 335,
+                   "RenderTraversalEmbeddedPresetRefusal": 338,
+                   "RenderTraversalIntegrated": 269,
+                   "SimBudgetAutosave": 361}
         rows = [test(f"GL.Case{index}", RESOURCE_LOCK=["luminumbra_gl_context"]) for index in range(797)]
         rows += [test(name, RESOURCE_LOCK=["luminumbra_gl_context"],
                       FIXTURES_REQUIRED=["render_benchmark_assets"])
@@ -818,12 +822,15 @@ class CTestShardTests(unittest.TestCase):
                     prop["value"] = ["shared-context" if value == "luminumbra_gl_context" else value
                                      for value in prop["value"]]
         previous = shards.partition(colocated, names, "asan")
+        unobserved = shards.partition(rows, names, "asan")
         parts = shards.partition(rows, names, "asan", timings)
         previous_loads = [sum(weights[name] for name in part) for part in previous]
+        unobserved_loads = [sum(weights[name] for name in part) for part in unobserved]
         loads = [sum(weights[name] for name in part) for part in parts]
         self.assertEqual(previous_loads, [1660, 2086, 606])
         self.assertEqual(loads, [1660, 1346, 1346])
         self.assertLess(max(loads), max(previous_loads))
+        self.assertLess(max(loads), max(unobserved_loads))
         shards.validate_union(names, previous)
         shards.validate_union(names, parts)
         for operation in (shards.partition, shards._partition_validated, shards._partition_projected):
@@ -832,18 +839,51 @@ class CTestShardTests(unittest.TestCase):
                 reversed_parts = operation(list(reversed(rows)), list(reversed(names)), "asan", timings)
                 self.assertEqual([set(part) for part in reversed_parts], [set(part) for part in parts])
 
+    def test_asan_timing_file_has_positive_seconds_and_ctest_names(self):
+        timings = shards.read_json(ROOT / "tools/ci/asan_timings.json")
+        self.assertTrue(timings)
+        self.assertEqual(list(timings), sorted(timings))
+        name_pattern = re.compile(
+            r"(?:[A-Za-z_][A-Za-z0-9_]*/)?[A-Za-z_][A-Za-z0-9_]*"
+            r"(?:\.[A-Za-z_][A-Za-z0-9_]*(?:/[^\r\n]+)?)?")
+        for name, seconds in timings.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(name_pattern.fullmatch(name))
+                self.assertIsInstance(seconds, (int, float))
+                self.assertNotIsInstance(seconds, bool)
+                self.assertGreater(seconds, 0)
+                self.assertLessEqual(seconds, sys.float_info.max)
+
+    def test_asan_long_test_observations_balance_a_partial_roster(self):
+        timings = shards.read_json(ROOT / "tools/ci/asan_timings.json")
+        observed = {
+            "CapturePresets/SimBudgetAutosave.StationaryCaptureStaysSettledAcrossAutosaves/archipelago": 329,
+            "CapturePresets/SimBudgetAutosave.StationaryCaptureStaysSettledAcrossAutosaves/default": 225,
+            "CapturePresets/SimBudgetAutosave.StationaryCaptureStaysSettledAcrossAutosaves/mountains": 339,
+            "RegionalEnergy.RecordByteBoundariesCoverWriterDecoderAndCachedTick": 205,
+        }
+        rows = [test(name) for name in observed] + [test(f"Quick.Case{index}") for index in range(30)]
+        names = [row["name"] for row in rows]
+        parts = shards.partition(rows, names, "asan", timings)
+        loads = [sum(observed.get(name, 1) for name in part) for part in parts]
+        self.assertLessEqual(max(loads), 1.15 * sum(loads) / len(loads))
+        shards.validate_union(names, parts)
+
     def test_asan_workflow_timings_reach_cli_plans_and_evidence(self):
         workflow = (ROOT / ".github/workflows/asan.yml").read_text(encoding="utf-8")
         command = shlex.split(next(line.strip() for line in workflow.splitlines()
                                   if line.strip().startswith("python3 tools/ci/ctest_shards.py plan ")))
         timing_path = ROOT / command[command.index("--timings") + 1]
         timings = shards.read_json(timing_path)
-        self.assertEqual(timings, {"RenderBenchmarkIsolationSubmission": 166,
-                                  "RenderBenchmarkOverrideCollection": 335,
-                                  "RenderTraversalEmbeddedPresetRefusal": 338,
-                                  "RenderTraversalIntegrated": 269})
-        rows = self.policy_roster("asan") + [test(name, RESOURCE_LOCK=["luminumbra_gl_context"])
-                                            for name in timings]
+        render_timings = {"RenderBenchmarkIsolationSubmission": 78,
+                          "RenderBenchmarkOverrideCollection": 174,
+                          "RenderTraversalEmbeddedPresetRefusal": 214,
+                          "RenderTraversalIntegrated": 156}
+        self.assertEqual({name: timings[name] for name in render_timings}, render_timings)
+        rows = self.policy_roster("asan")
+        existing = {row["name"] for row in rows}
+        rows += [test(name, RESOURCE_LOCK=["luminumbra_gl_context"])
+                 for name in timings if name not in existing]
         names = [row["name"] for row in rows]
         self.write_plan(self.root, 1, tests=rows, profile="asan")
         parts = shards.partition(rows, names, "asan", timings)

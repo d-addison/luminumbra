@@ -23,6 +23,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 #include "ScentField.h"
 
 namespace luminumbra::ai {
@@ -46,7 +47,8 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
                                                  const ScentField& field,
                                                  float origin_x,
                                                  float origin_z,
-                                                 float cell_size) {
+                                                 float cell_size,
+                                                 const CreatureTickAdmission* admission = nullptr) {
     using Luminumbra::Components::LocomotionIntentComponent;
     using Luminumbra::Components::LocomotionProfile;
     using Luminumbra::Components::ScentSenseComponent;
@@ -70,6 +72,9 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
     }
 
     for (auto e : agents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         ++stats.considered;
         const auto& sense = registry.get<const ScentSenseComponent>(e);
         if (sense.channel < 0)
