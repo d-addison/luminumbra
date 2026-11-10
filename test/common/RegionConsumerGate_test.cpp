@@ -3,12 +3,16 @@
 #include "luminumbra_common/ai/CreatureReproductionSystem.h"
 #include "luminumbra_common/ai/LifespanSystem.h"
 #include "luminumbra_common/ai/PerceptionSystem.h"
+#include "luminumbra_common/ai/SteeringConsumer.h"
 #include "luminumbra_common/ai/WildlifeFoliageSystem.h"
+#include "luminumbra_common/components/ScavengerComponent.h"
+#include "luminumbra_common/components/ThirstComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
@@ -1651,6 +1655,7 @@ void CoreCreatureTick(entt::registry& registry,
         AI::RunCreatureBrainSystemOnTick(
             registry, dt, {}, nullptr, 0, 0, 0, true, nullptr, admission);
         AI::RunMateSeekingOnTick(registry, {}, admission);
+        AI::RunSteeringConsumerOnTick(registry, admission);
         AI::RunMatingResolveOnTick(registry, tick, 12345u, {}, nullptr, admission);
     }
     AI::RunLifespanOnTick(registry, tick, gate, admission);
@@ -1735,9 +1740,14 @@ TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
     AI::CreatureTickAdmission admission;
     admission.Capture(registry, RegionConsumerGate(registry, {}));
     EXPECT_EQ(admission.owner_visits(), 0u);
+    const auto empty_steering = AI::RunSteeringConsumerOnTick(registry, &admission);
+    EXPECT_EQ(empty_steering.packed, 0);
+    EXPECT_EQ(empty_steering.migrated, 0);
+    EXPECT_EQ(empty_steering.homed, 0);
     const auto missing = Creature(registry, 1.0f);
     registry.remove<C::TransformComponent>(missing);
     const auto invalid = Creature(registry, std::numeric_limits<float>::infinity());
+    registry.emplace<C::MigratoryComponent>(invalid).wish_x = 1.0f;
     const auto valid = Creature(registry, -1.0f);
     const auto other = registry.create();
     for (const bool empty : {false, true}) {
@@ -1753,6 +1763,7 @@ TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
         CoreCreatureTick(registry, 1u, gate, &admission);
         EXPECT_EQ(registry.get<C::MortalComponent>(missing).age_ticks, 0u);
         EXPECT_EQ(registry.get<C::MortalComponent>(invalid).age_ticks, 0u);
+        EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(invalid).wish_x, 0.0f);
     }
 }
 
@@ -1794,5 +1805,181 @@ TEST(RegionConsumerGate, AdmittedPredatorCannotChangeDeniedPreyAcrossBoundary) {
     EXPECT_EQ(CreatureBytes(registry, prey), before);
     EXPECT_FALSE(registry.get<C::CreatureComponent>(prey).eaten);
     EXPECT_GT(registry.get<C::MortalComponent>(predator).age_ticks, 0u);
+}
+} // namespace
+
+namespace {
+TEST(RegionConsumerGate, SessionFreezesDeniedMotorWishesAndSuppressesAvatarInputUntilAdmission) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool physics_enabled : {false, true}) {
+        for (const bool active : {false, true}) {
+            SCOPED_TRACE(physics_enabled);
+            SCOPED_TRACE(active);
+            W::GameSession session;
+            session.SetActiveRegionsEnabled(active);
+            if (physics_enabled) {
+                session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() +
+                                    '/');
+                session.SetJobSystem(&jobs);
+                session.SetAetherStateEnabled(false);
+                ASSERT_TRUE(session.CreateTransientWorld("Creature motors", "1337", "default"));
+            }
+            session.SetReplicatedSimulationAnchors({});
+            session.PinActiveRegion({0, 0}, true);
+            auto& registry = session.GetRegistry();
+            auto* physics = session.GetPhysicsSystem();
+            ASSERT_EQ(physics != nullptr, physics_enabled);
+            std::array<entt::entity, 6> creatures{};
+            for (std::size_t index = 0; index < creatures.size(); ++index) {
+                const auto entity = Creature(registry, 513.0f);
+                creatures[index] = entity;
+                auto& tf = registry.get<C::TransformComponent>(entity);
+                tf.position.y = 200.0f;
+                tf.position.z = 10.0f + static_cast<float>(index) * 50.0f;
+                auto& cr = registry.get<C::CreatureComponent>(entity);
+                cr.is_predator = true;
+                cr.hunger = 0.8f;
+                cr.wish_x = 0.25f;
+                cr.wish_z = -0.5f;
+                cr.last_action = static_cast<int>(AI::CreatureAction::Drink);
+                auto& genome = registry.get<C::CreatureGenomeComponent>(entity);
+                genome.vision_range = 0.0f;
+                genome.hearing_range = 0.0f;
+                if (physics) {
+                    registry.emplace<C::CreaturePhysicsComponent>(entity).avatar_index =
+                        physics->create_avatar_character(tf.position);
+                }
+            }
+            registry.emplace<C::MigratoryComponent>(creatures[0]);
+            registry.emplace<C::TerritoryBiasComponent>(creatures[1]);
+            registry.emplace<C::PackHunterComponent>(creatures[2]);
+            registry.emplace<C::ThirstComponent>(creatures[3]).thirst = 1.0f;
+            const auto water = registry.create();
+            registry.emplace<C::TransformComponent>(water).position = {533.0f, 200.0f, 160.0f};
+            registry.emplace<C::WaterHoleComponent>(water);
+            registry.emplace<C::ScavengerComponent>(creatures[4]);
+            const auto carcass = registry.create();
+            registry.emplace<C::TransformComponent>(carcass).position = {533.0f, 200.0f, 210.0f};
+            registry.emplace<C::CreatureComponent>(carcass).eaten = true;
+
+            const auto seed_biases = [&] {
+                auto& migration = registry.get<C::MigratoryComponent>(creatures[0]);
+                migration.wish_x = 0.75f;
+                migration.wish_z = 0.5f;
+                auto& territory = registry.get<C::TerritoryBiasComponent>(creatures[1]);
+                territory.wish_x = 0.5f;
+                territory.wish_z = 0.75f;
+                auto& pack = registry.get<C::PackHunterComponent>(creatures[2]);
+                pack.in_pack = 1;
+                pack.coord_x = 0.6f;
+                pack.coord_z = 0.8f;
+                registry.get<C::ThirstComponent>(creatures[3]).water_proximity = 1.0f;
+            };
+            for (int tick = 0; tick < 4; ++tick) {
+                const bool denied = active && tick < 3;
+                if (tick == 3) {
+                    session.PinActiveRegion({1, 0}, true);
+                }
+                seed_biases();
+                std::array<Luminumbra::Vec3, 6> before{};
+                for (std::size_t index = 0; index < creatures.size(); ++index) {
+                    before[index] = registry.get<C::TransformComponent>(creatures[index]).position;
+                    if (physics) {
+                        const auto avatar =
+                            registry.get<C::CreaturePhysicsComponent>(creatures[index])
+                                .avatar_index;
+                        physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
+                    }
+                }
+                ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+                ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+                for (std::size_t index = 0; index < creatures.size(); ++index) {
+                    SCOPED_TRACE(index);
+                    const auto entity = creatures[index];
+                    const auto& cr = registry.get<C::CreatureComponent>(entity);
+                    if (denied) {
+                        EXPECT_FLOAT_EQ(cr.wish_x, 0.25f);
+                        EXPECT_FLOAT_EQ(cr.wish_z, -0.5f);
+                        const auto& position = registry.get<C::TransformComponent>(entity).position;
+                        EXPECT_FLOAT_EQ(position.x, before[index].x);
+                        EXPECT_FLOAT_EQ(position.z, before[index].z);
+                    } else {
+                        EXPECT_TRUE(cr.wish_x != 0.25f || cr.wish_z != -0.5f);
+                    }
+                    if (physics) {
+                        const auto avatar =
+                            registry.get<C::CreaturePhysicsComponent>(entity).avatar_index;
+                        const auto velocity = physics->get_avatar_velocity(avatar);
+                        EXPECT_NEAR(velocity.x, denied ? 0.0f : cr.wish_x, 1.0e-4f);
+                        EXPECT_NEAR(velocity.z, denied ? 0.0f : cr.wish_z, 1.0e-4f);
+                    }
+                }
+                EXPECT_NE(registry.get<C::ThirstComponent>(creatures[3]).wish_x, 0.0f);
+                EXPECT_NE(registry.get<C::ScavengerComponent>(creatures[4]).wish_x, 0.0f);
+            }
+        }
+    }
+}
+
+TEST(RegionConsumerGate, PerceptionTargetsShareCapturedCreatureAdmissionAndResume) {
+    constexpr float dt = 1.0f / 30.0f;
+    for (const bool creature_target : {false, true}) {
+        for (const bool hearing_only : {false, true}) {
+            for (int mode = 0; mode < 5; ++mode) {
+                SCOPED_TRACE(creature_target);
+                SCOPED_TRACE(hearing_only);
+                SCOPED_TRACE(mode);
+                entt::registry registry;
+                const auto perceiver = Creature(registry, 511.9f);
+                registry.get<C::AwarenessComponent>(perceiver).awareness = {};
+                auto& perception = registry.get<C::PerceptionComponent>(perceiver);
+                perception.faction = 1;
+                perception.facing_x = 1.0f;
+                perception.facing_z = 0.0f;
+                perception.vision_range = hearing_only ? 0.0f : 30.0f;
+                perception.ear.range = hearing_only ? 30.0f : 0.0f;
+                const auto target = registry.create();
+                registry.emplace<C::TransformComponent>(target).position = {512.1f, 0.0f, 10.0f};
+                if (creature_target) {
+                    registry.emplace<C::CreatureComponent>(target);
+                }
+                auto& sensable = registry.emplace<C::SensableComponent>(target);
+                sensable.faction = 2;
+                sensable.noise_loudness = 1.0f;
+                sensable.noise_pitch = perception.ear.peak_pitch;
+                std::vector<RegionKey> due;
+                if (mode != 4) {
+                    due.push_back({0, 0});
+                }
+                if (mode == 3) {
+                    due.push_back({1, 0});
+                }
+                const RegionConsumerGate gate =
+                    mode == 1 ? RegionConsumerGate{} : RegionConsumerGate(registry, due);
+                AI::CreatureTickAdmission admission;
+                admission.Capture(registry, gate);
+                const auto owner_visits = gate.owner_visits();
+                const auto* captured = mode == 0 ? nullptr : &admission;
+                // Moving after capture must not make a denied source visible this tick.
+                registry.get<C::TransformComponent>(target).position.x = 511.95f;
+                const bool perceiver_allowed = mode != 4;
+                const bool sensed = perceiver_allowed && (!creature_target || mode != 2);
+                const auto stats = AI::RunPerceptionSystemOnTick(registry, dt, captured);
+                EXPECT_EQ(stats.perceivers, perceiver_allowed ? 1u : 0u);
+                EXPECT_EQ(stats.sensing, sensed ? 1u : 0u);
+                EXPECT_EQ(registry.get<C::AwarenessComponent>(perceiver).awareness.meter > 0.0f,
+                          sensed);
+                EXPECT_EQ(admission.owner_visits(), creature_target ? 2u : 1u);
+                EXPECT_EQ(gate.owner_visits(), owner_visits);
+                // Both the empty schedule and denied-source cases resume on recapture.
+                admission.Capture(registry, RegionConsumerGate{});
+                const auto resumed = AI::RunPerceptionSystemOnTick(registry, dt, &admission);
+                EXPECT_EQ(resumed.perceivers, 1u);
+                EXPECT_EQ(resumed.sensing, 1u);
+                EXPECT_GT(registry.get<C::AwarenessComponent>(perceiver).awareness.meter, 0.0f);
+            }
+        }
+    }
 }
 } // namespace

@@ -56,6 +56,9 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(
     {
         auto view = registry.view<const TransformComponent, const SensableComponent>();
         for (auto e : view) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& tf = view.get<const TransformComponent>(e);
             const auto& s = view.get<const SensableComponent>(e);
             sensables.push_back(
