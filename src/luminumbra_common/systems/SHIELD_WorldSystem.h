@@ -859,6 +859,8 @@ public:
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
     // Observers run under SaveOwnership and must not dispatch or wait for jobs.
+    // Owner-boundary render source binding; independent of durable residency.
+    bool set_far_world_authority_changes(std::shared_ptr<World::FarWorldAuthorityChanges> changes);
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
@@ -1223,6 +1225,7 @@ private:
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
+    std::shared_ptr<World::FarWorldAuthorityChanges> m_far_world_changes;
     std::shared_ptr<ChunkWaterChanges> m_water_changes = std::make_shared<ChunkWaterChanges>();
     std::vector<ChunkID> m_pending_water_changes;
     u64 m_water_authority_input_items = 0;
