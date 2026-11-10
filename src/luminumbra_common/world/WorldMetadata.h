@@ -31,8 +31,9 @@ std::uint32_t ResolveWorldSeed(const std::string& seed, std::uint32_t conversion
 
 #if defined(_WIN32)
 // Read a --seed value from the native Windows command line, independently of the
-// narrow argv code page. Refuses invalid UTF-16, argument mismatches, and UTF-8
-// output over the saved-world seed limit. Empty seed text remains valid.
+// narrow argv code page. The line is split with the C runtime's argv rules, so the
+// indices match the narrow argv. Refuses invalid UTF-16, argument mismatches, and
+// UTF-8 output over the saved-world seed limit. Empty seed text remains valid.
 std::optional<std::string>
 WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index);
 #endif

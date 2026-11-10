@@ -127,7 +127,6 @@
 #endif
 #include <windows.h>
 
-#include <shellapi.h>
 #include <string_view>
 #endif
 
@@ -4236,28 +4235,86 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
 }
 
 #if defined(_WIN32)
+namespace {
+
+// Split a command line with the C runtime's argv rules, so the result matches the
+// narrow argv the server parsed. The program name toggles quotes without escapes.
+// Arguments map 2n backslashes before a quote to n plus a delimiter and 2n+1 to n
+// plus a literal quote; "" inside quotes is a literal quote. CommandLineToArgvW
+// differs on that last rule ("a""""b" is a""b here but a"b there).
+std::vector<std::wstring> CrtCommandLineArguments(std::wstring_view line) {
+    const auto at = [&](std::size_t index) {
+        return index < line.size() ? line[index] : L'\0';
+    };
+    const auto blank = [](wchar_t unit) {
+        return unit == L' ' || unit == L'\t';
+    };
+    std::vector<std::wstring> arguments(1);
+    std::size_t p = 0;
+    bool quoted = false;
+    for (; p < line.size() && (quoted || !blank(line[p])); ++p) {
+        if (line[p] == L'"') {
+            quoted = !quoted;
+        } else {
+            arguments.front().push_back(line[p]);
+        }
+    }
+    for (;;) {
+        while (blank(at(p)))
+            ++p;
+        if (p >= line.size())
+            break;
+        std::wstring argument;
+        quoted = false;
+        for (;;) {
+            std::size_t slashes = 0;
+            while (at(p) == L'\\') {
+                ++p;
+                ++slashes;
+            }
+            bool copy = true;
+            if (at(p) == L'"') {
+                if (slashes % 2 == 0) {
+                    if (quoted && at(p + 1) == L'"') {
+                        ++p;
+                    } else {
+                        copy = false;
+                        quoted = !quoted;
+                    }
+                }
+                slashes /= 2;
+            }
+            argument.append(slashes, L'\\');
+            if (p >= line.size() || (!quoted && blank(line[p])))
+                break;
+            if (copy)
+                argument.push_back(line[p]);
+            ++p;
+        }
+        arguments.push_back(std::move(argument));
+    }
+    return arguments;
+}
+
+} // namespace
+
 std::optional<std::string>
 WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index) {
     if (command_line == nullptr || seed_index < 2 || seed_index >= argument_count)
         return std::nullopt;
     // Windows command lines are bounded to 32767 UTF-16 units including NUL.
-    // Enforce that bound before CommandLineToArgvW allocates its argument table.
+    // Enforce that bound before splitting it into arguments.
     constexpr std::size_t kCommandLineUnits = 32767;
     std::size_t command_length = 0;
     while (command_length < kCommandLineUnits && command_line[command_length] != L'\0')
         ++command_length;
     if (command_length == 0 || command_length == kCommandLineUnits)
         return std::nullopt;
-    int wide_count = 0;
-    const auto free_arguments = [](wchar_t** arguments) {
-        LocalFree(arguments);
-    };
-    const std::unique_ptr<wchar_t*, decltype(free_arguments)> arguments(
-        CommandLineToArgvW(command_line, &wide_count), free_arguments);
-    if (!arguments || wide_count != argument_count ||
-        std::wstring_view(arguments.get()[seed_index - 1]) != L"--seed")
+    const auto arguments = CrtCommandLineArguments(std::wstring_view(command_line, command_length));
+    if (arguments.size() != static_cast<std::size_t>(argument_count) ||
+        arguments[static_cast<std::size_t>(seed_index) - 1] != L"--seed")
         return std::nullopt;
-    const std::wstring_view seed(arguments.get()[seed_index]);
+    const std::wstring_view seed(arguments[static_cast<std::size_t>(seed_index)]);
     if (seed.empty())
         return std::string{};
     if (seed.size() > Persistence::SavedInputLimits::kWorldSeedBytes)
