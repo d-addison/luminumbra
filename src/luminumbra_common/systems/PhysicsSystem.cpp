@@ -358,11 +358,16 @@ void PhysicsSystem::update(float delta_time) {
     m_batched_queries.ProcessBatch(this);
 }
 
-void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
+bool PhysicsSystem::has_body_capacity() const {
+    return m_jolt_system && m_jolt_system->GetNumBodies() < m_jolt_system->GetMaxBodies();
+}
+
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (!m_body_interface)
-        return;
-    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
-        return;
+        return false;
+    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end()) {
+        return true;
+    }
 
     constexpr std::size_t kHeightmapSide = CHUNK_SIZE_X + 1;
     if (chunk.heightmap_data.size() != kHeightmapSide * kHeightmapSide) {
@@ -371,7 +376,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                              chunk.get_coords().x,
                              chunk.get_coords().y,
                              chunk.get_coords().z);
-        return;
+        return false;
     }
 
     // 1. Copy the cached heightmap data into a Jolt-compatible array.
@@ -398,7 +403,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
     const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
-        return;
+        return false;
     }
 
     // 2. Create the HeightFieldShape.
@@ -416,14 +421,14 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (result.HasError()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape error for chunk ({},{},{}): {}", cc.x, cc.y, cc.z, result.GetError());
-        return;
+        return false;
     }
 
     // Additional safety check
     if (!result.Get()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
-        return;
+        return false;
     }
 
     // The position is baked into the shape, so the body itself can be created at the world origin.
@@ -433,8 +438,12 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                                             JPH::EMotionType::Static,
                                             Layers::NON_MOVING);
     JPH::Body* body = m_body_interface->CreateBody(body_settings);
+    if (body == nullptr) {
+        return false;
+    }
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
     m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
+    return true;
 }
 
 void PhysicsSystem::remove_chunk_collision(ChunkID id) {

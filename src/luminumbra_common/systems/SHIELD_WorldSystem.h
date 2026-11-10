@@ -305,6 +305,8 @@ public:
         std::size_t surface_generation_scheduled = 0;
         std::size_t vertical_generation_scheduled = 0;
         std::size_t deferred_generation = 0;
+        // Resident visits in the collider pass; zero during continued pool refusal.
+        std::size_t collision_candidates = 0;
         std::size_t meshing_candidates = 0;
         std::size_t scheduled_meshing = 0;
         // Accepted items matching this update's current candidates, excluding
@@ -682,7 +684,9 @@ public:
                                   PhysicsSystem* physics_system,
                                   int horizontal_radius = 1);
     // Synchronous admission: surface/collision radii <= 12, at most 625 columns
-    // and 8192 chunks including vertical margins; refusal precedes chunk changes.
+    // and 8192 chunks including vertical margins; budget refusal precedes changes.
+    // Body allocation refusal returns false after building the surface; refused
+    // chunks remain without collision and are retried by streaming updates.
     // Negative direct-API radii retain their historical zero normalization.
     // render_lod0_radius (default -1): the ring distance that renders at full-SDF
     // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
@@ -1253,17 +1257,11 @@ private:
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
-    // Gate the O(N) per-tick collision-creation scan so
-    // a SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely
-    // instead of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic
-    // work signal: set true at exactly the two sites that reset has_collision=false (remesh / LOD0
-    // promotion in process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) —
-    // NOT job-activity state (cf. the attempt-#1 trap above). Cleared only when a scan visits every
-    // chunk without hitting the per-frame cap (i.e. it drained all eligible work). Starts true so
-    // the first tick scans. The scan body itself is byte-identical to before, so collision
-    // eligibility/order — and thus has_collision, which feeds world_hash — is unchanged; only
-    // redundant settled-tick scans go.
+    // Scan after remeshing, synchronous rebuilding, or unfinished collision work.
+    // Continued pool refusal skips scans until capacity frees or new mesh work
+    // arrives; replacements can release their old body even when the pool is full.
     bool m_collision_pass_dirty = true;
+    bool m_collision_pool_refused = false;
 
     const std::vector<ChunkLOD> m_lod_levels = {
         {0, 1, 192.0f}, // LOD 0: Full detail up to 192 meters (~12 chunks)

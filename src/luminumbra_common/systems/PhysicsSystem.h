@@ -61,8 +61,12 @@ public:
     }
 
     // --- World Geometry ---
-    void add_chunk_collision(Chunk& chunk);
+    // True only when this chunk has a registered body, including an existing one.
+    // Refusal leaves the body registry unchanged; callers may retry.
+    bool add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
+    // Owner-thread admission hint; allocation must still handle refusal.
+    bool has_body_capacity() const;
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
     // Spawns a small dynamic sphere with an initial velocity: it falls under the
@@ -120,7 +124,8 @@ public:
     // Steps every avatar character by dt: the per-avatar horizontal wish velocity
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
-    std::size_t avatar_character_count() const {
+    // Includes empty slots left by removal; indices remain stable until clear.
+    std::size_t avatar_character_slot_count() const {
         return m_avatars.size();
     }
     glm::vec3 get_avatar_position(std::size_t index) const;

@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
@@ -24,7 +25,9 @@
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/MarchingCubes.h"
 
 #include <gtest/gtest.h>
 
@@ -2474,14 +2477,149 @@ TEST(RegionConsumerGate, AvatarFreezeHandlesInvalidOwnersAndClearRestart) {
     physics.set_avatar_frozen(avatar, true, teleported);
     physics.clear_avatar_characters();
     physics.clear_avatar_characters();
-    EXPECT_EQ(physics.avatar_character_count(), 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
     EXPECT_FALSE(physics.audio_raycast({516.0f, 10001.3f, 10.0f}, {518.0f, 10001.3f, 10.0f}).hit);
     EXPECT_EQ(physics.create_avatar_character(position), 0u);
     physics.set_avatar_frozen(0u, true, position);
     physics.shutdown();
     physics.startup();
-    EXPECT_EQ(physics.avatar_character_count(), 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
     EXPECT_FALSE(physics.audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit);
+}
+
+TEST(RegionConsumerGate, AvatarSlotCountPreservesHolesAndAppendIndices) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    physics.startup();
+    ASSERT_EQ(physics.create_avatar_character({0, 100, 0}), 0u);
+    ASSERT_EQ(physics.create_avatar_character({3, 100, 0}), 1u);
+    physics.remove_avatar_character(0u);
+    physics.remove_avatar_character(0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
+    EXPECT_EQ(physics.get_avatar_position(0u), glm::vec3(0.0f));
+    EXPECT_EQ(physics.get_avatar_position(1u), glm::vec3(3, 100, 0));
+    ASSERT_EQ(physics.create_avatar_character({6, 100, 0}), 2u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_EQ(physics.create_avatar_character({0, 100, 0}), 0u);
+}
+
+TEST(RegionConsumerGate, TerrainCollisionReportsOnlyRegisteredBodies) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    EXPECT_FALSE(physics.has_body_capacity());
+    EXPECT_FALSE(physics.add_chunk_collision(chunk));
+    physics.startup();
+    EXPECT_TRUE(physics.has_body_capacity());
+    constexpr std::size_t side = Luminumbra::CHUNK_SIZE_X + 1;
+    for (const auto size : {std::size_t{0}, std::size_t{1}, side * side - 1, side * side + 1}) {
+        chunk.heightmap_data.assign(size, 8.0f);
+        EXPECT_FALSE(physics.add_chunk_collision(chunk));
+    }
+    for (const float height : {-1.0f, static_cast<float>(Luminumbra::CHUNK_SIZE_Y)}) {
+        chunk.heightmap_data.assign(side * side, height);
+        EXPECT_FALSE(physics.add_chunk_collision(chunk));
+    }
+    chunk.heightmap_data.assign(side * side, 8.0f);
+    ASSERT_TRUE(physics.add_chunk_collision(chunk));
+    EXPECT_TRUE(physics.add_chunk_collision(chunk));
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, 1u);
+    physics.remove_chunk_collision(chunk.get_id());
+    physics.remove_chunk_collision(chunk.get_id());
+    EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    EXPECT_TRUE(physics.add_chunk_collision(chunk));
+    physics.shutdown();
+    EXPECT_FALSE(physics.has_body_capacity());
+    EXPECT_FALSE(physics.add_chunk_collision(chunk));
+}
+
+TEST(RegionConsumerGate, TerrainCollisionRetriesAfterFrozenCapsuleFillsBodyPool) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    // The fixed shared pool bounds this probe to 10240 bodies; frozen capsules
+    // consume its final two slots after the projectile bodies.
+    constexpr std::size_t body_limit = 10240u;
+    for (std::size_t index = 0; index < body_limit - 2; ++index) {
+        ASSERT_FALSE(
+            physics.create_dynamic_sphere({static_cast<float>(index) * 3.0f, -1000, 100}, {}, 0.1f)
+                .IsInvalid());
+    }
+    for (std::size_t index = 0; index < 2; ++index) {
+        const glm::vec3 position(100000.0f + static_cast<float>(index) * 3.0f, 1000, 0);
+        ASSERT_EQ(physics.create_avatar_character(position), index);
+        physics.set_avatar_frozen(index, true, position);
+    }
+    ASSERT_FALSE(physics.has_body_capacity());
+    EXPECT_TRUE(physics.create_dynamic_sphere({0, -1000, 100}, {}, 0.1f).IsInvalid());
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    for (const bool synchronous : {false, true}) {
+        SCOPED_TRACE(synchronous);
+        Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        std::shared_ptr<Luminumbra::Chunk> floor;
+        entt::registry registry;
+        if (synchronous) {
+            ASSERT_FALSE(world.EnsureSurfaceReadyNear({8, 8, 8}, &physics, 0, 0));
+            const auto chunks = world.snapshot_streamed_chunks();
+            const auto found = std::find_if(chunks.begin(), chunks.end(), [](const auto& chunk) {
+                return chunk->get_coords() == Luminumbra::IVec3(0, 0, 0);
+            });
+            ASSERT_NE(found, chunks.end());
+            floor = *found;
+        } else {
+            floor = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+            world.GenerateChunkData(*floor);
+            Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, *floor, 0.0f, 1);
+            floor->current_lod.store(0);
+            floor->set_state(Luminumbra::ChunkState::Ready);
+            ASSERT_TRUE(world.adopt_streamed_chunk(floor));
+            world.update(registry, std::vector<Luminumbra::Vec3>{}, &physics);
+            EXPECT_GT(world.get_last_streaming_budget_stats().collision_candidates, 0u);
+        }
+        ASSERT_FALSE(floor->has_collision.load());
+        EXPECT_FALSE(physics.add_chunk_collision(*floor));
+        EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+        // Virtual controllers do not allocate inner bodies, even at pool capacity.
+        physics.create_player_controller({8, 8, 8});
+        EXPECT_EQ(physics.get_player_position(), glm::vec3(8, 8, 8));
+        EXPECT_FALSE(physics.is_player_grounded());
+        for (int pass = 0; pass < 3; ++pass) {
+            world.update(registry, std::vector<Luminumbra::Vec3>{}, &physics);
+            EXPECT_FALSE(floor->has_collision.load());
+            // Continued refusal must not re-scan the resident world every tick.
+            EXPECT_EQ(world.get_last_streaming_budget_stats().collision_candidates, 0u);
+        }
+        physics.set_avatar_frozen(0u, false, {100000, 1000, 0});
+        ASSERT_TRUE(physics.has_body_capacity());
+        // No synchronous readiness call or remesh reopens this gate: the dirty
+        // collision pass itself must survive refusal and retry the streamed chunk.
+        world.update(registry, std::vector<Luminumbra::Vec3>{}, &physics);
+        ASSERT_TRUE(floor->has_collision.load());
+        EXPECT_GT(world.get_last_streaming_budget_stats().collision_candidates, 0u);
+        EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+        EXPECT_FALSE(physics.has_body_capacity());
+        EXPECT_TRUE(physics.add_chunk_collision(*floor));
+        EXPECT_TRUE(world.EnsureCollisionReadyNear({8, 8, 8}, &physics, 0));
+        // A remesh can replace an existing body even at capacity: removal frees its slot.
+        floor->has_collision.store(false);
+        world.update(registry, std::vector<Luminumbra::Vec3>{}, &physics);
+        EXPECT_TRUE(floor->has_collision.load());
+        EXPECT_GT(world.get_last_streaming_budget_stats().collision_candidates, 0u);
+        physics.update_player({}, false, 0.0f, 1.0f / 30.0f);
+        EXPECT_TRUE(physics.is_player_grounded());
+        EXPECT_GE(physics.get_player_position().y, 7.9f);
+        physics.update(0.0f);
+        EXPECT_EQ(physics.work_items().bodies, body_limit);
+        world.clear_world(&physics);
+        EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+        EXPECT_TRUE(physics.has_body_capacity());
+        physics.set_avatar_frozen(0u, true, {100000, 1000, 0});
+        EXPECT_FALSE(physics.has_body_capacity());
+    }
 }
 
 TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
@@ -2519,7 +2657,7 @@ TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
         } else {
             physics.clear_avatar_characters();
             physics.clear_avatar_characters();
-            EXPECT_EQ(physics.avatar_character_count(), 0u);
+            EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
         }
         physics.clear_avatar_characters();
         physics.update(0.0f);

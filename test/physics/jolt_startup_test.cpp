@@ -1877,7 +1877,7 @@ void RepeatedApplicationLifecycle() {
             Require(!body.IsInvalid());
             physics.update(1.0F / 60.0F);
             physics.shutdown();
-            Require(!physics.is_started() && physics.avatar_character_count() == 0);
+            Require(!physics.is_started() && physics.avatar_character_slot_count() == 0);
             Require(JPH::Factory::sInstance == prior_factory &&
                     JPH::PhysicsMaterial::sDefault == prior_material);
             RequireUnpublished(physics);
@@ -2255,7 +2255,7 @@ void ApplicationAvatarAppendRefusal() {
             Require(measured > 0 && measured < Allocations().blocks.size());
         } else {
             Require(caught && Allocations().failures == 1);
-            Require(physics.avatar_character_count() == 1 && Outstanding() == 0);
+            Require(physics.avatar_character_slot_count() == 1 && Outstanding() == 0);
             Require(physics.get_avatar_position(0) == position);
             Require(physics.get_avatar_velocity(0) == glm::vec3(0.0F));
             physics.update_avatars(1.0F / 30.0F);
@@ -2265,9 +2265,9 @@ void ApplicationAvatarAppendRefusal() {
         physics.set_avatar_frozen(1, true, {517.0F, 10000.0F, 10.0F});
         physics.remove_avatar_character(1);
         physics.remove_avatar_character(1);
-        Require(physics.avatar_character_count() == 2);
+        Require(physics.avatar_character_slot_count() == 2);
         physics.clear_avatar_characters();
-        Require(physics.avatar_character_count() == 0);
+        Require(physics.avatar_character_slot_count() == 0);
     }
     Require(Outstanding() == 0);
     std::_Exit(0);

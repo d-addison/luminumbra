@@ -546,11 +546,15 @@ bool HasRenderableGeometry(const Chunk& chunk) {
            (!chunk.water_mesh_vertices.empty() && !chunk.water_mesh_indices.empty());
 }
 
-void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
+bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
     const ChunkID id = chunk.get_id();
     physics_system.remove_chunk_collision(id);
-    physics_system.add_chunk_collision(chunk);
-    chunk.has_collision.store(true, std::memory_order_release);
+    if (physics_system.add_chunk_collision(chunk)) {
+        chunk.has_collision.store(true, std::memory_order_release);
+        return true;
+    }
+    chunk.has_collision.store(false, std::memory_order_release);
+    return false;
 }
 
 } // namespace
@@ -3771,37 +3775,34 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     _dbg_split(
         m_dbg_stream.meshing_pass); // runtime telemetry: Step 3 meshing-candidate pass + dispatch
 
-    // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
-    //  the eligibility scan is O(N) over every streamed chunk. Gate it on
-    // m_collision_pass_dirty so a SETTLED world skips it entirely. The flag is set at the two
-    // has_collision=false reset sites (remesh/LOD0 promotion + synchronous rebuild) and cleared
-    // here once a scan drains all eligible chunks without hitting the per-frame cap. The scan body
-    // is unchanged, so the set of colliders created (and has_collision, which feeds world_hash) is
-    // identical to before — only redundant settled-tick walks are removed.
-    if (physics_system && m_collision_pass_dirty) {
-        int collision_meshes_created_this_frame = 0;
-        bool hit_frame_cap = false;
+    // Step 4. Time-slice collider creation. After pool refusal, retain the dirty
+    // flag without scanning resident chunks until capacity or new mesh work arrives.
+    if (physics_system && m_collision_pass_dirty &&
+        (!m_collision_pool_refused || physics_system->has_body_capacity())) {
+        m_collision_pool_refused = false;
+        int collision_attempts = 0;
+        bool work_remaining = false;
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-            if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
-                // Only create collision once the chunk is sim-available at
-                // LOD0 ( : predicate centralized — collision is
-                // built from the HEIGHTMAP; sim_available_lod0 is the single
-                // place the availability definition lives).
-                if (sim_available_lod0(*chunk_ptr)) {
-                    replace_chunk_collision(*physics_system, *chunk_ptr);
-
-                    collision_meshes_created_this_frame++;
-                    if (collision_meshes_created_this_frame >= MAX_COLLISION_MESHES_PER_FRAME) {
-                        hit_frame_cap = true;
-                        break;
-                    }
+            (void)id;
+            ++m_last_streaming_budget_stats.collision_candidates;
+            if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load() &&
+                sim_available_lod0(*chunk_ptr)) {
+                const bool created = replace_chunk_collision(*physics_system, *chunk_ptr);
+                ++collision_attempts;
+                // Invalid/non-surface geometry must not block other chunks.
+                // Pool refusal leaves the pass open until a body slot frees.
+                if (!created && !physics_system->has_body_capacity()) {
+                    m_collision_pool_refused = true;
+                    work_remaining = true;
+                    break;
+                }
+                if (collision_attempts >= MAX_COLLISION_MESHES_PER_FRAME) {
+                    work_remaining = true;
+                    break;
                 }
             }
         }
-        // Hitting the cap means eligible chunks may remain past the break, so stay dirty for the
-        // next tick. Otherwise the loop visited every chunk and created colliders for all eligible
-        // ones, so there is no collision work left until something resets has_collision again.
-        m_collision_pass_dirty = hit_frame_cap;
+        m_collision_pass_dirty = work_remaining;
     }
     _dbg_split(m_dbg_stream.collision); // runtime telemetry
 
@@ -4732,14 +4733,18 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     }
 
     std::size_t collision_count = 0;
+    bool collision_ready = true;
     for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
         const auto& chunk = surface_chunk.chunk;
         const IVec2& offset = surface_chunk.offset;
         if (surface_chunk.lod == 0 && surface_chunk.vertical_rank == 0 &&
             std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
             !chunk->has_collision.load()) {
-            replace_chunk_collision(*physics_system, *chunk);
-            ++collision_count;
+            if (replace_chunk_collision(*physics_system, *chunk)) {
+                ++collision_count;
+            } else {
+                collision_ready = false;
+            }
         }
     }
 
@@ -4762,7 +4767,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // gated collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread
     // store.
     m_collision_pass_dirty = true;
-    return true;
+    m_collision_pool_refused = !collision_ready && !physics_system->has_body_capacity();
+    return collision_ready;
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
@@ -6405,6 +6411,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 //  a remesh / LOD0 promotion just cleared this chunk's collider, so
                 // re-open the gated collision scan (Step 4) to rebuild it. Main-thread store.
                 m_collision_pass_dirty = true;
+                m_collision_pool_refused = false;
             }
             // A terrain request must retain edit invalidation. Water-only work
             // consumes no voxel input and has its own mesh-version freshness.
