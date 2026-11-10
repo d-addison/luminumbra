@@ -5903,6 +5903,38 @@
       ]
     },
     {
+      "id": "render.session-render-admission",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Normal-play activation, native qualification and a separately named measured production limits profile remain outstanding.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarFrozenObservation.SessionRender*",
+          "planned": "native frozen capture and bake refusal regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.SessionRenderAdmitsUnsavedTerrainAndWaterAtTheSameDurableGeneration",
+          "planned": "native explicit session handoff regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.PreviewUseWithCommittedIdentityIsRefusedTransactionally",
+          "planned": "native preview refusal diagnostic regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.TypedAdmissionRefusalsPreserveTargetAndChargesAndExistingNames",
+          "planned": "native typed admission refusal regression execution; owner: rendering"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-volume-memory.md"
+        }
+      ]
+    },
+    {
       "id": "station.architecture",
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",

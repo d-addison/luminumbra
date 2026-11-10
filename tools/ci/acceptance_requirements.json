@@ -1,6 +1,6 @@
 {
   "schema": "luminumbra.acceptance_requirements.v1",
-  "description": "Reviewed contract inventory. Stable ids are maintained, never renumbered. Text is the complete normalized source statement; quote is a short verbatim excerpt. Every prose, bullet and table-data statement is accounted for, including explicit descriptive exclusions. Table headings and separator lines are scaffolding. Update this inventory when either contract changes; the checker refuses unaccounted or stale statements. Exclusions require exact membership in the checker's closed audited table; changes require a new source/text/category audit.",
+  "description": "Reviewed contract inventory. Stable ids are maintained, never renumbered. Text is the complete normalized source statement; quote is a short verbatim excerpt. Every prose, bullet and table-data statement is accounted for, including explicit descriptive exclusions. Table headings and separator lines are scaffolding. Update this inventory when either contract changes; the checker refuses unaccounted or stale statements. Exclusions require exact membership in the checker's closed audited table; changes require a new source/text/category audit. Render-only SessionRender eligibility and typed handoff admission evidence is indexed separately by render.session-render-admission in acceptance_matrix.json; it does not activate normal-play authority or qualify production limits.",
   "documents": [
     "docs/distant-world.md",
     "docs/active-regions.md"
