@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
@@ -110,10 +112,11 @@ constexpr int kReturnIterations = 60;
 // shutting the job system down.
 class DurableFixture {
 public:
-    explicit DurableFixture(bool durable, bool active_regions = false) {
+    explicit DurableFixture(bool durable, bool active_regions = false, bool high_res = true) {
         jobs.startup();
         session = std::make_unique<GameSession>();
         session->SetActiveRegionsEnabled(active_regions);
+        session->SetWaterHighResEnabled(high_res);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
         created = session->CreateWorld("DurableResidency", "12345", "default");
@@ -199,6 +202,26 @@ bool Contains(const std::vector<std::shared_ptr<Chunk>>& chunks, const Chunk* ta
     return std::any_of(chunks.begin(), chunks.end(), [target](const auto& chunk) {
         return chunk.get() == target;
     });
+}
+
+void ExpectSameCalmWaterFields(const Chunk& chunk, const Chunk& expected) {
+    EXPECT_EQ(chunk.water_bed_mm, expected.water_bed_mm);
+    EXPECT_EQ(chunk.water_depth_mm, expected.water_depth_mm);
+    EXPECT_EQ(chunk.water_edge_flux, expected.water_edge_flux);
+    EXPECT_EQ(chunk.water_level_data, expected.water_level_data);
+    EXPECT_EQ(chunk.water_flow_data, expected.water_flow_data);
+    EXPECT_EQ(chunk.water_sim_terrain_height, expected.water_sim_terrain_height);
+    EXPECT_EQ(chunk.has_water_sim.load(), expected.has_water_sim.load());
+    EXPECT_EQ(chunk.current_water_resolution.load(), expected.current_water_resolution.load());
+    EXPECT_EQ(chunk.max_water_delta_last_tick, 0.0f);
+}
+
+void ExpectPersistedWaterAuthority(const fs::path& save_dir, const IVec3& coords) {
+    using Luminumbra::Persistence::WorldSaveService;
+    const auto persisted = WorldSaveService::read_chunk(save_dir, coords, true);
+    ASSERT_EQ(persisted.status, WorldSaveService::ChunkReadStatus::Found) << persisted.error;
+    ASSERT_TRUE(persisted.chunk);
+    EXPECT_TRUE(persisted.chunk->has_water_authority());
 }
 
 TEST(WorldDurableResidency, FlagOffEvictionStillErases) {
@@ -408,10 +431,11 @@ TEST(WorldDurableResidency, ClientRefusalGatesDueAndPressureSaves) {
             EXPECT_EQ(tree(), committed);
             EXPECT_TRUE(edited->is_voxel_data_dirty());
             EXPECT_EQ(edited->voxel_revision(), revision);
-            if (pressure)
+            if (pressure) {
                 EXPECT_TRUE(fx.session->PersistenceSaveRequested());
-            else
+            } else {
                 EXPECT_TRUE(fx.session->PersistenceAutosaveDue());
+            }
         }
         EXPECT_TRUE(Luminumbra::Client::SaveSessionWhenDue(fx.session.get(), true));
         EXPECT_NE(tree(), committed);
@@ -966,6 +990,126 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     const auto loaded = reloaded.GetWorldSystem()->find_streamed_chunk(coords);
     ASSERT_TRUE(loaded);
     EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
+}
+
+TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounter) {
+    using Luminumbra::Persistence::WorldSaveService;
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true, /*high_res=*/false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    ASSERT_TRUE(fx.world->durable_residency());
+    fx.world->clear_world(fx.physics);
+    auto* water = fx.session->GetWaterSystem();
+    ASSERT_NE(water, nullptr);
+    ASSERT_EQ(water->sim_resolution(), 8);
+    water->SetHydrology(true, 0, 0);
+    water->SetWeatherRain(nullptr, 0);
+
+    // A flat, dry generated column keeps depth and flux unchanged. Medium seeds
+    // from these 17-by-17 heightmap nodes, including after regeneration.
+    const auto generate = [](const IVec3& coords) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->set_state(ChunkState::Idle);
+        chunk->current_lod.store(0);
+        chunk->heightmap_data.assign(std::size_t{17} * 17, 10000.0f);
+        chunk->mark_sdf_generated_current_params();
+        return chunk;
+    };
+    // Incremental saves include every resident in a dirty region. Straddle a
+    // region boundary so the sleeping neighbour's region stays unsaved.
+    const auto saved = generate(IVec3(WorldSaveService::kRegionChunkSpan - 1, 0, 0));
+    saved->mark_water_state_dirty();
+    ASSERT_TRUE(fx.world->adopt_streamed_chunk(saved));
+    // Establish the snapshot before the regenerable neighbour arrives, so later
+    // saves exercise incremental selection rather than the initial cache write.
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    ASSERT_TRUE(WorldSaveService::has_chunk_snapshot(fx.session->GetWorldSaveDir()));
+    const auto unsaved = generate(IVec3(WorldSaveService::kRegionChunkSpan, 0, 0));
+    ASSERT_TRUE(fx.world->adopt_streamed_chunk(unsaved));
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> uninterrupted{
+        {saved->get_id(), saved}, {unsaved->get_id(), unsaved}};
+    constexpr int kCalmTicksToSleep = 120;
+    constexpr std::size_t kCellsPerChunk = 8u * 8u;
+    // Only two chunks and 120 warmup updates; every update fits the solver window.
+    for (int tick = 0; tick < kCalmTicksToSleep; ++tick) {
+        water->update(fx.session->GetRegistry(), uninterrupted);
+        ASSERT_EQ(water->cells_stepped_last_update(), 2u * kCellsPerChunk);
+    }
+    for (const auto& chunk : {saved, unsaved}) {
+        ASSERT_TRUE(chunk->has_water_sim.load());
+        ASSERT_TRUE(chunk->is_water_sleeping.load());
+        ASSERT_EQ(chunk->ticks_below_threshold, kCalmTicksToSleep);
+        ASSERT_EQ(chunk->water_bed_mm, std::vector<std::int32_t>(kCellsPerChunk, 10000000));
+        ASSERT_EQ(chunk->water_sim_terrain_height, std::vector<float>(kCellsPerChunk, 10000.0f));
+        ASSERT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(kCellsPerChunk, 0));
+        ASSERT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(2u * kCellsPerChunk, 0));
+    }
+    ASSERT_TRUE(saved->has_water_authority());
+    ASSERT_TRUE(saved->is_voxel_data_dirty());
+    ASSERT_FALSE(unsaved->needs_authority());
+    ASSERT_FALSE(unsaved->is_water_state_dirty());
+    ASSERT_FALSE(unsaved->is_voxel_data_dirty());
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    ExpectPersistedWaterAuthority(fx.session->GetWorldSaveDir(), saved->get_coords());
+    const auto absent =
+        WorldSaveService::read_chunk(fx.session->GetWorldSaveDir(), unsaved->get_coords(), true);
+    ASSERT_EQ(absent.status, WorldSaveService::ChunkReadStatus::Absent) << absent.error;
+
+    GameSession reloaded;
+    reloaded.SetJobSystem(&fx.jobs);
+    reloaded.SetRootPath(fx.root.root_string());
+    reloaded.SetActiveRegionsEnabled(true);
+    reloaded.SetWaterHighResEnabled(false);
+    ASSERT_TRUE(reloaded.LoadWorld(fx.session->GetMetadata().worldId));
+    ASSERT_EQ(reloaded.GetWorldSaveDir(), fx.session->GetWorldSaveDir());
+    auto* loaded_world = reloaded.GetWorldSystem();
+    ASSERT_NE(loaded_world, nullptr);
+    // Outside the initial spawn window, durable chunks are restored on demand
+    // through the same public path that streaming uses before generation.
+    ASSERT_TRUE(loaded_world->restore_authoritative_chunk(saved->get_coords()));
+    const auto restored = loaded_world->find_streamed_chunk(saved->get_coords());
+    ASSERT_TRUE(restored);
+    EXPECT_TRUE(restored->same_water_state(*saved));
+    EXPECT_EQ(restored->ticks_below_threshold, saved->ticks_below_threshold);
+    EXPECT_EQ(restored->is_water_sleeping.load(), saved->is_water_sleeping.load());
+    ASSERT_FALSE(loaded_world->find_authoritative_chunk(unsaved->get_coords()));
+    const auto regenerated = generate(unsaved->get_coords());
+    ASSERT_TRUE(loaded_world->adopt_streamed_chunk(regenerated));
+    EXPECT_FALSE(regenerated->has_water_sim.load());
+    EXPECT_FALSE(regenerated->is_water_sleeping.load());
+    EXPECT_EQ(regenerated->ticks_below_threshold, 0);
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> resumed{
+        {restored->get_id(), restored}, {regenerated->get_id(), regenerated}};
+    auto* loaded_water = reloaded.GetWaterSystem();
+    ASSERT_NE(loaded_water, nullptr);
+    loaded_water->SetHydrology(true, 0, 0);
+    loaded_water->SetWeatherRain(nullptr, 0);
+
+    // The uninterrupted pair stays asleep. After reload the neighbour takes 120
+    // ticks to sleep, waking the saved chunk for one calm step each tick.
+    // That chunk immediately sleeps again, without resetting its persisted counter.
+    for (int tick = 1; tick <= kCalmTicksToSleep + 1; ++tick) {
+        SCOPED_TRACE(tick);
+        water->update(fx.session->GetRegistry(), uninterrupted);
+        loaded_water->update(reloaded.GetRegistry(), resumed);
+        EXPECT_EQ(water->cells_stepped_last_update(), 0u);
+        EXPECT_EQ(loaded_water->cells_stepped_last_update(),
+                  tick <= kCalmTicksToSleep ? 2u * kCellsPerChunk : 0u);
+        EXPECT_EQ(saved->ticks_below_threshold, kCalmTicksToSleep);
+        EXPECT_EQ(unsaved->ticks_below_threshold, kCalmTicksToSleep);
+        EXPECT_TRUE(saved->is_water_sleeping.load());
+        EXPECT_TRUE(unsaved->is_water_sleeping.load());
+        EXPECT_EQ(restored->ticks_below_threshold,
+                  kCalmTicksToSleep + std::min(tick, kCalmTicksToSleep));
+        EXPECT_TRUE(restored->is_water_sleeping.load());
+        EXPECT_EQ(regenerated->ticks_below_threshold, std::min(tick, kCalmTicksToSleep));
+        EXPECT_EQ(regenerated->is_water_sleeping.load(), tick >= kCalmTicksToSleep);
+        EXPECT_TRUE(water->dbg_mass_ok());
+        EXPECT_TRUE(loaded_water->dbg_mass_ok());
+        for (const auto& chunk : {saved, restored, regenerated}) {
+            ExpectSameCalmWaterFields(*chunk, *unsaved);
+        }
+        EXPECT_FALSE(regenerated->needs_authority());
+    }
 }
 
 TEST(WorldDurableResidency, RepeatedSuccessfulSavesLeaveSettledActivationElided) {
