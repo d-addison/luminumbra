@@ -199,6 +199,15 @@ void ClampTerrainParams(TerrainGenParams& p) {
 float ScentOriginFor(float anchor) {
     return anchor - (static_cast<float>(kScentFieldCells) * kScentCellSize * 0.5f);
 }
+
+void RemoveCreatureAvatar(Luminumbra::world::GameSession& session,
+                          entt::registry& registry,
+                          entt::entity entity) {
+    if (auto* physics = session.GetPhysicsSystem()) {
+        physics->remove_avatar_character(
+            registry.get<Luminumbra::Components::CreaturePhysicsComponent>(entity).avatar_index);
+    }
+}
 } // namespace
 
 namespace Luminumbra::world {
@@ -319,9 +328,13 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
 
 GameSession::GameSession() {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
+    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
+        .connect<&RemoveCreatureAvatar>(*this);
 }
 
 GameSession::~GameSession() {
+    m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
+        .disconnect<&RemoveCreatureAvatar>(*this);
     // Jobs can read world, water, weather and physics. Drain before member destruction.
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -857,15 +870,23 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                     phys.get<Luminumbra::Components::CreatureComponent>(e);
                                 const auto& cp =
                                     phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                                const bool denied =
+                                    creature_admission && !creature_admission->Allows(e);
+                                m_physicsSystem->set_avatar_frozen(
+                                    cp.avatar_index,
+                                    denied,
+                                    phys.get<Luminumbra::Components::TransformComponent>(e)
+                                        .position);
                                 m_physicsSystem->set_avatar_wish_velocity(
                                     cp.avatar_index,
-                                    creature_admission && !creature_admission->Allows(e)
-                                        ? glm::vec2(0.0f)
-                                        : glm::vec2(cr.wish_x, cr.wish_z));
+                                    denied ? glm::vec2(0.0f) : glm::vec2(cr.wish_x, cr.wish_z));
                             }
                             m_physicsSystem->update_avatars(
                                 static_cast<float>(m_simulationClock.fixed_dt()));
                             for (auto e : pe) {
+                                if (creature_admission && !creature_admission->Allows(e)) {
+                                    continue;
+                                }
                                 const auto& cp =
                                     phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
                                 phys.get<Luminumbra::Components::TransformComponent>(e).position =

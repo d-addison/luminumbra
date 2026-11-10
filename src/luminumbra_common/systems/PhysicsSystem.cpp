@@ -24,6 +24,7 @@
 
 #include "../core/Log.h"
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -636,8 +637,56 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
 
 // ---  : server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
+    for (std::size_t index = 0; index < m_avatar_characters.size(); ++index) {
+        remove_avatar_character(index);
+    }
     m_avatar_characters.clear();
     m_avatar_wish.clear();
+    m_avatar_frozen_bodies.clear();
+}
+
+void PhysicsSystem::remove_avatar_character(std::size_t index) {
+    if (index >= m_avatar_characters.size()) {
+        return;
+    }
+    destroy_body(m_avatar_frozen_bodies[index]);
+    m_avatar_frozen_bodies[index] = JPH::BodyID();
+    m_avatar_characters[index].reset();
+    m_avatar_wish[index] = glm::vec2(0.0f);
+}
+
+void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm::vec3& position) {
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) {
+        return;
+    }
+    auto& body = m_avatar_frozen_bodies[index];
+    if (!frozen && body.IsInvalid()) {
+        return;
+    }
+    auto& character = *m_avatar_characters[index];
+    const JPH::RVec3 feet =
+        std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)
+            ? JPH::RVec3(position.x, position.y, position.z)
+            : character.GetPosition();
+    if (frozen && body.IsInvalid()) {
+        const JPH::BodyCreationSettings settings(m_avatar_shape,
+                                                 feet,
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        body = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+        if (body.IsInvalid()) {
+            throw std::runtime_error("No physics body available for frozen avatar");
+        }
+    } else if (!frozen) {
+        destroy_body(body);
+        body = JPH::BodyID();
+    } else if (feet != character.GetPosition()) {
+        m_body_interface->SetPosition(body, feet, JPH::EActivation::DontActivate);
+    }
+    character.SetPosition(feet);
+    character.SetLinearVelocity(JPH::Vec3::sZero());
+    m_avatar_wish[index] = glm::vec2(0.0f);
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
@@ -669,6 +718,7 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
                                                 JPH::Quat::sIdentity(),
                                                 m_jolt_system.get()));
     m_avatar_wish.emplace_back(0.0f, 0.0f);
+    m_avatar_frozen_bodies.emplace_back();
     return m_avatar_characters.size() - 1;
 }
 
@@ -682,7 +732,7 @@ void PhysicsSystem::update_avatars(float dt) {
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
     for (std::size_t i = 0; i < m_avatar_characters.size(); ++i) {
         auto& character = m_avatar_characters[i];
-        if (!character)
+        if (!character || !m_avatar_frozen_bodies[i].IsInvalid())
             continue;
         ++m_work_items.characters;
         const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);

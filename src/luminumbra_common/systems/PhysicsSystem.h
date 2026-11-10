@@ -103,6 +103,15 @@ public:
     void clear_avatar_characters();
     // Positions use the feet, matching creature transforms and the local player.
     std::size_t create_avatar_character(const glm::vec3& initial_position);
+    // Leaves other avatar indices stable. Repeated removal is harmless.
+    void remove_avatar_character(std::size_t index);
+    // Frozen avatars keep zero velocity and a static collision capsule, and are
+    // excluded from integration. Stage every avatar before update_avatars so
+    // moving avatars see all frozen capsules independent of creation order.
+    // Finite feet positions also synchronize teleports while frozen or resuming;
+    // invalid positions retain the last valid avatar position. Unfrozen avatars
+    // that were never frozen retain the legacy movement path byte-for-byte.
+    void set_avatar_frozen(std::size_t index, bool frozen, const glm::vec3& position);
     // Set an avatar's horizontal wish velocity (world XZ m/s) for the
     // next step -- the server applies the network usercmd's movement here. Persists
     // until changed (0 by default -> the avatar stands, the without movement input behaviour).
@@ -225,7 +234,8 @@ private:
     // Server-authoritative avatar characters (one per connected player)
     // + the shared avatar capsule shape. Stepped in index order for determinism.
     std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
-    std::vector<glm::vec2> m_avatar_wish; // per-avatar horizontal wish velocity (m/s)
+    std::vector<glm::vec2> m_avatar_wish;            // per-avatar horizontal wish velocity (m/s)
+    std::vector<JPH::BodyID> m_avatar_frozen_bodies; // invalid when not frozen
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
