@@ -3,7 +3,10 @@
 #include "FarWorldAuthorityChanges.h"
 #include "persistence/WorldSaveService.h"
 #include <bitset>
+#include <cstdint>
+#include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace Luminumbra::World {
@@ -26,7 +29,9 @@ public:
         CopyLimit,
         AuthorityUnavailable,
         WaterUnavailable,
-        AllocationFailure
+        AllocationFailure,
+        DeadlineExceeded,
+        CommittedReadRefused
     };
     struct Image {
         IVec3 coords{};
@@ -44,6 +49,23 @@ public:
     struct Counters {
         std::uint64_t tick_items = 0, query_items = 0;
         std::uint64_t copied_records = 0, copied_bytes = 0, dirty_overflows = 0;
+    };
+    struct CaptureLimits {
+        Persistence::WorldSaveService::AuthorityReadLimits read;
+        std::uint32_t deadline_frames = 0;
+    };
+    // Source assembly only. These owned inputs have no frozen-use eligibility.
+    // The pointer returned by capture() lasts until replacement or destruction.
+    struct SourceCapture {
+        std::uint64_t serial = 0;
+        Persistence::WorldSaveService::AuthorityWindow window;
+        std::vector<Image> published;
+        Persistence::WorldSaveService::AuthorityWindowResult committed;
+    };
+    struct CaptureStatus {
+        Error error = Error::None;
+        std::uint64_t serving_serial = 0, target_serial = 0;
+        bool active = false, queued = false, paused = false, latest_ready = false;
     };
     explicit FarWorldAuthorityProducer(const Limits& limits);
     ~FarWorldAuthorityProducer();
@@ -66,8 +88,25 @@ public:
     read_committed(const Persistence::WorldSaveService::AuthorityWindow& window,
                    const Persistence::WorldSaveService::AuthorityReadLimits& limits) const;
 
+    // All calls run on the owner thread. Pump once per prepared frame; pause
+    // stops admissions, while an already started capture still ages to refusal.
+    bool configure_capture(const CaptureLimits& limits);
+    bool request_capture(std::span<const Persistence::WorldSaveService::AuthorityWindow> windows);
+    bool needs_capture_boundary() const;
+    void pump_capture();
+    void fence_source_reads(bool paused);
+    void invalidate_source();
+    bool refresh_saved_source(const std::filesystem::path& root, std::string& error);
+    const SourceCapture* capture() const;
+    CaptureStatus capture_status() const;
+    const std::string& capture_read_error() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+struct FarWorldAuthorityConfig {
+    FarWorldAuthorityProducer::Limits source;
+    FarWorldAuthorityProducer::CaptureLimits capture;
 };
 } // namespace Luminumbra::World
