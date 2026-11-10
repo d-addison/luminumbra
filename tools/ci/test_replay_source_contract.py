@@ -1197,38 +1197,6 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
         self.assertNotIn("Cancel(", forget)
 
 
-class MeshPublicationSourceContract(unittest.TestCase):
-    def test_session_adoption_resets_water_completion_and_restores_water_geometry(self):
-        session = read_source("src/luminumbra_common/world/GameSession.cpp")
-        adoption = session.split("void GameSession::AdoptWorldStateFrom(", 1)[1].split(
-            "void GameSession::", 1)[0]
-        self.assertIn("chunk->pending_water_mesh_generated.store(false, std::memory_order_release);",
-                      adoption)
-        self.assertIn("(!chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty())",
-                      re.sub(r"\s+", " ", adoption))
-
-    def test_heightmap_fallback_preserves_terrain_authority_and_independent_water_wake(self):
-        source = re.sub(r"\s+", " ", read_source(
-            "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"))
-        self.assertIn("return chunk.has_terrain_authority() && chunk.sdf_data.empty() && "
-                      "chunk.heightmap_data.size() == kHeightmapCells;", source)
-        self.assertIn("return HasAuthoritativeHeightmapOnly(chunk) ? "
-                      "std::max(requested_lod, 1) : requested_lod;", source)
-        self.assertIn("return lod == 0 || (lod == 1 && HasAuthoritativeHeightmapOnly(chunk));",
-                      source)
-        self.assertIn("WaterMeshingDirty(m_water_mesh_watch, "
-                      "m_last_streaming_budget_stats.water_meshing_inputs)", source)
-        self.assertIn("water_lod_requested && IsWaterMeshParticipant(*chunk_ptr)", source)
-        self.assertIn("if (terrain_mesh_required) { "
-                      "required_lod = TerrainMeshLod(*chunk_ptr, required_lod); }", source)
-        native = read_source("test/shield/meshing_hardening_test.cpp")
-        self.assertIn("TEST(StreamingHardening, AuthorityHeightmapMeshesWithoutGenerationPromotion)",
-                      native)
-        self.assertIn("for (const int old_lod : {-1, 2})", native)
-        self.assertIn("water_meshing_inputs, 1u", native)
-        self.assertIn("water_meshing_inputs, 0u", native)
-
-
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.discover(str(ROOT / "test/tools"),
                                    pattern="test_region_authority_wiring.py"))

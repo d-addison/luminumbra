@@ -555,16 +555,41 @@ bool IsWaterMeshParticipant(const Chunk& chunk) {
     return lod == 0 || (lod == 1 && HasAuthoritativeHeightmapOnly(chunk));
 }
 
+bool NeedsWaterMesh(const Chunk& chunk) {
+    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
+    // The mesher accepts at most a 32*32 grid. Incomplete inputs wait for repair.
+    return resolution > 1 && resolution <= 32 &&
+           chunk.water_level_data.size() >=
+               static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution) &&
+           chunk.has_water_sim.load(std::memory_order_acquire) &&
+           !chunk.water_mesh_generated.load(std::memory_order_acquire);
+}
+
+bool NeedsReadyWaterMesh(const std::shared_ptr<Chunk>& chunk) {
+    return chunk && chunk->get_state() == ChunkState::Ready && IsWaterMeshParticipant(*chunk) &&
+           NeedsWaterMesh(*chunk) && chunk->pending_lod.load(std::memory_order_acquire) < 0;
+}
+
+float WaterMeshDistanceSquared(const Chunk& chunk, std::span<const Vec3> anchors) {
+    const Vec3 center =
+        (Vec3(chunk.get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    float distance_sq = glm::dot(center, center);
+    if (!anchors.empty()) {
+        distance_sq = std::numeric_limits<float>::max();
+        for (const auto& anchor : anchors) {
+            const Vec3 delta = center - anchor;
+            distance_sq = std::min(distance_sq, glm::dot(delta, delta));
+        }
+    }
+    return distance_sq;
+}
+
 bool WaterMeshingDirty(std::span<const std::weak_ptr<Chunk>> owners, std::size_t& inputs) {
     bool dirty = false;
     for (const auto& owner : owners) {
         ++inputs;
         const auto chunk = owner.lock();
-        dirty |= chunk && chunk->get_state() == ChunkState::Ready &&
-                 IsWaterMeshParticipant(*chunk) &&
-                 chunk->has_water_sim.load(std::memory_order_acquire) &&
-                 !chunk->water_mesh_generated.load(std::memory_order_acquire) &&
-                 chunk->pending_lod.load(std::memory_order_acquire) < 0;
+        dirty |= NeedsReadyWaterMesh(chunk);
     }
     return dirty;
 }
@@ -3403,16 +3428,16 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // fallbacks, and rebuilt by that pass.
     // Include dry owners so late water initialization can reopen scheduling.
     const bool water_meshing_dirty =
+        m_water_system &&
         WaterMeshingDirty(m_water_mesh_watch, m_last_streaming_budget_stats.water_meshing_inputs);
     const bool anchor_changed = (anchor_positions != m_last_anchor_positions);
     const bool count_changed = (m_streaming_state.chunks.size() != m_last_chunk_count);
     const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
     const bool streaming_dirty = generation_dirty || anchor_changed || count_changed ||
-                                 activation_ran_this_tick || water_meshing_dirty ||
-                                 !m_last_pass_drained;
+                                 activation_ran_this_tick || !m_last_pass_drained;
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
-    if (streaming_dirty) {
+    if (streaming_dirty || water_meshing_dirty || deferred_meshing_pending()) {
         // Residency is indexed at insert/erase. Neighbor mesh state is read at
         // this owner-thread observation point, matching the former snapshot.
         const auto& meshed_columns = m_activation_index.columns();
@@ -3471,154 +3496,184 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             deferred_indices.emplace(m_deferred_meshing[index].chunk->get_id(), index);
         }
 
-        m_water_mesh_watch.clear();
-        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-            (void)id;
-            bool needs_meshing = false;
-            bool terrain_mesh_required = true;
-            int required_lod = -1;
+        if (streaming_dirty) {
+            m_water_mesh_watch.clear();
+            for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+                (void)id;
+                bool needs_meshing = false;
+                bool terrain_mesh_required = true;
+                int required_lod = -1;
 
-            ChunkState state = chunk_ptr->get_state();
-            const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
-            if (pending_lod >= 0) {
-                continue;
-            }
+                ChunkState state = chunk_ptr->get_state();
+                const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
 
-            // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
-            // demands wins). One anchor -> that anchor, identical to the historical
-            // camera_position.
-            Vec3 closest_anchor = anchor_positions.empty() ? Vec3(0.0f) : anchor_positions[0];
-            if (anchor_positions.size() > 1) {
-                const IVec3 lod_chunk = chunk_ptr->get_coords();
-                float best = 1e30f;
-                for (const Vec3& a : anchor_positions) {
-                    const IVec3 d = lod_chunk - world_to_chunk_coords(a);
-                    const float ds =
-                        static_cast<float>(horizontal_distance_sq(d.x, d.z) + d.y * d.y);
-                    if (ds < best) {
-                        best = ds;
-                        closest_anchor = a;
+                // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
+                // demands wins). One anchor -> that anchor, identical to the historical
+                // camera_position.
+                Vec3 closest_anchor = anchor_positions.empty() ? Vec3(0.0f) : anchor_positions[0];
+                if (anchor_positions.size() > 1) {
+                    const IVec3 lod_chunk = chunk_ptr->get_coords();
+                    float best = 1e30f;
+                    for (const Vec3& a : anchor_positions) {
+                        const IVec3 d = lod_chunk - world_to_chunk_coords(a);
+                        const float ds =
+                            static_cast<float>(horizontal_distance_sq(d.x, d.z) + d.y * d.y);
+                        if (ds < best) {
+                            best = ds;
+                            closest_anchor = a;
+                        }
                     }
                 }
-            }
 
-            if (state == Luminumbra::ChunkState::Idle) {
-                needs_meshing = true;
-            } else if (state == Luminumbra::ChunkState::Ready) {
-                Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
-                                    Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-                // pass the meshed LOD so demotions go through the
-                // asymmetric hysteresis band (promote at D, demote at D + margin).
-                required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
-                                                          chunk_center,
-                                                          closest_anchor,
-                                                          chunk_ptr->current_lod.load());
-
-                const bool water_lod_requested = required_lod == 0;
-                if (water_lod_requested && IsWaterMeshParticipant(*chunk_ptr)) {
-                    m_water_mesh_watch.emplace_back(chunk_ptr);
-                }
-                // Authoritative heightmaps cannot be regenerated to satisfy LOD0.
-                // Keep their terrain fallback settled while water requests LOD0 independently.
-                required_lod = TerrainMeshLod(*chunk_ptr, required_lod);
-                if (required_lod != chunk_ptr->current_lod.load()) {
-                    needs_meshing = true;
-                    terrain_mesh_required = true;
-                } else if (water_lod_requested &&
-                           chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
-                           !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
-                    needs_meshing = true;
-                    terrain_mesh_required = false;
-                    required_lod = 0;
-                } else if (get_lod_step_for_level(required_lod) > 1 &&
-                           !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
-                           (required_transition_faces(*chunk_ptr, required_lod) &
-                            static_cast<u8>(~chunk_ptr->applied_transition_faces.load(
-                                std::memory_order_acquire))) !=
-                               Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
-                    // A finer neighbor arrived after this coarse chunk was meshed:
-                    // remesh so the now-required boundary transition skirts are
-                    // baked in, closing the persistent LOD seam crack.
-                    needs_meshing = true;
-                    terrain_mesh_required = true;
-                }
-            }
-
-            if (needs_meshing) {
-                const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
-                                          Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-                if (required_lod == -1) {
-                    // Never-meshed chunks carry current_lod == -1, so this stays
-                    // the raw band assignment; a previously meshed chunk that
-                    // re-enters here keeps the same hysteresis as the Ready path.
+                if (state == Luminumbra::ChunkState::Ready ||
+                    state == Luminumbra::ChunkState::Meshing) {
+                    Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                        Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                    // pass the meshed LOD so demotions go through the
+                    // asymmetric hysteresis band (promote at D, demote at D + margin).
                     required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
                                                               chunk_center,
                                                               closest_anchor,
                                                               chunk_ptr->current_lod.load());
-                }
-                if (terrain_mesh_required) {
-                    required_lod = TerrainMeshLod(*chunk_ptr, required_lod);
-                }
-                // The column-surface cache samples the same chunk positions, so
-                // this replaces per-candidate fractal noise evaluations with a
-                // hash lookup (terrain height is a pure function of seed/params).
-                // Vertical rank is the distance OUTSIDE the column surface span
-                // (0 for every chunk the isosurface passes through), so cliff
-                // wall chunks drain with the same hole-fill priority as the
-                // center surface chunk.
-                const ColumnSurfaceSpan span =
-                    column_surface_span(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
-                const int chunk_y = chunk_ptr->get_coords().y;
-                const int vertical_surface_distance =
-                    chunk_y > span.max_y ? chunk_y - span.max_y
-                                         : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
-                // Meshing priority by distance to the CLOSEST anchor (multi-anchor). One
-                // anchor -> identical to the historical camera-relative distance.
-                const IVec3 mc_coords = chunk_ptr->get_coords();
-                float distance_sq = 1e30f;
-                for (const Vec3& a : anchor_positions) {
-                    const IVec3 delta = mc_coords - world_to_chunk_coords(a);
-                    distance_sq =
-                        std::min(distance_sq,
-                                 static_cast<float>(horizontal_distance_sq(delta.x, delta.z) +
-                                                    delta.y * delta.y));
-                }
-                meshing_candidates.push_back({chunk_ptr,
-                                              required_lod,
-                                              state == Luminumbra::ChunkState::Ready &&
-                                                  !chunk_ptr->mesh_vertices.empty() &&
-                                                  !chunk_ptr->mesh_indices.empty(),
-                                              terrain_mesh_required,
-                                              vertical_surface_distance,
-                                              distance_sq});
-            }
 
-            const auto retained = deferred_indices.find(chunk_ptr->get_id());
-            if (retained != deferred_indices.end() &&
-                m_deferred_meshing[retained->second].chunk == chunk_ptr) {
-                auto& item = m_deferred_meshing[retained->second];
-                // Refresh in the existing scan, without changing prefix ownership
-                // or its due tick. Even a satisfied request still owns a remesh,
-                // but must use today's LOD and neighbors rather than undo it.
-                if (required_lod < 0) {
+                    const bool water_lod_requested = required_lod == 0;
+                    if (water_lod_requested && IsWaterMeshParticipant(*chunk_ptr)) {
+                        m_water_mesh_watch.emplace_back(chunk_ptr);
+                    }
+                }
+                // Pending publications still own a place in the water watch list.
+                if (pending_lod >= 0) {
+                    continue;
+                }
+                if (state == Luminumbra::ChunkState::Idle) {
+                    needs_meshing = true;
+                } else if (state == Luminumbra::ChunkState::Ready) {
+                    const bool water_lod_requested = required_lod == 0;
+                    // Authoritative heightmaps cannot be regenerated to satisfy LOD0.
+                    // Keep their terrain fallback settled while water requests LOD0 independently.
+                    required_lod = TerrainMeshLod(*chunk_ptr, required_lod);
+                    if (required_lod != chunk_ptr->current_lod.load()) {
+                        needs_meshing = true;
+                        terrain_mesh_required = true;
+                    } else if (m_water_system && water_lod_requested &&
+                               chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                               !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
+                        needs_meshing = true;
+                        terrain_mesh_required = false;
+                        required_lod = 0;
+                    } else if (get_lod_step_for_level(required_lod) > 1 &&
+                               !chunk_ptr->mesh_vertices.empty() &&
+                               !chunk_ptr->mesh_indices.empty() &&
+                               (required_transition_faces(*chunk_ptr, required_lod) &
+                                static_cast<u8>(~chunk_ptr->applied_transition_faces.load(
+                                    std::memory_order_acquire))) !=
+                                   Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
+                        // A finer neighbor arrived after this coarse chunk was meshed:
+                        // remesh so the now-required boundary transition skirts are
+                        // baked in, closing the persistent LOD seam crack.
+                        needs_meshing = true;
+                        terrain_mesh_required = true;
+                    }
+                }
+
+                if (needs_meshing) {
                     const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                               Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-                    required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
-                                                              chunk_center,
-                                                              closest_anchor,
-                                                              chunk_ptr->current_lod.load());
+                    if (required_lod == -1) {
+                        // Never-meshed chunks carry current_lod == -1, so this stays
+                        // the raw band assignment; a previously meshed chunk that
+                        // re-enters here keeps the same hysteresis as the Ready path.
+                        required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                                  chunk_center,
+                                                                  closest_anchor,
+                                                                  chunk_ptr->current_lod.load());
+                    }
+                    if (terrain_mesh_required) {
+                        required_lod = TerrainMeshLod(*chunk_ptr, required_lod);
+                    }
+                    // The column-surface cache samples the same chunk positions, so
+                    // this replaces per-candidate fractal noise evaluations with a
+                    // hash lookup (terrain height is a pure function of seed/params).
+                    // Vertical rank is the distance OUTSIDE the column surface span
+                    // (0 for every chunk the isosurface passes through), so cliff
+                    // wall chunks drain with the same hole-fill priority as the
+                    // center surface chunk.
+                    const ColumnSurfaceSpan span =
+                        column_surface_span(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
+                    const int chunk_y = chunk_ptr->get_coords().y;
+                    const int vertical_surface_distance =
+                        chunk_y > span.max_y ? chunk_y - span.max_y
+                                             : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
+                    // Meshing priority by distance to the CLOSEST anchor (multi-anchor). One
+                    // anchor -> identical to the historical camera-relative distance.
+                    const IVec3 mc_coords = chunk_ptr->get_coords();
+                    float distance_sq = 1e30f;
+                    for (const Vec3& a : anchor_positions) {
+                        const IVec3 delta = mc_coords - world_to_chunk_coords(a);
+                        distance_sq =
+                            std::min(distance_sq,
+                                     static_cast<float>(horizontal_distance_sq(delta.x, delta.z) +
+                                                        delta.y * delta.y));
+                    }
+                    meshing_candidates.push_back({chunk_ptr,
+                                                  required_lod,
+                                                  state == Luminumbra::ChunkState::Ready &&
+                                                      !chunk_ptr->mesh_vertices.empty() &&
+                                                      !chunk_ptr->mesh_indices.empty(),
+                                                  terrain_mesh_required,
+                                                  vertical_surface_distance,
+                                                  distance_sq});
                 }
-                item.lod_level = required_lod;
-                if (needs_meshing) {
-                    item.terrain_mesh_required = terrain_mesh_required;
+
+                const auto retained = deferred_indices.find(chunk_ptr->get_id());
+                if (retained != deferred_indices.end() &&
+                    m_deferred_meshing[retained->second].chunk == chunk_ptr) {
+                    auto& item = m_deferred_meshing[retained->second];
+                    // Refresh in the existing scan, without changing prefix ownership
+                    // or its due tick. Even a satisfied request still owns a remesh,
+                    // but must use today's LOD and neighbors rather than undo it.
+                    if (required_lod < 0) {
+                        const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                                  Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                        required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                                  chunk_center,
+                                                                  closest_anchor,
+                                                                  chunk_ptr->current_lod.load());
+                    }
+                    item.lod_level = required_lod;
+                    if (needs_meshing) {
+                        item.terrain_mesh_required = terrain_mesh_required;
+                    }
+                    const bool has_active_mesh = state == Luminumbra::ChunkState::Ready &&
+                                                 !chunk_ptr->mesh_vertices.empty() &&
+                                                 !chunk_ptr->mesh_indices.empty();
+                    item.high_priority =
+                        !has_active_mesh &&
+                        retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
+                    item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
+                    item.current_candidate = needs_meshing;
                 }
-                const bool has_active_mesh = state == Luminumbra::ChunkState::Ready &&
-                                             !chunk_ptr->mesh_vertices.empty() &&
-                                             !chunk_ptr->mesh_indices.empty();
-                item.high_priority = !has_active_mesh &&
-                                     retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
-                item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
-                item.current_candidate = needs_meshing;
+            }
+
+        } else {
+            // Settled water refreshes visit only the watched participants and
+            // never reopen terrain LOD or column-surface queries.
+            for (const auto& owner : m_water_mesh_watch) {
+                const auto chunk = owner.lock();
+                if (!NeedsReadyWaterMesh(chunk)) {
+                    continue;
+                }
+                meshing_candidates.push_back({chunk,
+                                              0,
+                                              HasRenderableGeometry(*chunk),
+                                              false,
+                                              0,
+                                              WaterMeshDistanceSquared(*chunk, anchor_positions)});
+                const auto retained = deferred_indices.find(chunk->get_id());
+                if (retained != deferred_indices.end() &&
+                    m_deferred_meshing[retained->second].chunk == chunk) {
+                    m_deferred_meshing[retained->second].current_candidate = true;
+                }
             }
         }
 
@@ -3718,24 +3773,34 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 meshing_candidates.size() - result.submitted_candidates;
         }
 
-        // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
-        // pass ran). The world is settled iff this pass produced no candidates, left nothing
-        // deferred, and no gen/mesh jobs are in flight. Job-active state is read ONLY here; on the
-        // per-tick-quiesced hashed paths it is deterministic. Advancing m_last_serviced_generation
-        // only at quiescence means a budget-deferred remesh (deferred_meshing>0) or any produced
-        // candidate keeps the gate sticky-open next tick, so chained seam/transition propagation
-        // always converges.
-        const bool produced_work =
-            !meshing_candidates.empty() || m_last_streaming_budget_stats.deferred_meshing > 0;
-        // quiescence keys on the publication-keyed outstanding
-        // signals (main-thread events), not wall-clock job counters — the last
-        // scheduler read to be de-timed ahead of the barrier removal.
-        const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
-                               !promotion_pipeline_pending() && !generation_batch_outstanding() &&
-                               !deferred_meshing_pending();
-        m_last_pass_drained = quiescent;
-        if (quiescent) {
-            m_last_serviced_generation = m_dirty_generation;
+        // Only terrain work keeps the full candidate pass open. Generation,
+        // promotion and terrain descriptors use owner-thread publication state,
+        // so chained LOD and transition updates converge independently of
+        // worker completion timing. Water wakeups use the participant list.
+        if (streaming_dirty) {
+            // Water-only work is revisited through the watch list. It must not
+            // keep the terrain scan open, including after an empty publication
+            // from incomplete water inputs. These descriptor scans are bounded
+            // by nine batches and the dispatch candidate-count cap.
+            const bool terrain_pending = std::any_of(
+                m_streaming_state.meshing_batches.begin(),
+                m_streaming_state.meshing_batches.end(),
+                [](const auto& batch) {
+                    return std::any_of(batch.chunks.begin(),
+                                       batch.chunks.end(),
+                                       [](const auto& item) { return item.terrain_mesh_required; });
+                });
+            const bool terrain_deferred = std::any_of(
+                m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
+                m_deferred_meshing.end(),
+                [](const auto& item) { return item.terrain_mesh_required; });
+            const bool quiescent = terrain_meshing_backlog == 0 && !terrain_pending &&
+                                   !terrain_deferred && !promotion_pipeline_pending() &&
+                                   !generation_batch_outstanding();
+            m_last_pass_drained = quiescent;
+            if (quiescent) {
+                m_last_serviced_generation = m_dirty_generation;
+            }
         }
     } // streaming_dirty gate
     _dbg_split(
@@ -6198,6 +6263,9 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
             // Classification above guarantees an empty or exact full lattice.
             // Each terrain channel is bounded by one chunk's padded lattice.
             snapshot.sdf_data = chunk->sdf_data;
+            if (chunk->has_terrain_authority()) {
+                snapshot.mark_sdf_loaded_or_edited();
+            }
             if (chunk->heightmap_data.size() == kHeightmapCells) {
                 snapshot.heightmap_data = chunk->heightmap_data;
             }

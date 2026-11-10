@@ -2341,3 +2341,96 @@ TEST(AsyncWaterMeshing, WaterPollingVisitsOnlyHighDetailParticipantsAndFindsLate
     world.update(registry, std::vector<Vec3>{}, nullptr, false);
     EXPECT_EQ(world.get_last_streaming_budget_stats().water_meshing_inputs, 0u);
 }
+
+TEST(AsyncWaterMeshing, SettledWaterRefreshDoesNotRevisitTerrainColumnsAndWaitsForValidInputs) {
+    for (const bool with_water : {false, true}) {
+        SCOPED_TRACE(with_water);
+        SHIELD_WorldSystem world(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        WaterSystem water(nullptr, &world);
+        water.SetBootPaused(true);
+        if (with_water) {
+            world.SetWaterSystem(&water);
+        }
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        FillDugPond(world, *chunk, 4);
+        chunk->current_lod.store(0);
+        chunk->current_water_resolution.store(0);
+        chunk->water_mesh_generated.store(false);
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        entt::registry registry;
+        // Initial adoption and the first activation can publish empty water
+        // replacements; subsequent invalid inputs wait without reopening terrain.
+        for (int pass = 0; pass < 4; ++pass) {
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing,
+                      with_water && (pass == 0 || pass == 3) ? 1u : 0u);
+        }
+        const auto counters = world.activation_index_counters();
+        const auto terrain_version = chunk->mesh_version.load();
+        auto water_version = chunk->water_mesh_version.load();
+        for (const int resolution : {0, 1, 33, 4, 4}) {
+            SCOPED_TRACE(resolution);
+            chunk->current_water_resolution.store(resolution);
+            chunk->water_mesh_generated.store(false);
+            chunk->water_level_data.assign(15u, 10.0f);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+            EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+            chunk->water_level_data.assign(16u, 10.0f);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            world.wait_for_streaming_jobs();
+            const bool meshable = with_water && resolution == 4;
+            if (meshable) {
+                ++water_version;
+            }
+            EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+            EXPECT_EQ(chunk->water_mesh_generated.load(), meshable);
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+            EXPECT_EQ(world.activation_index_counters().span_cache_hits, counters.span_cache_hits);
+            EXPECT_EQ(world.activation_index_counters().span_cache_misses,
+                      counters.span_cache_misses);
+            EXPECT_EQ(world.activation_index_counters().columns_scanned, counters.columns_scanned);
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, PendingWaterPublicationRetainsItsWatchAcrossTerrainCandidatePasses) {
+    for (const bool retained_geometry : {false, true}) {
+        SCOPED_TRACE(retained_geometry);
+
+        SHIELD_WorldSystem world(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        WaterSystem water(nullptr, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        FillDugPond(world, *chunk, 4);
+        chunk->current_lod.store(0);
+        if (retained_geometry) {
+            World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+        }
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        entt::registry registry;
+        world.begin_tick(0);
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        EXPECT_EQ(chunk->get_state(), retained_geometry ? ChunkState::Ready : ChunkState::Meshing);
+        world.begin_tick(1);
+        world.update(registry, std::vector<Vec3>{Vec3(0.0f)}, nullptr, false);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        world.activate_due(8);
+        ASSERT_EQ(chunk->pending_lod.load(), -1);
+        ASSERT_TRUE(chunk->water_mesh_generated.load());
+        chunk->water_mesh_generated.store(false);
+        world.begin_tick(9);
+        world.update(registry, std::vector<Vec3>{Vec3(0.0f)}, nullptr, false);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().water_meshing_inputs, 1u);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+        world.wait_for_streaming_jobs();
+    }
+}

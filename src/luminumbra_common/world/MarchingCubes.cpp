@@ -603,10 +603,11 @@ void GenerateCoarseHeightfieldTerrain(const Systems::SHIELD_WorldSystem& world_s
     // the batch-vs-scalar parity gtest). Reading the cached heightmap then
     // skips one full per-column shaped-noise re-evaluation per vertex (the
     // dominant meshing cost on shaped presets). River worlds and chunks with
-    // no heightmap keep the analytic coarse sampler unchanged.
+    // no heightmap keep the analytic coarse sampler unchanged. Authoritative
+    // heightmaps always define the surface, including in river worlds.
     const int hm_size_x = CHUNK_SIZE_X + 1;
     const bool use_cached_heightmap =
-        !world_system.get_params().rivers_enabled &&
+        (chunk.has_terrain_authority() || !world_system.get_params().rivers_enabled) &&
         chunk.heightmap_data.size() ==
             static_cast<std::size_t>(hm_size_x) * static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
 

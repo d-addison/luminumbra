@@ -2739,3 +2739,56 @@ TEST_F(FarWorldWaterGl, IncompleteTriangleRefusesBeforeGpuAndPreservesResident) 
     }
 }
 } // namespace
+
+TEST_F(FarWorldWaterGl, EmptyTerrainPublicationRetiresGpuGeometryAndPreservesWater) {
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        RenderPipeline pipeline;
+        ASSERT_TRUE(pipeline.startup(9, 9, LUMINUMBRA_SOURCE_ROOT));
+        pipeline.set_taau_enabled(false);
+        pipeline.set_far_lod_enabled(false);
+        pipeline.set_far_world_mode(mode);
+        Systems::TerrainGenParams params;
+        params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+        Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        chunk->mesh_vertices = {{Vec3(0, 2, 0), Vec3(0, 1, 0), 1u},
+                                {Vec3(1, 2, 0), Vec3(0, 1, 0), 1u},
+                                {Vec3(0, 2, 1), Vec3(0, 1, 0), 1u}};
+        chunk->mesh_indices = {0, 1, 2};
+        chunk->water_mesh_vertices = chunk->mesh_vertices;
+        chunk->water_mesh_indices = chunk->mesh_indices;
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        entt::registry registry;
+        Camera camera({8, 8, 8}, {0, 1, 0}, -90, 0);
+        const auto render = [&] {
+            pipeline.render_frame(
+                registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        };
+        render();
+        ASSERT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+        ASSERT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+        // Neither incomplete channel is an empty replacement.
+        for (const bool vertices_only : {true, false}) {
+            chunk->mesh_vertices =
+                vertices_only ? chunk->water_mesh_vertices : std::vector<VoxelVertex>{};
+            chunk->mesh_indices = vertices_only ? std::vector<u32>{} : chunk->water_mesh_indices;
+            ++chunk->mesh_version;
+            render();
+            EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+            EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+        }
+        chunk->mesh_vertices.clear();
+        chunk->mesh_indices.clear();
+        ++chunk->mesh_version;
+        render();
+        EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 0u);
+        EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+        EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_indices_drawn, 0u);
+        render();
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_upload_candidates, 0u);
+        EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+    }
+}

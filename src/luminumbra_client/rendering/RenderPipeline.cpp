@@ -4447,10 +4447,10 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
             }
         }
         const auto found = records.find(chunk.id);
-        // A published empty water mesh is a real replacement, adopted through
+        // A published empty mesh is a real replacement, adopted through
         // the same bounded queue. Absent chunks still use the inactivity grace.
         if (!(Water ? chunk.has_water_mesh() : chunk.has_terrain_mesh()) &&
-            (!Water || found == records.end() || found->second.element_count == 0))
+            (found == records.end() || found->second.element_count == 0))
             continue;
         const bool is_new = found == records.end() || found->second.element_count == 0;
         bool is_stale = !is_new && found->second.mesh_version !=
@@ -4539,8 +4539,12 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                     upload_water_mesh(candidate.chunk, payload);
                 else
                     unload_water_resources(candidate.chunk.id);
-            } else
-                upload_chunk_mesh(candidate.chunk, payload);
+            } else {
+                if (payload.has_mesh())
+                    upload_chunk_mesh(candidate.chunk, payload);
+                else
+                    unload_chunk_resources(candidate.chunk.id);
+            }
             return failures ==
                    (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
         },
@@ -4571,7 +4575,7 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
                                                ChunkMeshPayload& payload) const {
-    if (!chunk.source_chunk || !chunk.has_terrain_mesh()) {
+    if (!chunk.source_chunk) {
         return false;
     }
 
@@ -4592,7 +4596,7 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
     payload.indices = chunk.source_chunk->mesh_indices;
 
     const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
-    if (version_after != version_before || !payload.has_mesh()) {
+    if (version_after != version_before || (payload.vertices.empty() != payload.indices.empty())) {
         payload.vertices.clear();
         payload.indices.clear();
         return false;

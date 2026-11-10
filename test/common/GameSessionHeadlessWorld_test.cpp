@@ -13117,3 +13117,84 @@ TEST(GameSessionHeadlessWorldTest, SessionEnergyReusesRegistersAndPublishesOnlyP
 TEST(GameSessionHeadlessWorldTest, EnergyRegistersStayTransactionalAcrossSchedulerRefusal) {
     ASSERT_NO_FATAL_FAILURE(CheckEnergyRegistersSurviveSchedulerRefusal());
 }
+
+TEST(GameSessionHeadlessWorldTest, SavedWaterOnlyGeometryBecomesRenderableOnAdoption) {
+    using Luminumbra::ChunkState;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession reader;
+    reader.SetRootPath(root.root_string());
+    reader.SetJobSystem(&jobs);
+    reader.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(reader.CreateTransientWorld("Water geometry reader", "1337", "default"));
+    const auto snapshot = root.path() / "water-geometry";
+    ASSERT_TRUE(reader.SaveWorldStateTo(snapshot));
+    Luminumbra::WorldStreamingState saved;
+    const std::vector<Luminumbra::VoxelVertex> vertices{
+        {Luminumbra::Vec3(0, 2, 0), Luminumbra::Vec3(0, 1, 0), 1u},
+        {Luminumbra::Vec3(1, 2, 0), Luminumbra::Vec3(0, 1, 0), 1u},
+        {Luminumbra::Vec3(0, 2, 1), Luminumbra::Vec3(0, 1, 0), 1u}};
+    const std::vector<Luminumbra::u32> indices{0, 1, 2};
+    const std::array states{ChunkState::Unloaded,
+                            ChunkState::Loading,
+                            ChunkState::Idle,
+                            ChunkState::Meshing,
+                            ChunkState::Ready,
+                            ChunkState::Unloading};
+    int next_x = 0;
+    for (const auto state : states) {
+        for (int geometry = 0; geometry < 4; ++geometry) {
+            auto chunk = saved.get_or_create_chunk(Luminumbra::IVec3(next_x++, 0, 0));
+            chunk->heightmap_data.assign(289u, 8.0f);
+            chunk->mark_sdf_loaded_or_edited();
+            chunk->set_state(state);
+            chunk->current_lod.store(0);
+            if ((geometry & 1) != 0) {
+                chunk->water_mesh_vertices = vertices;
+            }
+            if ((geometry & 2) != 0) {
+                chunk->water_mesh_indices = indices;
+            }
+            chunk->has_collision.store(true);
+            chunk->pending_lod.store(0);
+            chunk->pending_mesh_ready.store(true);
+            chunk->pending_mesh_failed.store(true);
+        }
+    }
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(saved, snapshot));
+    ASSERT_TRUE(reader.LoadWorldStateFrom(snapshot)) << reader.GetWorldOpenError();
+    auto* world = reader.GetWorldSystem();
+    ASSERT_NE(world, nullptr);
+    const auto renderable = world->get_renderable_chunks();
+    EXPECT_EQ(renderable.size(), states.size());
+    EXPECT_EQ(world->get_runtime_chunk_stats().renderable_chunks, states.size());
+    next_x = 0;
+    for (const auto state : states) {
+        for (int geometry = 0; geometry < 4; ++geometry) {
+            SCOPED_TRACE(static_cast<int>(state));
+            SCOPED_TRACE(geometry);
+            const auto chunk = world->find_streamed_chunk(Luminumbra::IVec3(next_x++, 0, 0));
+            ASSERT_TRUE(chunk);
+            const bool complete = geometry == 3;
+            EXPECT_EQ(chunk->get_state(),
+                      complete || state == ChunkState::Ready ? ChunkState::Ready
+                                                             : ChunkState::Idle);
+            EXPECT_EQ(std::find(renderable.begin(), renderable.end(), chunk.get()) !=
+                          renderable.end(),
+                      complete);
+            EXPECT_TRUE(chunk->mesh_vertices.empty());
+            EXPECT_TRUE(chunk->mesh_indices.empty());
+            EXPECT_EQ(chunk->water_mesh_vertices.size(),
+                      (geometry & 1) != 0 ? vertices.size() : 0u);
+            EXPECT_EQ(chunk->water_mesh_indices,
+                      (geometry & 2) != 0 ? indices : std::vector<Luminumbra::u32>{});
+            EXPECT_FALSE(chunk->has_collision.load());
+            EXPECT_FALSE(chunk->pending_mesh_ready.load());
+            EXPECT_FALSE(chunk->pending_mesh_failed.load());
+            EXPECT_FALSE(chunk->pending_water_mesh_generated.load());
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_EQ(chunk->current_lod.load(), state == ChunkState::Idle && complete ? -1 : 0);
+        }
+    }
+}

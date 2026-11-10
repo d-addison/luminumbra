@@ -610,10 +610,17 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_empty_water_replacements_are_adopted_through_the_budget(self):
         integrate = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
-        self.assertIn("!Water || found == records.end() || found->second.element_count == 0", integrate)
+        self.assertIn("(found == records.end() || found->second.element_count == 0)", integrate)
+        self.assertNotIn("!Water || found == records.end()", integrate)
         self.assertIn("!chunk.water_metadata_valid", integrate)
         self.assertIn("if (payload.has_mesh())", integrate)
         self.assertIn("unload_water_resources(candidate.chunk.id)", integrate)
+        self.assertIn("unload_chunk_resources(candidate.chunk.id)", integrate)
+        terrain = body(self.pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(")
+        self.assertNotIn("!chunk.has_terrain_mesh()", terrain)
+        self.assertIn("payload.vertices.empty() != payload.indices.empty()", terrain)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        self.assertIn("EmptyTerrainPublicationRetiresGpuGeometryAndPreservesWater", native)
         copy = body(self.pipeline, "bool RenderPipeline::copy_water_mesh_payload(")
         self.assertNotIn("!chunk.has_water_mesh()", copy)
         self.assertIn("version_before != chunk.water_mesh_version", copy)

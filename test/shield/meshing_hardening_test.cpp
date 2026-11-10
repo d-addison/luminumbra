@@ -1546,6 +1546,14 @@ TEST(StreamingHardening, AuthorityHeightmapMeshesWithoutGenerationPromotion) {
         EXPECT_EQ(chunk->water_mesh_version.load(), 3u);
         EXPECT_EQ(chunk->mesh_version.load(), version + 1u);
         EXPECT_TRUE(chunk->water_mesh_generated.load());
+        // Reach the next activation with no residency anchors. The following
+        // three observations then exercise only the adopted chunk's LOD/watch.
+        for (int pass = 0; pass < 3; ++pass) {
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+            EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_generation, 0u);
+        }
         chunk->water_mesh_generated.store(false);
         for (int pass = 0; pass < 3; ++pass) {
             world.update(registry, Vec3(300.0f, 8.0f, 8.0f), nullptr, false);
@@ -1553,6 +1561,7 @@ TEST(StreamingHardening, AuthorityHeightmapMeshesWithoutGenerationPromotion) {
         }
         EXPECT_EQ(world.get_last_streaming_budget_stats().water_meshing_inputs, 0u);
         EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+        EXPECT_EQ(world.get_runtime_chunk_stats().total_chunks, 1u);
         EXPECT_EQ(chunk->current_lod.load(), 1);
         EXPECT_EQ(chunk->water_mesh_version.load(), 3u);
         EXPECT_FALSE(chunk->water_mesh_generated.load());
@@ -1561,5 +1570,62 @@ TEST(StreamingHardening, AuthorityHeightmapMeshesWithoutGenerationPromotion) {
         EXPECT_EQ(chunk->water_mesh_version.load(), 4u);
         EXPECT_EQ(chunk->mesh_version.load(), version + 1u);
         EXPECT_TRUE(chunk->water_mesh_generated.load());
+    }
+}
+
+TEST(StreamingHardening, AuthoritativeRiverHeightmapSurvivesDirectAndSnapshotMeshing) {
+    for (const bool threaded : {false, true}) {
+        SCOPED_TRACE(threaded);
+        JobSystem jobs;
+        if (threaded) {
+            jobs.startup(1);
+        }
+        auto params = MakeFlatSurfaceParams();
+        params.rivers_enabled = true;
+        SHIELD_WorldSystem world(threaded ? &jobs : nullptr, nullptr, params, 1337);
+        for (const bool authoritative : {false, true}) {
+            SCOPED_TRACE(authoritative);
+            for (const bool complete : {false, true}) {
+                SCOPED_TRACE(complete);
+                auto chunk = std::make_shared<Chunk>(IVec3(0));
+                world.GenerateChunkData(*chunk, 2);
+                chunk->heightmap_data.assign(complete ? 289u : 1u, 3.0f);
+                if (authoritative) {
+                    chunk->mark_sdf_loaded_or_edited();
+                }
+                const auto heights = chunk->heightmap_data;
+                const auto stamp = chunk->authority_stamp();
+                World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 2);
+                if (authoritative && complete) {
+                    ASSERT_FALSE(chunk->mesh_vertices.empty());
+                    for (const auto& vertex : chunk->mesh_vertices) {
+                        EXPECT_FLOAT_EQ(vertex.position.y, 3.0f);
+                    }
+                } else {
+                    Chunk procedural(IVec3(0));
+                    World::MarchingCubes::PolygoniseTerrain(world, procedural, 0.0f, 2);
+                    EXPECT_EQ(HashVec(chunk->mesh_vertices), HashVec(procedural.mesh_vertices));
+                }
+                const auto direct_mesh = HashVec(chunk->mesh_vertices);
+                const auto direct_indices = chunk->mesh_indices;
+                chunk->set_state(ChunkState::Ready);
+                chunk->current_lod.store(2);
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+                entt::registry registry;
+                world.update(registry, std::vector<Vec3>{}, nullptr, false);
+                world.wait_for_streaming_jobs();
+                EXPECT_EQ(chunk->heightmap_data, heights);
+                EXPECT_EQ(chunk->authority_stamp(), stamp);
+                if (authoritative && complete) {
+                    EXPECT_EQ(chunk->current_lod.load(), 1);
+                    EXPECT_EQ(HashVec(chunk->mesh_vertices), direct_mesh);
+                    EXPECT_EQ(chunk->mesh_indices, direct_indices);
+                } else if (authoritative) {
+                    EXPECT_EQ(chunk->current_lod.load(), 2);
+                    EXPECT_EQ(HashVec(chunk->mesh_vertices), direct_mesh);
+                }
+                world.clear_world(nullptr);
+            }
+        }
     }
 }

@@ -4148,13 +4148,17 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         chunk->pending_water_mesh_indices.clear();
 
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
-        // stable state; Ready and Idle are restored verbatim (a Ready chunk
-        // with an empty mesh is a legitimate air chunk).
+        // stable state. Published geometry is renderable even when saved Idle;
+        // a Ready chunk with an empty mesh is a legitimate air chunk.
         const bool has_mesh =
             (!chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty()) ||
             (!chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty());
         const ChunkState state = chunk->get_state();
-        if (state != ChunkState::Ready && state != ChunkState::Idle) {
+        if (state == ChunkState::Idle && has_mesh) {
+            // Keep the saved remesh request while presenting retained geometry.
+            chunk->current_lod.store(-1, std::memory_order_release);
+        }
+        if (has_mesh || (state != ChunkState::Ready && state != ChunkState::Idle)) {
             chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
         }
 
