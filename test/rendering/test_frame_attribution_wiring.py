@@ -1594,7 +1594,7 @@ class FrameAttributionWiring(unittest.TestCase):
                            "first_vertex = 0u;", "base_instance = 0u;"):
             self.assertIn(assignment, prefix)
         dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
-        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1); "
+        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u); "
                       "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
                       "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
                       "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
