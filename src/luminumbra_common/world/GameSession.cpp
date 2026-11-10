@@ -17,7 +17,8 @@
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
+#include "../ai/CreatureTickAdmission.h"
+#include "../ai/DecompositionSystem.h" // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
@@ -122,6 +123,15 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <string_view>
+#endif
+
 namespace fs = std::filesystem;
 
 // A using-declaration to make the code cleaner. This brings the struct into the current scope.
@@ -225,8 +235,8 @@ struct GameSession::FoliageStep {
         auto& step = session.m_foliageStep;
         if (!step)
             step = std::make_unique<FoliageStep>();
-        // The regional gate selects foliage work; creatures and legacy irrigation
-        // still run every tick, and telemetry counts the full participant roster.
+        // The regional gate selects foliage work; creature admission was captured
+        // before movement, and telemetry counts the full participant roster.
         if (!luminumbra::foliage::FoliageRegistryStage::HasWork(session.m_registry))
             return nullptr;
         step->Begin(session);
@@ -454,6 +464,7 @@ void GameSession::ResetWorldSystems() {
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionalFieldView = nullptr;
     m_scentRecenterPending = false;
     m_regionalFieldsBound = false;
@@ -658,6 +669,52 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
+namespace {
+
+// Captures this tick's creature admission before any movement, reusing the cache in the
+// registry context. Returns null when active regions are off, so every creature runs.
+luminumbra::ai::CreatureTickAdmission* CaptureCreatureTickAdmission(
+    entt::registry& registry, bool active_regions_enabled, const RegionConsumerGate& gate) {
+    if (!active_regions_enabled) {
+        return nullptr;
+    }
+    auto& admission = registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
+    admission.Capture(registry, gate);
+    return &admission;
+}
+
+void BlendCreatureSurvivalWishes(entt::registry& registry,
+                                 const luminumbra::ai::CreatureTickAdmission* admission) {
+    // Additive blend of the survival wishes into CreatureComponent.wish so a
+    // thirsty/scavenging creature actually steers to water/carrion. Entities
+    // without the opt-in components are untouched (try_get -> null), keeping
+    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+    auto sv = registry.view<Luminumbra::Components::CreatureComponent>();
+    for (auto e : sv) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
+        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+        // the thirst pull applies ONLY when the arbiter
+        // actually chose Drink — the old unconditional blend let a
+        // FLEEING creature be simultaneously steered toward water
+        // (the contract's exact defect). Thirst now competes inside
+        // DecideCreatureAction; this blend is its motor output.
+        if (cr.last_action == static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+            if (const auto* th = registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
+                cr.wish_x += th->wish_x;
+                cr.wish_z += th->wish_z;
+            }
+        }
+        if (const auto* scv = registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
+            cr.wish_x += scv->wish_x;
+            cr.wish_z += scv->wish_z;
+        }
+    }
+}
+
+} // namespace
+
 std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
@@ -718,8 +775,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return i + 1;
             }
             const FoliageStep::Guard foliage_guard{*this};
+            const auto creature_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
+            luminumbra::ai::CreatureTickAdmission* const creature_admission =
+                CaptureCreatureTickAdmission(m_registry, m_activeRegionsEnabled, creature_gate);
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
-            m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
+            auto* field_candidate = scheduled_fields ? &*scheduled_fields : nullptr;
+            m_regionalFieldView = field_candidate;
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
@@ -748,7 +812,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // tick. The engine still names no creature behavior.
             if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
                     .empty()) {
-                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, nullptr, true, creature_admission);
             } else {
                 luminumbra::ai::StimulusContext stimulus_context;
                 stimulus_context.tick = current_tick;
@@ -780,7 +845,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 }
                 const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
                 luminumbra::ai::RunInstinctSystemOnTick(
-                    m_registry, current_tick, &stimulus_registry);
+                    m_registry, current_tick, &stimulus_registry, true, creature_admission);
             }
 
             budget.Next(Stage::Perception, [&] {
@@ -797,7 +862,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // world_hash is UNCHANGED (byte-identical) -- same discipline as the
             // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
             luminumbra::ai::RunPerceptionSystemOnTick(
-                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()), creature_admission);
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
@@ -807,7 +872,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                  kScentFieldChannels
                            : 0ull;
             });
-            const bool scent_active = AdvanceNearScent(scheduled_fields);
+            const bool scent_active = AdvanceNearScent(field_candidate);
 
             budget.Next(Stage::Locomotion, [&] {
                 return SimParticipantCount<TelemetryComp::ActionPlanComponent,
@@ -817,7 +882,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // 2d.: action-plan locomotion, then scent gradient bias.
             // The executor writes only LocomotionIntentComponent; physics/render owners
             // consume that intent in their existing lanes.
-            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry, creature_admission);
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
@@ -849,20 +914,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    luminumbra::ai::RunMateSeekingOnTick(
+                        m_registry, m_reproductionTuning, creature_admission);
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
                     // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                     // integration layer is unit-tested independently of the producers.
-                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry, creature_admission);
 
                     // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
                     // systems wired into the live tick. Opt-in via ThirstComponent /
@@ -877,36 +944,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         m_thirstTuning);
                     luminumbra::ai::RunScavengingOnTick(
                         m_registry, current_tick, m_scavengingTuning);
-                    {
-                        // Additive blend of the survival wishes into CreatureComponent.wish so a
-                        // thirsty/scavenging creature actually steers to water/carrion. Entities
-                        // without the opt-in components are untouched (try_get -> null), keeping
-                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                        for (auto e : sv) {
-                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                            // the thirst pull applies ONLY when the arbiter
-                            // actually chose Drink — the old unconditional blend let a
-                            // FLEEING creature be simultaneously steered toward water
-                            // (the contract's exact defect). Thirst now competes inside
-                            // DecideCreatureAction; this blend is its motor output.
-                            if (cr.last_action ==
-                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                                if (const auto* th =
-                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
-                                            e)) {
-                                    cr.wish_x += th->wish_x;
-                                    cr.wish_z += th->wish_z;
-                                }
-                            }
-                            if (const auto* scv =
-                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
-                                        e)) {
-                                cr.wish_x += scv->wish_x;
-                                cr.wish_z += scv->wish_z;
-                            }
-                        }
-                    }
+                    BlendCreatureSurvivalWishes(m_registry, creature_admission);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                     // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
@@ -932,7 +970,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                 const auto& cp =
                                     phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
                                 m_physicsSystem->set_avatar_wish_velocity(
-                                    cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
+                                    cp.avatar_index,
+                                    creature_admission && !creature_admission->Allows(e)
+                                        ? glm::vec2(0.0f)
+                                        : glm::vec2(cr.wish_x, cr.wish_z));
                             }
                             m_physicsSystem->update_avatars(
                                 static_cast<float>(m_simulationClock.fixed_dt()));
@@ -961,7 +1002,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         current_tick,
                         static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -980,7 +1022,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                            static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
                                Systems::kWeatherExtentCells;
                 });
-                StepRegionalWeather(scheduled_fields, current_tick);
+                StepRegionalWeather(field_candidate, current_tick);
                 m_weatherSystem->UpdateFromClock(
                     current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
             } else {
@@ -1321,13 +1363,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(foliage_registry);
                 });
                 if (!foliage_registry.view<Comp::GrazeableComponent>().empty())
-                    luminumbra::ai::RunWildlifeFoliageOnTick(
-                        foliage_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
+                    luminumbra::ai::RunWildlifeFoliageOnTick(foliage_registry,
+                                                             current_tick,
+                                                             m_wildlifeFoliageTuning,
+                                                             foliage_gate,
+                                                             creature_admission);
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(foliage_registry);
                 });
                 if (!foliage_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(foliage_registry, current_tick, foliage_gate);
+                    luminumbra::ai::RunLifespanOnTick(
+                        foliage_registry, current_tick, foliage_gate, creature_admission);
             }
             {
                 auto& living_registry = foliage_step ? foliage_registry : m_registry;
@@ -1349,7 +1395,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return SimParticipantCount<TelemetryComp::DecayComponent>(living_registry);
                 });
                 if (!living_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(living_registry, current_tick);
+                    luminumbra::ai::RunDecompositionOnTick(
+                        living_registry, current_tick, creature_admission);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
@@ -1362,7 +1409,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                    luminumbra::ai::RunCircadianOnTick(
+                        m_registry, tod01, m_circadianAmplitude, creature_admission);
                 }
                 // Territory: claim home + emit a homing bias (movement blends it like
                 // mate-seeking).
@@ -1412,7 +1460,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 return i + 1;
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(
-                    std::move(scheduled_fields), scheduled_energy, defer_water_authority);
+                    field_candidate, scheduled_energy, defer_water_authority);
             } else {
                 SettleWaterAuthority(defer_water_authority);
             }
@@ -1583,6 +1631,8 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
+    metadata.seedConversionVersion = kSeedConversionVersion;
+    metadata.resolvedSeed = StringToSeed(metadata.seed);
     metadata.worldType = worldType;
     metadata.worldId = options.transient_creation ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
@@ -1722,7 +1772,7 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
-    m_numericSeed = StringToSeed(m_metadata.seed);
+    m_numericSeed = m_metadata.resolvedSeed;
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
@@ -1915,7 +1965,9 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
     }
     // Resolve the same terrain-bounded wanted set before reading any chunks. Worker
     // preparation owns its sampler and never reads a live session or starts jobs.
-    prepared->world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    prepared->world_seed = static_cast<int>(saved.metadata.seedConversionVersion == 0
+                                                ? ResolveWorldSeed(saved.metadata.seed, 0)
+                                                : saved.metadata.resolvedSeed);
     auto state_options = options;
     if (options.active_regions) {
         TerrainGenParams params = preset.params;
@@ -2318,11 +2370,11 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
     return &step;
 }
 
-void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields,
+void GameSession::PublishRegionCompletedWork(FieldPageState* fields,
                                              RegionalEnergyStep* energy,
                                              bool defer_water_authority) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
-    m_regionalFieldView = fields ? &*fields : nullptr;
+    m_regionalFieldView = fields;
     // Water observers still see the original registry and committed regional state.
     SettleWaterAuthority(defer_water_authority);
     if (m_regionFault) {
@@ -2631,7 +2683,7 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
     }
 }
 
-void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick) {
+void GameSession::StepRegionalWeather(FieldPageState* fields, std::uint64_t tick) {
     if (!m_regionalWeatherParticipating || !fields) {
         if (m_regionalFieldsBound && m_weatherSystem)
             m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
@@ -2913,6 +2965,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionSchedulerOverride = config;
 }
 void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
@@ -3604,6 +3657,10 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
+    if (m_metadata.seedConversionVersion != 0) {
+        metadata_json["seedConversionVersion"] = m_metadata.seedConversionVersion;
+        metadata_json["resolvedSeed"] = m_metadata.resolvedSeed;
+    }
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
@@ -4377,6 +4434,118 @@ std::string GameSession::GenerateWorldId() {
 }
 
 uint32_t GameSession::StringToSeed(const std::string& seedStr) {
+    return ResolveWorldSeed(seedStr, kSeedConversionVersion);
+}
+
+#if defined(_WIN32)
+namespace {
+
+// Split a command line with the C runtime's argv rules, so the result matches the
+// narrow argv the server parsed. The program name toggles quotes without escapes.
+// Arguments map 2n backslashes before a quote to n plus a delimiter and 2n+1 to n
+// plus a literal quote; "" inside quotes is a literal quote. CommandLineToArgvW
+// differs on that last rule ("a""""b" is a""b here but a"b there).
+std::vector<std::wstring> CrtCommandLineArguments(std::wstring_view line) {
+    const auto at = [&](std::size_t index) {
+        return index < line.size() ? line[index] : L'\0';
+    };
+    const auto blank = [](wchar_t unit) {
+        return unit == L' ' || unit == L'\t';
+    };
+    std::vector<std::wstring> arguments(1);
+    std::size_t p = 0;
+    bool quoted = false;
+    for (; p < line.size() && (quoted || !blank(line[p])); ++p) {
+        if (line[p] == L'"') {
+            quoted = !quoted;
+        } else {
+            arguments.front().push_back(line[p]);
+        }
+    }
+    for (;;) {
+        while (blank(at(p)))
+            ++p;
+        if (p >= line.size())
+            break;
+        std::wstring argument;
+        quoted = false;
+        for (;;) {
+            std::size_t slashes = 0;
+            while (at(p) == L'\\') {
+                ++p;
+                ++slashes;
+            }
+            bool copy = true;
+            if (at(p) == L'"') {
+                if (slashes % 2 == 0) {
+                    if (quoted && at(p + 1) == L'"') {
+                        ++p;
+                    } else {
+                        copy = false;
+                        quoted = !quoted;
+                    }
+                }
+                slashes /= 2;
+            }
+            argument.append(slashes, L'\\');
+            if (p >= line.size() || (!quoted && blank(line[p])))
+                break;
+            if (copy)
+                argument.push_back(line[p]);
+            ++p;
+        }
+        arguments.push_back(std::move(argument));
+    }
+    return arguments;
+}
+
+} // namespace
+
+std::optional<std::string>
+WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index) {
+    if (command_line == nullptr || seed_index < 2 || seed_index >= argument_count)
+        return std::nullopt;
+    // Windows command lines are bounded to 32767 UTF-16 units including NUL.
+    // Enforce that bound before splitting it into arguments.
+    constexpr std::size_t kCommandLineUnits = 32767;
+    std::size_t command_length = 0;
+    while (command_length < kCommandLineUnits && command_line[command_length] != L'\0')
+        ++command_length;
+    if (command_length == 0 || command_length == kCommandLineUnits)
+        return std::nullopt;
+    const auto arguments = CrtCommandLineArguments(std::wstring_view(command_line, command_length));
+    if (arguments.size() != static_cast<std::size_t>(argument_count) ||
+        arguments[static_cast<std::size_t>(seed_index) - 1] != L"--seed")
+        return std::nullopt;
+    const std::wstring_view seed(arguments[static_cast<std::size_t>(seed_index)]);
+    if (seed.empty())
+        return std::string{};
+    if (seed.size() > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    const int length = static_cast<int>(seed.size());
+    const int bytes = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, seed.data(), length, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 ||
+        static_cast<std::size_t>(bytes) > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    // At most 4 KiB, measured in UTF-8 bytes before allocation.
+    std::string utf8(static_cast<std::size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_UTF8,
+                            WC_ERR_INVALID_CHARS,
+                            seed.data(),
+                            length,
+                            utf8.data(),
+                            bytes,
+                            nullptr,
+                            nullptr) != bytes)
+        return std::nullopt;
+    return utf8;
+}
+#endif
+
+std::uint32_t ResolveWorldSeed(const std::string& seedStr, std::uint32_t conversion_version) {
+    if (conversion_version != 0 && conversion_version != kSeedConversionVersion)
+        throw std::invalid_argument("Unsupported seed conversion version.");
     if (seedStr.empty()) {
         return std::random_device{}();
     }
@@ -4385,10 +4554,42 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
         // Use std::stoull for 64-bit seed range, then cast
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
-        // If not a number, hash the string
-        const std::hash<std::string> hasher;
-        return static_cast<uint32_t>(hasher(seedStr));
+        if (conversion_version == 0) {
+            const std::hash<std::string> hasher;
+            return static_cast<std::uint32_t>(hasher(seedStr));
+        }
+        std::uint64_t hash = UINT64_C(14695981039346656037);
+        for (const char byte : seedStr) {
+            hash ^= static_cast<unsigned char>(byte);
+            hash *= UINT64_C(1099511628211);
+        }
+        return static_cast<std::uint32_t>(hash ^ (hash >> 32));
     }
+}
+
+std::string ValidateWorldSeedMetadata(const nlohmann::json& metadata) {
+    const bool has_version = metadata.contains("seedConversionVersion");
+    const bool has_seed = metadata.contains("resolvedSeed");
+    if (!has_version && !has_seed)
+        return {};
+    if (!has_version || !has_seed)
+        return "Corrupt world metadata: incomplete seed conversion pair.";
+    const auto& version = metadata.at("seedConversionVersion");
+    if (!version.is_number_integer() || version < 1)
+        return "Corrupt world metadata: invalid seed conversion version.";
+    if (version != kSeedConversionVersion)
+        return "Unsupported future seed conversion version.";
+    const auto& resolved = metadata.at("resolvedSeed");
+    if (!resolved.is_number_integer() || resolved < 0 ||
+        resolved > std::numeric_limits<std::uint32_t>::max())
+        return "Corrupt world metadata: invalid resolved seed.";
+    if (!metadata.contains("seed") || !metadata.at("seed").is_string() ||
+        metadata.at("seed").get_ref<const std::string&>().empty())
+        return "Corrupt world metadata: versioned seed requires nonempty seed text.";
+    if (resolved.get<std::uint32_t>() !=
+        ResolveWorldSeed(metadata.at("seed").get_ref<const std::string&>(), kSeedConversionVersion))
+        return "Corrupt world metadata: resolved seed disagrees with seed conversion.";
+    return {};
 }
 
 // scent/foraging grid <-> world helpers. The field is kScentFieldCells wide, cell
@@ -4541,7 +4742,7 @@ void GameSession::RestoreRegionalScent() {
     }
 }
 
-void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
+void GameSession::CaptureRegionalScent(FieldPageState*& fields) {
     m_scentCapture.resize(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
     auto& cells = m_scentCapture;
     for (int x = 0; x < kScentFieldCells; ++x)
@@ -4551,7 +4752,10 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                      [static_cast<std::size_t>(channel)] =
                          std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
     if (!fields) {
-        fields.emplace();
+        if (!m_scentCandidate) {
+            m_scentCandidate = std::make_unique<FieldPageState>();
+        }
+        fields = m_scentCandidate.get();
         fields->begin_weather_update(m_fieldPages);
     }
     fields->reuse_scent_buffers(m_scentChangeBuffers);
@@ -4573,6 +4777,9 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
         // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
         // and retry on a later tick, preserving both frozen bytes and the live projection.
         fields->reuse_scent_buffers(m_scentChangeBuffers);
+        if (fields == m_scentCandidate.get()) {
+            fields = nullptr;
+        }
         RestoreRegionalScent();
         return;
     }
@@ -4581,7 +4788,7 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
     m_regionalFieldView = &*fields;
 }
 
-bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {
+bool GameSession::AdvanceNearScent(FieldPageState*& fields) {
     const bool scent_active = HasScentParticipants();
     const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
     const bool foraging_active =

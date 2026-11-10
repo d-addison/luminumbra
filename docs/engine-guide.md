@@ -15,6 +15,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 | Layer | Current identity |
 |---|---|
 | World metadata | `world_info.json` declares `container_version: 2` for ordinary unindexed saves, or `container_version: 3` with `snapshotFormat: 1` for indexed saves; missing versions are obsolete |
+| Seed conversion | New worlds store `seedConversionVersion: 1` and uint32 `resolvedSeed`; both absent retains legacy conversion |
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: unindexed schema `luminumbra.persistence.world_manifest.v1`, indexed schema `luminumbra.persistence.world_manifest.v2`; both use `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
@@ -63,6 +64,30 @@ magic, manifest identity, headers, compressed data and truncated payload streams
 produce corruption/validation diagnostics, not obsolete-world advice. Loading
 refuses invalid durable data rather than regenerating over it. The persistence,
 far-LOD and terrain-preset tests cover these boundaries.
+
+New worlds record integer `seedConversionVersion: 1` and `resolvedSeed` (uint32)
+in `world_info.json`. Numeric seed text retains `std::stoull` parsing, including
+numeric prefixes and truncation to uint32. For nonnumeric text, version 1 hashes
+the UTF-8 bytes with FNV-1a 64 (offset 14695981039346656037, prime 1099511628211,
+arithmetic modulo 2^64), then XORs the upper and lower 32-bit halves. Empty new
+seed input still draws from `std::random_device` and stores its decimal text.
+Readers and writers refuse an incomplete pair, invalid integer types or ranges,
+unknown conversion versions, empty versioned seed text, and resolved values that
+disagree with recomputation. Both fields absent means legacy `std::hash`
+conversion for nonnumeric text on the toolchain that created the world; reopening
+and resaving retain that absence. This additive conversion version is independent
+of the metadata envelope and leaves world-hash encoding unchanged.
+
+LREC1 server recordings store `(uint64(1) << 32) | resolvedSeed` in the existing
+`seed` slot and retain the original `seed_string`, including empty input. Playback
+uses the low uint32 word when the upper word is 1; otherwise it resolves the
+original text with legacy conversion before creating the world. Legacy text that
+`std::stoull` cannot parse recorded `std::strtoull` as 0 or UINT64_MAX, so it cannot
+match this tag. Legacy numeric seeds whose upper word is 1 already resolve to the
+same low uint32 word. Numeric parsing, lockstep numeric headers, LREC1 versions
+3/4, header layout, and world-hash encoding remain unchanged. Untagged text replays
+retain their original toolchain dependency; new recordings carry the resolved
+seed and are portable.
 
 Metadata is checked before a missing chunk directory can count as a fresh save.
 Unversioned metadata is refused even alongside current containers. A higher

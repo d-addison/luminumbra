@@ -738,7 +738,7 @@ private:
     struct RegionalEnergyStep;
     std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
     [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
-    void PublishRegionCompletedWork(std::optional<FieldPageState> fields,
+    void PublishRegionCompletedWork(FieldPageState* fields,
                                     RegionalEnergyStep* energy,
                                     bool defer_water_authority);
     void BindRegionalFieldQueries();
@@ -750,7 +750,7 @@ private:
                                 const std::map<RegionKey, std::uint64_t>* work = nullptr);
     [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
                                                                             std::uint64_t tick);
-    void StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick);
+    void StepRegionalWeather(FieldPageState* fields, std::uint64_t tick);
     // Query-only view of this tick's candidate, cleared before publication or fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     bool m_regionalFieldsBound = false;
@@ -805,6 +805,7 @@ private:
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     std::vector<ScentCell> m_scentCapture;
     ScentChangeBuffers m_scentChangeBuffers;
+    std::unique_ptr<FieldPageState> m_scentCandidate;
     mutable luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
     mutable bool m_scentDueCacheValid = false;
     bool m_scentRecenterPending = false;
@@ -853,8 +854,8 @@ private:
     void RefreshScentDueCache() const;
     void RebaseForagingCells(int dx, int dz);
     void RestoreRegionalScent();
-    void CaptureRegionalScent(std::optional<FieldPageState>& fields);
-    bool AdvanceNearScent(std::optional<FieldPageState>& fields);
+    void CaptureRegionalScent(FieldPageState*& fields);
+    bool AdvanceNearScent(FieldPageState*& fields);
     bool HasScentBorderWork() const;
     bool HasScentParticipants(bool require_due = true) const;
     bool HasPlantParticipants() const; //  opt-in gate
