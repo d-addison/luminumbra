@@ -1300,13 +1300,16 @@ TEST(StreamingHardening, RetainedWaterDescriptorsDrainWithoutInvalidationOwners)
         world.update(registry, anchors, nullptr, false);
         ASSERT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
         ASSERT_LT(world.pending_publication_chunks(), chunks.size());
+        const auto retained = chunks.size() - world.pending_publication_chunks();
         // A descriptor retains ownership even when its originating request is
         // acknowledged; it must still drain without another residency change.
         ASSERT_TRUE(AcknowledgeWaterMeshInvalidations(water));
         const auto hits = world.activation_index_counters().span_cache_hits;
         world.update(registry, anchors, nullptr, false);
         EXPECT_GT(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
-        EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+        EXPECT_EQ(world.activation_index_counters().span_cache_hits - hits, 2u * retained);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().meshing_candidates, retained);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, retained);
         EXPECT_EQ(world.pending_publication_chunks(), chunks.size());
         paused.release();
         world.wait_for_streaming_jobs();
