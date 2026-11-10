@@ -216,6 +216,14 @@ void ExpectSameCalmWaterFields(const Chunk& chunk, const Chunk& expected) {
     EXPECT_EQ(chunk.max_water_delta_last_tick, 0.0f);
 }
 
+void ExpectPersistedWaterAuthority(const fs::path& save_dir, const IVec3& coords) {
+    using Luminumbra::Persistence::WorldSaveService;
+    const auto persisted = WorldSaveService::read_chunk(save_dir, coords, true);
+    ASSERT_EQ(persisted.status, WorldSaveService::ChunkReadStatus::Found) << persisted.error;
+    ASSERT_TRUE(persisted.chunk);
+    EXPECT_TRUE(persisted.chunk->has_water_authority());
+}
+
 TEST(WorldDurableResidency, FlagOffEvictionStillErases) {
     DurableFixture fx(/*durable=*/false);
     ASSERT_TRUE(fx.created) << fx.error;
@@ -1041,6 +1049,7 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
     ASSERT_FALSE(unsaved->is_water_state_dirty());
     ASSERT_FALSE(unsaved->is_voxel_data_dirty());
     ASSERT_TRUE(fx.session->SaveWorldState());
+    ExpectPersistedWaterAuthority(fx.session->GetWorldSaveDir(), saved->get_coords());
     const auto absent =
         WorldSaveService::read_chunk(fx.session->GetWorldSaveDir(), unsaved->get_coords(), true);
     ASSERT_EQ(absent.status, WorldSaveService::ChunkReadStatus::Absent) << absent.error;
@@ -1051,8 +1060,12 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
     reloaded.SetActiveRegionsEnabled(true);
     reloaded.SetWaterHighResEnabled(false);
     ASSERT_TRUE(reloaded.LoadWorld(fx.session->GetMetadata().worldId));
+    ASSERT_EQ(reloaded.GetWorldSaveDir(), fx.session->GetWorldSaveDir());
     auto* loaded_world = reloaded.GetWorldSystem();
     ASSERT_NE(loaded_world, nullptr);
+    // Outside the initial spawn window, durable chunks are restored on demand
+    // through the same public path that streaming uses before generation.
+    ASSERT_TRUE(loaded_world->restore_authoritative_chunk(saved->get_coords()));
     const auto restored = loaded_world->find_streamed_chunk(saved->get_coords());
     ASSERT_TRUE(restored);
     EXPECT_TRUE(restored->same_water_state(*saved));
