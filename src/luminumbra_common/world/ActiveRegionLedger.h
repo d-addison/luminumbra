@@ -194,7 +194,7 @@ public:
     bool acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at);
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
-        return m_scheduleRegisters ? m_scheduleRegisters->m_energyAges : m_energyAges;
+        return m_energyAges;
     }
     // Missing register returns false without changing age.
     bool energy_age(const RegionKey& key, std::uint64_t& age) const noexcept;
@@ -241,7 +241,7 @@ public:
         m_completedWork.clear();
     }
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& completed_work() const {
-        return m_scheduleRegisters ? m_scheduleRegisters->m_completedWork : m_completedWork;
+        return m_completedWork;
     }
     // An accepted partial save may have an older ledger than its clock. Raise
     // only the validation ceiling on load; never run catch-up, alter any region
@@ -259,11 +259,13 @@ public:
     // before any decision; unknown regions and repeated/backward ticks refuse.
     // nullopt uses the local single-player anchor; an explicit empty span visits nothing.
     // due lists only records that survive this tick's retention, in scheduler order.
-    RegionSchedule schedule(const WorldClock& clock,
-                            std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
-                            std::span<const RegionWork> work = {},
-                            const DurableDigest& durable_digest = {},
-                            const OwnershipProbe& owned = {});
+    // The result is retained until the next schedule call; copy it to retain a snapshot.
+    const RegionSchedule&
+    schedule(const WorldClock&,
+             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
+             std::span<const RegionWork> work = {},
+             const DurableDigest& durable_digest = {},
+             const OwnershipProbe& owned = {});
     [[nodiscard]] std::string canonical_bytes() const;
     // Throws std::length_error if the envelope would exceed kMaxFileBytes.
     [[nodiscard]] std::string encode() const;
@@ -271,11 +273,6 @@ public:
     static bool decode(std::string_view bytes, ActiveRegionLedger& out, std::string& error);
 
 private:
-    RegionSchedule schedule_in_place(const WorldClock& clock,
-                                     std::optional<std::span<const Vec3>> replicated_anchors,
-                                     std::span<const RegionWork> work,
-                                     const DurableDigest& durable_digest,
-                                     const OwnershipProbe& owned);
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
     // energy age, water debt or completed work, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
@@ -291,9 +288,8 @@ private:
                                std::optional<std::size_t> completed_owners = std::nullopt,
                                bool allocator_advanced = false,
                                std::optional<std::size_t> record_count = std::nullopt) const;
-    // A scheduling candidate borrows immutable registers until its record changes commit.
-    // Ordinary ledger copies still own independent registers.
-    const ActiveRegionLedger* m_scheduleRegisters = nullptr;
+    struct ScheduleScratch;
+    std::shared_ptr<ScheduleScratch> m_scheduleScratch;
     struct EnergyPublication;
     // Derived scratch for sparse transactional energy publication.
     std::shared_ptr<EnergyPublication> m_energyPublication;
