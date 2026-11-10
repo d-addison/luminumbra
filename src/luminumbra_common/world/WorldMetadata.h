@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <ctime>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 
 namespace Luminumbra::world {
@@ -27,6 +28,14 @@ inline constexpr std::uint32_t kSeedConversionVersion = 1;
 // XORing the high and low 32-bit halves. Both retain std::stoull numeric parsing
 // and the random-device path for empty input. Unknown versions throw.
 std::uint32_t ResolveWorldSeed(const std::string& seed, std::uint32_t conversion_version);
+
+#if defined(_WIN32)
+// Read a --seed value from the native Windows command line, independently of the
+// narrow argv code page. Refuses invalid UTF-16, argument mismatches, and UTF-8
+// output over the saved-world seed limit. Empty seed text remains valid.
+std::optional<std::string>
+WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index);
+#endif
 
 // Validate the optional seedConversionVersion/resolvedSeed pair without changing
 // metadata or resolving an absent legacy seed. An empty result means admission.

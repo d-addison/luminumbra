@@ -524,6 +524,74 @@ TEST(WorldSeedConversion, PinnedUtf8AndNumericCompatibility) {
     EXPECT_THROW(world::ResolveWorldSeed("hello", 2), std::invalid_argument);
 }
 
+#if defined(_WIN32)
+TEST(WorldSeedConversion, NativeWindowsCommandLinePreservesUtf8AndRefusesInvalidInput) {
+    using world::WorldSeedFromWindowsCommandLine;
+    struct SeedCase {
+        std::wstring command;
+        int count;
+        int index;
+        std::string utf8;
+    };
+    std::string utf8_limit;
+    for (int index = 0; index < 2048; ++index)
+        utf8_limit += "\xc3\xa9";
+    for (const auto& input : std::vector<SeedCase>{
+             {L"server --seed portable-\u00e9", 3, 2, "portable-\xc3\xa9"},
+             {L"server --seed \u4e16\u754c-\U0001f30d",
+              3,
+              2,
+              "\xe4\xb8\x96\xe7\x95\x8c-\xf0\x9f\x8c\x8d"},
+             {L"\"C:\\Program Files\\server.exe\" --seed \"with space \\\\backslash\"",
+              3,
+              2,
+              "with space \\\\backslash"},
+             {L"server --seed \"\"", 3, 2, ""},
+             {L"server --seed 0", 3, 2, "0"},
+             {L"server --seed \"  +42tail\"", 3, 2, "  +42tail"},
+             {L"server --seed first --seed portable-\u00e9", 5, 2, "first"},
+             {L"server --seed first --seed portable-\u00e9", 5, 4, "portable-\xc3\xa9"},
+             {L"server --seed " + std::wstring(4096, L'x'), 3, 2, std::string(4096, 'x')},
+             {L"server --seed " + std::wstring(2048, L'\u00e9'), 3, 2, utf8_limit}}) {
+        const auto converted =
+            WorldSeedFromWindowsCommandLine(input.command.c_str(), input.count, input.index);
+        ASSERT_TRUE(converted.has_value());
+        if (converted) {
+            EXPECT_EQ(*converted, input.utf8);
+            if (!input.utf8.empty()) {
+                EXPECT_EQ(world::ResolveWorldSeed(*converted, 1),
+                          world::ResolveWorldSeed(input.utf8, 1));
+            }
+        }
+    }
+    const auto pinned = WorldSeedFromWindowsCommandLine(L"server --seed portable-\u00e9", 3, 2);
+    ASSERT_TRUE(pinned.has_value());
+    if (pinned) {
+        EXPECT_EQ(world::ResolveWorldSeed(*pinned, 1), UINT32_C(3978087486));
+    }
+    EXPECT_FALSE(WorldSeedFromWindowsCommandLine(nullptr, 3, 2).has_value());
+    for (const auto& [count, index] :
+         std::vector<std::pair<int, int>>{{0, 2}, {3, -1}, {3, 0}, {3, 1}, {3, 3}, {4, 2}}) {
+        EXPECT_FALSE(
+            WorldSeedFromWindowsCommandLine(L"server --seed value", count, index).has_value());
+    }
+    for (const std::wstring command :
+         {L"", L"server --seed", L"server --root value", L"server --seed value extra"}) {
+        EXPECT_FALSE(WorldSeedFromWindowsCommandLine(command.c_str(), 3, 2).has_value());
+    }
+    for (const auto& seed :
+         std::vector<std::wstring>{std::wstring(1, static_cast<wchar_t>(0xd800)),
+                                   std::wstring(1, static_cast<wchar_t>(0xdc00)),
+                                   std::wstring(1, static_cast<wchar_t>(0xd800)) + L"x",
+                                   std::wstring(4097, L'x'),
+                                   std::wstring(2049, L'\u00e9'),
+                                   std::wstring(32767, L'x')}) {
+        const auto command = L"server --seed " + seed;
+        EXPECT_FALSE(WorldSeedFromWindowsCommandLine(command.c_str(), 3, 2).has_value());
+    }
+}
+#endif
+
 TEST_F(WorldOpenRefusal, VersionedTextSeedGoldenRoundTripsBothSaveFormats) {
     for (const bool indexed : {false, true}) {
         SCOPED_TRACE(indexed);
@@ -755,7 +823,7 @@ TEST_F(WorldOpenRefusal, ReplaySeedTagBoundariesAndUnknownTagsKeepLegacyFallback
     }
 }
 
-TEST_F(WorldOpenRefusal, SyntheticWriterRecordsVersionAndTruncatedNumericSeed) {
+TEST_F(WorldOpenRefusal, SyntheticNumericSeedsRemainCompatibleWithoutConversionMetadata) {
     Persistence::SyntheticSaveSpec spec;
     spec.seed = UINT64_MAX;
     spec.chunk_count = 1;
@@ -764,12 +832,13 @@ TEST_F(WorldOpenRefusal, SyntheticWriterRecordsVersionAndTruncatedNumericSeed) {
     const auto report = Persistence::WriteSyntheticSave(spec, root);
     ASSERT_TRUE(report.ok) << report.error;
     const auto metadata = nlohmann::json::parse(Read(report.save_dir / "world_info.json"));
-    EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
-    EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_MAX);
+    EXPECT_FALSE(metadata.contains("seedConversionVersion"));
+    EXPECT_FALSE(metadata.contains("resolvedSeed"));
+    EXPECT_EQ(world::ResolveWorldSeed(metadata.at("seed").get<std::string>(), 0), UINT32_MAX);
     const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
     ASSERT_TRUE(inspected.error.empty()) << inspected.error;
-    EXPECT_EQ(inspected.metadata.seedConversionVersion, 1u);
-    EXPECT_EQ(inspected.metadata.resolvedSeed, UINT32_MAX);
+    EXPECT_EQ(inspected.metadata.seedConversionVersion, 0u);
+    EXPECT_EQ(world::ResolveWorldSeed(inspected.metadata.seed, 0), UINT32_MAX);
 }
 
 class SeedMetadataRefusal : public WorldOpenRefusal {};

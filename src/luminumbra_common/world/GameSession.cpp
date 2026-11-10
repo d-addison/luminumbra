@@ -121,6 +121,16 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <shellapi.h>
+#include <string_view>
+#endif
+
 namespace fs = std::filesystem;
 
 // A using-declaration to make the code cleaner. This brings the struct into the current scope.
@@ -4224,6 +4234,54 @@ std::string GameSession::GenerateWorldId() {
 uint32_t GameSession::StringToSeed(const std::string& seedStr) {
     return ResolveWorldSeed(seedStr, kSeedConversionVersion);
 }
+
+#if defined(_WIN32)
+std::optional<std::string>
+WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index) {
+    if (command_line == nullptr || seed_index < 2 || seed_index >= argument_count)
+        return std::nullopt;
+    // Windows command lines are bounded to 32767 UTF-16 units including NUL.
+    // Enforce that bound before CommandLineToArgvW allocates its argument table.
+    constexpr std::size_t kCommandLineUnits = 32767;
+    std::size_t command_length = 0;
+    while (command_length < kCommandLineUnits && command_line[command_length] != L'\0')
+        ++command_length;
+    if (command_length == 0 || command_length == kCommandLineUnits)
+        return std::nullopt;
+    int wide_count = 0;
+    const auto free_arguments = [](wchar_t** arguments) {
+        LocalFree(arguments);
+    };
+    const std::unique_ptr<wchar_t*, decltype(free_arguments)> arguments(
+        CommandLineToArgvW(command_line, &wide_count), free_arguments);
+    if (!arguments || wide_count != argument_count ||
+        std::wstring_view(arguments.get()[seed_index - 1]) != L"--seed")
+        return std::nullopt;
+    const std::wstring_view seed(arguments.get()[seed_index]);
+    if (seed.empty())
+        return std::string{};
+    if (seed.size() > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    const int length = static_cast<int>(seed.size());
+    const int bytes = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, seed.data(), length, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 ||
+        static_cast<std::size_t>(bytes) > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    // At most 4 KiB, measured in UTF-8 bytes before allocation.
+    std::string utf8(static_cast<std::size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_UTF8,
+                            WC_ERR_INVALID_CHARS,
+                            seed.data(),
+                            length,
+                            utf8.data(),
+                            bytes,
+                            nullptr,
+                            nullptr) != bytes)
+        return std::nullopt;
+    return utf8;
+}
+#endif
 
 std::uint32_t ResolveWorldSeed(const std::string& seedStr, std::uint32_t conversion_version) {
     if (conversion_version != 0 && conversion_version != kSeedConversionVersion)
