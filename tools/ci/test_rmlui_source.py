@@ -1987,8 +1987,12 @@ class BootstrapInterpreterBinding(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         marker = "      - name: Prepare fresh RmlUi build root\n        shell: msys2 {0}\n"
         section = workflow.split(marker, 1)[1]
-        initializer = section.split("run: ", 1)[1].splitlines()[0].strip("'")
-        self.assertIn('"$(cygpath -u "$CI_PYTHON_EXECUTABLE")" -I -B', initializer)
+        initializer = textwrap.dedent(section.split("run: |\n", 1)[1]
+                                      .split("      - name: Configure", 1)[0])
+        self.assertEqual(initializer.splitlines(), [
+            'CI_PYTHON_BASH="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"',
+            '"$CI_PYTHON_BASH" -I -B tools/ci/rmlui_source.py init --root build/release',
+        ])
         self.assertIn("CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}",
                       section.split("      - name: Configure", 1)[0])
         configure = " ".join(textwrap.dedent(section.split("run: >-\n", 1)[1]
