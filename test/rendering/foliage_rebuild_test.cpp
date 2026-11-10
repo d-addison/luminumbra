@@ -20,6 +20,7 @@
 #include <glad/glad.h>
 #include <glm/ext/vector_float3.hpp>
 #include <glm/ext/vector_float4.hpp>
+#include <glm/trigonometric.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -260,7 +261,7 @@ TEST_F(FoliageRebuildTest, CompletedCountIsUnknownAcrossOrdinaryAndFrozenGenerat
         EXPECT_EQ(pass.instances().size(), first_count);
         glFinish();
         std::uint64_t frame_id = 4;
-        for (const auto readiness : {GL_TIMEOUT_EXPIRED, GL_WAIT_FAILED}) {
+        for (const auto readiness : {GLenum{GL_TIMEOUT_EXPIRED}, GLenum{GL_WAIT_FAILED}}) {
             const ScopedReadbackNotReady unavailable(readiness);
             const Attribution::FoliageFrameScope frame(true);
             Rebuild(pass, chunks, frame_id++);
@@ -569,6 +570,62 @@ TEST_F(FoliageRebuildTest, ReusedScratchMatchesFreshBuildsAcrossGrowthShrinkAndE
         Rebuild(fresh.pass(), chunks, frame_id);
         EXPECT_EQ(reused_hash, fresh.pass().uploaded_input_hash());
         ExpectSame(reused_records, GpuRecords());
+    }
+}
+
+TEST_F(FoliageRebuildTest, SurfaceScratchStopsAllocatingAcrossRepeatedTerrainRebuilds) {
+    for (const bool evidence : {false, true}) {
+        SCOPED_TRACE(evidence);
+        ScopedPass scoped;
+        auto& pass = scoped.pass();
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.use_rendered_ground();
+        pass.set_evidence_enabled(evidence);
+        const auto chunks = SupportedChunks(2);
+        std::uint64_t warmed_allocations = 0;
+        // Two builds warm both cache entries and the one extra scratch buffer.
+        // Later builds include absent support, restoration, and empty output.
+        for (std::uint64_t frame_id = 1; frame_id <= 7; ++frame_id) {
+            SCOPED_TRACE(frame_id);
+            UploadGround(pass, 1, {0, 0, 0}, 8);
+            UploadGround(pass, 2, {1, 0, 0}, 6);
+            if (frame_id == 4 || frame_id == 6) {
+                pass.remove_ground_mesh(1);
+            }
+            if (frame_id == 6) {
+                pass.remove_ground_mesh(2);
+            }
+            const auto work = RebuildAttributed(pass, chunks, frame_id);
+            EXPECT_EQ(work.surface_misses, 2u);
+            EXPECT_EQ(work.hashed_bytes == 0, !evidence);
+            if (frame_id == 2) {
+                warmed_allocations = pass.surface_scratch_allocations();
+                EXPECT_EQ(warmed_allocations, 3u);
+            } else if (frame_id > 2) {
+                EXPECT_EQ(pass.surface_scratch_allocations(), warmed_allocations);
+            }
+            const auto records = GpuRecords();
+            if (evidence) {
+                EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
+            } else {
+                EXPECT_FALSE(pass.uploaded_input_hash());
+            }
+            ScopedPass fresh;
+            ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass()));
+            fresh.pass().use_rendered_ground();
+            fresh.pass().set_evidence_enabled(true);
+            if (frame_id != 4 && frame_id != 6) {
+                UploadGround(fresh.pass(), 1, {0, 0, 0}, 8);
+            }
+            if (frame_id != 6) {
+                UploadGround(fresh.pass(), 2, {1, 0, 0}, 6);
+            }
+            Rebuild(fresh.pass(), chunks, frame_id);
+            ExpectSame(records, GpuRecords());
+            if (evidence) {
+                EXPECT_EQ(pass.uploaded_input_hash(), fresh.pass().uploaded_input_hash());
+            }
+        }
     }
 }
 
@@ -1949,6 +2006,74 @@ private:
 
 class FoliagePaletteReloadTest : public FoliageRebuildTest {
 protected:
+    static void ExpectUniformsMatchNamedSetters(const FoliagePass& pass,
+                                                const Luminumbra::Rendering::RenderContext& context,
+                                                const Luminumbra::Rendering::Camera& camera) {
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+        Luminumbra::Rendering::Shader reference(
+            (root / "res/shaders/foliage.vert").string().c_str(),
+            (root / "res/shaders/foliage.frag").string().c_str());
+        ASSERT_TRUE(reference.IsValid());
+        reference.use();
+        reference.setMat4("u_view", camera.GetViewMatrix());
+        reference.setMat4(
+            "u_projection",
+            Luminumbra::Rendering::ReversedZPerspective(
+                glm::radians(camera.Zoom), 1.0f, camera.GetNearPlane(), camera.GetFarPlane()));
+        reference.setVec3("u_cameraPos", camera.Position);
+        reference.setFloat("u_time", context.time_seconds);
+        reference.setFloat("u_swayAmplitude", 0.25f);
+        reference.setFloat("u_swaySpeed", 1.6f);
+        reference.setFloat("u_fadeStart", pass.fade_start_m());
+        reference.setFloat("u_fadeEnd", pass.fade_end_m());
+        reference.setVec3("u_sunDirection", context.sun.direction);
+        reference.setVec3("u_sunColor", context.sun.color);
+        reference.setFloat("u_sunIntensity", context.sun.intensity);
+        reference.setVec3("u_ambientColor", context.sky_ambient_color);
+        reference.setVec3("u_moonDir", context.moon_light_dir);
+        const auto& cloud = context.cloud_state;
+        reference.setInt("u_cloudShadowEnabled", cloud.enabled && cloud.shadow_enabled ? 1 : 0);
+        reference.setVec2("u_cloudScrollOffset", cloud.scroll_offset);
+        reference.setFloat("u_cloudCoverageAmount", cloud.coverage_amount);
+        reference.setFloat("u_cloudBiomeVariation", cloud.biome_variation);
+        reference.setFloat("u_cloudPlaneHeight", cloud.plane_height);
+        reference.setFloat("u_cloudShadowStrength", cloud.shadow_strength);
+        reference.setVec3("u_cloudSunDir", cloud.sun_travel_dir);
+        // Twenty uniforms, at most sixteen float components each. Unused
+        // uniforms (including a stripped sun intensity) must agree as absent.
+        for (const char* name : {"u_view",
+                                 "u_projection",
+                                 "u_cameraPos",
+                                 "u_time",
+                                 "u_swayAmplitude",
+                                 "u_swaySpeed",
+                                 "u_fadeStart",
+                                 "u_fadeEnd",
+                                 "u_sunDirection",
+                                 "u_sunColor",
+                                 "u_sunIntensity",
+                                 "u_ambientColor",
+                                 "u_moonDir",
+                                 "u_cloudShadowEnabled",
+                                 "u_cloudScrollOffset",
+                                 "u_cloudCoverageAmount",
+                                 "u_cloudBiomeVariation",
+                                 "u_cloudPlaneHeight",
+                                 "u_cloudShadowStrength",
+                                 "u_cloudSunDir"}) {
+            SCOPED_TRACE(name);
+            const auto actual = glGetUniformLocation(pass.shader()->Id(), name);
+            const auto expected = glGetUniformLocation(reference.Id(), name);
+            ASSERT_EQ(actual >= 0, expected >= 0);
+            if (actual >= 0 && expected >= 0) {
+                std::array<float, 16> actual_values{}, expected_values{};
+                glGetUniformfv(pass.shader()->Id(), actual, actual_values.data());
+                glGetUniformfv(reference.Id(), expected, expected_values.data());
+                EXPECT_EQ(actual_values, expected_values);
+            }
+        }
+    }
+
     static void ExpectNoDraws(FoliagePass& pass,
                               const Luminumbra::Rendering::RenderContext& context,
                               const Luminumbra::Rendering::Camera& camera) {
@@ -2044,6 +2169,67 @@ protected:
         EXPECT_EQ(pass.instance_generation(), restored_generation);
     }
 };
+
+TEST_F(FoliagePaletteReloadTest, DrawUniformCacheSurvivesReloadResetAndInvalidShader) {
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ScopedPass scoped;
+        auto& pass = scoped.pass();
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        Rebuild(pass, Chunks(1), 1);
+        const ScopedDrawTarget target;
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+                  static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+        Luminumbra::Rendering::RenderContext context;
+        context.screen_width = context.screen_height = 64;
+        context.lit_scene = Luminumbra::Rendering::FboHandle{target.framebuffer()};
+        context.sun.direction = {0.1f, -0.8f, 0.2f};
+        context.sun.color = {0.3f, 0.4f, 0.5f};
+        context.sun.intensity = 0.7f;
+        context.sky_ambient_color = {0.05f, 0.1f, 0.15f};
+        context.moon_light_dir = {0.4f, 0.7f, 0.2f};
+        context.cloud_state.enabled = context.cloud_state.shadow_enabled = true;
+        context.cloud_state.scroll_offset = {1, 2};
+        context.cloud_state.coverage_amount = 0.6f;
+        context.cloud_state.biome_variation = 0.2f;
+        context.cloud_state.plane_height = 600;
+        context.cloud_state.shadow_strength = 0.4f;
+        context.cloud_state.sun_travel_dir = {0.2f, -0.9f, 0.3f};
+        const Luminumbra::Rendering::Camera camera(kCamera);
+        {
+            const RebuildGlCalls calls;
+            pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+            ASSERT_TRUE(pass.shader()->IsValid());
+            EXPECT_EQ(calls.uniform_queries(), 20u);
+        }
+        for (int draw = 0; draw < 4; ++draw) {
+            SCOPED_TRACE(draw);
+            context.time_seconds = static_cast<float>(draw) + 2.5f;
+            context.cloud_state.shadow_enabled = draw % 2 == 0;
+            if (draw == 1) {
+                ASSERT_TRUE(pass.shader()->Reload());
+            } else if (draw == 2) {
+                pass.reset_shader();
+                pass.execute(context, camera);
+                EXPECT_EQ(pass.last_draw_calls(), 0u);
+                pass.init_shader(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                 "missing-foliage-root");
+                ASSERT_FALSE(pass.shader()->IsValid());
+                pass.execute(context, camera);
+                EXPECT_EQ(pass.last_draw_calls(), 0u);
+                pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+                ASSERT_TRUE(pass.shader()->IsValid());
+            }
+            {
+                const RebuildGlCalls calls;
+                pass.execute(context, camera);
+                EXPECT_EQ(pass.last_draw_calls(), 1u);
+                EXPECT_EQ(calls.uniform_queries(), draw == 1 ? 20u : 0u);
+            }
+            ExpectUniformsMatchNamedSetters(pass, context, camera);
+        }
+    }
+}
 
 TEST_F(FoliagePaletteReloadTest, FailedPaletteReloadRetiresDrawsAndReadbacksUntilValidReload) {
     const std::array<const char*, 7> invalid_palettes{nullptr,

@@ -276,6 +276,7 @@ add_executable(common_tests
     common/PromotionSimTruthDecoupling_test.cpp
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
+    common/RegionalWater_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -1572,10 +1573,16 @@ else()
     target_link_libraries(shieldrt_far_field_maxmip_gpu PRIVATE OpenGL::GL)
 endif()
 
+# Allocation replacement stays isolated from the other test executables.
+add_executable(regional_scent_allocation_test common/regional_scent_allocation_test.cpp)
+target_include_directories(regional_scent_allocation_test PRIVATE ../src)
+target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    common/RegionConsumerGate_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp
@@ -1642,6 +1649,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
@@ -2132,6 +2140,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     species_behavior_overrides_test
     runtime_world_visual_validation_test
     frontier_gates_test
+    regional_scent_allocation_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test

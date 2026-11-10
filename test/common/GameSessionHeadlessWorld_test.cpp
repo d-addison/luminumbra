@@ -6132,6 +6132,99 @@ TEST(GameSessionHeadlessWorldTest, UnchangedSnapshotSaveDoesNotReparseCommittedC
     EXPECT_GT(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
 }
 
+TEST(GameSessionHeadlessWorldTest, RepeatedClientIdentityInspectionsReuseAdmittedChunkRecords) {
+    using Service = P::WorldSaveService;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Repeated identity inspection", "94713", "default"));
+    const auto plan =
+        owner.GetWorldSystem()->GetInitialChunkLoadList(owner.GetMetadata().spawnPoint);
+    ASSERT_GE(plan.size(), std::size_t{2});
+    const Luminumbra::IVec3 excluded{plan.front().x + 64, plan.front().y, plan.front().z};
+    // Three small, distinct records keep admission independent of earlier fixtures.
+    for (const auto& coords : {plan[0], plan[1], excluded}) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        chunk->set_state(Luminumbra::ChunkState::Meshing);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -6.875f);
+        chunk->heightmap_data = {613.125f, 614.375f};
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    const auto saved_files = ReadClockTestDirectory(save);
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_EQ(reopened.GetLastLoadedChunkCount(), std::size_t{2});
+    const auto* admitted_world = reopened.GetWorldSystem();
+    ASSERT_NE(admitted_world, nullptr);
+    const auto admitted_tick = reopened.GetSimulationTickCount();
+    const auto admitted_hash = SessionWorldHash(reopened);
+    const auto expect_live_unchanged = [&]() {
+        ASSERT_EQ(reopened.GetWorldSystem(), admitted_world);
+        EXPECT_EQ(reopened.GetSimulationTickCount(), admitted_tick);
+        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+        EXPECT_FALSE(reopened.GetRegionSchedulerFault());
+        EXPECT_EQ(admitted_world->snapshot_streamed_chunks().size(), std::size_t{2});
+        EXPECT_EQ(admitted_world->find_streamed_chunk(excluded), nullptr);
+        EXPECT_EQ(admitted_world->durable_chunk_inventory().size(), std::size_t{3});
+        for (const auto& coords : {plan[0], plan[1]}) {
+            EXPECT_NE(admitted_world->find_streamed_chunk(coords), nullptr);
+        }
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    const auto expect_identity = [&]() {
+        const auto before = Service::chunk_record_decode_count_for_testing();
+        const auto identity = P::InspectSavedWorld(
+            reopened.GetSaveRootPath(), root.path(), reopened.GetMetadata().worldId);
+        ASSERT_TRUE(identity.error.empty()) << identity.error;
+        EXPECT_FALSE(identity.pending_recovery);
+        EXPECT_EQ(identity.metadata.worldId, owner.GetMetadata().worldId);
+        EXPECT_EQ(identity.metadata.seed, owner.GetMetadata().seed);
+        EXPECT_EQ(identity.metadata.worldType, owner.GetMetadata().worldType);
+        EXPECT_EQ(identity.preset_path, save / "preset.json");
+        EXPECT_EQ(Service::chunk_record_decode_count_for_testing(), before);
+    };
+    for (std::size_t inspection = 0; inspection < std::size_t{2}; ++inspection) {
+        SCOPED_TRACE(inspection);
+        ASSERT_NO_FATAL_FAILURE(expect_identity());
+        ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+        EXPECT_EQ(SessionWorldHash(reopened), admitted_hash);
+        EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
+    }
+
+    int excluded_rx = 0;
+    int excluded_rz = 0;
+    Service::region_coords_for_chunk(excluded, excluded_rx, excluded_rz);
+    const auto excluded_region = Service::region_file_path(save, excluded_rx, excluded_rz);
+    const auto excluded_bytes = ReadClockTestFile(excluded_region);
+    ASSERT_FALSE(excluded_bytes.empty());
+    const auto parked_region = root.path() / "excluded-region.lmr";
+    fs::rename(excluded_region, parked_region);
+    const auto missing_files = ReadClockTestDirectory(save);
+    const auto missing_decodes = Service::chunk_record_decode_count_for_testing();
+    const auto missing_identity = P::InspectSavedWorld(
+        reopened.GetSaveRootPath(), root.path(), reopened.GetMetadata().worldId);
+    EXPECT_EQ(missing_identity.error,
+              "inconsistent snapshot: " + Luminumbra::Filesystem::GenericUtf8PathString(
+                                              excluded_region.lexically_relative(save)));
+    EXPECT_EQ(Service::chunk_record_decode_count_for_testing(), missing_decodes);
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    EXPECT_EQ(ReadClockTestDirectory(save), missing_files);
+    EXPECT_EQ(ReadClockTestFile(parked_region), excluded_bytes);
+    fs::rename(parked_region, excluded_region);
+    ASSERT_NO_FATAL_FAILURE(expect_identity());
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    // The authoritative hash reads durable records, so compare it after restoring the file.
+    EXPECT_EQ(SessionWorldHash(reopened), admitted_hash);
+    EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
+}
+
 TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     constexpr std::size_t kLattice = std::size_t{17} * 17 * 17;
     // Distinctive values keep these record bytes unseen by any earlier admission.
@@ -12942,6 +13035,165 @@ void CheckEnergyTransactionCapacityRefusal() {
     EXPECT_TRUE(ledger.completed_work().empty());
 }
 
+std::string EnergyTransactionByteBoundaryRecord(std::map<RegionKey, RegionState>& owners,
+                                                std::size_t byte_limit,
+                                                int& last_page) {
+    constexpr std::size_t values_per_page = 256u * 64u;
+    // The active page is isolated from the dense frozen filler. Both channels stay
+    // below the diffusion outflow threshold, even after their one-unit deposits.
+    std::string record = "EFS1 64 0\nP 0 0 0:9 1:9\n";
+    // The caller caps this text allocation at kMaxRegionalRecordBytes.
+    record.reserve(byte_limit);
+    std::string dense_values;
+    for (std::size_t index = 0; index < values_per_page; ++index) {
+        dense_values += " " + std::to_string(index) + ":65535";
+    }
+    bool complete = false;
+    // At most the decoded page budget; build the dense tokens only once. Only the
+    // final partial row needs individual tokens to reach the exact encoded bound.
+    for (int px = 4; !complete && px < static_cast<int>(EnergyState::kMaxRegionalValueBytes /
+                                                        (values_per_page * sizeof(std::uint16_t)));
+         ++px) {
+        std::string row = "P " + std::to_string(px) + " 0";
+        const auto remaining = byte_limit - record.size();
+        if (row.size() + dense_values.size() + 1 <= remaining) {
+            row += dense_values;
+            complete = row.size() + 1 == remaining;
+        } else {
+            std::vector<std::size_t> value_offsets;
+            for (std::size_t index = 0; index < values_per_page; ++index) {
+                const auto prefix = " " + std::to_string(index) + ":";
+                value_offsets.push_back(row.size() + prefix.size());
+                row += prefix;
+                row += "65535";
+                if (row.size() + 1 >= remaining) {
+                    auto excess = row.size() + 1 - remaining;
+                    // A token adds at most twelve bytes; at most three values lose digits.
+                    for (auto offset = value_offsets.rbegin();
+                         excess != 0 && offset != value_offsets.rend();
+                         ++offset) {
+                        const auto removed = (std::min)(excess, std::size_t{4});
+                        row.erase(*offset, removed);
+                        excess -= removed;
+                    }
+                    EXPECT_EQ(excess, 0u);
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        record += row + '\n';
+        last_page = px;
+        for (int x = 0; x < luminumbra::fields::kEnergyPageCells; ++x) {
+            owners.try_emplace(EnergyState::OwnerOfCell(px * 16 + x, 0), RegionState::Frozen);
+        }
+    }
+    EXPECT_TRUE(complete);
+    return record;
+}
+
+void ExpectEnergyTransactionBoundaryValues(const EnergyState& live,
+                                           int last_page,
+                                           std::uint64_t total,
+                                           const std::string& active,
+                                           const std::map<RegionKey, std::string>& tail) {
+    EXPECT_EQ(live.RegionBytes({0, 0}), active);
+    for (const auto& [owner, bytes] : tail) {
+        EXPECT_TRUE(live.RegionBytes(owner) == bytes);
+    }
+    // These nonzero sentinels and the page count prove the exact page-key set.
+    // All values outside the two sparse boundary pages started at UINT16_MAX.
+    // With the boundary values pinned above, an unchanged total proves every
+    // other value is unchanged too: none can increase to compensate a decrease.
+    EXPECT_NE(live.at_cell(0, 0), 0u);
+    for (int px = 4; px <= last_page; ++px) {
+        EXPECT_NE(live.at_cell(px * 16, 0), 0u);
+    }
+    EXPECT_EQ(live.page_count(), static_cast<std::size_t>(last_page - 2));
+    EXPECT_EQ(live.total_raw(), total);
+}
+
+void CheckEnergyTransactionEncodedByteBoundary(EnergyState& live,
+                                               ActiveRegionLedger& ledger,
+                                               int last_page,
+                                               bool refuse) {
+    const auto limit = EnergyState::kMaxRegionalRecordBytes;
+    const auto initial_size = limit - (refuse ? 0u : 1u);
+    ASSERT_TRUE(live.ValidateRegionalOwners(ledger.records(), ledger.energy_ages()));
+    const auto pages = live.page_count();
+    ASSERT_LT(pages * 256u * 64u * sizeof(std::uint16_t), EnergyState::kMaxRegionalValueBytes);
+    const int channel = refuse ? 1 : 0;
+    ASSERT_EQ(live.at_cell(0, 0, channel), 9u);
+    ASSERT_TRUE(live.QueueRegionalDeposit(1, 0, 0, channel, 1));
+    const auto capacity = live.regional_deposit_capacity();
+    const auto active = live.RegionBytes({0, 0});
+    std::map<RegionKey, std::string> tail;
+    for (int x = 0; x < luminumbra::fields::kEnergyPageCells; ++x) {
+        const auto owner = EnergyState::OwnerOfCell(last_page * 16 + x, 0);
+        if (!tail.contains(owner)) {
+            tail.emplace(owner, live.RegionBytes(owner));
+        }
+    }
+    const auto total = live.total_raw();
+    const auto ledger_before = ledger.encode();
+    const auto work_before = ledger.completed_work();
+    const std::array due{RegionKey{0, 0}};
+    EnergyState::RegionalTick transaction;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const bool accepted = live.BeginRegionalTick(1, ledger, due, transaction);
+        EXPECT_EQ(accepted, !refuse);
+        if (accepted) {
+            EXPECT_EQ(live.at_cell(0, 0, channel), 10u);
+            // Only a value digit changes: delimiters/indices have the same width
+            // in RegionBytes and the exact-size canonical input record.
+            EXPECT_EQ(initial_size + live.RegionBytes({0, 0}).size(), limit + active.size());
+        }
+        transaction.rollback();
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectEnergyTransactionBoundaryValues(live, last_page, total, active, tail));
+        EXPECT_EQ(live.at_cell(0, 0, channel), 9u);
+        EXPECT_EQ(live.page_count(), pages);
+        EXPECT_EQ(live.regional_deposit_capacity(), capacity);
+        EXPECT_EQ(ledger.encode(), ledger_before);
+        EXPECT_EQ(ledger.completed_work(), work_before);
+    }
+    if (refuse) {
+        // The retained deposit makes channel 1 go 9 -> 10. At age 8 both
+        // channels decay 10 -> 9, and 9 >> 4 == 0 seals every diffusion flux.
+        // Starting at the limit, +1 -2 digits leaves the record one byte below it.
+        ASSERT_TRUE(ledger.set_energy_age({0, 0}, 7));
+    }
+    auto reference = live;
+    EnergyState::RegionalResult expected;
+    ASSERT_TRUE(reference.TickRegional(1, ledger.records(), due, ledger.energy_ages(), expected));
+    ASSERT_TRUE(live.BeginRegionalTick(1, ledger, due, transaction));
+    ASSERT_NO_FATAL_FAILURE(ExpectEnergyTransactionBoundaryValues(
+        live, last_page, reference.total_raw(), reference.RegionBytes({0, 0}), tail));
+    // Frozen values and all page keys are pinned by the whole-state check above,
+    // so the active region's digit delta gives the exact complete record size.
+    const auto final_size = refuse ? limit - 1 : limit;
+    EXPECT_EQ(initial_size + live.RegionBytes({0, 0}).size(), final_size + active.size());
+    EXPECT_EQ(live.at_cell(0, 0, 0), refuse ? 9u : 10u);
+    EXPECT_EQ(live.at_cell(0, 0, 1), 9u);
+    if (refuse) {
+        EXPECT_EQ(live.RegionBytes({0, 0}).size() + 1, active.size());
+        EXPECT_EQ(reference.total_raw() + 1, total);
+    } else {
+        EXPECT_EQ(live.RegionBytes({0, 0}).size(), active.size() + 1);
+        EXPECT_EQ(reference.total_raw(), total + 1);
+    }
+    ASSERT_TRUE(ledger.prepare_energy_work(transaction.ages(), transaction.work()));
+    ledger.commit_energy_work();
+    transaction.commit();
+    EXPECT_EQ(ledger.energy_ages(), expected.ages);
+    EXPECT_EQ(ledger.energy_ages().at({0, 0}), refuse ? 8u : 1u);
+    auto work_oracle = ledger;
+    work_oracle.publish_completed_work(expected.work);
+    EXPECT_EQ(ledger.completed_work(), work_oracle.completed_work());
+    EXPECT_EQ(live.regional_deposit_capacity(), EnergyState::kMaxRegionalDeposits);
+    EXPECT_EQ(live.page_count(), pages);
+}
+
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, EnergyTransactionMatchesRegionalKernelAndRestoresRefusedTicks) {
@@ -12964,6 +13216,32 @@ TEST(GameSessionHeadlessWorldTest, EnergyTransactionRefusesInvalidOwnersAndPubli
 
 TEST(GameSessionHeadlessWorldTest, EnergyTransactionCapacityRefusalLeavesValuesAndAgesUntouched) {
     ASSERT_NO_FATAL_FAILURE(CheckEnergyTransactionCapacityRefusal());
+}
+
+TEST(GameSessionHeadlessWorldTest, EnergyTransactionChecksExactEncodedByteLimitAndRetries) {
+    std::map<RegionKey, RegionState> owners{{{0, 0}, RegionState::Active}};
+    EnergyState live(64);
+    int last_page = 0;
+    {
+        // Decode once. Admission itself checks exact canonical reencoding; release
+        // the large text before the transaction/rollback and public-kernel checks.
+        const auto record = EnergyTransactionByteBoundaryRecord(
+            owners, EnergyState::kMaxRegionalRecordBytes - 1, last_page);
+        ASSERT_EQ(record.size(), EnergyState::kMaxRegionalRecordBytes - 1);
+        ASSERT_TRUE(live.DeserializeRegionalRecord(record));
+    }
+    auto ledger = ScheduledFieldLedger(0, owners);
+    for (const auto& [owner, state] : owners) {
+        (void)state;
+        ASSERT_TRUE(ledger.set_energy_age(owner, 0));
+    }
+    EXPECT_TRUE(ledger.completed_work().empty());
+    // Commit the first channel's exact-limit acceptance, then try the other
+    // channel's retained deposit against that same record at the limit.
+    for (const bool refuse : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(
+            CheckEnergyTransactionEncodedByteBoundary(live, ledger, last_page, refuse));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, LegacyEnergyMigratesToOwnerAgesAndSealsFrozenOwners) {
