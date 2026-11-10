@@ -23,6 +23,7 @@
 #include <imgui_internal.h>
 #include <ios>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
@@ -2470,6 +2471,141 @@ TEST(UiSmokeDeathTest, CaptureGalleryOmitsPersonalRatingsAndRetainsContentRefusa
                 "");
 }
 
+namespace {
+
+class UiHotReloadTest : public testing::TestWithParam<const char*> {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(m_context.ready()) << m_context.error();
+        fs::create_directories(Root() / "data/ui");
+        fs::create_directories(Root() / "data/fonts/Lora");
+        for (const auto* name :
+             {"Lora-VariableFont_wght.ttf", "Lora-Italic-VariableFont_wght.ttf"}) {
+            fs::copy_file(SourceRoot() / "data/fonts/Lora" / name,
+                          Root() / "data/fonts/Lora" / name);
+        }
+        m_ui = std::make_unique<Luminumbra::Client::Rml_UIManager>(
+            Luminumbra::Filesystem::GenericUtf8PathString(Root()) + "/");
+        m_ui->Init(m_context.window(), nullptr);
+        ASSERT_NE(m_ui->GetContext(), nullptr);
+    }
+
+    void TearDown() override {
+        if (m_ui) {
+            m_ui->Shutdown();
+        }
+    }
+
+    fs::path Root() const {
+        return m_temporary.Path().parent_path();
+    }
+
+    void WriteDocument(const std::string& contents) const {
+        std::ofstream output(Root() / "data/ui/reload.rml", std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(output);
+        output << contents;
+        output.close();
+        ASSERT_TRUE(output);
+    }
+
+    Luminumbra::Client::Rml_UIManager& Ui() {
+        return *m_ui;
+    }
+
+private:
+    Luminumbra::TestSupport::ScopedTempFile m_temporary{"ui-reload-", ".rml"};
+    HiddenGlContext m_context;
+    std::unique_ptr<Luminumbra::Client::Rml_UIManager> m_ui;
+};
+
+TEST_P(UiHotReloadTest, FailedReplacementRemainsUsableAndRepairReplacesOnce) {
+    auto& ui = Ui();
+    const int initial_documents = ui.GetContext()->GetNumDocuments();
+    const auto initial_generation = ui.document_generation();
+    ui.ReloadActiveDocument();
+    EXPECT_EQ(ui.document_generation(), initial_generation);
+    EXPECT_EQ(ui.GetContext()->GetNumDocuments(), initial_documents);
+
+    ASSERT_NO_FATAL_FAILURE(WriteDocument(R"(
+        <rml><head><title>Reload</title></head><body id="pause">
+        <button id="resume_btn">resume</button></body></rml>)"));
+    int callbacks = 0;
+    ui.SetPauseActionCallback([&](const std::string& action) {
+        EXPECT_EQ(action, "resume");
+        ++callbacks;
+    });
+    auto* original = LoadDocumentAndFind(ui, "reload.rml", "pause");
+    ASSERT_NE(original, nullptr);
+    original->SetAttribute("data-retained", "edited");
+    const int loaded_documents = ui.GetContext()->GetNumDocuments();
+    EXPECT_EQ(loaded_documents, initial_documents + 1);
+    const auto loaded_generation = ui.document_generation();
+    EXPECT_EQ(loaded_generation, initial_generation + 1);
+
+    if (const auto* malformed = GetParam()) {
+        ASSERT_NO_FATAL_FAILURE(WriteDocument(malformed));
+    } else {
+        ASSERT_TRUE(fs::remove(Root() / "data/ui/reload.rml"));
+    }
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+        ui.ReloadActiveDocument();
+        ui.Update();
+        auto* retained = FindDocumentByElementId(ui.GetContext(), "pause");
+        ASSERT_EQ(retained, original);
+        EXPECT_TRUE(retained->IsVisible());
+        EXPECT_EQ(retained->GetAttribute<Rml::String>("data-retained", ""), "edited");
+        EXPECT_EQ(ui.GetContext()->GetNumDocuments(), loaded_documents);
+        EXPECT_EQ(ui.document_generation(), loaded_generation);
+        ASSERT_NO_FATAL_FAILURE(ClickAndUpdate(ui, retained->GetElementById("resume_btn")));
+        EXPECT_EQ(callbacks, attempt);
+    }
+
+    ASSERT_NO_FATAL_FAILURE(WriteDocument(R"(
+        <rml><head><title>Repaired</title></head><body id="pause" data-repaired="true">
+        <button id="resume_btn">repaired resume</button></body></rml>)"));
+    ui.ReloadActiveDocument();
+    auto* repaired = FindDocumentByElementId(ui.GetContext(), "pause");
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_NE(repaired, original);
+    ui.Update();
+    EXPECT_TRUE(repaired->IsVisible());
+    EXPECT_TRUE(repaired->HasAttribute("data-repaired"));
+    EXPECT_FALSE(repaired->HasAttribute("data-retained"));
+    EXPECT_EQ(ui.GetContext()->GetNumDocuments(), loaded_documents);
+    EXPECT_EQ(ui.document_generation(), loaded_generation + 1);
+    ASSERT_NO_FATAL_FAILURE(ClickAndUpdate(ui, repaired->GetElementById("resume_btn")));
+    EXPECT_EQ(callbacks, 3);
+
+    // Ordinary navigation to the same path still leaves the adopted document alone.
+    ui.RequestLoadDocument("reload.rml");
+    ui.Update();
+    EXPECT_EQ(FindDocumentByElementId(ui.GetContext(), "pause"), repaired);
+    EXPECT_EQ(ui.document_generation(), loaded_generation + 1);
+    // Another explicit reload replaces it exactly once and binds one callback.
+    ui.ReloadActiveDocument();
+    ui.Update();
+    repaired = FindDocumentByElementId(ui.GetContext(), "pause");
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_EQ(ui.GetContext()->GetNumDocuments(), loaded_documents);
+    EXPECT_EQ(ui.document_generation(), loaded_generation + 2);
+    ASSERT_NO_FATAL_FAILURE(ClickAndUpdate(ui, repaired->GetElementById("resume_btn")));
+    EXPECT_EQ(callbacks, 4);
+
+    ui.RequestLoadDocument("missing.rml");
+    ui.Update();
+    ASSERT_EQ(FindDocumentByElementId(ui.GetContext(), "pause"), repaired);
+    EXPECT_EQ(ui.document_generation(), loaded_generation + 2);
+    ASSERT_NO_FATAL_FAILURE(ClickAndUpdate(ui, repaired->GetElementById("resume_btn")));
+    EXPECT_EQ(callbacks, 5);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    MissingEmptyAndTruncated,
+    UiHotReloadTest,
+    testing::Values(nullptr, "", "<rml><head></head><body id=\"pause\"><button id=\"resume_btn\""));
+
+} // namespace
+
 //  world-select load button must NOT fire the load callback with no selection, and the
 // active document hot-reloads via ReloadActiveDocument.
 TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
@@ -2489,13 +2625,11 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     Rml::ElementDocument* ws = LoadDocumentAndFind(ui, "world_selection.rml", "world_selection");
     ASSERT_NE(ws, nullptr);
 
-    // Clear any authored default selection so the guard is exercised on an empty selection.
-    Rml::ElementList items;
-    ws->GetElementsByClassName(items, "list-item");
-    for (Rml::Element* item : items) {
-        item->RemoveAttribute("data-selected");
-        item->SetClass("selected", false);
-    }
+    // Establish a selection so reload must clear both DOM and manager state.
+    Rml::Element* selected_before_reload = FirstWorldListItem(ws);
+    ASSERT_NE(selected_before_reload, nullptr);
+    ClickAndUpdate(ui, selected_before_reload);
+    EXPECT_TRUE(selected_before_reload->IsClassSet("selected"));
     // The manager tracks selection internally; reloading the doc resets it to empty.
     ui.ReloadActiveDocument();
     ui.Update();

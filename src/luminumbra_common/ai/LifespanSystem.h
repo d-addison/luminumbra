@@ -44,6 +44,8 @@
 #include "../components/CreatureComponents.h" // CreatureComponent (starvation + carcass seam)
 #include "../components/MortalComponents.h"   // MortalComponent (the opt-in)
 
+#include "../systems/RegionConsumerGate.h"
+
 namespace luminumbra::ai {
 
 // Components live in the capital-L namespace (engine convention).
@@ -67,13 +69,21 @@ struct LifespanStats {
 // of registry state. id-ordered so the death-marking order (and thus any derived
 // telemetry) is deterministic. No creation/destruction -> no two-phase needed,
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
-inline LifespanStats RunLifespanOnTick(entt::registry& reg, std::uint64_t /*tick*/ = 0) {
+inline LifespanStats RunLifespanOnTick(entt::registry& reg,
+                                       std::uint64_t /*tick*/ = 0,
+                                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     LifespanStats stats;
 
     auto view = reg.view<Comp::MortalComponent>();
 
     // id-ordered traversal so death-marking is deterministic / order-stable.
-    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::vector<entt::entity> ents;
+    for (auto e : view) {
+        // Creature mortality stays full-rate until the creature pipeline has regional scheduling.
+        if (reg.all_of<Comp::CreatureComponent>(e) || gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
