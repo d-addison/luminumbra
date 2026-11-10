@@ -3529,6 +3529,20 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 }
             }
 
+            if (!water_lod_requested && required_lod >= 0 &&
+                (!chunk_ptr->water_mesh_vertices.empty() ||
+                 !chunk_ptr->water_mesh_indices.empty() ||
+                 chunk_ptr->water_mesh_generated.load(std::memory_order_acquire) ||
+                 pending_lod == 0)) {
+                // Publish water departure independently of terrain LOD. A pending
+                // worker owns its staging buffers until completion; supersede only
+                // its water version so terrain publication remains eligible.
+                chunk_ptr->water_mesh_vertices.clear();
+                chunk_ptr->water_mesh_indices.clear();
+                ++chunk_ptr->water_mesh_version;
+                chunk_ptr->water_mesh_generated.store(false, std::memory_order_release);
+            }
+
             if (pending_lod >= 0) {
                 // Retain skipped terrain obligations until publication. Healthy
                 // water-only jobs must still let a full pass reach quiescence.

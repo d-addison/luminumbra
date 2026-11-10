@@ -578,17 +578,24 @@ TEST(AsyncWaterMeshing, PendingWaterMeshRetainsAnchorLodRecheckUntilPublication)
                 gate.finish();
             }
             ASSERT_EQ(chunk->pending_lod.load(), -1);
-            ASSERT_TRUE(chunk->water_mesh_generated.load());
+            const bool departed = anchor_case == 0 || anchor_case == 4;
+            ASSERT_EQ(chunk->water_mesh_generated.load(), !departed);
+            if (departed) {
+                EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+                EXPECT_TRUE(chunk->water_mesh_indices.empty());
+            }
             ASSERT_EQ(chunk->current_lod.load(), 0);
             ASSERT_EQ(chunk->mesh_version.load(), 0u);
 
             // No further anchor motion or water mutation can wake this check.
             world.update(registry, anchors, nullptr, false);
             const bool demote = anchor_case == 0;
-            EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, demote ? 1u : 0u);
+            EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing,
+                      demote || anchor_case == 4 ? 1u : 0u);
             world.wait_for_streaming_jobs();
             EXPECT_EQ(chunk->current_lod.load(), demote ? 1 : 0);
             EXPECT_EQ(chunk->mesh_version.load(), demote ? 1u : 0u);
+            EXPECT_EQ(chunk->water_mesh_generated.load(), !demote);
         }
     }
 }
