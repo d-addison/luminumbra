@@ -276,6 +276,7 @@ add_executable(common_tests
     common/PromotionSimTruthDecoupling_test.cpp
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
+    common/RegionalWater_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -1644,6 +1645,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
