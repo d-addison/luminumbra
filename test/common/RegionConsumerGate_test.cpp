@@ -1,5 +1,8 @@
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_common/ai/CreatureBrainSystem.h"
+#include "luminumbra_common/ai/CreatureReproductionSystem.h"
 #include "luminumbra_common/ai/LifespanSystem.h"
+#include "luminumbra_common/ai/PerceptionSystem.h"
 #include "luminumbra_common/ai/WildlifeFoliageSystem.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
@@ -22,6 +25,515 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// Independent full-rate reference for movement, needs, courtship and seeded births.
+namespace LegacyCreatureTickOracle {
+using namespace luminumbra::ai;
+namespace Comp = ::Luminumbra::Components;
+namespace dm = ::Luminumbra::DeterministicMath;
+
+inline CreatureBrainStats
+RunCreatureBrainSystemOnTick(entt::registry& reg,
+                             float dt,
+                             const EcologyTuning& tuning = {},
+                             const ScentField* scent = nullptr,
+                             float scent_origin_x = 0.0f,
+                             float scent_origin_z = 0.0f,
+                             float scent_cell_size = 0.0f,
+                             bool use_perception_substrate = true,
+                             const CreatureSpeciesRegistry* species = nullptr) {
+    CreatureBrainStats stats;
+    auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
+    std::vector<entt::entity> ents;
+    for (auto e : view)
+        ents.push_back(e);
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    struct Snap {
+        entt::entity e;
+        float x, z;
+        float hx, hz;
+        bool predator;
+        bool eaten;
+    };
+    std::vector<Snap> snap;
+    snap.reserve(ents.size());
+    for (auto e : ents) {
+        const auto& tf = view.get<Comp::TransformComponent>(e);
+        const auto& c = view.get<Comp::CreatureComponent>(e);
+        snap.push_back(
+            {e, tf.position.x, tf.position.z, c.wish_x, c.wish_z, c.is_predator, c.eaten});
+    }
+    UniformSpatialGrid predGrid(tuning.flock_neighbor_radius);
+    UniformSpatialGrid preyGrid(tuning.flock_neighbor_radius);
+    {
+        std::vector<GridPoint> predPts, preyPts;
+        predPts.reserve(snap.size());
+        preyPts.reserve(snap.size());
+        for (std::uint32_t i = 0; i < snap.size(); ++i) {
+            const Snap& o = snap[i];
+            (o.predator ? predPts : preyPts).push_back({i, o.x, o.z});
+        }
+        predGrid.Build(predPts);
+        preyGrid.Build(preyPts);
+    }
+    std::vector<std::uint32_t> herdHits;
+    PerceptionField predTargetField;
+    PerceptionField preyTargetField;
+    PerceptionSnapshot targetSnapshot;
+    if (use_perception_substrate) {
+        std::vector<PerceptionSourceInput> predSources, preySources;
+        predSources.reserve(snap.size());
+        preySources.reserve(snap.size());
+        for (std::uint32_t i = 0; i < snap.size(); ++i) {
+            const Snap& o = snap[i];
+            if (o.eaten)
+                continue;
+            PerceptionSourceInput in;
+            in.index = i;
+            in.has_position = true;
+            in.x = o.x;
+            in.z = o.z;
+            in.radius = 0.0f;
+            (o.predator ? predSources : preySources).push_back(in);
+        }
+        predTargetField.Build(predSources);
+        preyTargetField.Build(preySources);
+    }
+    for (std::size_t selfIdx = 0; selfIdx < ents.size(); ++selfIdx) {
+        const entt::entity e = ents[selfIdx];
+        auto& tf = view.get<Comp::TransformComponent>(e);
+        auto& cr = view.get<Comp::CreatureComponent>(e);
+        if (cr.eaten) {
+            cr.wish_x = 0.0f;
+            cr.wish_z = 0.0f;
+            ++stats.updated;
+            continue;
+        }
+        const float sx = tf.position.x, sz = tf.position.z;
+        const Comp::CreatureGenomeComponent* sg = reg.try_get<Comp::CreatureGenomeComponent>(e);
+        float faceX = 0.0f, faceZ = 0.0f;
+        if (sg != nullptr) {
+            const float hh =
+                dm::Sqrt(snap[selfIdx].hx * snap[selfIdx].hx + snap[selfIdx].hz * snap[selfIdx].hz);
+            if (hh > 1e-4f) {
+                faceX = snap[selfIdx].hx / hh;
+                faceZ = snap[selfIdx].hz / hh;
+            }
+        }
+        const float starve01 = utility_clamp01((cr.hunger - 0.85f) / 0.15f);
+        const float starve_degrade = 1.0f - 0.5f * starve01;
+        float bestDist = 1.0e9f, tx = sx, tz = sz;
+        bool found = false;
+        entt::entity te = entt::null;
+        auto considerTarget = [&](const Snap& o) {
+            const float dx = o.x - sx, dz = o.z - sz;
+            const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (sg != nullptr) {
+                bool sensed = (d <= sg->hearing_range * starve_degrade);
+                if (!sensed && d <= sg->vision_range * starve_degrade) {
+                    if (faceX == 0.0f && faceZ == 0.0f) {
+                        sensed = true;
+                    } else if (d > 1e-4f) {
+                        sensed = ((dx * faceX + dz * faceZ) / d) >= sg->vision_cos_half_fov;
+                    } else {
+                        sensed = true;
+                    }
+                }
+                if (!sensed)
+                    return;
+            }
+            if (d < bestDist) {
+                bestDist = d;
+                tx = o.x;
+                tz = o.z;
+                te = o.e;
+                found = true;
+            }
+        };
+        if (use_perception_substrate) {
+            const PerceptionField& targetField = cr.is_predator ? preyTargetField : predTargetField;
+            PerceptionQueryInput tq;
+            tq.has_position = true;
+            tq.x = sx;
+            tq.z = sz;
+            targetField.Query(tq, targetSnapshot);
+            for (const PerceivedSource& ps : targetSnapshot.perceived) {
+                considerTarget(snap[ps.index]);
+            }
+        } else {
+            for (const Snap& o : snap) {
+                if (o.e == e || o.predator == cr.is_predator || o.eaten)
+                    continue;
+                considerTarget(o);
+            }
+        }
+        if (scent != nullptr && cr.is_predator && !found && scent_cell_size > 0.0f) {
+            const int cx = WorldToScentCell(sx, scent_origin_x, scent_cell_size);
+            const int cz = WorldToScentCell(sz, scent_origin_z, scent_cell_size);
+            float gdx = 0.0f, gdz = 0.0f;
+            const float conf = scent->SimulationCellAllowed(cx, cz)
+                                   ? scent->GradientSteer(/*ch=*/0,
+                                                          cx,
+                                                          cz,
+                                                          /*sign=*/+1.0f,
+                                                          /*floor=*/1e-4f,
+                                                          /*k=*/0.05f,
+                                                          gdx,
+                                                          gdz)
+                                   : 0.0f;
+            if (conf > 0.0f) {
+                tx = sx + gdx * 12.0f;
+                tz = sz + gdz * 12.0f;
+                bestDist = 20.0f;
+                found = true;
+            }
+        }
+        if (cr.is_predator && found && bestDist < tuning.catch_radius && reg.valid(te) &&
+            !reg.get<Comp::CreatureComponent>(te).eaten) {
+            reg.get<Comp::CreatureComponent>(te).eaten = true;
+            cr.hunger = utility_clamp01(cr.hunger - tuning.catch_satiation);
+        }
+        CreatureSenses s;
+        s.is_predator = cr.is_predator;
+        s.hunger = cr.hunger;
+        s.stamina = cr.stamina;
+        s.energy = cr.energy;
+        if (const auto* cc = reg.try_get<Comp::CircadianComponent>(e))
+            s.circadian_activity = cc->activity;
+        const auto* th = reg.try_get<Comp::ThirstComponent>(e);
+        if (th != nullptr) {
+            s.thirst = th->thirst;
+            s.water_proximity = th->water_proximity;
+        }
+        const float nearNorm = found ? (1.0f - utility_clamp01(bestDist / 30.0f)) : 0.0f;
+        if (cr.is_predator) {
+            s.food_proximity = nearNorm;
+        } else {
+            s.threat_proximity = nearNorm;
+            s.food_proximity = 0.6f;
+            if (auto* al = reg.try_get<Comp::AlarmComponent>(e)) {
+                al->alarmed = (nearNorm > 0.4f) ? 1u : 0u;
+                if (al->level > s.threat_proximity)
+                    s.threat_proximity = al->level;
+            }
+        }
+        const CreatureSpecies* species_definition =
+            species ? species->Find(cr.species_id) : nullptr;
+        const CreatureAction act = DecideCreatureAction(
+            s, species_definition ? species_definition->brain : CreatureBrainParams{});
+        cr.last_action = static_cast<int>(act);
+        float dirx = 0.0f, dirz = 0.0f;
+        switch (act) {
+            case CreatureAction::Flee:
+                if (found) {
+                    dirx = sx - tx;
+                    dirz = sz - tz;
+                }
+                break;
+            case CreatureAction::Hunt:
+                if (found) {
+                    dirx = tx - sx;
+                    dirz = tz - sz;
+                }
+                break;
+            case CreatureAction::Wander: {
+                const float ang = 2.39996323f * static_cast<float>(entt::to_integral(e) % 16u + 1u);
+                dirx = dm::Cos(ang);
+                dirz = dm::Sin(ang);
+                break;
+            }
+            case CreatureAction::Graze:
+                cr.hunger = utility_clamp01(cr.hunger - tuning.hunger_graze_sate * dt);
+                break;
+            case CreatureAction::Rest:
+                cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);
+                cr.energy = utility_clamp01(cr.energy + tuning.energy_rest_recover * dt);
+                break;
+            case CreatureAction::Sleep:
+                cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);
+                cr.energy = utility_clamp01(cr.energy + tuning.energy_sleep_recover * dt);
+                break;
+            case CreatureAction::Drink:
+                if (th != nullptr) {
+                    dirx = th->wish_x;
+                    dirz = th->wish_z;
+                }
+                break;
+        }
+        float adirx = 0.0f, adirz = 0.0f;
+        const float alen = dm::Sqrt(dirx * dirx + dirz * dirz);
+        if (alen > 1.0e-5f) {
+            adirx = dirx / alen;
+            adirz = dirz / alen;
+        }
+        if (act == CreatureAction::Flee || act == CreatureAction::Hunt ||
+            act == CreatureAction::Wander) {
+            herdHits.clear();
+            const UniformSpatialGrid& grid = cr.is_predator ? predGrid : preyGrid;
+            grid.QueryRadius(sx, sz, herdHits);
+            std::vector<std::pair<float, float>> herd;
+            std::vector<std::pair<float, float>> herdHeadings;
+            herd.reserve(herdHits.size());
+            herdHeadings.reserve(herdHits.size());
+            for (std::uint32_t hi : herdHits) {
+                if (static_cast<std::size_t>(hi) == selfIdx)
+                    continue;
+                herd.emplace_back(snap[hi].x, snap[hi].z);
+                herdHeadings.emplace_back(snap[hi].hx, snap[hi].hz);
+            }
+            FlockParams fp{};
+            fp.neighbor_radius = tuning.flock_neighbor_radius;
+            fp.separation_radius = tuning.flock_separation_radius;
+            fp.cohesion_weight = tuning.flock_cohesion_weight;
+            fp.separation_weight = tuning.flock_separation_weight;
+            fp.alignment_weight = tuning.alignment_weight;
+            const FlockSteer fs = ComputeFlockSteer(sx, sz, herd, fp, &herdHeadings);
+            adirx += fs.x * tuning.herd_weight;
+            adirz += fs.z * tuning.herd_weight;
+        }
+        const float len = dm::Sqrt(adirx * adirx + adirz * adirz);
+        cr.wish_x = 0.0f;
+        cr.wish_z = 0.0f;
+        if (len > 1.0e-5f) {
+            const float inv = 1.0f / len;
+            const float speed =
+                ((act == CreatureAction::Flee || act == CreatureAction::Hunt) ? cr.move_speed * 1.5f
+                                                                              : cr.move_speed) *
+                starve_degrade;
+            cr.wish_x = adirx * inv * speed;
+            cr.wish_z = adirz * inv * speed;
+            cr.stamina = utility_clamp01(cr.stamina - tuning.stamina_move_drain * dt);
+            if (!reg.all_of<Comp::CreaturePhysicsComponent>(e)) {
+                tf.position.x += cr.wish_x * dt;
+                tf.position.z += cr.wish_z * dt;
+            }
+        }
+        cr.hunger = utility_clamp01(cr.hunger + tuning.hunger_growth_per_second * dt);
+        cr.energy = utility_clamp01(cr.energy - tuning.energy_drain_per_second * dt);
+        ++stats.updated;
+    }
+    return stats;
+}
+
+inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& tuning = {}) {
+    auto view = reg.view<Comp::CreatureComponent,
+                         Comp::CreatureGenomeComponent,
+                         Comp::TransformComponent>();
+    struct M {
+        entt::entity e;
+        float x, z;
+        bool female;
+        bool ready;
+        std::uint16_t species_id;
+    };
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    std::vector<M> snap;
+    snap.reserve(ents.size());
+    for (auto e : ents) {
+        const auto& tf = view.get<Comp::TransformComponent>(e);
+        const auto& cr = view.get<Comp::CreatureComponent>(e);
+        const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        snap.push_back({e,
+                        tf.position.x,
+                        tf.position.z,
+                        gn.female,
+                        IsReadyToMate(cr, gn, tuning),
+                        cr.species_id});
+    }
+    for (std::size_t i = 0; i < ents.size(); ++i) {
+        const M& self = snap[i];
+        if (!self.ready)
+            continue;
+        auto& cr = view.get<Comp::CreatureComponent>(self.e);
+        if (cr.last_action == static_cast<int>(CreatureAction::Flee))
+            continue;
+        float best = tuning.mate_seek_radius, mx = 0.0f, mz = 0.0f;
+        bool found = false;
+        for (const M& o : snap) {
+            if (o.e == self.e || !o.ready || o.female == self.female ||
+                o.species_id != self.species_id)
+                continue;
+            const float dx = o.x - self.x, dz = o.z - self.z;
+            const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (d < best) {
+                best = d;
+                mx = o.x;
+                mz = o.z;
+                found = true;
+            }
+        }
+        if (!found)
+            continue;
+        const float dx = mx - self.x, dz = mz - self.z;
+        const float d = dm::Sqrt(dx * dx + dz * dz);
+        if (d > tuning.courtship_radius && d > 1.0e-5f) {
+            const float inv = cr.move_speed / d;
+            cr.wish_x = dx * inv;
+            cr.wish_z = dz * inv;
+        } else {
+            cr.wish_x = 0.0f;
+            cr.wish_z = 0.0f;
+        }
+    }
+}
+
+inline CreatureReproductionStats
+RunMatingResolveOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ReproductionTuning& tuning = {},
+                       const CreatureSpeciesRegistry* species = nullptr) {
+    CreatureReproductionStats stats;
+    auto view = reg.view<Comp::CreatureComponent,
+                         Comp::CreatureGenomeComponent,
+                         Comp::TransformComponent>();
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    for (auto e : ents) {
+        auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        if (gn.age_ticks < 0xFFFFFFFFu)
+            ++gn.age_ticks;
+        if (gn.reproduce_cooldown > 0)
+            --gn.reproduce_cooldown;
+    }
+    struct Male {
+        entt::entity e;
+        float x, z;
+        std::uint16_t species_id;
+    };
+    std::vector<Male> males;
+    for (auto e : ents) {
+        const auto& cr = view.get<Comp::CreatureComponent>(e);
+        const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        if (!gn.female && IsReadyToMate(cr, gn, tuning)) {
+            const auto& tf = view.get<Comp::TransformComponent>(e);
+            males.push_back({e, tf.position.x, tf.position.z, cr.species_id});
+        }
+    }
+    struct Birth {
+        CreatureGenome genome;
+        float x, y, z;
+        std::uint32_t generation;
+        bool female;
+        std::uint16_t species_id;
+    };
+    std::vector<Birth> births;
+    std::vector<bool> male_used(males.size(), false);
+    for (auto e : ents) {
+        auto& cr = view.get<Comp::CreatureComponent>(e);
+        auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        if (!gn.female || !IsReadyToMate(cr, gn, tuning)) {
+            continue;
+        }
+        const auto& tf = view.get<Comp::TransformComponent>(e);
+        int best = -1;
+        float bestDist = tuning.courtship_radius;
+        for (std::size_t m = 0; m < males.size(); ++m) {
+            if (male_used[m] || males[m].species_id != cr.species_id)
+                continue;
+            const float dx = males[m].x - tf.position.x, dz = males[m].z - tf.position.z;
+            const float d = dm::Sqrt(dx * dx + dz * dz);
+            if (d < bestDist) {
+                bestDist = d;
+                best = static_cast<int>(m);
+            }
+        }
+        if (best < 0) {
+            gn.courting_ticks = 0;
+            continue;
+        }
+        ++stats.courting;
+        ++gn.courting_ticks;
+        if (gn.courting_ticks < tuning.courtship_ticks)
+            continue;
+        const entt::entity maleE = males[static_cast<std::size_t>(best)].e;
+        male_used[static_cast<std::size_t>(best)] = true;
+        auto& mgn = view.get<Comp::CreatureGenomeComponent>(maleE);
+        CreatureGenome fG;
+        fG.move_speed = gn.move_speed;
+        fG.vigilance = gn.vigilance;
+        fG.hunger_threshold = gn.hunger_threshold;
+        fG.size_scale = gn.size_scale;
+        fG.vision_cos_half_fov = gn.vision_cos_half_fov;
+        fG.vision_range = gn.vision_range;
+        fG.hearing_range = gn.hearing_range;
+        CreatureGenome mG;
+        mG.move_speed = mgn.move_speed;
+        mG.vigilance = mgn.vigilance;
+        mG.hunger_threshold = mgn.hunger_threshold;
+        mG.size_scale = mgn.size_scale;
+        mG.vision_cos_half_fov = mgn.vision_cos_half_fov;
+        mG.vision_range = mgn.vision_range;
+        mG.hearing_range = mgn.hearing_range;
+        luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
+            kReproSeedOffset ^ world_seed,
+            (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
+                static_cast<std::uint64_t>(entt::to_integral(maleE)),
+            tick);
+        const CreatureSpecies* species_definition =
+            species ? species->Find(cr.species_id) : nullptr;
+        const SpeciesGenomeRanges ranges =
+            species_definition ? species_definition->genome_ranges : SpeciesGenomeRanges{};
+        CreatureGenome childG = BreedOffspring(fG, mG, rng, ranges);
+        const bool childFemale = (rng.next_u64() & 1ull) == 0ull;
+        childG = BreedSensoryInto(childG, fG, mG, rng, ranges);
+        const auto& mtf = view.get<Comp::TransformComponent>(maleE);
+        Birth b;
+        b.genome = childG;
+        b.x = (tf.position.x + mtf.position.x) * 0.5f;
+        b.y = (tf.position.y + mtf.position.y) * 0.5f;
+        b.z = (tf.position.z + mtf.position.z) * 0.5f + tuning.spawn_radius;
+        b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
+        b.female = childFemale;
+        b.species_id = cr.species_id;
+        births.push_back(b);
+        gn.courting_ticks = 0;
+        gn.reproduce_cooldown = tuning.cooldown_ticks;
+        mgn.reproduce_cooldown = tuning.cooldown_ticks;
+    }
+    for (const Birth& b : births) {
+        const auto child = reg.create();
+        auto& tf = reg.emplace<Comp::TransformComponent>(child);
+        tf.position.x = b.x;
+        tf.position.y = b.y;
+        tf.position.z = b.z;
+        tf.scale = ::Luminumbra::Vec3(b.genome.size_scale);
+        auto& cr = reg.emplace<Comp::CreatureComponent>(child);
+        cr.is_predator = false;
+        cr.species_id = b.species_id;
+        cr.hunger = 0.5f;
+        cr.stamina = 1.0f;
+        cr.move_speed = b.genome.move_speed;
+        auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
+        gn.move_speed = b.genome.move_speed;
+        gn.vigilance = b.genome.vigilance;
+        gn.hunger_threshold = b.genome.hunger_threshold;
+        gn.size_scale = b.genome.size_scale;
+        gn.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        gn.vision_range = b.genome.vision_range;
+        gn.hearing_range = b.genome.hearing_range;
+        gn.age_ticks = 0;
+        gn.reproduce_cooldown = tuning.cooldown_ticks;
+        gn.generation = b.generation;
+        gn.female = b.female;
+        gn.courting_ticks = 0;
+        auto& pc = reg.emplace<Comp::PerceptionComponent>(child);
+        pc.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        pc.vision_range = b.genome.vision_range;
+        pc.ear.range = b.genome.hearing_range;
+        ++stats.born;
+    }
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
 
 namespace {
 namespace C = Luminumbra::Components;
@@ -240,7 +752,7 @@ TEST(RegionConsumerGate, DefaultGateMatchesLegacyBytesAndTelemetry) {
     EXPECT_EQ(PlantBytes(blocked), before);
 }
 
-TEST(RegionConsumerGate, CreatureMortalityStaysFullRateWhilePlantMortalityIsGated) {
+TEST(RegionConsumerGate, CreatureAndPlantMortalityShareAdmission) {
     for (const bool starvation : {false, true}) {
         for (int owner_case = 0; owner_case < 4; ++owner_case) {
             for (int mode = 0; mode < 3; ++mode) {
@@ -276,17 +788,18 @@ TEST(RegionConsumerGate, CreatureMortalityStaysFullRateWhilePlantMortalityIsGate
                         mode == 0 ? luminumbra::ai::RunLifespanOnTick(registry, tick)
                                   : luminumbra::ai::RunLifespanOnTick(registry, tick, gate);
                     const auto& mortal = registry.get<C::MortalComponent>(creature);
-                    EXPECT_EQ(mortal.age_ticks, tick == 1u ? 1u : 2u);
-                    EXPECT_EQ(mortal.dead, tick >= 2u ? 1u : 0u);
-                    EXPECT_EQ(registry.get<C::CreatureComponent>(creature).eaten, tick >= 2u);
+                    EXPECT_EQ(mortal.age_ticks, mode == 2 ? 0u : (tick == 1u ? 1u : 2u));
+                    EXPECT_EQ(mortal.dead, mode != 2 && tick >= 2u ? 1u : 0u);
+                    EXPECT_EQ(registry.get<C::CreatureComponent>(creature).eaten,
+                              mode != 2 && tick >= 2u);
                     EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks,
                               mode == 2 ? 0u : 1u);
                     EXPECT_EQ(registry.get<C::MortalComponent>(plant).dead, mode == 2 ? 0u : 1u);
-                    EXPECT_EQ(stats.aged, tick == 1u ? (mode == 2 ? 1 : 2) : (tick == 2u ? 1 : 0));
-                    EXPECT_EQ(stats.died, tick == 1u ? (mode == 2 ? 0 : 1) : (tick == 2u ? 1 : 0));
+                    EXPECT_EQ(stats.aged, mode == 2 ? 0 : (tick == 1u ? 2 : (tick == 2u ? 1 : 0)));
+                    EXPECT_EQ(stats.died, mode == 2 ? 0 : (tick == 1u ? 1 : (tick == 2u ? 1 : 0)));
                 }
                 EXPECT_EQ(gate.owner_visits(),
-                          mode == 2 && (owner_case == 0 || owner_case == 3) ? 3u + due.size() : 0u);
+                          mode == 2 && (owner_case == 0 || owner_case == 3) ? 6u + due.size() : 0u);
             }
         }
     }
@@ -1058,5 +1571,228 @@ TEST(RegionConsumerGate, IdentityOrderingIsStrictForMixedZeroAndDuplicateIds) {
               legacy_tag | static_cast<std::uint64_t>(entt::to_integral(entities[3])));
     EXPECT_EQ(F::PlantSimulationId(registry, entities[4]),
               legacy_tag | static_cast<std::uint64_t>(entt::to_integral(entities[4])));
+}
+} // namespace
+
+namespace {
+namespace AI = luminumbra::ai;
+
+entt::entity Creature(entt::registry& registry, float x, bool female = false) {
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = {x, 0.0f, 10.0f};
+    registry.emplace<C::CreatureComponent>(entity).hunger = 0.2f;
+    auto& genome = registry.emplace<C::CreatureGenomeComponent>(entity);
+    genome.age_ticks = 100u;
+    genome.female = female;
+    genome.courting_ticks = AI::kCourtshipTicks - 1u;
+    registry.emplace<C::MortalComponent>(entity).lifespan_ticks = 10000u;
+    registry.emplace<C::PerceptionComponent>(entity);
+    registry.emplace<C::AwarenessComponent>(entity).awareness.meter = 0.4f;
+    return entity;
+}
+
+std::string CreatureBytes(const entt::registry& registry, entt::entity entity) {
+    const auto& tf = registry.get<C::TransformComponent>(entity);
+    const auto& cr = registry.get<C::CreatureComponent>(entity);
+    nlohmann::json bytes = {tf.position.x,
+                            tf.position.y,
+                            tf.position.z,
+                            cr.is_predator,
+                            cr.species_id,
+                            cr.hunger,
+                            cr.stamina,
+                            cr.energy,
+                            cr.move_speed,
+                            cr.last_action,
+                            cr.wish_x,
+                            cr.wish_z,
+                            cr.eaten};
+    if (const auto* gn = registry.try_get<C::CreatureGenomeComponent>(entity)) {
+        bytes.push_back({gn->move_speed,
+                         gn->vigilance,
+                         gn->hunger_threshold,
+                         gn->size_scale,
+                         gn->vision_cos_half_fov,
+                         gn->vision_range,
+                         gn->hearing_range,
+                         gn->age_ticks,
+                         gn->reproduce_cooldown,
+                         gn->generation,
+                         gn->female,
+                         gn->courting_ticks});
+    }
+    if (const auto* mortal = registry.try_get<C::MortalComponent>(entity)) {
+        bytes.push_back({mortal->age_ticks, mortal->lifespan_ticks, mortal->dead});
+    }
+    if (const auto* aw = registry.try_get<C::AwarenessComponent>(entity)) {
+        const auto& a = aw->awareness;
+        bytes.push_back({a.meter,
+                         static_cast<int>(a.state),
+                         a.has_last_known,
+                         a.last_known_x,
+                         a.last_known_z,
+                         a.time_since_signal});
+    }
+    return bytes.dump();
+}
+
+void CoreCreatureTick(entt::registry& registry,
+                      std::uint64_t tick,
+                      const RegionConsumerGate& gate = {},
+                      const AI::CreatureTickAdmission* admission = nullptr,
+                      bool legacy = false) {
+    constexpr float dt = 1.0f / 30.0f;
+    AI::RunPerceptionSystemOnTick(registry, dt, admission);
+    if (legacy) {
+        LegacyCreatureTickOracle::RunCreatureBrainSystemOnTick(registry, dt);
+        LegacyCreatureTickOracle::RunMateSeekingOnTick(registry);
+        LegacyCreatureTickOracle::RunMatingResolveOnTick(registry, tick, 12345u);
+    } else {
+        AI::RunCreatureBrainSystemOnTick(
+            registry, dt, {}, nullptr, 0, 0, 0, true, nullptr, admission);
+        AI::RunMateSeekingOnTick(registry, {}, admission);
+        AI::RunMatingResolveOnTick(registry, tick, 12345u, {}, nullptr, admission);
+    }
+    AI::RunLifespanOnTick(registry, tick, gate, admission);
+}
+
+TEST(RegionConsumerGate, SessionFreezesCoreCreatureStateAndResumesWithItsPlantOwner) {
+    for (const bool active : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(active);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto creature = Creature(registry, 513.0f, true);
+        Creature(registry, 514.0f);
+        const auto plant = Plant(registry, 513.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const auto before = CreatureBytes(registry, creature);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(CreatureBytes(registry, creature) == before, active);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 0u : 1u);
+        EXPECT_EQ(registry.view<C::CreatureComponent>().size(), active ? 2u : 3u);
+        session.PinActiveRegion({1, 0}, true);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_NE(CreatureBytes(registry, creature), before);
+        EXPECT_EQ(registry.get<C::MortalComponent>(creature).age_ticks, active ? 1u : 2u);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 1u : 2u);
+    }
+}
+
+TEST(RegionConsumerGate, DeniedParentsCannotConsumeBirthIdsOrPerturbAdmittedOffspring) {
+    entt::registry actual, reference;
+    for (auto* registry : {&actual, &reference}) {
+        Creature(*registry, 513.0f, true);
+        Creature(*registry, 514.0f);
+        Creature(*registry, 10.0f, true);
+        Creature(*registry, 11.0f);
+    }
+    const auto blocked = static_cast<entt::entity>(0u);
+    const auto before = CreatureBytes(actual, blocked);
+    reference.remove<C::CreatureComponent>(blocked);
+    reference.remove<C::CreatureComponent>(static_cast<entt::entity>(1u));
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(actual, due);
+    AI::CreatureTickAdmission admission;
+    admission.Capture(actual, gate);
+    CoreCreatureTick(actual, 1u, gate, &admission);
+    CoreCreatureTick(reference, 1u);
+    EXPECT_EQ(CreatureBytes(actual, blocked), before);
+    ASSERT_EQ(actual.view<C::CreatureComponent>().size(), 5u);
+    for (const auto entity : reference.view<C::CreatureComponent>()) {
+        EXPECT_EQ(CreatureBytes(actual, entity), CreatureBytes(reference, entity));
+    }
+}
+
+TEST(RegionConsumerGate, CrossingUsesStartPositionThroughReproductionAndMortality) {
+    for (const bool east : {false, true}) {
+        entt::registry registry;
+        if (east) {
+            static_cast<void>(registry.create());
+        }
+        const auto creature = Creature(registry, east ? 511.999f : 512.001f);
+        registry.get<C::CreatureComponent>(creature).is_predator = true;
+        const std::array<RegionKey, 1> due{{{east ? 0 : 1, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        CoreCreatureTick(registry, 1u, gate, &admission);
+        EXPECT_FALSE(gate.Allows(creature));
+        EXPECT_EQ(registry.get<C::CreatureGenomeComponent>(creature).age_ticks, 101u);
+        EXPECT_EQ(registry.get<C::MortalComponent>(creature).age_ticks, 1u);
+        const auto after_crossing = CreatureBytes(registry, creature);
+        admission.Capture(registry, gate);
+        CoreCreatureTick(registry, 2u, gate, &admission);
+        EXPECT_EQ(CreatureBytes(registry, creature), after_crossing);
+    }
+}
+
+TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
+    entt::registry registry;
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, RegionConsumerGate(registry, {}));
+    EXPECT_EQ(admission.owner_visits(), 0u);
+    const auto missing = Creature(registry, 1.0f);
+    registry.remove<C::TransformComponent>(missing);
+    const auto invalid = Creature(registry, std::numeric_limits<float>::infinity());
+    const auto valid = Creature(registry, -1.0f);
+    const auto other = registry.create();
+    for (const bool empty : {false, true}) {
+        const std::vector<RegionKey> due =
+            empty ? std::vector<RegionKey>{} : std::vector<RegionKey>{{-1, 0}, {-1, 0}};
+        const RegionConsumerGate gate(registry, due);
+        admission.Capture(registry, gate);
+        EXPECT_EQ(admission.owner_visits(), 3u);
+        EXPECT_FALSE(admission.Allows(missing));
+        EXPECT_FALSE(admission.Allows(invalid));
+        EXPECT_EQ(admission.Allows(valid), !empty);
+        EXPECT_TRUE(admission.Allows(other));
+        CoreCreatureTick(registry, 1u, gate, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(missing).age_ticks, 0u);
+        EXPECT_EQ(registry.get<C::MortalComponent>(invalid).age_ticks, 0u);
+    }
+}
+
+TEST(RegionConsumerGate, InactiveCreaturePipelineMatchesIndependentFullRateOracle) {
+    entt::registry actual, reference;
+    for (auto* registry : {&actual, &reference}) {
+        Creature(*registry, 10.0f, true);
+        Creature(*registry, 11.0f);
+        const auto predator = Creature(*registry, 18.0f);
+        registry->get<C::CreatureComponent>(predator).is_predator = true;
+        registry->get<C::CreatureGenomeComponent>(predator).vision_range = 0.0f;
+        registry->get<C::CreatureGenomeComponent>(predator).hearing_range = 0.0f;
+    }
+    for (std::uint64_t tick = 1u; tick <= 32u; ++tick) {
+        CoreCreatureTick(actual, tick);
+        CoreCreatureTick(reference, tick, {}, nullptr, true);
+        ASSERT_EQ(actual.view<C::CreatureComponent>().size(),
+                  reference.view<C::CreatureComponent>().size());
+        for (const auto entity : reference.view<C::CreatureComponent>()) {
+            EXPECT_EQ(CreatureBytes(actual, entity), CreatureBytes(reference, entity));
+        }
+    }
+    EXPECT_GT(actual.view<C::CreatureComponent>().size(), 3u);
+}
+} // namespace
+
+namespace {
+TEST(RegionConsumerGate, AdmittedPredatorCannotChangeDeniedPreyAcrossBoundary) {
+    entt::registry registry;
+    const auto predator = Creature(registry, 511.9f);
+    registry.get<C::CreatureComponent>(predator).is_predator = true;
+    const auto prey = Creature(registry, 512.1f);
+    const auto before = CreatureBytes(registry, prey);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    CoreCreatureTick(registry, 1u, gate, &admission);
+    EXPECT_EQ(CreatureBytes(registry, prey), before);
+    EXPECT_FALSE(registry.get<C::CreatureComponent>(prey).eaten);
+    EXPECT_GT(registry.get<C::MortalComponent>(predator).age_ticks, 0u);
 }
 } // namespace

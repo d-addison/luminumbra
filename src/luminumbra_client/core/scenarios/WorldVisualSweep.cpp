@@ -110,7 +110,7 @@ void MeasureSweepFrame(const std::vector<unsigned char>& pixels,
     out_water_pixels = 0;
     out_water_ratio = 0.0;
     if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * height * 3u) {
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u) {
         return;
     }
     const std::size_t total = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);

@@ -17,7 +17,8 @@
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
+#include "../ai/CreatureTickAdmission.h"
+#include "../ai/DecompositionSystem.h" // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
@@ -605,6 +606,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault)
                     return i + 1;
             }
+            const auto foliage_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
+            luminumbra::ai::CreatureTickAdmission* creature_admission = nullptr;
+            if (m_activeRegionsEnabled) {
+                creature_admission =
+                    &m_registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
+                creature_admission->Capture(m_registry, foliage_gate);
+            }
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
             m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
             // Deterministic per-tick system order. The ordered event bus drains everything
@@ -684,7 +695,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // world_hash is UNCHANGED (byte-identical) -- same discipline as the
             // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
             luminumbra::ai::RunPerceptionSystemOnTick(
-                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()), creature_admission);
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
@@ -736,14 +747,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    luminumbra::ai::RunMateSeekingOnTick(
+                        m_registry, m_reproductionTuning, creature_admission);
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
@@ -848,7 +861,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         current_tick,
                         static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -954,10 +968,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-            const auto foliage_gate =
-                m_activeRegionsEnabled
-                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
-                    : RegionConsumerGate{};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -1212,7 +1222,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
+                    luminumbra::ai::RunLifespanOnTick(
+                        m_registry, current_tick, foliage_gate, creature_admission);
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
