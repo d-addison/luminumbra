@@ -3530,11 +3530,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             }
 
             if (!water_lod_requested && required_lod >= 0 &&
+                HasAuthoritativeHeightmapOnly(*chunk_ptr) &&
                 (!chunk_ptr->water_mesh_vertices.empty() ||
                  !chunk_ptr->water_mesh_indices.empty() ||
                  chunk_ptr->water_mesh_generated.load(std::memory_order_acquire) ||
                  pending_lod == 0)) {
-                // Publish water departure independently of terrain LOD. A pending
+                // Heightmap terrain can stay at LOD1 across the water boundary.
+                // Publish its water departure independently of terrain LOD. A pending
                 // worker owns its staging buffers until completion; supersede only
                 // its water version so terrain publication remains eligible.
                 chunk_ptr->water_mesh_vertices.clear();
@@ -6460,7 +6462,12 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             }
             // A terrain request must retain edit invalidation. Water-only work
             // consumes no voxel input and has its own mesh-version freshness.
-            if (water_current && (!job_chunk.terrain_mesh_required || terrain_current)) {
+            // Coarse heightmap terrain produces no water replacement. Its water
+            // departure is published by the scheduler when the raw band changes.
+            const bool replaces_water =
+                completed_lod == 0 || !HasAuthoritativeHeightmapOnly(*chunk);
+            if (replaces_water && water_current &&
+                (!job_chunk.terrain_mesh_required || terrain_current)) {
                 chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
                 chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
                 chunk->water_mesh_version++;

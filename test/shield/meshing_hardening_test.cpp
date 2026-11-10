@@ -1984,6 +1984,70 @@ TEST(StreamingHardening, HeightmapTransitionRemeshPrecedesDirtyWaterAndSurvivesP
     }
 }
 
+TEST(StreamingHardening, HeightmapTransitionRemeshPreservesPublishedWater) {
+    for (const bool workers : {false, true}) {
+        for (const int water_case : {0, 1, 2, 3}) {
+            SCOPED_TRACE(::testing::Message() << workers << ':' << water_case);
+            JobSystem jobs;
+            if (workers) {
+                jobs.startup(1);
+            }
+            WaterSystem water(nullptr, nullptr);
+            water.SetBootPaused(true);
+            SHIELD_WorldSystem world(
+                workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+            auto chunk = AdoptWetHeightmapFallback(world);
+            ASSERT_NE(chunk, nullptr);
+            if (water_case == 2) {
+                chunk->water_depth_mm.assign(16u, 0);
+            }
+            World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+            ++chunk->water_mesh_version;
+            ASSERT_TRUE(chunk->water_mesh_generated.load());
+            ASSERT_EQ(chunk->water_mesh_indices.empty(), water_case == 2);
+            if (water_case == 1 || water_case == 3) {
+                chunk->water_mesh_generated.store(false);
+                water.retain_mesh_invalidation(chunk->get_id());
+            }
+            if (water_case == 3) {
+                chunk->current_water_resolution.store(0);
+                chunk->water_level_data.resize(1u);
+            }
+            chunk->water_mesh_dirty_ticks = 5;
+            const auto water_vertices = HashVec(chunk->water_mesh_vertices);
+            const auto water_indices = chunk->water_mesh_indices;
+            const auto water_version = chunk->water_mesh_version.load();
+            const bool water_generated = chunk->water_mesh_generated.load();
+            auto neighbor = AdoptFlatMesh(world, 0, IVec3(1, 0, 0));
+            ASSERT_NE(neighbor, nullptr);
+            ASSERT_FALSE(neighbor->mesh_vertices.empty());
+            entt::registry registry;
+            world.begin_tick(0);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), 1);
+            world.quiesce_streaming_jobs_for_save();
+            ASSERT_TRUE(chunk->pending_mesh_ready.load());
+            ASSERT_TRUE(chunk->pending_water_mesh_vertices.empty());
+            ASSERT_TRUE(chunk->pending_water_mesh_indices.empty());
+            world.activate_due(7);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            world.begin_tick(8);
+            world.activate_due(8);
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            EXPECT_EQ(chunk->applied_transition_faces.load(),
+                      World::MarchingCubes::TransitionFaceMaxX);
+            EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+            EXPECT_EQ(HashVec(chunk->water_mesh_vertices), water_vertices);
+            EXPECT_EQ(chunk->water_mesh_indices, water_indices);
+            EXPECT_EQ(chunk->water_mesh_generated.load(), water_generated);
+            EXPECT_EQ(chunk->water_mesh_dirty_ticks, 5);
+            EXPECT_EQ(world.promotion_dispatch_totals().chunks, 0u);
+        }
+    }
+}
+
 TEST(StreamingHardening, PendingWaterPublicationRetainsLodChangeAndLateVoxelEdit) {
     for (const bool workers : {false, true}) {
         for (const bool voxel_edit : {false, true}) {
