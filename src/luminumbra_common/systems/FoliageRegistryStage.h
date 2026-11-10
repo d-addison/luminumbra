@@ -42,6 +42,21 @@ void Copy(const entt::registry& from,
     }
 }
 template<typename Function>
+void Participants(const Function& function) {
+    function.template operator()<C::PlantTag>();
+    function.template operator()<C::PollinationTag>();
+    function.template operator()<C::CropLifecycleComponent>();
+    function.template operator()<C::SoilFeederComponent>();
+    function.template operator()<C::WaterSourceComponent>();
+    function.template operator()<C::CombustibleComponent>();
+    function.template operator()<C::IgnitionSourceComponent>();
+    function.template operator()<C::GrazeableComponent>();
+    function.template operator()<C::MortalComponent>();
+    function.template operator()<C::CreatureComponent>();
+    function.template operator()<C::AlarmComponent>();
+    function.template operator()<C::DecayComponent>();
+}
+template<typename Function>
 void Components(const Function& function) {
     function.template operator()<C::TransformComponent>();
     function.template operator()<C::PlantTag>();
@@ -76,15 +91,10 @@ inline void CopyFoliage(const entt::registry& from,
 class FoliageRegistryStage {
 public:
     static bool HasWork(const entt::registry& original) {
-        namespace C = ::Luminumbra::Components;
-        return !original.view<const C::PlantTag>().empty() ||
-               !original.view<const C::SoilFeederComponent>().empty() ||
-               !original.view<const C::WaterSourceComponent>().empty() ||
-               !original.view<const C::CombustibleComponent>().empty() ||
-               !original.view<const C::IgnitionSourceComponent>().empty() ||
-               !original.view<const C::GrazeableComponent>().empty() ||
-               !original.view<const C::MortalComponent>().empty() ||
-               !original.view<const C::CreatureComponent>().empty();
+        bool has_work = false;
+        stage_detail::Participants(
+            [&]<typename T> { has_work = has_work || !original.view<const T>().empty(); });
+        return has_work;
     }
     void Begin(const entt::registry& original, std::uint64_t next_id) {
         if (!m_births.empty()) {
@@ -97,18 +107,7 @@ public:
         m_registry.clear();
         m_retained.clear();
         // EnTT pools have the entity-mask bound; known capacities survive ticks.
-        namespace C = ::Luminumbra::Components;
-        Collect<C::PlantTag>(original);
-        Collect<C::SoilFeederComponent>(original);
-        Collect<C::WaterSourceComponent>(original);
-        Collect<C::CombustibleComponent>(original);
-        Collect<C::IgnitionSourceComponent>(original);
-        Collect<C::GrazeableComponent>(original);
-        Collect<C::MortalComponent>(original);
-        Collect<C::CreatureComponent>(original);
-        // Downstream consumers must read same-tick death and grazing results.
-        Collect<C::AlarmComponent>(original);
-        Collect<C::DecayComponent>(original);
+        stage_detail::Participants([&]<typename T> { Collect<T>(original); });
         std::sort(m_retained.begin(), m_retained.end());
         stage_detail::Components([&]<typename T> {
             if (const auto* storage = original.storage<T>()) {

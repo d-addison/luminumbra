@@ -214,9 +214,9 @@ struct GameSession::LoadedWorldState {
 
 struct GameSession::FoliageStep {
     luminumbra::foliage::FoliageRegistryStage registry;
-    entt::registry idle;
     std::unique_ptr<luminumbra::foliage::SoilGrid> soil;
     std::unique_ptr<luminumbra::foliage::IrrigationGrid> irrigation;
+    std::uint64_t published_tick = 0;
     bool active = false, soil_staged = false, irrigation_staged = false;
 
     static FoliageStep* Prepare(GameSession& session) {
@@ -225,8 +225,9 @@ struct GameSession::FoliageStep {
         auto& step = session.m_foliageStep;
         if (!step)
             step = std::make_unique<FoliageStep>();
-        if (session.m_regionSchedule.due.empty() ||
-            !luminumbra::foliage::FoliageRegistryStage::HasWork(session.m_registry))
+        // The regional gate selects foliage work; creatures and legacy irrigation
+        // still run every tick, and telemetry counts the full participant roster.
+        if (!luminumbra::foliage::FoliageRegistryStage::HasWork(session.m_registry))
             return nullptr;
         step->Begin(session);
         return step.get();
@@ -293,6 +294,7 @@ struct GameSession::FoliageStep {
             session.m_activeRegionLedger.allocate_persistent_id(id);
         }
         registry.Commit(session.m_registry);
+        published_tick = session.m_worldClock.tick();
         active = false;
     }
     struct Guard {
@@ -1058,9 +1060,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             const RegionalEnergyStep::Guard energy_guard{scheduled_energy};
 
             auto* foliage_step = FoliageStep::Prepare(*this);
-            auto& foliage_registry = !m_activeRegionsEnabled ? m_registry
-                                     : foliage_step          ? foliage_step->registry.registry()
-                                                             : m_foliageStep->idle;
+            auto& foliage_registry = foliage_step ? foliage_step->registry.registry() : m_registry;
             // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
             // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
             // had growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale
@@ -1401,12 +1401,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 }
             }
 
-            budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
-            if (m_activeRegionsEnabled)
-                m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
-            else
-                m_simulationEventBus.drain(current_tick);
-            budget.Finish();
+            const auto deliver_events = [&] {
+                budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
+                if (m_activeRegionsEnabled) {
+                    m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+                } else {
+                    m_simulationEventBus.drain(current_tick);
+                }
+                budget.Finish();
+            };
+            if (!foliage_step) {
+                deliver_events();
+            }
             m_regionalFieldView = nullptr;
             if (m_regionFault)
                 return i + 1;
@@ -1416,6 +1422,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             SettleWaterAuthority(defer_water_authority);
             if (foliage_step) {
                 foliage_step->Commit(*this);
+                // Callbacks use the live registry. Publish first so they observe
+                // same-tick births/deaths and their writes cannot be overwritten.
+                // Foliage IDs reach the shared allocator before callback allocations.
+                deliver_events();
+                if (m_regionFault) {
+                    return i + 1;
+                }
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
@@ -2952,7 +2965,11 @@ void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
     if (m_activeRegionsEnabled && !m_regionFault) {
-        if (m_simulationBatchInProgress && m_activeRegionLedger.records().contains(work.key))
+        // Reports from callbacks after publication feed the next scheduler pass.
+        const bool published =
+            m_foliageStep && m_foliageStep->published_tick == m_worldClock.tick();
+        if (m_simulationBatchInProgress && !published &&
+            m_activeRegionLedger.records().contains(work.key))
             m_regionCompletedWork.push_back(work);
         else
             // Unknown records retain the scheduler's normal rejection accounting.
