@@ -1355,15 +1355,28 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                             self.assertIn("::warning::", result.stdout)
 
     def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
-        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
-        # embeds symbols through its own global flags.
+        # Keep dependency PCHs disabled on both cached Windows lanes without
+        # relaxing ccache's input checks. MSVC embeds symbols through /Z7 and
+        # disables Jolt's separate /Zi option.
         ci = jobs(self.workflows["ci.yml"])
-        msvc, = [step for step in steps(jobs(self.workflows["windows-build.yml"])["windows-msvc"])
+        windows = jobs(self.workflows["windows-build.yml"])
+        msvc, = [step for step in steps(windows["windows-msvc"])
                  if step.startswith("      - name: Configure, build, and test\n")]
         run = value(msvc, "run", 8)
-        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
-        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
-        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        configure = run[run.index("cmake --preset release "):run.index("\ncmake --build")]
+        self.assertEqual(configure,
+                         'cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl '
+                         '"-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `\n'
+                         '  -DCMAKE_C_FLAGS=/Z7 \'-DCMAKE_CXX_FLAGS=/Z7 /EHsc\' `\n'
+                         '  -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n'
+                         '  \'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF\' @compilerLaunchers')
+        for lane in ("windows-msvc", "windows-ucrt64"):
+            with self.subTest(lane=lane):
+                configure_step, = [step for step in steps(windows[lane])
+                                   if step.startswith("      - name: Configure, build, and test\n")
+                                   or step.startswith("      - name: Configure\n")]
+                self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON", value(configure_step, "run", 8))
+                self.assertNotRegex(windows[lane], r"(?i)CCACHE_SLOPPINESS|ccache\s+(?:--set-config|-o)\s+sloppiness")
         for name in ("linux", "tidy-shard", "fast-compile"):
             self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
 
@@ -1392,7 +1405,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         expected = {
             "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
             "windows-msvc": "d0e2abdce03da0f9a2338ba50914da691f98fda7a0905f2c027587de0ba98858",
-            "windows-ucrt64": "9b2ceea865a1d637d21d794061f90bbd4d2852838a970be7c0950bce0c05c266",
+            "windows-ucrt64": "af838ea52445c3dec53b98dc2a2d4b8a97dd545a243490118b314f6d91e51329",
             "windows-msvc-result": "b7ac3a695046fb6674f05e8cade0ada71e6265cf38e6c50ed9a3dc9b17cf4871",
             "windows-ucrt64-result": "9a918a89c4b910387a63f276bfc917757c2c884147ac44dfa165994454fe3061",
         }
@@ -2653,14 +2666,15 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
 
-    def test_ucrt64_configure_changes_only_debug_information_level(self):
+    def test_ucrt64_configure_disables_pch_and_keeps_debug_information_level(self):
         job = native_jobs(self.workflows)["windows-ucrt64"]
         configure, = [step for step in steps(job) if step.startswith("      - name: Configure\n")]
         self.assertEqual(value(configure, "run", 8),
                          'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
                          '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
                          '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
-                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
+                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1 '
+                         '-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON')
 
     def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
         job = jobs(self.workflows["windows-build.yml"])["windows-ucrt64"]
