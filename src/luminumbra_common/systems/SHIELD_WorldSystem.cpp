@@ -614,6 +614,9 @@ std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     // Teardown fences every owned callback without publishing or admitting work.
     quiesce_streaming_jobs_for_save();
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
@@ -663,6 +666,10 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
             chunk->pending_generation_ready.store(false, std::memory_order_release);
             if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
                 chunk->set_state(Luminumbra::ChunkState::Idle);
+            }
+            if (m_far_world_changes) {
+                m_far_world_changes->notify(chunk->get_coords(),
+                                            World::FarWorldAuthorityChange::Membership);
             }
             // Publish invalidation with authority, never from the generating job.
             const auto it = m_streaming_state.chunks.find(chunk->get_id());
@@ -3366,18 +3373,20 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation
     // delta (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change
     // (LOD keys on continuous distance, so any sub-chunk anchor motion can flip a band — no
-    // threshold, no quantization), a chunk-count delta, an activation tick, or a previous pass that
-    // did not reach quiescence. On a settled static pose all are false, so the O(N) meshed_columns
-    // build + candidate scan + sort + dispatch are skipped entirely. Step 4 (collision) and the
-    // telemetry scans run unchanged every tick.
+    // threshold, no quantization), a chunk-count delta, an activation tick, or terrain
+    // work that did not reach quiescence. Water invalidations have their own work set;
+    // a stationary flowing world visits only those chunks, including retries until
+    // publication, rather than keeping the full resident scan open every tick.
+    // Step 4 (collision) and the telemetry scans run unchanged every tick.
     const bool anchor_changed = (anchor_positions != m_last_anchor_positions);
     const bool count_changed = (m_streaming_state.chunks.size() != m_last_chunk_count);
     const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
-    const bool streaming_dirty = generation_dirty || anchor_changed || count_changed ||
-                                 activation_ran_this_tick || !m_last_pass_drained;
+    const bool full_meshing_scan = generation_dirty || anchor_changed || count_changed ||
+                                   activation_ran_this_tick || !m_last_pass_drained;
+    const bool water_mesh_dirty = m_water_system && !m_water_system->mesh_invalidations().empty();
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
-    if (streaming_dirty) {
+    if (full_meshing_scan || water_mesh_dirty || deferred_meshing_pending()) {
         // Residency is indexed at insert/erase. Neighbor mesh state is read at
         // this owner-thread observation point, matching the former snapshot.
         const auto& meshed_columns = m_activation_index.columns();
@@ -3438,16 +3447,17 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
         // Chunk state logging removed from hot path - too expensive
 
-        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-            (void)id;
+        bool skipped_pending_lod_recheck = false;
+        const auto collect_candidate = [&](const std::shared_ptr<Chunk>& chunk_ptr) {
+            const ChunkID id = chunk_ptr->get_id();
             bool needs_meshing = false;
             bool terrain_mesh_required = true;
             int required_lod = -1;
 
             ChunkState state = chunk_ptr->get_state();
             const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
-            if (pending_lod >= 0) {
-                continue;
+            if (pending_lod >= 0 && !full_meshing_scan) {
+                return;
             }
 
             // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
@@ -3468,9 +3478,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 }
             }
 
-            if (state == Luminumbra::ChunkState::Idle) {
+            if (state == Luminumbra::ChunkState::Idle && pending_lod < 0) {
                 needs_meshing = true;
-            } else if (state == Luminumbra::ChunkState::Ready) {
+            } else if (state == Luminumbra::ChunkState::Ready || pending_lod >= 0) {
                 Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                     Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
                 // pass the meshed LOD so demotions go through the
@@ -3502,7 +3512,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 }
             }
 
+            if (pending_lod >= 0) {
+                // Retain skipped terrain obligations until publication. Healthy
+                // water-only jobs must still let a full pass reach quiescence.
+                skipped_pending_lod_recheck =
+                    skipped_pending_lod_recheck || (needs_meshing && terrain_mesh_required);
+                return;
+            }
+
             if (needs_meshing) {
+                if (m_water_system && chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                    !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
+                    m_water_system->retain_mesh_invalidation(id);
+                }
                 const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                           Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
                 if (required_lod == -1) {
@@ -3574,6 +3596,55 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                      retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
                 item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
                 item.current_candidate = needs_meshing;
+            }
+        };
+
+        if (full_meshing_scan) {
+            for (const auto& [id, chunk] : m_streaming_state.chunks) {
+                (void)id;
+                collect_candidate(chunk);
+            }
+        } else {
+            // Retained requests own their metadata refresh even if their water
+            // invalidation was retired. This prefix is capped at four dispatch budgets.
+            for (std::size_t index = m_deferred_meshing_cursor; index < m_deferred_meshing.size();
+                 ++index) {
+                const auto& chunk = m_deferred_meshing[index].chunk;
+                const auto resident = m_streaming_state.chunks.find(chunk->get_id());
+                if (resident != m_streaming_state.chunks.end() && resident->second == chunk) {
+                    collect_candidate(chunk);
+                }
+            }
+        }
+        if (m_water_system) {
+            const auto& invalidations = m_water_system->mesh_invalidations();
+            for (auto it = invalidations.begin(); it != invalidations.end();) {
+                const ChunkID id = *it++;
+                const auto resident = m_streaming_state.chunks.find(id);
+                if (resident == m_streaming_state.chunks.end() ||
+                    !resident->second->has_water_sim.load(std::memory_order_acquire)) {
+                    m_water_system->acknowledge_mesh_invalidation(id);
+                    continue;
+                }
+                const auto& chunk = resident->second;
+                const bool generated = chunk->water_mesh_generated.load(std::memory_order_acquire);
+                const bool pending = chunk->pending_lod.load(std::memory_order_acquire) >= 0;
+                const bool coarse = !pending && chunk->get_state() == ChunkState::Ready &&
+                                    chunk->current_lod.load(std::memory_order_acquire) > 0;
+                const auto retained = deferred_indices.find(id);
+                const bool already_collected =
+                    full_meshing_scan || (retained != deferred_indices.end() &&
+                                          m_deferred_meshing[retained->second].chunk == chunk);
+                if (!already_collected && (!coarse || generated)) {
+                    // Publication may satisfy water while a voxel edit still owes
+                    // terrain. Check that obligation before retiring its indexed wake.
+                    collect_candidate(chunk);
+                }
+                if (!pending && (generated || coarse)) {
+                    // Disabled, absent and coarse grids return via residency/LOD
+                    // changes. Pending workers retain ownership until publication.
+                    m_water_system->acknowledge_mesh_invalidation(id);
+                }
             }
         }
 
@@ -3673,21 +3744,25 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 meshing_candidates.size() - result.submitted_candidates;
         }
 
-        // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
-        // pass ran). The world is settled iff this pass produced no candidates, left nothing
-        // deferred, and no gen/mesh jobs are in flight. Job-active state is read ONLY here; on the
-        // per-tick-quiesced hashed paths it is deterministic. Advancing m_last_serviced_generation
-        // only at quiescence means a budget-deferred remesh (deferred_meshing>0) or any produced
-        // candidate keeps the gate sticky-open next tick, so chained seam/transition propagation
-        // always converges.
-        const bool produced_work =
-            !meshing_candidates.empty() || m_last_streaming_budget_stats.deferred_meshing > 0;
-        // quiescence keys on the publication-keyed outstanding
-        // signals (main-thread events), not wall-clock job counters — the last
-        // scheduler read to be de-timed ahead of the barrier removal.
-        const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
-                               !promotion_pipeline_pending() && !generation_batch_outstanding() &&
-                               !deferred_meshing_pending();
+        // Only terrain work, including checks skipped for pending chunks, holds
+        // the full resident scan open. Water work remains
+        // indexed above until publication. These checks visit only the capped batch
+        // and retained dispatch prefixes, never the resident world.
+        const bool terrain_batch_pending = std::any_of(
+            m_streaming_state.meshing_batches.begin(),
+            m_streaming_state.meshing_batches.end(),
+            [](const auto& batch) {
+                return std::any_of(batch.chunks.begin(), batch.chunks.end(), [](const auto& item) {
+                    return item.terrain_mesh_required;
+                });
+            });
+        const bool terrain_deferred = std::any_of(
+            m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
+            m_deferred_meshing.end(),
+            [](const MeshingWorkItem& item) { return item.terrain_mesh_required; });
+        const bool quiescent = !skipped_pending_lod_recheck && terrain_meshing_backlog == 0 &&
+                               !terrain_batch_pending && !terrain_deferred &&
+                               !promotion_pipeline_pending() && !generation_batch_outstanding();
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
@@ -4901,6 +4976,7 @@ void SHIELD_WorldSystem::debug_force_water_remesh() {
         if (c && c->has_water_sim.load(std::memory_order_acquire)) {
             c->water_mesh_generated.store(false);
             c->water_mesh_dirty_ticks = 0;
+            m_last_pass_drained = false;
         }
     }
 }
@@ -6440,6 +6516,14 @@ void SHIELD_WorldSystem::set_seed(int seed) {
 
 void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     wait_for_streaming_jobs();
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
+
+    // Replacement chunks can have the same count and anchors as the settled world.
+    // Invalidate both activation's generation key and meshing's quiescence latch.
+    ++m_dirty_generation;
+    m_last_pass_drained = false;
 
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
@@ -6846,11 +6930,46 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
     }
 }
 
+bool SHIELD_WorldSystem::set_far_world_authority_changes(
+    std::shared_ptr<World::FarWorldAuthorityChanges> changes) {
+    wait_for_streaming_jobs();
+    if (changes == m_far_world_changes) {
+        return true;
+    }
+    if (changes) {
+        const auto limit = changes->record_limit();
+        if (m_streaming_state.chunks.size() > limit ||
+            m_parked.size() > limit - m_streaming_state.chunks.size()) {
+            return false;
+        }
+    }
+    if (m_far_world_changes) {
+        m_far_world_changes->clear();
+    }
+    m_far_world_changes = std::move(changes);
+    if (!m_far_world_changes) {
+        return true;
+    }
+    // One bounded inventory at attachment; ticks consume only typed changes.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        m_far_world_changes->membership(chunk, false, true);
+    }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        m_far_world_changes->membership(parked.chunk, true, true);
+    }
+    return true;
+}
+
 void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
                                            bool parked,
                                            bool present) {
     if (!chunk)
         return;
+    if (m_far_world_changes) {
+        m_far_world_changes->membership(chunk, parked, present);
+    }
     // Every resident chunk reports water changes, so ownership promotion visits only the chunks
     // that changed. The regional membership index below stays durable-residency only.
     if (present)
