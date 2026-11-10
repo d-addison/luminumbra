@@ -45,6 +45,17 @@ void operator delete(void* storage) noexcept {
 void operator delete(void* storage, std::size_t) noexcept {
     std::free(storage);
 }
+void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+    auto* storage = std::malloc(bytes == 0 ? 1 : bytes);
+    if (storage != nullptr) {
+        if (auto* counter = AllocationCounter())
+            ++*counter;
+    }
+    return storage;
+}
+void operator delete(void* storage, const std::nothrow_t&) noexcept {
+    std::free(storage);
+}
 
 namespace {
 using namespace Luminumbra::world;
@@ -877,7 +888,7 @@ const ActiveRegionLedger::OwnershipProbe kNobodyOwns = [](RegionKey) {
     return false;
 };
 
-TEST(ActiveRegionLedgerTest, WarmScheduleCountsWorkForRegionsAdmittedByTheSameAnchors) {
+TEST(ActiveRegionLedgerTest, WarmScheduleCountsAnchorAdmittedRegionWorkFromTheNextTick) {
     const Vec3 home{256, 0, 256};
     const std::array replicated{home, home};
     const RegionKey admitted{0, 0};
@@ -904,14 +915,21 @@ TEST(ActiveRegionLedgerTest, WarmScheduleCountsWorkForRegionsAdmittedByTheSameAn
             const auto& actual = ledger.schedule(WorldClock(tick), anchors, work, digest);
             AllocationCounter() = nullptr;
             EXPECT_EQ(allocations, 0u);
-            EXPECT_EQ(actual.work, 11u);
-            EXPECT_EQ(actual.rejected.work, 1u);
-            EXPECT_EQ(ledger.records().at(admitted).pressure, 11u);
-            ASSERT_EQ(actual.transitions.size(), 1u);
-            EXPECT_EQ(actual.transitions.front(),
-                      (RegionTransition{kFar,
-                                        tick == 2 ? RegionState::Active : RegionState::Reduced,
-                                        tick == 2 ? RegionState::Reduced : RegionState::Frozen}));
+            if (tick == 2) {
+                // The region is first admitted by this call's anchors, so its work is
+                // rejected and the distant region stays active, as on the base scheduler.
+                EXPECT_EQ(actual.work, 0u);
+                EXPECT_EQ(actual.rejected.work, 3u);
+                EXPECT_EQ(ledger.records().at(admitted).pressure, 0u);
+                EXPECT_TRUE(actual.transitions.empty());
+            } else {
+                EXPECT_EQ(actual.work, 11u);
+                EXPECT_EQ(actual.rejected.work, 1u);
+                EXPECT_EQ(ledger.records().at(admitted).pressure, 11u);
+                ASSERT_EQ(actual.transitions.size(), 1u);
+                EXPECT_EQ(actual.transitions.front(),
+                          (RegionTransition{kFar, RegionState::Active, RegionState::Reduced}));
+            }
             EXPECT_EQ(actual, fresh.schedule(WorldClock(tick), anchors, work, digest));
             EXPECT_EQ(ledger.records(), fresh.records());
             EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
@@ -920,7 +938,7 @@ TEST(ActiveRegionLedgerTest, WarmScheduleCountsWorkForRegionsAdmittedByTheSameAn
     }
 }
 
-TEST(ActiveRegionLedgerTest, SameCallWorkRequiresAnAdmittedAnchorOrAnExistingRecord) {
+TEST(ActiveRegionLedgerTest, WorkWithoutValidAnchorsRequiresAnExistingRecord) {
     const Vec3 home{256, 0, 256};
     const std::array invalid{Vec3{std::numeric_limits<float>::quiet_NaN(), 0, 0}};
     const std::array work{RegionWork{{0, 0}, 10, 0, 0, 0}, RegionWork{kFar, 1, 0, 0, 0}};

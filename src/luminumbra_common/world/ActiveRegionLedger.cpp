@@ -454,7 +454,8 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     auto& accepted_work = scratch.work;
     accepted_work.clear();
     const auto accept_work = [&](const RegionWork& units) {
-        if (m_records.contains(units.key) || scratch.added.contains(units.key)) {
+        // Work is filtered against records present before this call's anchors.
+        if (m_records.contains(units.key)) {
             accepted_work.push_back(units);
             const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
                                    Sum(units.water_cells, units.page_updates));
