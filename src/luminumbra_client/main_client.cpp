@@ -5735,37 +5735,50 @@ int main(int argc, char* argv[]) {
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                             if (const auto* lweather = gameSession->GetWeatherSystem()) {
                                 g_app.weather.consumedStrikes.AdvanceTo(sim_tick);
-                                // Strikes consumed on the same frame share one bolt state.
-                                std::vector<Luminumbra::Rendering::ProjectedLiveStrike>
-                                    frame_strikes;
-                                glm::mat4 vp(1.0f);
+                                // Strikes consumed on the same frame share one bolt state. Every
+                                // consumed strike flashes and queues thunder; bolt geometry is
+                                // built only for the strongest strikes that can fit the point
+                                // budget.
+                                struct ConsumedStrike {
+                                    const Luminumbra::Systems::StrikeEvent* event;
+                                    float ground_y;
+                                };
+                                std::vector<ConsumedStrike> consumed;
+                                std::vector<float> pulses;
+                                auto* lws = gameSession->GetWorldSystem();
                                 for (const auto& strike : lweather->StrikeSchedule()) {
                                     if (!g_app.weather.consumedStrikes.TryConsume(strike)) {
                                         continue;
                                     }
-                                    auto* lws = gameSession->GetWorldSystem();
                                     const float gy = lws ? lws->GetTerrainHeightAt(strike.world_x,
                                                                                    strike.world_z)
                                                          : 0.0f;
-                                    const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
-                                        strike.world_x,
-                                        gy,
-                                        strike.world_z,
-                                        strike.magnitude,
-                                        (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
-                                            strike.strike_tick);
-                                    if (frame_strikes.empty()) {
-                                        int fbw = 0, fbh = 0;
-                                        glfwGetFramebufferSize(window, &fbw, &fbh);
-                                        const float aspect = (fbh > 0) ? static_cast<float>(fbw) /
-                                                                             static_cast<float>(fbh)
-                                                                       : 1.0f;
-                                        vp = glm::perspective(glm::radians(g_camera->Zoom),
-                                                              aspect,
-                                                              0.1f,
-                                                              10000.0f) *
-                                             g_camera->GetViewMatrix();
-                                    }
+                                    const glm::vec3 ground(strike.world_x, gy, strike.world_z);
+                                    const float dist = glm::length(ground - g_camera->Position);
+                                    // Magnitude-scaled flash, attenuated with distance (a far
+                                    // strike lights the sky, a near one lights the scene).
+                                    pulses.push_back(0.22f *
+                                                     std::clamp(strike.magnitude, 0.2f, 1.0f) /
+                                                     (1.0f + dist / 400.0f));
+                                    consumed.push_back({&strike, gy});
+                                    //  hook: queue the physically-delayed thunder cue.
+                                    g_app.audio.pendingThunder.push_back({strike.strike_tick,
+                                                                          glfwGetTime(),
+                                                                          dist,
+                                                                          strike.magnitude});
+                                }
+                                std::vector<Luminumbra::Rendering::ProjectedLiveStrike>
+                                    frame_strikes;
+                                if (!consumed.empty()) {
+                                    int fbw = 0, fbh = 0;
+                                    glfwGetFramebufferSize(window, &fbw, &fbh);
+                                    const float aspect = (fbh > 0) ? static_cast<float>(fbw) /
+                                                                         static_cast<float>(fbh)
+                                                                   : 1.0f;
+                                    const glm::mat4 vp =
+                                        glm::perspective(
+                                            glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
+                                        g_camera->GetViewMatrix();
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
                                         if (clip.w <= 0.0f)
@@ -5781,25 +5794,35 @@ int main(int argc, char* argv[]) {
                                             }
                                             return points;
                                         };
-                                    auto& projected = frame_strikes.emplace_back();
-                                    projected.main_channel = project_stroke(bolt.main_channel);
-                                    projected.branches.reserve(bolt.branches.size());
-                                    for (const auto& br : bolt.branches) {
-                                        projected.branches.push_back(project_stroke(br));
+                                    // A drawn stroke needs at least two points, so no more than
+                                    // half the budget's strikes can ever contribute geometry.
+                                    const auto selected =
+                                        Luminumbra::Rendering::SelectLiveStrikeGeometry(
+                                            pulses,
+                                            static_cast<std::size_t>(
+                                                Luminumbra::Rendering::kMaxBoltSegmentPoints) /
+                                                2);
+                                    frame_strikes.reserve(selected.size());
+                                    for (const std::size_t index : selected) {
+                                        const auto& strike = *consumed[index].event;
+                                        const float gy = consumed[index].ground_y;
+                                        const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
+                                            strike.world_x,
+                                            gy,
+                                            strike.world_z,
+                                            strike.magnitude,
+                                            (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
+                                                strike.strike_tick);
+                                        auto& projected = frame_strikes.emplace_back();
+                                        projected.main_channel = project_stroke(bolt.main_channel);
+                                        projected.branches.reserve(bolt.branches.size());
+                                        for (const auto& br : bolt.branches) {
+                                            projected.branches.push_back(project_stroke(br));
+                                        }
+                                        projected.pulse = pulses[index];
+                                        projected.strike_ndc =
+                                            project(glm::vec3(strike.world_x, gy, strike.world_z));
                                     }
-                                    const glm::vec3 ground(strike.world_x, gy, strike.world_z);
-                                    const float dist = glm::length(ground - g_camera->Position);
-                                    // Magnitude-scaled flash, attenuated with distance (a far
-                                    // strike lights the sky, a near one lights the scene).
-                                    projected.pulse = 0.22f *
-                                                      std::clamp(strike.magnitude, 0.2f, 1.0f) /
-                                                      (1.0f + dist / 400.0f);
-                                    projected.strike_ndc = project(ground);
-                                    //  hook: queue the physically-delayed thunder cue.
-                                    g_app.audio.pendingThunder.push_back({strike.strike_tick,
-                                                                          glfwGetTime(),
-                                                                          dist,
-                                                                          strike.magnitude});
                                 }
                                 if (!frame_strikes.empty()) {
                                     auto composed = Luminumbra::Rendering::ComposeLiveStrikes(

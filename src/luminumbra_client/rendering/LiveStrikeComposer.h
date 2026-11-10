@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -25,7 +26,34 @@ struct ComposedLiveStrikes {
     float pulse = 0.0f;
 };
 
-// True when a segment's bounding box overlaps the view; segments touching a
+// True when the segment a-b touches the [-1, 1] view square (Liang-Barsky clip).
+inline bool LiveSegmentTouchesView(glm::vec2 a, glm::vec2 b) {
+    const glm::vec2 d = b - a;
+    const float p[4] = {-d.x, d.x, -d.y, d.y};
+    const float q[4] = {a.x + 1.0f, 1.0f - a.x, a.y + 1.0f, 1.0f - a.y};
+    float enter = 0.0f;
+    float leave = 1.0f;
+    for (int i = 0; i < 4; ++i) {
+        if (p[i] == 0.0f) {
+            if (q[i] < 0.0f) {
+                return false;
+            }
+            continue;
+        }
+        const float t = q[i] / p[i];
+        if (p[i] < 0.0f) {
+            enter = t > enter ? t : enter;
+        } else {
+            leave = t < leave ? t : leave;
+        }
+        if (enter > leave) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True when any drawn segment of the stroke touches the view; segments touching a
 // pen-up point are not drawn.
 inline bool LiveStrokeMayBeVisible(std::span<const glm::vec2> stroke) {
     for (std::size_t i = 1; i < stroke.size(); ++i) {
@@ -34,45 +62,71 @@ inline bool LiveStrokeMayBeVisible(std::span<const glm::vec2> stroke) {
         if (a == kLiveBoltPenUp || b == kLiveBoltPenUp) {
             continue;
         }
-        const bool overlaps_x = (a.x < b.x ? b.x : a.x) >= -1.0f && (a.x < b.x ? a.x : b.x) <= 1.0f;
-        const bool overlaps_y = (a.y < b.y ? b.y : a.y) >= -1.0f && (a.y < b.y ? a.y : b.y) <= 1.0f;
-        if (overlaps_x && overlaps_y) {
+        if (LiveSegmentTouchesView(a, b)) {
             return true;
         }
     }
     return false;
 }
 
+// Indices, in ascending order, of the at most max_strikes strikes with the strongest
+// pulse; ties keep the earlier strike. Only these strikes get bolt geometry, so the
+// strongest flash always has its bolt.
+inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> pulses,
+                                                         std::size_t max_strikes) {
+    std::vector<std::size_t> order(pulses.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    const std::size_t keep = max_strikes < order.size() ? max_strikes : order.size();
+    std::partial_sort(order.begin(),
+                      order.begin() + static_cast<std::ptrdiff_t>(keep),
+                      order.end(),
+                      [&](std::size_t a, std::size_t b) {
+                          return pulses[a] != pulses[b] ? pulses[a] > pulses[b] : a < b;
+                      });
+    order.resize(keep);
+    std::sort(order.begin(), order.end());
+    return order;
+}
+
 // Combines every same-frame strike into one bolt polyline of at most max_points.
 // Strokes outside the view are skipped and strokes that do not fit whole are
 // dropped. Every visible main channel is placed before any branch, so heavily
-// branched earlier strikes cannot displace a later strike's channel, and branches
-// are drawn only for strikes whose main channel was placed. Every strike
-// contributes to the flash: the strongest supplies the pulse and strike point, and
-// ties keep the earlier strike.
+// branched earlier strikes cannot displace a later strike's channel. Branches are
+// drawn for strikes whose main channel was placed or lies outside the view, so a
+// fork reaching into the view from an offscreen channel still shows; a visible
+// channel that did not fit takes its branches with it. Every strike contributes to
+// the flash: the strongest supplies the pulse and strike point, and ties keep the
+// earlier strike.
 inline ComposedLiveStrikes ComposeLiveStrikes(std::span<const ProjectedLiveStrike> strikes,
                                               std::size_t max_points) {
     ComposedLiveStrikes out;
+    enum class Placement {
+        Placed,
+        Offscreen,
+        NoRoom
+    };
     const auto append = [&](std::span<const glm::vec2> stroke) {
         if (!LiveStrokeMayBeVisible(stroke)) {
-            return false;
+            return Placement::Offscreen;
         }
         const std::size_t separator = out.points.empty() ? 0 : 1;
         if (stroke.size() + separator > max_points - out.points.size()) {
-            return false;
+            return Placement::NoRoom;
         }
         if (separator != 0) {
             out.points.push_back(kLiveBoltPenUp);
         }
         out.points.insert(out.points.end(), stroke.begin(), stroke.end());
-        return true;
+        return Placement::Placed;
     };
-    std::vector<bool> placed(strikes.size(), false);
+    std::vector<Placement> channels(strikes.size(), Placement::NoRoom);
     for (std::size_t i = 0; i < strikes.size(); ++i) {
-        placed[i] = append(strikes[i].main_channel);
+        channels[i] = append(strikes[i].main_channel);
     }
     for (std::size_t i = 0; i < strikes.size(); ++i) {
-        if (!placed[i]) {
+        if (channels[i] == Placement::NoRoom) {
             continue;
         }
         for (const std::vector<glm::vec2>& branch : strikes[i].branches) {

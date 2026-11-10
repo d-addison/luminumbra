@@ -13,8 +13,10 @@ namespace {
 
 using Luminumbra::Rendering::ComposeLiveStrikes;
 using Luminumbra::Rendering::kLiveBoltPenUp;
+using Luminumbra::Rendering::LiveSegmentTouchesView;
 using Luminumbra::Rendering::LiveStrikeTracker;
 using Luminumbra::Rendering::ProjectedLiveStrike;
+using Luminumbra::Rendering::SelectLiveStrikeGeometry;
 using Luminumbra::Systems::StrikeEvent;
 
 TEST(LiveStrikeTracker, DistinctSameTickIdentitiesAreConsumedOnce) {
@@ -204,12 +206,45 @@ TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
     EXPECT_EQ(composed.strike_ndc, crossing.strike_ndc);
 }
 
-TEST(LiveStrikeComposer, BranchesNeedTheirOwnPlacedChannel) {
+TEST(LiveStrikeComposer, VisibleBranchOfAnOffscreenChannelIsDrawn) {
     ProjectedLiveStrike offscreen_channel = Strike({0.0f, 0.5f}, 1, 0.1f);
     offscreen_channel.main_channel = Stroke({3.0f, 0.5f}, {3.0f, 0.0f}, 30);
     const std::vector<ProjectedLiveStrike> strikes{offscreen_channel};
-    // The branch is visible, but drawing it without its channel would float in the sky.
-    EXPECT_TRUE(ComposeLiveStrikes(strikes, 96).points.empty());
+    // The channel is rejected for visibility, not capacity, so its fork still shows.
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_EQ(composed.points.size(), 20u);
+    EXPECT_EQ(composed.points.front(), offscreen_channel.branches[0].front());
+    EXPECT_EQ(Strokes(composed.points), 1u);
+}
+
+TEST(LiveStrikeComposer, DiagonalStrokesOutsideTheViewSpendNoPoints) {
+    // Each segment's bounding box overlaps the view, but the segment passes the corner.
+    std::vector<ProjectedLiveStrike> strikes;
+    for (int i = 0; i < 3; ++i) {
+        ProjectedLiveStrike diagonal;
+        diagonal.main_channel = Stroke({0.5f, 1.6f}, {1.6f, 0.5f}, 30);
+        diagonal.strike_ndc = {1.6f, 0.5f};
+        diagonal.pulse = 0.05f;
+        strikes.push_back(diagonal);
+    }
+    const ProjectedLiveStrike visible = Strike({0.0f, 0.5f}, 0, 0.1f);
+    strikes.push_back(visible);
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_EQ(composed.points.size(), 30u);
+    EXPECT_EQ(composed.points.front(), visible.main_channel.front());
+    EXPECT_FALSE(LiveSegmentTouchesView({0.5f, 1.6f}, {1.6f, 0.5f}));
+    EXPECT_TRUE(LiveSegmentTouchesView({0.5f, 1.4f}, {1.4f, 0.5f}));
+    EXPECT_TRUE(LiveSegmentTouchesView({0.0f, 0.0f}, {0.0f, 0.0f}));
+    EXPECT_FALSE(LiveSegmentTouchesView({2.0f, 2.0f}, {2.0f, 2.0f}));
+}
+
+TEST(LiveStrikeComposer, GeometrySelectionKeepsTheStrongestStrikesInOrder) {
+    const std::vector<float> pulses{0.1f, 0.5f, 0.3f, 0.5f, 0.2f};
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 3), (std::vector<std::size_t>{1, 2, 3}));
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 1), (std::vector<std::size_t>{1}));
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 9), (std::vector<std::size_t>{0, 1, 2, 3, 4}));
+    EXPECT_TRUE(SelectLiveStrikeGeometry(pulses, 0).empty());
+    EXPECT_TRUE(SelectLiveStrikeGeometry({}, 4).empty());
 }
 
 TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
