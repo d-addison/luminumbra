@@ -32,6 +32,11 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::World {
+class FarWorldAuthorityProducer;
+struct FarWorldAuthorityConfig;
+} // namespace Luminumbra::World
+
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
 }
@@ -199,6 +204,15 @@ public:
     std::uint64_t WorldRevision() const {
         return m_worldRevision;
     }
+
+    // Explicit owner-thread opt-in for bounded source capture. No play path
+    // enables this service. Attachment refuses unpublished streaming work;
+    // successful world replacement releases the binding.
+    bool EnableFarWorldAuthorityProducer(const World::FarWorldAuthorityConfig& config,
+                                         std::string& error);
+    World::FarWorldAuthorityProducer* GetFarWorldAuthorityProducer();
+    void PumpFarWorldAuthorityCapture();
+    void FenceFarWorldAuthorityReads(bool paused);
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -653,6 +667,9 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    void DisableFarWorldAuthorityProducer();
+    std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
+    bool m_farWorldSourceNeedsRefresh = false;
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
     struct FoliageStep;

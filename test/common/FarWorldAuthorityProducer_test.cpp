@@ -1,5 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/world/FarWorldAuthorityProducer.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <gtest/gtest.h>
@@ -322,5 +323,263 @@ TEST(FarWorldAuthorityProducer, OwnsLegacySourceAndFailedReadCannotBecomeAbsence
     std::filesystem::remove_all(root);
     EXPECT_EQ(producer.read_committed({0, 0, 0, 0}, limits).membership,
               Save::AuthorityMembership::Unavailable);
+}
+} // namespace
+
+namespace {
+class FarWorldSourceCaptureTest : public testing::Test {
+protected:
+    std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("capture_");
+    Producer producer{Limits()};
+    Save::AuthorityReadLimits reads{
+        64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072};
+    void SetUp() override {
+        WorldStreamingState empty;
+        ASSERT_TRUE(Save{}.save_world(empty, root));
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.configure_capture({reads, 3}));
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+    void Request() {
+        const std::array<Save::AuthorityWindow, 2> windows{{{0, 0, 0, 0}, {1, 1, 0, 0}}};
+        ASSERT_TRUE(producer.request_capture(windows));
+    }
+};
+
+TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSuccessorEdits) {
+    auto first = Edited({0, 0, 0}, 1.0f);
+    auto second = Edited({1, 0, 0}, 2.0f);
+    first->set_water_authority();
+    first->current_water_resolution.store(4);
+    first->water_bed_mm.assign(16, 0);
+    first->water_depth_mm.assign(16, 3);
+    producer.changes()->membership(first, false, true);
+    producer.changes()->membership(second, true, true);
+    Request();
+    producer.pump_capture();
+    EXPECT_EQ(producer.counters().copied_records, 2u);
+    EXPECT_FALSE(producer.configure_capture({reads, 3}));
+    first->sdf_data[0] = 3.0f;
+    second->sdf_data[0] = 4.0f;
+    first->water_depth_mm[0] = 8;
+    first->mark_water_state_dirty();
+    first->mark_voxel_data_dirty();
+    second->mark_voxel_data_dirty();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    ASSERT_EQ(producer.capture()->published.size(), 2u);
+    EXPECT_EQ(producer.capture()->published[0].sdf[0], 1.0f);
+    EXPECT_EQ(producer.capture()->published[1].sdf[0], 2.0f);
+    EXPECT_EQ(producer.capture()->published[0].depth[0], 3);
+    EXPECT_TRUE(producer.capture_status().queued);
+    EXPECT_FALSE(producer.capture_status().latest_ready);
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->published[0].sdf[0], 3.0f);
+    EXPECT_EQ(producer.capture()->published[1].sdf[0], 4.0f);
+    EXPECT_EQ(producer.capture()->published[0].depth[0], 8);
+    EXPECT_TRUE(producer.capture_status().latest_ready);
+    EXPECT_EQ(producer.counters().copied_records, 4u);
+    const auto before = producer.counters();
+    producer.pump_capture();
+    EXPECT_EQ(producer.counters().copied_records, before.copied_records);
+    EXPECT_EQ(producer.counters().query_items, before.query_items);
+}
+
+TEST_F(FarWorldSourceCaptureTest, WantedReplacementRetainsActiveWindowAndOnlyLatestSuccessor) {
+    for (int x = 0; x < 3; ++x) {
+        producer.changes()->membership(Edited({x, 0, 0}, static_cast<float>(x)), false, true);
+    }
+    const std::array<Save::AuthorityWindow, 1> first{{{0, 0, 0, 0}}};
+    const std::array<Save::AuthorityWindow, 1> second{{{1, 1, 0, 0}}};
+    const std::array<Save::AuthorityWindow, 1> latest{{{2, 2, 0, 0}}};
+    ASSERT_TRUE(producer.request_capture(first));
+    producer.pump_capture();
+    ASSERT_TRUE(producer.request_capture(second));
+    ASSERT_TRUE(producer.request_capture(latest));
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->window.min_chunk_x, 0);
+    EXPECT_EQ(producer.capture()->published[0].sdf[0], 0.0f);
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->window.min_chunk_x, 2);
+    EXPECT_EQ(producer.capture()->published[0].sdf[0], 2.0f);
+    EXPECT_EQ(producer.counters().copied_records, 2u);
+    EXPECT_TRUE(producer.capture_status().latest_ready);
+}
+
+TEST_F(FarWorldSourceCaptureTest, ContinuousEditsFinishActiveCaptureEveryTwoPumps) {
+    auto chunk = Edited({0, 0, 0});
+    producer.changes()->membership(chunk, false, true);
+    Request();
+    for (unsigned frame = 0; frame < 12; ++frame) {
+        chunk->sdf_data[0] = static_cast<float>(frame);
+        chunk->mark_voxel_data_dirty();
+        producer.pump_capture();
+        if (frame % 2u == 1u) {
+            ASSERT_NE(producer.capture(), nullptr);
+            EXPECT_EQ(producer.capture()->serial, frame / 2u + 1u);
+            EXPECT_EQ(producer.capture()->published[0].sdf[0], static_cast<float>(frame - 1u));
+        }
+    }
+    EXPECT_LE(producer.counters().copied_records, 6u);
+}
+
+TEST_F(FarWorldSourceCaptureTest, DeadlineRefusesAndPreservesServingCapture) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* serving = producer.capture();
+    ASSERT_NE(serving, nullptr);
+    ASSERT_TRUE(producer.configure_capture({reads, 1}));
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::DeadlineExceeded);
+    EXPECT_EQ(producer.capture(), serving);
+    EXPECT_FALSE(producer.capture_status().latest_ready);
+    EXPECT_FALSE(producer.capture_status().active);
+}
+
+TEST_F(FarWorldSourceCaptureTest, ReaderFenceRetainsStateAndDeadlineIncludesPausedFrames) {
+    Request();
+    producer.fence_source_reads(true);
+    std::string error;
+    EXPECT_FALSE(producer.admit_saved_source(root, reads, error));
+    EXPECT_FALSE(producer.refresh_saved_source(root, error));
+    EXPECT_EQ(producer.read_committed({}, reads).membership,
+              Save::AuthorityMembership::Unavailable);
+    producer.pump_capture();
+    EXPECT_FALSE(producer.capture_status().active);
+    producer.fence_source_reads(false);
+    producer.pump_capture();
+    producer.fence_source_reads(true);
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture(), nullptr);
+    producer.fence_source_reads(false);
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    Request();
+    producer.pump_capture();
+    producer.fence_source_reads(true);
+    for (unsigned frame = 0; frame < 3; ++frame) {
+        producer.pump_capture();
+    }
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::DeadlineExceeded);
+    EXPECT_FALSE(producer.capture_status().latest_ready);
+}
+
+TEST_F(FarWorldSourceCaptureTest, SourceReplacementCannotMixCapturedVolatileAndCommittedData) {
+    auto chunk = Edited({0, 0, 0}, 5.0f);
+    producer.changes()->membership(chunk, false, true);
+    Request();
+    producer.pump_capture();
+    producer.invalidate_source();
+    EXPECT_EQ(producer.read_committed({}, reads).membership,
+              Save::AuthorityMembership::Unavailable);
+    WorldStreamingState replacement;
+    ASSERT_TRUE(replacement.insert_chunk(Edited({1, 0, 0}, 7.0f)));
+    ASSERT_TRUE(Save{}.save_world(replacement, root));
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error));
+    chunk->sdf_data[0] = 9.0f;
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture(), nullptr);
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->published[0].sdf[0], 9.0f);
+    ASSERT_EQ(producer.capture()->committed.chunks.size(), 1u);
+    EXPECT_EQ(producer.capture()->committed.chunks[0]->sdf_data[0], 7.0f);
+    EXPECT_EQ(producer.capture()->committed.generation, 0u);
+}
+
+TEST_F(FarWorldSourceCaptureTest, ChangedCommittedGenerationRefusesUntilFreshBoundary) {
+    WorldStreamingState disk;
+    auto chunk = Edited({0, 0, 0}, 1.0f);
+    ASSERT_TRUE(disk.insert_chunk(chunk));
+    const auto commit = [&]() {
+        Persistence::SaveTransaction transaction(root, 0, {}, Save::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        ASSERT_TRUE(Save::finalize_indexed_envelope(root, nullptr));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    };
+    ASSERT_NO_FATAL_FAILURE(commit());
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    const auto generation = producer.capture()->committed.generation;
+    EXPECT_GT(generation, 0u);
+    const auto* accepted = producer.capture();
+    Request();
+    producer.pump_capture();
+    chunk->sdf_data[0] = 3.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_NO_FATAL_FAILURE(commit());
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_FALSE(producer.capture_read_error().empty());
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(producer.capture()->committed.generation, generation);
+    ASSERT_TRUE(producer.refresh_saved_source(root, error)) << error;
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_GT(producer.capture()->committed.generation, generation);
+    EXPECT_EQ(producer.capture()->committed.chunks[0]->sdf_data[0], 3.0f);
+}
+
+TEST_F(FarWorldSourceCaptureTest, InvalidRequestsAndMissingSourcesNeverReplaceAcceptedCapture) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* serving = producer.capture();
+    ASSERT_NE(serving, nullptr);
+    EXPECT_FALSE(producer.request_capture({}));
+    Producer cold(Limits());
+    const std::array<Save::AuthorityWindow, 1> single{{{0, 0, 0, 0}}};
+    EXPECT_FALSE(cold.request_capture(single));
+    ASSERT_TRUE(cold.configure_capture({reads, 3}));
+    EXPECT_FALSE(cold.request_capture(single));
+    const std::array<Save::AuthorityWindow, 2> wide{{{0, 0, 0, 0}, {100, 100, 0, 0}}};
+    EXPECT_FALSE(producer.request_capture(wide));
+    auto invalid = reads;
+    invalid.decoded_total_bytes = 0;
+    EXPECT_FALSE(producer.configure_capture({invalid, 3}));
+    EXPECT_FALSE(producer.configure_capture({reads, 0}));
+    Request();
+    producer.pump_capture();
+    std::filesystem::remove_all(root);
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_FALSE(producer.capture_read_error().empty());
+    EXPECT_EQ(producer.capture(), serving);
+    EXPECT_FALSE(producer.capture_status().latest_ready);
+}
+
+TEST_F(FarWorldSourceCaptureTest, MalformedVolatileCaptureRefusesBeforeReadingAndCanRetry) {
+    auto chunk = Edited({0, 0, 0});
+    producer.changes()->membership(chunk, false, true);
+    chunk->sdf_data.clear();
+    Request();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(producer.capture(), nullptr);
+    EXPECT_FALSE(producer.capture_status().active);
+    chunk->sdf_data = Edited({0, 0, 0})->sdf_data;
+    chunk->mark_voxel_data_dirty();
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
 }
 } // namespace
