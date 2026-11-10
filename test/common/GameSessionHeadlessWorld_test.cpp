@@ -6132,6 +6132,99 @@ TEST(GameSessionHeadlessWorldTest, UnchangedSnapshotSaveDoesNotReparseCommittedC
     EXPECT_GT(P::WorldSaveService::chunk_record_decode_count_for_testing(), before);
 }
 
+TEST(GameSessionHeadlessWorldTest, RepeatedClientIdentityInspectionsReuseAdmittedChunkRecords) {
+    using Service = P::WorldSaveService;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Repeated identity inspection", "94713", "default"));
+    const auto plan =
+        owner.GetWorldSystem()->GetInitialChunkLoadList(owner.GetMetadata().spawnPoint);
+    ASSERT_GE(plan.size(), std::size_t{2});
+    const Luminumbra::IVec3 excluded{plan.front().x + 64, plan.front().y, plan.front().z};
+    // Three small, distinct records keep admission independent of earlier fixtures.
+    for (const auto& coords : {plan[0], plan[1], excluded}) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        chunk->set_state(Luminumbra::ChunkState::Meshing);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, -6.875f);
+        chunk->heightmap_data = {613.125f, 614.375f};
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    const auto saved_files = ReadClockTestDirectory(save);
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_EQ(reopened.GetLastLoadedChunkCount(), std::size_t{2});
+    const auto* admitted_world = reopened.GetWorldSystem();
+    ASSERT_NE(admitted_world, nullptr);
+    const auto admitted_tick = reopened.GetSimulationTickCount();
+    const auto admitted_hash = SessionWorldHash(reopened);
+    const auto expect_live_unchanged = [&]() {
+        ASSERT_EQ(reopened.GetWorldSystem(), admitted_world);
+        EXPECT_EQ(reopened.GetSimulationTickCount(), admitted_tick);
+        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+        EXPECT_FALSE(reopened.GetRegionSchedulerFault());
+        EXPECT_EQ(admitted_world->snapshot_streamed_chunks().size(), std::size_t{2});
+        EXPECT_EQ(admitted_world->find_streamed_chunk(excluded), nullptr);
+        EXPECT_EQ(admitted_world->durable_chunk_inventory().size(), std::size_t{3});
+        for (const auto& coords : {plan[0], plan[1]}) {
+            EXPECT_NE(admitted_world->find_streamed_chunk(coords), nullptr);
+        }
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    const auto expect_identity = [&]() {
+        const auto before = Service::chunk_record_decode_count_for_testing();
+        const auto identity = P::InspectSavedWorld(
+            reopened.GetSaveRootPath(), root.path(), reopened.GetMetadata().worldId);
+        ASSERT_TRUE(identity.error.empty()) << identity.error;
+        EXPECT_FALSE(identity.pending_recovery);
+        EXPECT_EQ(identity.metadata.worldId, owner.GetMetadata().worldId);
+        EXPECT_EQ(identity.metadata.seed, owner.GetMetadata().seed);
+        EXPECT_EQ(identity.metadata.worldType, owner.GetMetadata().worldType);
+        EXPECT_EQ(identity.preset_path, save / "preset.json");
+        EXPECT_EQ(Service::chunk_record_decode_count_for_testing(), before);
+    };
+    for (std::size_t inspection = 0; inspection < std::size_t{2}; ++inspection) {
+        SCOPED_TRACE(inspection);
+        ASSERT_NO_FATAL_FAILURE(expect_identity());
+        ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+        EXPECT_EQ(SessionWorldHash(reopened), admitted_hash);
+        EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
+    }
+
+    int excluded_rx = 0;
+    int excluded_rz = 0;
+    Service::region_coords_for_chunk(excluded, excluded_rx, excluded_rz);
+    const auto excluded_region = Service::region_file_path(save, excluded_rx, excluded_rz);
+    const auto excluded_bytes = ReadClockTestFile(excluded_region);
+    ASSERT_FALSE(excluded_bytes.empty());
+    const auto parked_region = root.path() / "excluded-region.lmr";
+    fs::rename(excluded_region, parked_region);
+    const auto missing_files = ReadClockTestDirectory(save);
+    const auto missing_decodes = Service::chunk_record_decode_count_for_testing();
+    const auto missing_identity = P::InspectSavedWorld(
+        reopened.GetSaveRootPath(), root.path(), reopened.GetMetadata().worldId);
+    EXPECT_EQ(missing_identity.error,
+              "inconsistent snapshot: " + Luminumbra::Filesystem::GenericUtf8PathString(
+                                              excluded_region.lexically_relative(save)));
+    EXPECT_EQ(Service::chunk_record_decode_count_for_testing(), missing_decodes);
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    EXPECT_EQ(ReadClockTestDirectory(save), missing_files);
+    EXPECT_EQ(ReadClockTestFile(parked_region), excluded_bytes);
+    fs::rename(parked_region, excluded_region);
+    ASSERT_NO_FATAL_FAILURE(expect_identity());
+    ASSERT_NO_FATAL_FAILURE(expect_live_unchanged());
+    // The authoritative hash reads durable records, so compare it after restoring the file.
+    EXPECT_EQ(SessionWorldHash(reopened), admitted_hash);
+    EXPECT_EQ(ReadClockTestDirectory(save), saved_files);
+}
+
 TEST(GameSessionHeadlessWorldTest, EncodedChunkRecordChecksMatchTheirDecode) {
     constexpr std::size_t kLattice = std::size_t{17} * 17 * 17;
     // Distinctive values keep these record bytes unseen by any earlier admission.
