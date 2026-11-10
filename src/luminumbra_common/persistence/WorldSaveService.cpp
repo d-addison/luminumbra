@@ -7376,7 +7376,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             for (const auto& member : index.members) {
                 int rx = 0, rz = 0;
                 const auto path = std::filesystem::path(member.path);
-                if (ParseRegionFileName(path.filename(), rx, rz)) {
+                if (path.parent_path() == std::filesystem::path("chunks/region") &&
+                    path.extension() == kRegionFileExtension) {
+                    if (!ParseRegionFileName(path.filename(), rx, rz))
+                        throw std::runtime_error("unrecognised region file name");
                     if (member.cls != MemberClass::Authoritative)
                         throw std::runtime_error("unsupported derived authority member");
                     candidate->members.emplace(std::pair{rx, rz}, Impl::Member{member, {}});
@@ -7395,7 +7398,9 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                 if (!AuthorityReadBudget::Charge(1, limits.probes, budget.probes))
                     throw std::runtime_error("authority inventory probe limit exceeded");
                 int rx = 0, rz = 0;
-                if (ParseRegionFileName(entry->path().filename(), rx, rz)) {
+                if (entry->path().extension() == kRegionFileExtension) {
+                    if (!ParseRegionFileName(entry->path().filename(), rx, rz))
+                        throw std::runtime_error("unrecognised region file name");
                     if (!AuthorityReadBudget::Charge(1, limits.members, budget.members))
                         throw std::runtime_error("authority member limit exceeded");
                     std::vector<RegionRecord> records;

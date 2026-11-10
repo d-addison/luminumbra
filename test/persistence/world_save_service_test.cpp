@@ -5064,6 +5064,150 @@ TEST(WorldSaveService, AuthorityWindowLegacyAdmissionPinsGenerationZeroWithoutCr
     ExpectWindowUnavailable(reader.read({-32, -32, 0, 0}, WindowLimits()));
 }
 
+TEST(WorldSaveService, AuthorityWindowRefusesNoncanonicalRegionMembersAndPreservesAdmission) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir original_save("authority_window_canonical");
+    WorldStreamingState state;
+    const auto chunk = AddWindowChunk(state, {0, 0, 0}, true);
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    ASSERT_EQ(original.membership, AuthorityMembership::Present) << original.error;
+    ASSERT_EQ(original.chunks.size(), 1u);
+
+    for (const bool indexed : {false, true}) {
+        for (const char* name : {"r.00.0.lmr", "r.0.00.lmr", "r.-0.0.lmr"}) {
+            for (const bool canonical_sibling : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << indexed << ":" << name << ":" << canonical_sibling);
+                const TempSaveDir save("authority_window_noncanonical");
+                ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, indexed));
+                const auto canonical = WorldSaveService::region_file_path(save.path(), 0, 0);
+                const auto alias = canonical.parent_path() / name;
+                ASSERT_TRUE(std::filesystem::copy_file(canonical, alias));
+                if (!canonical_sibling) {
+                    ASSERT_TRUE(std::filesystem::remove(canonical));
+                }
+                if (indexed) {
+                    P::SnapshotIndex index;
+                    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+                    const auto member = std::find_if(
+                        index.members.begin(), index.members.end(), [](const auto& value) {
+                            return value.path == "chunks/region/r.0.0.lmr";
+                        });
+                    ASSERT_NE(member, index.members.end());
+                    auto alias_member = *member;
+                    alias_member.path = std::string("chunks/region/") + name;
+                    ASSERT_TRUE(P::member_path_allowed(alias_member.path));
+                    if (canonical_sibling)
+                        index.members.push_back(alias_member);
+                    else
+                        *member = alias_member;
+                    std::sort(index.members.begin(),
+                              index.members.end(),
+                              [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+                    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                               P::encode_snapshot_index(index)));
+                }
+                EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+                EXPECT_EQ(error, "unrecognised region file name");
+                const auto retained = reader.read({}, WindowLimits());
+                EXPECT_EQ(retained.membership, original.membership) << retained.error;
+                EXPECT_EQ(retained.generation, original.generation);
+                EXPECT_EQ(retained.source_identity, original.source_identity);
+                ASSERT_EQ(retained.members.size(), original.members.size());
+                for (std::size_t i = 0; i < retained.members.size(); ++i) {
+                    EXPECT_EQ(retained.members[i].region_x, original.members[i].region_x);
+                    EXPECT_EQ(retained.members[i].region_z, original.members[i].region_z);
+                    EXPECT_EQ(retained.members[i].generation, original.members[i].generation);
+                    EXPECT_EQ(retained.members[i].membership, original.members[i].membership);
+                }
+                ASSERT_EQ(retained.chunks.size(), 1u);
+                EXPECT_EQ(retained.chunks.front()->sdf_data, chunk->sdf_data);
+                EXPECT_EQ(retained.chunks.front()->water_depth_mm, chunk->water_depth_mm);
+                EXPECT_EQ(original.chunks.front()->sdf_data, chunk->sdf_data);
+                EXPECT_EQ(original.chunks.front()->water_depth_mm, chunk->water_depth_mm);
+                AuthorityReader unadmitted;
+                EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error));
+                ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesNoncanonicalIndexStatesAndClasses) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_noncanonical_index");
+    std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
+    for (const char* name : {"r.00.0.lmr", "r.0.00.lmr", "r.2147483648.0.lmr"}) {
+        for (const bool present : {false, true}) {
+            for (const auto cls : {P::MemberClass::Authoritative, P::MemberClass::Derived}) {
+                P::SnapshotIndex index;
+                index.generation = 1;
+                const auto relative = std::string("chunks/region/") + name;
+                ASSERT_TRUE(P::member_path_allowed(relative));
+                index.members.push_back({relative, cls, present, 0, 0, 1});
+                const auto bytes = P::encode_snapshot_index(index);
+                P::SnapshotIndex decoded;
+                std::string error;
+                ASSERT_TRUE(P::decode_snapshot_index(bytes, decoded, error)) << error;
+                ASSERT_NO_FATAL_FAILURE(
+                    ReplaceWindowBytes(P::snapshot_index_path(save.path()), bytes));
+                AuthorityReader reader;
+                EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error)) << relative;
+                EXPECT_EQ(error, "unrecognised region file name") << relative;
+                ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesMalformedLegacyRegionNamesBeforeReadingPayloads) {
+    const TempSaveDir save("authority_window_noncanonical_legacy");
+    const auto region_dir = WorldSaveService::region_directory(save.path());
+    std::filesystem::create_directories(region_dir);
+    for (const char* name : {"r.00.0.lmr", "r.+0.0.lmr", "r.0.lmr", "unknown.lmr"}) {
+        for (const int kind : {0, 1, 2}) {
+            const auto path = region_dir / name;
+            if (kind == 2) {
+                std::filesystem::create_directory(path);
+            } else {
+                ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, kind == 0 ? "" : "LMRG"));
+            }
+            AuthorityReader reader;
+            std::string error;
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error)) << name;
+            EXPECT_EQ(error, "unrecognised region file name") << name;
+            ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+            ASSERT_TRUE(std::filesystem::remove(path));
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowCanonicalMembersAdmitWithUnrelatedSidecars) {
+    for (const bool indexed : {false, true}) {
+        const TempSaveDir save("authority_window_region_sidecars");
+        WorldStreamingState state;
+        const auto chunk = AddWindowChunk(state, {0, 0, 0});
+        AddWindowChunk(state, {-32, 0, 0});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, indexed));
+        for (const char* name : {"notes.txt", "r.00.0.txt", "r.00.0.lmr.tmp"})
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
+                WorldSaveService::region_directory(save.path()) / name, "unrelated"));
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto result = reader.read({}, WindowLimits());
+        ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+        ASSERT_EQ(result.chunks.size(), 1u);
+        EXPECT_EQ(result.chunks.front()->sdf_data, chunk->sdf_data);
+        const auto negative = reader.read({-32, -32, 0, 0}, WindowLimits());
+        EXPECT_EQ(negative.membership, AuthorityMembership::Present) << negative.error;
+    }
+}
+
 TEST(WorldSaveService, AuthorityWindowUnknownIndexStatusRefusesAndPreservesAdmission) {
     namespace P = Luminumbra::Persistence;
     const TempSaveDir save("authority_window_unknown_index");
