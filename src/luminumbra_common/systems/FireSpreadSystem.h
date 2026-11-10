@@ -42,6 +42,8 @@
 #include "../components/CoreComponents.h"
 #include "../core/DeterministicMath.h" // Sqrt (libm-free / IEEE-deterministic)
 
+#include "RegionConsumerGate.h"
+
 namespace luminumbra::sim {
 
 namespace Comp = ::Luminumbra::Components;
@@ -104,7 +106,8 @@ inline FireSpreadStats
 RunFireSpreadOnTick(entt::registry& reg,
                     std::uint64_t tick,
                     glm::vec2 wind_xz = glm::vec2(0.0f),
-                    std::span<const FireIgnitionSource> external_sources = {}) {
+                    std::span<const FireIgnitionSource> external_sources = {},
+                    const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     (void)tick;
     FireSpreadStats stats;
 
@@ -112,8 +115,11 @@ RunFireSpreadOnTick(entt::registry& reg,
 
     // id-ordered entity list so snapshot + apply are order-independent + deterministic.
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -136,8 +142,11 @@ RunFireSpreadOnTick(entt::registry& reg,
     {
         auto ig = reg.view<Comp::IgnitionSourceComponent, Comp::TransformComponent>();
         std::vector<entt::entity> igs;
-        for (auto e : ig)
-            igs.push_back(e);
+        for (auto e : ig) {
+            if (gate.Allows(e)) {
+                igs.push_back(e);
+            }
+        }
         std::sort(igs.begin(), igs.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
@@ -150,8 +159,11 @@ RunFireSpreadOnTick(entt::registry& reg,
         }
     }
     for (const FireIgnitionSource& source : external_sources) {
-        sources.push_back(
-            {source.position, source.radius, source.intensity > 0.0f ? source.intensity : 0.0f});
+        if (gate.AllowsPosition({source.position.x, 0.0f, source.position.y})) {
+            sources.push_back({source.position,
+                               source.radius,
+                               source.intensity > 0.0f ? source.intensity : 0.0f});
+        }
     }
 
     // --- : per Unburnt candidate, tally heat from all sources; ignite on threshold.

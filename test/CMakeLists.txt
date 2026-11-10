@@ -1576,6 +1576,7 @@ endif()
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    common/RegionConsumerGate_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp
@@ -1642,6 +1643,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
@@ -1743,6 +1745,9 @@ target_link_libraries(audio_propagation_metrics_test PRIVATE
     miniaudio
     nlohmann_json
     glm
+)
+target_compile_definitions(audio_propagation_metrics_test PRIVATE
+    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1
 )
 luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 

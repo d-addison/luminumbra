@@ -24,6 +24,7 @@
 #include "world/WorldStreamingState.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -532,7 +533,7 @@ TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority
             }
             const auto depths = chunk->water_depth_mm;
             const auto flux = chunk->water_edge_flux;
-            P::RegionContentHasher before;
+            P::RegionContentHasher before(true);
             before.append(*chunk);
             chunk->mark_sdf_generated_current_params();
             chunk->clear_voxel_data_dirty_after_generation();
@@ -544,9 +545,11 @@ TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority
             EXPECT_TRUE(chunk->is_voxel_data_dirty());
             EXPECT_EQ(chunk->water_depth_mm, depths);
             EXPECT_EQ(chunk->water_edge_flux, flux);
-            P::RegionContentHasher after;
+            P::RegionContentHasher after(true);
             after.append(*chunk);
             EXPECT_FALSE(after.empty());
+            ASSERT_TRUE(before.water_value().has_value());
+            ASSERT_TRUE(after.water_value().has_value());
             EXPECT_EQ(after.water_value(), before.water_value());
             const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
             const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
@@ -1149,16 +1152,35 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
     const auto second = AddCompleteWaterChunk(original, {1, 0, 0});
     first->mark_voxel_data_dirty();
     second->mark_water_data_dirty();
-    P::RegionContentHasher hasher;
+    P::RegionContentHasher hasher(true);
+    P::RegionContentHasher without_diagnostics;
     EXPECT_TRUE(hasher.empty());
+    EXPECT_TRUE(without_diagnostics.empty());
+    constexpr std::array<std::array<std::uint64_t, 3>, 3> golden{{
+        {0x7dd62db149fe95e7ull, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
+        {0x3acf610d610e4f8cull, 0x6594214f1b72516full, 0x7239ec74bcb7a85aull},
+        {0x6b094f28f1f19fc6ull, 0x2c448894bf5db35eull, 0x296be0162168cbbcull},
+    }};
     auto contents = nlohmann::json::array();
     const auto verify = [&] {
+        const auto& expected = golden.at(contents.size());
+        EXPECT_EQ(hasher.value(), expected[0]);
+        EXPECT_EQ(without_diagnostics.value(), expected[0]);
+        EXPECT_EQ(hasher.terrain_value(), expected[1]);
+        EXPECT_EQ(hasher.water_value(), expected[2]);
+        EXPECT_FALSE(without_diagnostics.terrain_value().has_value());
+        EXPECT_FALSE(without_diagnostics.water_value().has_value());
+        EXPECT_EQ(without_diagnostics.empty(), hasher.empty());
         const auto canonical =
             nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", contents}};
         std::ostringstream digest;
         digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
         EXPECT_EQ(digest.str(), P::StableChecksum(canonical.dump(4) + '\n'));
     };
+    verify();
+    Chunk regenerable({2, 0, 0});
+    hasher.append(regenerable);
+    without_diagnostics.append(regenerable);
     verify();
     for (const auto& chunk : {first, second}) {
         const auto snapshot = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
@@ -1185,6 +1207,7 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
         }
         contents.push_back(std::move(projected));
         hasher.append(*chunk);
+        without_diagnostics.append(*chunk);
         verify();
     }
     EXPECT_FALSE(hasher.empty());
@@ -1192,23 +1215,30 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
     digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
     EXPECT_EQ(P::ComputeRegionContentHash(original), digest.str());
     const auto base = hasher.value();
-    Chunk regenerable({2, 0, 0});
     hasher.append(regenerable);
+    without_diagnostics.append(regenerable);
     EXPECT_EQ(hasher.value(), base);
     EXPECT_THROW(hasher.append(*second), std::invalid_argument);
     EXPECT_THROW(hasher.append(*first), std::invalid_argument);
+    EXPECT_THROW(without_diagnostics.append(*second), std::invalid_argument);
+    EXPECT_THROW(without_diagnostics.append(*first), std::invalid_argument);
     EXPECT_EQ(hasher.value(), base);
+    verify();
     ++second->water_depth_mm[0];
-    P::RegionContentHasher changed_water;
+    P::RegionContentHasher changed_water(true);
     changed_water.append(*first);
     changed_water.append(*second);
+    ASSERT_TRUE(changed_water.terrain_value().has_value());
+    ASSERT_TRUE(changed_water.water_value().has_value());
     EXPECT_EQ(changed_water.terrain_value(), hasher.terrain_value());
     EXPECT_NE(changed_water.water_value(), hasher.water_value());
     EXPECT_NE(changed_water.value(), base);
     first->sdf_data[0] += 0.5f;
-    P::RegionContentHasher changed_terrain;
+    P::RegionContentHasher changed_terrain(true);
     changed_terrain.append(*first);
     changed_terrain.append(*second);
+    ASSERT_TRUE(changed_terrain.terrain_value().has_value());
+    ASSERT_TRUE(changed_terrain.water_value().has_value());
     EXPECT_NE(changed_terrain.terrain_value(), changed_water.terrain_value());
     EXPECT_EQ(changed_terrain.water_value(), changed_water.water_value());
 }
