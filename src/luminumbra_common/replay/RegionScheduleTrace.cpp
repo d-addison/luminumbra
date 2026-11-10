@@ -7,7 +7,9 @@
 #include "world/WorldClock.h"
 
 #include <exception>
+#include <filesystem>
 #include <nlohmann/json.hpp>
+#include <system_error>
 
 namespace Luminumbra::Replay {
 namespace {
@@ -64,6 +66,16 @@ bool WriteRegionScheduleTrace(const std::filesystem::path& replay,
     auto path = replay;
     path += ".regions.json";
     try {
+        // The guard opens the replay's directory, so a fresh destination needs
+        // its parent first, as the unguarded writer created it before.
+        if (replay.has_parent_path()) {
+            std::error_code parent_error;
+            std::filesystem::create_directories(replay.parent_path(), parent_error);
+            if (parent_error) {
+                error = "Cannot write region schedule trace.";
+                return false;
+            }
+        }
         // Paired publication and its recovery own the companion under this
         // directory guard; a standalone write must not replace it meanwhile.
         const Persistence::ReplayPairReadGuard ownership(replay);
