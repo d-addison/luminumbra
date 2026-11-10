@@ -697,11 +697,29 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("return std::move(found->second.decoded)", handoff)
         activation = self.function(source, "read_chunk", "WorldSaveService::")
         self.assertIn("CurrentRecordMatches(path, *region, id)", activation)
-        self.assertIn("AdmitChunkRecord(record, path, &errors, facts, &result.chunk)", activation)
+        self.assertRegex(
+            activation,
+            r"AdmitChunkRecord\(\s*record,\s*path,\s*&errors,\s*facts,\s*&result.chunk,"
+            r"\s*false,\s*false,\s*admission->format.indexed\)")
         session = read_source("src/luminumbra_common/world/GameSession.cpp")
         for name in ("PrepareWorldLoad", "ReadPreparedWorldState"):
             self.assertIn("const Persistence::WorldSaveService::WorldReadScope chunk_reads;",
                           self.function(session, name))
+
+    def test_strict_saved_water_has_no_success_with_invalid_flag(self):
+        source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        loader = self.function(source, "LoadWorldStreamingStateSnapshotJson", "")
+        self.assertNotIn("strict_water_valid", loader)
+        self.assertLess(loader.index("RequireWaterAuthority(chunk_json, encoded_arrays)"),
+                        loader.index("ApplyChunkFields(chunk_json"))
+        self.assertRegex(loader, r"if \(authority.strict_water && !WaterValuesValid\(\*chunk\)\)\s*"
+                         r'throw std::invalid_argument\("Saved water decoded values refused"\);')
+        self.assertLess(loader.index("!WaterValuesValid(*chunk)"),
+                        loader.index("out_state.insert_chunk(chunk)"))
+        service = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        decoder = self.function(service, "DecodeChunkRecord", "")
+        self.assertNotIn("strict_water_valid", decoder)
+        self.assertIn("if (!LoadWorldStreamingStateSnapshotJson(", decoder)
 
     @staticmethod
     def function(source, name, prefix="GameSession::"):

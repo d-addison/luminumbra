@@ -88,6 +88,8 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
+    // Indexed admission validates present water arrays; historical defaults are preserved.
+    bool strict_water = false;
     bool terrain_edited = true;
     bool migrate_legacy_water = false;
     bool validate_record_authority = false;
@@ -101,7 +103,8 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 // Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
 // (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
 // below accepts this form and the plain-JSON form.
-std::string SerializeChunkRecordPayloadJson(const Chunk& chunk);
+// Writer admission reuses the encoded DOM without parsing the resulting record.
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid = nullptr);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,

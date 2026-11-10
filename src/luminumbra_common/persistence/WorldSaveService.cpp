@@ -2420,6 +2420,7 @@ struct ChunkEncodeWork {
     RegionRecord record;
     std::string inputs;
     bool water_authority = false;
+    bool strict_water_valid = false;
     bool has_null = false;
     bool success = false;
     std::vector<std::string> errors{};
@@ -2497,7 +2498,8 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             if (hook)
                 hook(index);
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
-            const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
+            const std::string payload =
+                SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
             if (!CompressPayload(payload, item.record, &item.errors)) {
                 in_flight.release(admitted);
                 admitted = 0;
@@ -2855,7 +2857,8 @@ std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
 
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
-                                         std::vector<std::string>* errors) {
+                                         std::vector<std::string>* errors,
+                                         bool strict_water = false) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
@@ -2867,7 +2870,8 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
     // The header's edited flag is the durable terrain authority bit: a payload may not claim
     // terrain ownership the header lacks. Owned water under an unflagged header is the one
     // accepted disagreement; the flag repair below keeps it.
-    const ChunkAuthorityLoadPolicy record_policy{.terrain_edited =
+    const ChunkAuthorityLoadPolicy record_policy{.strict_water = strict_water,
+                                                 .terrain_edited =
                                                      (record.flags & kRecordFlagEdited) != 0u,
                                                  .validate_record_authority = true,
                                                  .allow_unflagged_water = true};
@@ -2910,6 +2914,7 @@ struct ChunkRecordFacts {
     IVec3 coords{0};
     bool lattice_ok = false;
     bool loaded_or_edited = false;
+    bool strict_water = false;
 };
 
 struct ChunkRecordKey {
@@ -3180,33 +3185,36 @@ bool AdmitChunkRecord(const RegionRecord& record,
                       ChunkRecordFacts& facts,
                       std::shared_ptr<Chunk>* decoded,
                       bool validation_only = false,
-                      bool cache_unretained = false) {
+                      bool cache_unretained = false,
+                      bool strict_water = false) {
     const ChunkRecordKey key = ChunkRecordKeyOf(record);
     auto& pending = PendingChunkAdmissions();
     if (pending) {
-        if (const auto* found = pending->find(key)) {
+        if (const auto* found = pending->find(key);
+            found && (!strict_water || found->facts.strict_water)) {
             facts = found->facts;
             if (decoded)
                 *decoded = pending->take(record.id);
             return true;
         }
     }
-    if (decoded) {
+    const auto cached_facts = AdmittedChunkRecordCache().find(key);
+    if (cached_facts && (!strict_water || cached_facts->strict_water)) {
+        if (!decoded) {
+            facts = *cached_facts;
+            return true;
+        }
         if (auto admitted = AdmittedChunkRecordCache().take_decoded(key)) {
-            facts = DecodedChunkRecordFacts(*admitted);
+            facts = *cached_facts;
             *decoded = std::move(admitted);
             return true;
         }
-    } else {
-        if (const auto admitted = AdmittedChunkRecordCache().find(key)) {
-            facts = *admitted;
-            return true;
-        }
     }
-    auto chunk = DecodeChunkRecord(record, path, errors);
+    auto chunk = DecodeChunkRecord(record, path, errors, strict_water);
     if (!chunk)
         return false;
     facts = DecodedChunkRecordFacts(*chunk);
+    facts.strict_water = strict_water;
     // The decode is a pure function of these bytes, so a chunk whose canonical inputs still
     // equal the decoded ones is already stored by this record and needs no new encoding.
     AdmittedChunkRecordCache().remember(key, facts, ChunkSnapshotInputBytes(*chunk));
@@ -3931,7 +3939,10 @@ bool SnapshotMemberForRegionFile(const std::filesystem::path& region_file,
 bool VerifyRegionMembership(const std::filesystem::path& region_file,
                             const std::vector<RegionRecord>& records,
                             std::vector<std::string>* errors,
-                            const SnapshotIndex* admitted_index = nullptr) {
+                            const SnapshotIndex* admitted_index = nullptr,
+                            bool* strict_water = nullptr) {
+    if (strict_water)
+        *strict_water = false;
     std::filesystem::path save_dir;
     std::string relative;
     if (!SnapshotMemberForRegionFile(region_file, save_dir, relative))
@@ -3945,6 +3956,8 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
     }
     if (admitted_index->generation == 0)
         return true;
+    if (strict_water)
+        *strict_water = true;
     const auto& index = *admitted_index;
     const auto member = std::lower_bound(
         index.members.begin(),
@@ -5937,15 +5950,16 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
                                           std::vector<std::string>* errors) {
     const detail::SnapshotReadOwnership ownership;
     out_chunks.clear();
+    bool strict_water = false;
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
-        !VerifyRegionMembership(region_file, raw_records, errors)) {
+        !VerifyRegionMembership(region_file, raw_records, errors, nullptr, &strict_water)) {
         return false;
     }
     for (const RegionRecord& record : raw_records) {
         if (record.lod_level != 0u)
             continue;
-        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
         if (!chunk) {
             out_chunks.clear();
             return false;
@@ -5975,9 +5989,10 @@ bool WorldSaveService::read_authoritative_region_chunks(
         AddError(errors, "authoritative chunk read bounds are invalid");
         return false;
     }
+    bool strict_water = false;
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
-        !VerifyRegionMembership(region_file, raw_records, errors, admitted_index)) {
+        !VerifyRegionMembership(region_file, raw_records, errors, admitted_index, &strict_water)) {
         return false;
     }
     for (const RegionRecord& record : raw_records) {
@@ -5990,16 +6005,19 @@ bool WorldSaveService::read_authoritative_region_chunks(
         }
         std::shared_ptr<Chunk> chunk;
         if ((record.flags & kRecordFlagEdited) != 0u) {
-            chunk = DecodeChunkRecord(record, region_file, errors);
+            chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
         } else {
             ChunkRecordFacts facts;
-            if (!AdmitChunkRecord(record, region_file, errors, facts, nullptr, false, true)) {
+            if (!AdmitChunkRecord(
+                    record, region_file, errors, facts, nullptr, false, true, strict_water)) {
                 out_chunks.clear();
                 return false;
             }
             if (!facts.loaded_or_edited)
                 continue;
-            if (!AdmitChunkRecord(record, region_file, errors, facts, &chunk) || !chunk) {
+            if (!AdmitChunkRecord(
+                    record, region_file, errors, facts, &chunk, false, false, strict_water) ||
+                !chunk) {
                 out_chunks.clear();
                 return false;
             }
@@ -7852,14 +7870,25 @@ std::uint64_t NextAuthoritySourceIdentity() {
     return ++sequence.identity;
 }
 
+// Legacy window reads admit empty historical grids and dormant writer state.
 bool AuthorityWaterValid(const Chunk& chunk) {
     if (!chunk.has_water_authority())
         return true;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    if (resolution != 4 && resolution != 8 && resolution != 16 && resolution != 32)
+    if (resolution < 0 || resolution > 32 ||
+        (resolution != 0 && (resolution < 2 || 32 % resolution != 0)))
+        return false;
+    // Water grids are bounded to 32^2 cells, with two flux slots per cell.
+    if (chunk.water_depth_mm.size() > 1024u || chunk.water_bed_mm.size() > 1024u ||
+        chunk.water_edge_flux.size() > 2048u)
         return false;
     const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells &&
+    const bool empty =
+        chunk.water_depth_mm.empty() && chunk.water_bed_mm.empty() && chunk.water_edge_flux.empty();
+    const bool complete =
+        chunk.water_depth_mm.size() == cells && chunk.water_bed_mm.size() == cells &&
+        (chunk.water_edge_flux.empty() || chunk.water_edge_flux.size() == 2u * cells);
+    return (resolution == 0 || empty || complete) &&
            std::all_of(chunk.water_depth_mm.begin(),
                        chunk.water_depth_mm.end(),
                        [](std::int32_t depth) { return depth >= 0; });
@@ -7869,7 +7898,7 @@ bool AuthorityWaterValid(const Chunk& chunk) {
 std::shared_ptr<Chunk> DecodeAuthorityRecord(
     const RegionRecord& record, const std::filesystem::path& path, int rx, int rz, bool legacy) {
     std::vector<std::string> errors;
-    auto chunk = DecodeChunkRecord(record, path, &errors);
+    auto chunk = DecodeChunkRecord(record, path, &errors, !legacy);
     if (!chunk)
         throw std::runtime_error(errors.empty() ? "malformed authority record" : errors.front());
     int actual_rx = 0, actual_rz = 0;
@@ -8266,7 +8295,14 @@ WorldSaveService::read_chunk(const std::filesystem::path& save_dir,
         if (const auto found = region->positions.find(id); found != region->positions.end()) {
             const auto& record = region->records[found->second.first];
             ChunkRecordFacts facts;
-            const bool admitted = AdmitChunkRecord(record, path, &errors, facts, &result.chunk);
+            const bool admitted = AdmitChunkRecord(record,
+                                                   path,
+                                                   &errors,
+                                                   facts,
+                                                   &result.chunk,
+                                                   false,
+                                                   false,
+                                                   admission->format.indexed);
             constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                              (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
             if (!admitted || !result.chunk || result.chunk->get_coords() != coords ||
@@ -8456,11 +8492,13 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                           retain || promote_legacy_water ? &chunk : nullptr,
                                           retain_chunks && retain_chunks->empty() &&
                                               !authoritative_inventory,
-                                          true))
+                                          true,
+                                          indexed))
                         return reject("");
                     if (!chunk && (record.flags & kRecordFlagEdited) == 0u &&
                         facts.loaded_or_edited &&
-                        !AdmitChunkRecord(record, path, &errors, facts, &chunk))
+                        !AdmitChunkRecord(
+                            record, path, &errors, facts, &chunk, false, false, indexed))
                         return reject("");
                     // Retain promotions and flag repairs until the save that records them commits.
                     // A pure validation (no inventory) re-derives repairs on every load, so it
@@ -8739,7 +8777,8 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                          ChunkRecordFacts{chunk->get_coords(),
                                           SdfLatticeAdmissible(*chunk),
                                           water_authority ||
-                                              (record.flags & kRecordFlagEdited) != 0u},
+                                              (record.flags & kRecordFlagEdited) != 0u,
+                                          item.strict_water_valid},
                          std::move(cached)});
                 }
                 std::string().swap(inputs);

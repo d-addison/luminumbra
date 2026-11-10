@@ -720,6 +720,125 @@ struct EncodedChunkArrays {
     }
 };
 
+// Check widths and grid counts before conversion or allocation. Water grids contain at most
+// 32 * 32 cells and two flux values per cell, independent of the enclosing record byte cap.
+void RequireWaterInteger(const nlohmann::json& value, std::int64_t minimum, std::int64_t maximum) {
+    if (!value.is_number_integer() ||
+        (value.is_number_unsigned() &&
+         value.get<std::uint64_t>() > static_cast<std::uint64_t>(maximum)) ||
+        (!value.is_number_unsigned() &&
+         (value.get<std::int64_t>() < minimum || value.get<std::int64_t>() > maximum)))
+        throw std::invalid_argument("Saved water integer range refused");
+}
+
+void RequireWaterFloat(const nlohmann::json& value) {
+    if (!value.is_number())
+        throw std::invalid_argument("Saved water numeric value required");
+    const double number = value.get<double>();
+    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
+        throw std::invalid_argument("Saved water finite float range refused");
+}
+
+void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
+    const auto& state = value.contains("water_state") ? value.at("water_state") : value;
+    const auto& resolution_json = state.at("current_water_resolution");
+    RequireWaterInteger(resolution_json, 0, 32);
+    const int resolution = resolution_json.get<int>();
+    if (resolution != 0 && (resolution < 2 || 32 % resolution != 0))
+        throw std::invalid_argument("Saved water resolution refused");
+    const std::size_t cells =
+        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    if (value.contains("water_depth_mm") != value.contains("water_bed_mm"))
+        throw std::invalid_argument("Saved water integer pair required");
+    constexpr std::array fields{"water_depth_mm",
+                                "water_bed_mm",
+                                "water_edge_flux",
+                                "water_level_data",
+                                "water_flow_data",
+                                "water_sim_terrain_height"};
+    std::array<std::size_t, fields.size()> counts{};
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        const char* field = fields[index];
+        if (!encoded && !value.contains(field)) {
+            // Plain records predating integer grids restore empty depth/bed and zero flux.
+            if (index < 2u)
+                continue;
+            if (index == 2u) {
+                counts[index] = 2u * counts[0];
+                continue;
+            }
+        }
+        const auto& array = value.at(field);
+        const std::string_view name(field);
+        // Off retains integer arrays without a resolution stamp for their old grid.
+        // Dormant legacy arrays need no active-grid shape, but stay bounded to 32^2 cells.
+        const std::size_t limit = name == "water_edge_flux" ? 2048u : 1024u;
+        if (encoded) {
+            const auto& count = array.at("count");
+            if (!count.is_number_unsigned() || count.get<std::uint64_t>() > limit)
+                throw std::invalid_argument("Saved water grid shape refused");
+            counts[index] = static_cast<std::size_t>(count.get<std::uint64_t>());
+            continue;
+        }
+        if (!array.is_array() || array.size() > limit)
+            throw std::invalid_argument("Saved water grid shape refused");
+        counts[index] = array.size();
+        for (const auto& cell : array) {
+            if (name == "water_depth_mm" || name == "water_bed_mm" || name == "water_edge_flux") {
+                RequireWaterInteger(
+                    cell,
+                    name == "water_depth_mm" ? 0 : std::numeric_limits<std::int32_t>::min(),
+                    std::numeric_limits<std::int32_t>::max());
+            } else if (name == "water_flow_data") {
+                RequireWaterFloat(cell.at("x"));
+                RequireWaterFloat(cell.at("y"));
+            } else {
+                RequireWaterFloat(cell);
+            }
+        }
+    }
+    // An absent or empty pair is the historical float-only form. With no active
+    // resolution, dormant integer arrays retain the writer's bounded contents verbatim.
+    const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
+    const bool complete_integers =
+        counts[0] == cells && counts[1] == cells && counts[2] == 2u * cells;
+    const bool dormant_integers = !state.at("has_water_sim").get<bool>() && counts[0] == cells &&
+                                  counts[1] == cells && counts[2] == 0u;
+    const bool mirrors_valid = std::all_of(counts.begin() + 3, counts.end(), [cells](auto count) {
+        return count == 0u || count == cells;
+    });
+    if ((resolution != 0 && !no_integers && !complete_integers && !dormant_integers) ||
+        (resolution != 0 && !mirrors_valid))
+        throw std::invalid_argument("Saved water grid shape refused");
+}
+
+// A successful array decode has already checked encoded types and finite values. The writer
+// uses the same bounded water values before encoding, without parsing its output again.
+bool WaterValuesValid(const Chunk& chunk) {
+    if (!std::all_of(chunk.water_depth_mm.begin(),
+                     chunk.water_depth_mm.end(),
+                     [](std::int32_t depth) { return depth >= 0; }))
+        return false;
+    for (const auto* mirror : {&chunk.water_level_data, &chunk.water_sim_terrain_height}) {
+        if (!std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); }))
+            return false;
+    }
+    return std::all_of(
+        chunk.water_flow_data.begin(), chunk.water_flow_data.end(), [](const Vec2& flow) {
+            return std::isfinite(flow.x) && std::isfinite(flow.y);
+        });
+}
+
+bool WaterAuthorityValid(const nlohmann::json& value, bool encoded) {
+    try {
+        RequireWaterAuthority(value, encoded);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 template<typename Arrays>
 void ApplyChunkFields(const nlohmann::json& value,
                       const Arrays& arrays,
@@ -1468,7 +1587,9 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk) {
                                      {"chunks", std::move(chunks)}});
 }
 
-std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid) {
+    if (strict_water_valid)
+        *strict_water_valid = false;
     nlohmann::json object = ChunkToJson(chunk, false, true);
     object["sdf_data"] = EncodedArrayToJson(chunk.sdf_data);
     object["heightmap_data"] = EncodedArrayToJson(chunk.heightmap_data);
@@ -1487,6 +1608,8 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk) {
     object["water_depth_mm"] = EncodedArrayToJson(chunk.water_depth_mm);
     object["water_bed_mm"] = EncodedArrayToJson(chunk.water_bed_mm);
     object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
+    if (strict_water_valid)
+        *strict_water_valid = WaterAuthorityValid(object, true) && WaterValuesValid(chunk);
     nlohmann::json chunks = nlohmann::json::array();
     chunks.push_back(std::move(object));
     const nlohmann::json snapshot{{"schema", kSnapshotSchema},
@@ -1599,12 +1722,16 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         };
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+            if (authority.strict_water)
+                RequireWaterAuthority(chunk_json, encoded_arrays);
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)
                 ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
             else
                 ApplyChunkJson(chunk_json, *chunk, authority);
+            if (authority.strict_water && !WaterValuesValid(*chunk))
+                throw std::invalid_argument("Saved water decoded values refused");
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
