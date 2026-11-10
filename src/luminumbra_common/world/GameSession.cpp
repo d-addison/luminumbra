@@ -287,12 +287,7 @@ struct GameSession::FoliageStep {
         }
         return true;
     }
-    void Commit(GameSession& session) {
-        // Prepared registers retain the allocator extension; candidate exhaustion was checked.
-        for (auto next = registry.initial_id(); next < registry.next_id(); ++next) {
-            std::uint64_t id = 0;
-            session.m_activeRegionLedger.allocate_persistent_id(id);
-        }
+    void Commit(GameSession& session) noexcept {
         registry.Commit(session.m_registry);
         published_tick = session.m_worldClock.tick();
         active = false;
@@ -301,7 +296,7 @@ struct GameSession::FoliageStep {
         GameSession& session;
         ~Guard() {
             if (auto* step = session.m_foliageStep.get(); step && step->active) {
-                step->registry.Abort(session.m_registry);
+                step->registry.Abort();
                 if (step->soil_staged) {
                     step->soil.swap(session.m_soilGrid);
                 }
@@ -1413,19 +1408,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (!foliage_step) {
                 deliver_events();
             }
-            m_regionalFieldView = nullptr;
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                PublishRegionCompletedWork(std::move(scheduled_fields), scheduled_energy);
+                PublishRegionCompletedWork(
+                    std::move(scheduled_fields), scheduled_energy, defer_water_authority);
+            } else {
+                SettleWaterAuthority(defer_water_authority);
             }
-            SettleWaterAuthority(defer_water_authority);
+            m_regionalFieldView = nullptr;
             if (foliage_step) {
                 foliage_step->Commit(*this);
                 // Callbacks use the live registry. Publish first so they observe
                 // same-tick births/deaths and their writes cannot be overwritten.
                 // Foliage IDs reach the shared allocator before callback allocations.
                 deliver_events();
+                SettleWaterAuthority(defer_water_authority);
                 if (m_regionFault) {
                     return i + 1;
                 }
@@ -2321,22 +2319,36 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
 }
 
 void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields,
-                                             RegionalEnergyStep* energy) {
+                                             RegionalEnergyStep* energy,
+                                             bool defer_water_authority) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
-    const auto ages = energy ? energy->transaction.ages()
-                             : std::span<const std::pair<RegionKey, std::uint64_t>>{};
-    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork)) {
-        throw std::runtime_error("Regional registers refused");
+    m_regionalFieldView = fields ? &*fields : nullptr;
+    // Water observers still see the original registry and committed regional state.
+    SettleWaterAuthority(defer_water_authority);
+    if (m_regionFault) {
+        throw std::runtime_error("Water authority settlement refused");
     }
     auto* foliage = m_foliageStep && m_foliageStep->active ? m_foliageStep.get() : nullptr;
+    if (foliage && m_activeRegionLedger.next_persistent_id() != foliage->registry.initial_id()) {
+        throw std::runtime_error("Stale foliage allocator");
+    }
+    const auto ages = energy ? energy->transaction.ages()
+                             : std::span<const std::pair<RegionKey, std::uint64_t>>{};
+    const auto next_id =
+        foliage ? foliage->registry.next_id() : m_activeRegionLedger.next_persistent_id();
+    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork, next_id)) {
+        throw std::runtime_error("Regional registers refused");
+    }
     if (foliage) {
-        if (m_activeRegionLedger.next_persistent_id() != foliage->registry.initial_id()) {
-            throw std::runtime_error("Stale foliage allocator");
-        }
-        if (foliage->registry.initial_id() == 1 && foliage->registry.next_id() != 1) {
-            throw std::runtime_error("Unadmitted foliage identity");
-        }
         foliage->registry.PreparePublication(m_registry);
+    }
+    // Backend bindings and weather projections can allocate. Prepare them against
+    // the candidate before publishing any regional registers or foliage payloads.
+    const bool regional =
+        m_activeRegionsEnabled && (m_fieldPages.has_ambient() || (fields && fields->has_ambient()));
+    if (regional != m_regionalFieldsBound) {
+        BindRegionalFieldQueries();
+        ProjectRegionalWeather(m_worldClock.tick(), false);
     }
     m_activeRegionLedger.commit_energy_work();
     if (energy) {
@@ -2355,12 +2367,6 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
         RestoreRegionalScent();
     }
     m_regionCompletedWork.clear();
-    // Authority may first appear in a running world. Rebind only at a transition, after
-    // publication has succeeded, and replace any legacy weather projection at that boundary.
-    if ((m_activeRegionsEnabled && m_fieldPages.has_ambient()) != m_regionalFieldsBound) {
-        BindRegionalFieldQueries();
-        ProjectRegionalWeather(m_worldClock.tick(), false);
-    }
 }
 
 FieldPageView GameSession::RegionalFields() const {
@@ -2396,7 +2402,9 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
-    const bool regional = m_activeRegionsEnabled && m_fieldPages.has_ambient();
+    const bool regional =
+        m_activeRegionsEnabled &&
+        (m_fieldPages.has_ambient() || (m_regionalFieldView && m_regionalFieldView->has_ambient()));
     if (!regional) {
         m_regionalWeatherBoundaryOwners.clear();
         m_regionalWeatherBoundaryShifts.clear();
@@ -2618,7 +2626,8 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
     m_regionalAmbientOwners.clear();
     for (const auto& [owner, record] : m_activeRegionLedger.records()) {
         (void)record;
-        UpdateRegionalWeatherBoundaryOwner(owner, m_fieldPages);
+        UpdateRegionalWeatherBoundaryOwner(
+            owner, m_regionalFieldView ? *m_regionalFieldView : m_fieldPages);
     }
 }
 

@@ -192,6 +192,7 @@ struct ActiveRegionLedger::EnergyPublication {
     std::vector<Registers::node_type> spare;
     std::vector<std::pair<RegionKey, std::uint64_t>> ages;
     std::size_t growths = 0;
+    std::uint64_t next_id = 1;
     void recycle(Registers& registers) {
         if (spare.capacity() < spare.size() + registers.size()) {
             spare.reserve((std::max)(spare.capacity() * 2, spare.size() + registers.size()));
@@ -216,10 +217,17 @@ struct ActiveRegionLedger::EnergyPublication {
 };
 
 bool ActiveRegionLedger::prepare_energy_work(
-    std::span<const std::pair<RegionKey, std::uint64_t>> ages, std::span<const RegionWork> work) {
+    std::span<const std::pair<RegionKey, std::uint64_t>> ages,
+    std::span<const RegionWork> work,
+    std::optional<std::uint64_t> next_id) {
+    const auto candidate_id = next_id.value_or(m_nextPersistentId);
+    if (candidate_id < m_nextPersistentId || candidate_id > kPersistentIdLimit) {
+        return false;
+    }
     if (!m_energyPublication)
         m_energyPublication = std::make_shared<EnergyPublication>();
     auto& prepared = *m_energyPublication;
+    prepared.next_id = candidate_id;
     prepared.recycle(prepared.completed);
     prepared.new_ages.clear();
     prepared.ages.clear();
@@ -251,7 +259,8 @@ bool ActiveRegionLedger::prepare_energy_work(
     }
     return encodable_with_counts(m_energyAges.size() + prepared.new_ages.size(),
                                  m_waterDebts.size(),
-                                 prepared.completed.size());
+                                 prepared.completed.size(),
+                                 candidate_id != 1);
 }
 void ActiveRegionLedger::commit_energy_work() noexcept {
     auto& prepared = *m_energyPublication;
@@ -263,6 +272,7 @@ void ActiveRegionLedger::commit_energy_work() noexcept {
             m_energyAges.insert(prepared.new_ages.extract(key));
     }
     m_completedWork.swap(prepared.completed);
+    m_nextPersistentId = prepared.next_id;
 }
 std::size_t ActiveRegionLedger::energy_publication_growths() const noexcept {
     return m_energyPublication ? m_energyPublication->growths : 0;

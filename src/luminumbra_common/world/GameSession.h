@@ -739,7 +739,8 @@ private:
     std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
     [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
     void PublishRegionCompletedWork(std::optional<FieldPageState> fields,
-                                    RegionalEnergyStep* energy);
+                                    RegionalEnergyStep* energy,
+                                    bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
