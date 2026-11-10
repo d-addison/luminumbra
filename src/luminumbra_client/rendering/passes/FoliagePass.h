@@ -234,6 +234,11 @@ public:
     const Client::Attribution::FoliageRebuild& rebuild_attribution() const {
         return m_rebuild_attribution;
     }
+    // Cumulative growth of synchronous surface-build scratch, independent of
+    // attribution collection. Worker results own their separate snapshot storage.
+    std::uint64_t surface_scratch_allocations() const {
+        return m_surface_scratch_allocations;
+    }
     using CountObservation = FoliageCountObservation;
     // Window-boundary diagnostic only. Reads the actual indirect draw count,
     // never the play-mode capacity marker. May wait for GPU completion; callers
@@ -500,6 +505,30 @@ private:
     build_or_get_chunk_records(const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx);
 
     std::unique_ptr<Shader> m_shader;
+    void cache_draw_uniforms();
+    std::uint64_t m_draw_shader_generation = 0;
+    struct DrawUniforms {
+        int view = -1;
+        int projection = -1;
+        int camera_pos = -1;
+        int time = -1;
+        int sway_amplitude = -1;
+        int sway_speed = -1;
+        int fade_start = -1;
+        int fade_end = -1;
+        int sun_direction = -1;
+        int sun_color = -1;
+        int sun_intensity = -1;
+        int ambient_color = -1;
+        int moon_dir = -1;
+        int cloud_shadow_enabled = -1;
+        int cloud_scroll_offset = -1;
+        int cloud_coverage_amount = -1;
+        int cloud_biome_variation = -1;
+        int cloud_plane_height = -1;
+        int cloud_shadow_strength = -1;
+        int cloud_sun_dir = -1;
+    } m_draw_uniforms;
     u32 m_vao = 0;
 
     // GPU scatter resources ( #4). m_gpu_scatter gates the whole path; when
@@ -579,6 +608,10 @@ private:
     GpuMetadata m_uploaded_metadata{};
     // Only adjacent dirty runs are concatenated; at most 512 * 8192 vec4s.
     std::vector<glm::vec4> m_dirty_surface_scratch;
+    // One additional 8192-vec4 (128 KiB) buffer is swapped with cache entries
+    // only after sampling completes, retaining storage across terrain rebuilds.
+    std::vector<glm::vec4> m_surface_build_scratch;
+    std::uint64_t m_surface_scratch_allocations = 0;
     std::size_t m_metadata_count = 0;
     bool m_metadata_valid = false;
     // Palette storage is checked against element, GL byte, and uniform limits.
