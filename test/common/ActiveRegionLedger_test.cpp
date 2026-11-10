@@ -877,6 +877,72 @@ const ActiveRegionLedger::OwnershipProbe kNobodyOwns = [](RegionKey) {
     return false;
 };
 
+TEST(ActiveRegionLedgerTest, WarmScheduleCountsWorkForRegionsAdmittedByTheSameAnchors) {
+    const Vec3 home{256, 0, 256};
+    const std::array replicated{home, home};
+    const RegionKey admitted{0, 0};
+    const std::array work{RegionWork{admitted, 1, 2, 3, 4},
+                          RegionWork{admitted, 1, 0, 0, 0},
+                          RegionWork{kFar, 0, 0, 0, 0},
+                          RegionWork{{999, 999}, 100, 0, 0, 0}};
+    const auto digest = [](RegionKey) {
+        return 42u;
+    };
+    for (const bool local : {false, true}) {
+        ActiveRegionLedger ledger({0, 1, 1});
+        ledger.pin(kFar, true, WorldClock{});
+        ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+        if (local) {
+            ledger.set_local_anchor(home);
+        }
+        const auto anchors = local ? std::optional<std::span<const Vec3>>{}
+                                   : std::optional<std::span<const Vec3>>{replicated};
+        for (const std::uint64_t tick : {2u, 3u}) {
+            auto fresh = ledger;
+            std::size_t allocations = 0;
+            AllocationCounter() = tick == 3 ? &allocations : nullptr;
+            const auto& actual = ledger.schedule(WorldClock(tick), anchors, work, digest);
+            AllocationCounter() = nullptr;
+            EXPECT_EQ(allocations, 0u);
+            EXPECT_EQ(actual.work, 11u);
+            EXPECT_EQ(actual.rejected.work, 1u);
+            EXPECT_EQ(ledger.records().at(admitted).pressure, 11u);
+            ASSERT_EQ(actual.transitions.size(), 1u);
+            EXPECT_EQ(actual.transitions.front(),
+                      (RegionTransition{kFar,
+                                        tick == 2 ? RegionState::Active : RegionState::Reduced,
+                                        tick == 2 ? RegionState::Reduced : RegionState::Frozen}));
+            EXPECT_EQ(actual, fresh.schedule(WorldClock(tick), anchors, work, digest));
+            EXPECT_EQ(ledger.records(), fresh.records());
+            EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+            EXPECT_EQ(ledger.encode(), fresh.encode());
+        }
+    }
+}
+
+TEST(ActiveRegionLedgerTest, SameCallWorkRequiresAnAdmittedAnchorOrAnExistingRecord) {
+    const Vec3 home{256, 0, 256};
+    const std::array invalid{Vec3{std::numeric_limits<float>::quiet_NaN(), 0, 0}};
+    const std::array work{RegionWork{{0, 0}, 10, 0, 0, 0}, RegionWork{kFar, 1, 0, 0, 0}};
+    for (const bool empty : {false, true}) {
+        ActiveRegionLedger ledger;
+        ledger.pin(kFar, true, WorldClock{});
+        ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+        ledger.set_local_anchor(home);
+        auto fresh = ledger;
+        const auto anchors = empty ? std::span<const Vec3>{} : std::span<const Vec3>{invalid};
+        const auto actual = ledger.schedule(WorldClock(2), anchors, work);
+        EXPECT_EQ(actual.work, 1u);
+        EXPECT_EQ(actual.rejected.work, 1u);
+        EXPECT_EQ(actual.rejected.anchors, empty ? 0u : 1u);
+        EXPECT_FALSE(ledger.records().contains({0, 0}));
+        EXPECT_EQ(actual, fresh.schedule(WorldClock(2), anchors, work));
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+    }
+}
+
 TEST(ActiveRegionLedgerTest, WarmScheduleRetainsNodesAndMatchesFreshScratchAfterShrinkAndGrowth) {
     ActiveRegionLedger ledger({0, 1, 1});
     ledger.pin(kFar, true, WorldClock{});
@@ -888,7 +954,11 @@ TEST(ActiveRegionLedgerTest, WarmScheduleRetainsNodesAndMatchesFreshScratchAfter
     const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
     ledger.schedule(WorldClock(1), home, work);
     const auto* retained = &ledger.records().at(kFar);
-    const auto initial = ledger.records().size();
+    ASSERT_EQ(ledger.records().size(), 10u);
+    ActiveRegionLedger away_reference;
+    away_reference.pin(kFar, true, WorldClock{});
+    const auto away_schedule = away_reference.schedule(WorldClock(1), away);
+    ASSERT_EQ(away_reference.records().size(), 13u);
     constexpr auto idle = ActiveRegionLedger::kIdleEvictionTicks;
     for (const auto tick : {std::uint64_t{2}, std::uint64_t{3}, idle + 4, idle + 5, idle + 6}) {
         auto fresh = ledger; // Copies carry no derived scheduler scratch.
@@ -903,6 +973,8 @@ TEST(ActiveRegionLedgerTest, WarmScheduleRetainsNodesAndMatchesFreshScratchAfter
                                 [](RegionKey) -> bool { throw std::runtime_error("probe"); }),
                 std::runtime_error);
             EXPECT_EQ(ledger.encode(), fresh.encode());
+            EXPECT_EQ(ledger.records(), fresh.records());
+            EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
         }
         std::size_t allocations = 0;
         AllocationCounter() = tick == idle + 5 ? nullptr : &allocations;
@@ -918,7 +990,7 @@ TEST(ActiveRegionLedgerTest, WarmScheduleRetainsNodesAndMatchesFreshScratchAfter
             EXPECT_EQ(ledger.records().size(), 1u);
         }
         if (tick == idle + 5) {
-            EXPECT_EQ(ledger.records().size(), initial);
+            EXPECT_EQ(ledger.records().size(), away_schedule.ledger_records);
         }
     }
 }
@@ -943,6 +1015,70 @@ RegionSchedule Idle(ActiveRegionLedger& ledger,
                     std::uint64_t tick,
                     const ActiveRegionLedger::OwnershipProbe& owned = {}) {
     return ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, {}, {}, owned);
+}
+
+TEST(ActiveRegionLedgerTest, WarmRetentionMatchesFreshScratchForEveryOwnershipMode) {
+    const RegionKey retained{0, 0};
+    const RegionKey unowned{-1, 0};
+    const std::array<ActiveRegionLedger::OwnershipProbe, 4> probes{
+        ActiveRegionLedger::OwnershipProbe{},
+        kNobodyOwns,
+        [](RegionKey) { return true; },
+        [retained](RegionKey key) {
+            return key == retained;
+        }};
+    for (std::size_t mode = 0; mode < probes.size(); ++mode) {
+        auto ledger = HomeVisit();
+        const auto initial = ledger.records().size();
+        ASSERT_TRUE(ledger.records().contains(retained));
+        ASSERT_TRUE(ledger.records().contains(unowned));
+        for (const auto tick : {kIdle, kIdle + 1, kIdle + 2}) {
+            auto fresh = ledger;
+            std::size_t allocations = 0;
+            AllocationCounter() = &allocations;
+            const auto& actual =
+                ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, {}, {}, probes[mode]);
+            AllocationCounter() = nullptr;
+            EXPECT_EQ(allocations, 0u);
+            const bool expired = tick > kIdle;
+            auto expected = initial;
+            if (expired && (mode == 1 || mode == 3)) {
+                expected = mode == 3 ? 1u : 0u;
+            }
+            EXPECT_EQ(ledger.records().size(), expected);
+            EXPECT_EQ(actual.ledger_records, expected);
+            EXPECT_EQ(ledger.records().contains(retained), !expired || mode != 1);
+            EXPECT_EQ(ledger.records().contains(unowned), !expired || mode == 0 || mode == 2);
+            EXPECT_EQ(actual, Idle(fresh, tick, probes[mode]));
+            EXPECT_EQ(ledger.records(), fresh.records());
+            EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+            EXPECT_EQ(ledger.encode(), fresh.encode());
+        }
+    }
+}
+
+TEST(ActiveRegionLedgerTest, PartialOwnershipProbeFailureLeavesWarmLedgerUnchangedForRetry) {
+    auto ledger = HomeVisit();
+    Idle(ledger, kIdle);
+    auto fresh = ledger;
+    std::size_t calls = 0;
+    const auto probe = [&calls](RegionKey) {
+        if (++calls == 2) {
+            throw std::runtime_error("ownership unavailable");
+        }
+        return false;
+    };
+    EXPECT_THROW(Idle(ledger, kIdle + 1, probe), std::runtime_error);
+    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(ledger.records(), fresh.records());
+    EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+    EXPECT_EQ(ledger.encode(), fresh.encode());
+    const auto actual = Idle(ledger, kIdle + 1, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_EQ(actual, Idle(fresh, kIdle + 1, kNobodyOwns));
+    EXPECT_EQ(ledger.records(), fresh.records());
+    EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+    EXPECT_EQ(ledger.encode(), fresh.encode());
 }
 
 TEST(ActiveRegionLedgerTest, RetentionDropsOnlyIdleUnownedRecords) {

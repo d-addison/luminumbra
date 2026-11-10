@@ -454,7 +454,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     auto& accepted_work = scratch.work;
     accepted_work.clear();
     const auto accept_work = [&](const RegionWork& units) {
-        if (m_records.contains(units.key)) {
+        if (m_records.contains(units.key) || scratch.added.contains(units.key)) {
             accepted_work.push_back(units);
             const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
                                    Sum(units.water_cells, units.page_updates));
@@ -488,8 +488,8 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         const auto proximity = nearby ? clock.tick() : r.last_proximity;
         const bool idle =
             clock.tick() >= proximity && clock.tick() - proximity >= kIdleEvictionTicks;
-        const bool evict = owned && !r.pinned && !r.edited && !r.populated && r.water_cursor == 0 &&
-                           idle && !m_energyAges.contains(key) && !m_waterDebts.contains(key) &&
+        const bool evict = !r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
+                           !m_energyAges.contains(key) && !m_waterDebts.contains(key) &&
                            !m_completedWork.contains(key);
         if (evict)
             scratch.evictions.push_back(key);
@@ -532,7 +532,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
             throw std::invalid_argument("Freezing requires a durable region digest provider");
         frozen_digest = durable_digest(*selected);
     }
-    std::erase_if(scratch.evictions, [&](const RegionKey& key) { return owned(key); });
+    std::erase_if(scratch.evictions, [&](const RegionKey& key) { return !owned || owned(key); });
     // Complete every throwing operation before publishing any record changes.
     result.due.reserve(rows.size());
     result.transitions.reserve(rows.size());
