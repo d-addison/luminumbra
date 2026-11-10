@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CreatureTickAdmission.h"
+
 //  the STEERING CONSUMER — blends the  bias systems' outputs into the creature wish
 // velocity before the physics bridge applies it. This is the INTEGRATION layer between the bias
 // producers (PredatorPackSystem / MigrationSystem / TerritorySystem, which run in slot 7 and
@@ -29,10 +31,14 @@ struct SteeringConsumerStats {
     int homed = 0;    // creatures given a territory homing bias
 };
 
-inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
+inline SteeringConsumerStats
+RunSteeringConsumerOnTick(entt::registry& reg, const CreatureTickAdmission* admission = nullptr) {
     SteeringConsumerStats stats;
     auto sv = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
     for (auto e : sv) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& cr = sv.get<Comp::CreatureComponent>(e);
         if (cr.eaten)
             continue; // a carcass is inert
