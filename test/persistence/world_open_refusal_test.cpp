@@ -3632,6 +3632,234 @@ TEST_F(WorldOpenRefusal, DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles
     EXPECT_TRUE(changes.empty());
 }
 
+TEST_F(WorldOpenRefusal, DirectoryDiscoveryRehashesWatchTableAndPreservesOrdinaryChanges) {
+    using Luminumbra::Client::UI::UIHotReload;
+    const auto ui = root / "ui";
+    const auto original = ui / "original.rml";
+    ASSERT_NO_FATAL_FAILURE(Write(original, "original"));
+    UIHotReload reload;
+    reload.SetEnabled(true);
+    reload.WatchDirectory(ui, "rml");
+    const auto buckets_before = reload.WatchedFileBucketCount();
+    // Bound the fixture to 256 additions, exceeding the initial table's capacity.
+    constexpr std::size_t additions = 256;
+    ASSERT_LT(buckets_before, additions);
+    std::vector<std::string> expected{Filesystem::GenericUtf8PathString(original)};
+    for (std::size_t index = 0; index < additions; ++index) {
+        const auto path = ui / "nested" / (std::to_string(index) + ".rml");
+        ASSERT_NO_FATAL_FAILURE(Write(path, "new document"));
+        expected.push_back(Filesystem::GenericUtf8PathString(path));
+    }
+    ASSERT_NO_FATAL_FAILURE(Write(ui / "ignored.txt", "ignored"));
+    fs::last_write_time(original, fs::last_write_time(original) + std::chrono::seconds(2));
+    std::vector<std::string> changes;
+    reload.SetReloadCallback([&](const std::string& path) { changes.push_back(path); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    EXPECT_GT(reload.WatchedFileBucketCount(), buckets_before);
+    std::sort(expected.begin(), expected.end());
+    std::sort(changes.begin(), changes.end());
+    EXPECT_EQ(changes, expected);
+    changes.clear();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    EXPECT_TRUE(changes.empty());
+}
+
+TEST_F(WorldOpenRefusal, ReloadCallbackAddsFileAndDirectoryWatchesForLaterPolls) {
+    using Luminumbra::Client::UI::UIHotReload;
+    const auto original = root / "original.rml";
+    const auto added_file = root / "added.rml";
+    const auto added_directory = root / "added";
+    const auto added_document = added_directory / "existing.rml";
+    for (const auto& path : {original, added_file, added_document}) {
+        ASSERT_NO_FATAL_FAILURE(Write(path, "initial"));
+    }
+    UIHotReload reload;
+    reload.SetEnabled(true);
+    reload.WatchFile(original);
+    std::vector<std::string> changes;
+    bool watches_added = false;
+    reload.SetReloadCallback([&](const std::string& path) {
+        changes.push_back(path);
+        if (!watches_added) {
+            watches_added = true;
+            reload.WatchFile(added_file);
+            reload.WatchDirectory(added_directory, "rml");
+        }
+    });
+    fs::last_write_time(original, fs::last_write_time(original) + std::chrono::seconds(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    EXPECT_EQ(changes, std::vector<std::string>{Filesystem::GenericUtf8PathString(original)});
+    changes.clear();
+    const auto discovered = added_directory / "nested/new.rml";
+    ASSERT_NO_FATAL_FAILURE(Write(discovered, "discovered"));
+    for (const auto& path : {added_file, added_document}) {
+        fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+    }
+    std::vector<std::string> expected{Filesystem::GenericUtf8PathString(added_file),
+                                      Filesystem::GenericUtf8PathString(added_document),
+                                      Filesystem::GenericUtf8PathString(discovered)};
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    std::sort(expected.begin(), expected.end());
+    std::sort(changes.begin(), changes.end());
+    EXPECT_EQ(changes, expected);
+}
+
+TEST_F(WorldOpenRefusal, ReloadCallbackRemovesOwnAndOtherWatchesAfterDiscovery) {
+    using Luminumbra::Client::UI::UIHotReload;
+    const std::array<fs::path, 2> documents{root / "first.rml", root / "second.rml"};
+    UIHotReload reload;
+    reload.SetEnabled(true);
+    for (const auto& path : documents) {
+        ASSERT_NO_FATAL_FAILURE(Write(path, "initial"));
+        reload.WatchFile(path);
+        fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+    }
+    std::vector<std::string> changes;
+    reload.SetReloadCallback([&](const std::string& path) {
+        changes.push_back(path);
+        // Remove both the executing watch and the other queued watch in either order.
+        for (const auto& document : documents) {
+            reload.StopWatching(document);
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    std::sort(changes.begin(), changes.end());
+    const std::vector<std::string> expected{Filesystem::GenericUtf8PathString(documents[0]),
+                                            Filesystem::GenericUtf8PathString(documents[1])};
+    EXPECT_EQ(changes, expected);
+    changes.clear();
+    for (const auto& path : documents) {
+        fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+    reload.Update();
+    EXPECT_TRUE(changes.empty());
+}
+
+TEST_F(WorldOpenRefusal, ReloadCallbackCanDisableOrClearWatchesWhileQueuedChangesDrain) {
+    using Luminumbra::Client::UI::UIHotReload;
+    const auto ui = root / "ui";
+    const std::array<fs::path, 2> documents{ui / "first.rml", ui / "second.rml"};
+    for (const bool clear_watches : {false, true}) {
+        SCOPED_TRACE(clear_watches);
+        for (const auto& path : documents) {
+            ASSERT_NO_FATAL_FAILURE(Write(path, "initial"));
+        }
+        UIHotReload reload;
+        reload.SetEnabled(true);
+        reload.WatchDirectory(ui, "rml");
+        std::vector<std::string> changes;
+        reload.SetReloadCallback([&](const std::string& path) {
+            changes.push_back(path);
+            if (clear_watches) {
+                reload.ClearAllWatches();
+            } else {
+                reload.SetEnabled(false);
+            }
+        });
+        for (const auto& path : documents) {
+            fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+        reload.Update();
+        std::sort(changes.begin(), changes.end());
+        const std::vector<std::string> expected{Filesystem::GenericUtf8PathString(documents[0]),
+                                                Filesystem::GenericUtf8PathString(documents[1])};
+        EXPECT_EQ(changes, expected);
+        changes.clear();
+        for (const auto& path : documents) {
+            fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+        }
+        ASSERT_NO_FATAL_FAILURE(Write(ui / "new.rml", "new document"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+        reload.Update();
+        EXPECT_TRUE(changes.empty());
+        reload.SetEnabled(true);
+        reload.Update();
+        auto resumed_expected = clear_watches ? std::vector<std::string>{} : expected;
+        if (!clear_watches) {
+            resumed_expected.push_back(Filesystem::GenericUtf8PathString(ui / "new.rml"));
+        }
+        std::sort(resumed_expected.begin(), resumed_expected.end());
+        std::sort(changes.begin(), changes.end());
+        EXPECT_EQ(changes, resumed_expected);
+        fs::remove(ui / "new.rml");
+    }
+}
+
+TEST_F(WorldOpenRefusal, ReloadCallbackLifetimeSurvivesClearingAndReplacementOnEveryEntryPoint) {
+    using Luminumbra::Client::UI::UIHotReload;
+    const auto document = root / "document.rml";
+    ASSERT_NO_FATAL_FAILURE(Write(document, "initial"));
+    for (const bool replace_callback : {false, true}) {
+        for (const int entry_point : {0, 1, 2}) {
+            SCOPED_TRACE(replace_callback);
+            SCOPED_TRACE(entry_point);
+            UIHotReload reload;
+            reload.SetEnabled(true);
+            reload.WatchFile(document);
+            unsigned calls = 0;
+            unsigned replacement_calls = 0;
+            auto lifetime = std::make_shared<const int>(42);
+            const std::weak_ptr<const int> registered_lifetime = lifetime;
+            reload.SetReloadCallback([&, lifetime](const std::string& path) {
+                const std::weak_ptr<const int> executing_lifetime = lifetime;
+                // Retain all state used after registration changes outside the callable.
+                auto* const call_count = &calls;
+                EXPECT_EQ(path,
+                          entry_point == 1 ? std::string{}
+                                           : Filesystem::GenericUtf8PathString(document));
+                if (replace_callback) {
+                    reload.SetReloadCallback([&](const std::string&) { ++replacement_calls; });
+                } else {
+                    reload.SetReloadCallback({});
+                }
+                EXPECT_FALSE(executing_lifetime.expired());
+                ++*call_count;
+            });
+            lifetime.reset();
+            ASSERT_FALSE(registered_lifetime.expired());
+            if (entry_point == 0) {
+                reload.TriggerReload(document);
+            } else if (entry_point == 1) {
+                reload.ReloadAll();
+            } else {
+                fs::last_write_time(document,
+                                    fs::last_write_time(document) + std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1010));
+                reload.Update();
+            }
+            EXPECT_EQ(calls, 1u);
+            EXPECT_TRUE(registered_lifetime.expired());
+            EXPECT_EQ(replacement_calls, 0u);
+            reload.TriggerReload(document);
+            reload.ReloadAll();
+            EXPECT_EQ(calls, 1u);
+            EXPECT_EQ(replacement_calls, replace_callback ? 2u : 0u);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ReloadCallbackRetainsMutableStateAndSupportsNestedDelivery) {
+    using Luminumbra::Client::UI::UIHotReload;
+    UIHotReload reload;
+    std::vector<unsigned> calls;
+    reload.SetReloadCallback([&, count = 0u](const std::string&) mutable {
+        calls.push_back(++count);
+        if (count == 1u) {
+            reload.ReloadAll();
+        }
+    });
+    reload.TriggerReload(root / "manual.rml");
+    reload.ReloadAll();
+    EXPECT_EQ(calls, (std::vector<unsigned>{1u, 2u, 3u}));
+}
+
 TEST_F(WorldOpenRefusal, DirectoryWatchWildcardAndMissingDirectoryRemainSafe) {
     using Luminumbra::Client::UI::UIHotReload;
     const auto ui = root / "ui";

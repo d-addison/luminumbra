@@ -94,17 +94,20 @@ void UIHotReload::Update() {
 }
 
 void UIHotReload::TriggerReload(const std::filesystem::path& filePath) {
-    if (m_reloadCallback) {
+    // A callback may replace or clear its registration while it is executing.
+    const auto callback = m_reloadCallback;
+    if (callback) {
         LUMINUMBRA_CORE_INFO("[UI HotReload] File changed, triggering reload: {}",
                              Filesystem::GenericUtf8PathString(filePath));
-        m_reloadCallback(Filesystem::GenericUtf8PathString(filePath));
+        (*callback)(Filesystem::GenericUtf8PathString(filePath));
     }
 }
 
 void UIHotReload::ReloadAll() {
-    if (m_reloadCallback) {
+    const auto callback = m_reloadCallback;
+    if (callback) {
         LUMINUMBRA_CORE_INFO("[UI HotReload] Manual reload all triggered");
-        m_reloadCallback(""); // Empty path indicates reload all
+        (*callback)(""); // Empty path indicates reload all
     }
 }
 
