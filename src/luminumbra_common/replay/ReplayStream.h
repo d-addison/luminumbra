@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "../HashCheckpoint.h"
+#include "RegionScheduleTrace.h"
 
 namespace Luminumbra::Replay {
 
@@ -132,6 +133,9 @@ public:
     // Patches the header tick_count, appends the trailer, and flushes to disk.
     // Returns false on IO failure. After Finalize the writer is closed.
     bool Finalize(std::uint64_t tick_count);
+    // Finalizes a recoverable replay/trace pair. Null removes a stale trace;
+    // refusal preserves both previous files, including their exact bytes.
+    bool Finalize(std::uint64_t tick_count, const RegionScheduleTrace* trace);
 
     [[nodiscard]] std::uint64_t InputRecordCount() const {
         return m_input_count;
@@ -141,6 +145,7 @@ public:
     }
 
 private:
+    bool Finish(std::uint64_t tick_count, const std::string* trace_bytes, bool paired);
     std::string m_path;
     std::vector<std::uint8_t> m_buffer; // header + records, flushed on Finalize
     std::uint64_t m_input_count = 0;

@@ -366,6 +366,33 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("ReadSavedJson(path,kMaxTraceBytes,value,missing,false)", trace)
         self.assertLess(trace.index("BoundedJsonDump("), trace.index("ReplacementOutputFileoutput(path)"))
 
+    def test_replay_pair_publication_and_reader_share_recovery_guard(self):
+        mode = compact_cpp((ROOT / "src/luminumbra_server/modes/Replay.cpp").read_text())
+        record = cpp_block(mode, "intRunRecord(")
+        self.assertIn("writer.Finalize(executed,trace)", record)
+        self.assertNotIn("WriteRegionScheduleTrace(", record)
+        self.assertNotIn("fs::remove(companion", record)
+        playback = cpp_block(mode, "intRunReplay(")
+        self.assertLess(playback.index("ReplayPairReadGuard>"), playback.index("ReadReplay("))
+        self.assertLess(playback.index("ReadRegionScheduleTrace("), playback.index("pair_guard.reset()"))
+        stream = compact_cpp((ROOT / "src/luminumbra_common/replay/ReplayStream.cpp").read_text())
+        self.assertIn("paired?output.commit_with_companion(trace_bytes):output.commit()", stream)
+
+    def test_replay_output_staging_has_a_fixed_stem_and_journals_before_pair_changes(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text())
+        constructor = cpp_block(service, "ReplacementOutputFile::ReplacementOutputFile(")
+        self.assertIn('NextLedgerTempPath(output_path.parent_path()/".output")', constructor)
+        self.assertNotIn("NextLedgerTempPath(output_path)", constructor)
+        pair = cpp_block(service, "boolReplacementOutputFile::commit_with_companion(")
+        self.assertLess(pair.index("!journal.commit()"), pair.index("!trace->publish()"))
+        self.assertLess(pair.index("!trace->publish()"), pair.index("!publish()"))
+        self.assertIn("RecoverReplayPair(directory)", pair)
+        recovery = cpp_block(service, "boolRecoverReplayPair(")
+        self.assertIn("installed==incoming", recovery)
+        self.assertIn("installed==previous", recovery)
+        self.assertIn('header["undo_bytes"]', recovery)
+        self.assertIn('header["undo_checksum"]', recovery)
+
     def test_overlay_failure_regression_reaches_the_owned_staging_writer(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
@@ -424,9 +451,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
                          "Detail::WindowsDisposeLink(retiring)", "ReadFileIdentity(path,named)",
-                         "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
+                         "std::uint64_tmaximum=512", "current[5]>maximum", "current[5]>bytes.max_size()",
+                         "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
-        self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+        self.assertLess(native.index("current[5]>maximum"), native.index("bytes.assign("))
         identity = service[service.index("boolReadFileIdentity("):service.index("boolSameFileIdentity(")]
         self.assertIn("::lstat(path.c_str(),&information)", identity)
 
@@ -589,7 +617,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
         publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
-        self.assertIn("constDWORDflags=durable_namespace?MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH:MOVEFILE_REPLACE_EXISTING;", publication)
+        self.assertIn("constDWORDflags=MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH;", publication)
         ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
                    "::MoveFileExW(temp.c_str(),destination.c_str(),flags)", "constDWORDattributes_error=::GetLastError()",
                    "if(retained_payload)retained_payload->retain_publication_identity();",

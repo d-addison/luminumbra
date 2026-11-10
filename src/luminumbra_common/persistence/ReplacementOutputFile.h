@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <string_view>
 
 namespace Luminumbra::Persistence {
@@ -17,6 +18,27 @@ public:
     [[nodiscard]] bool is_open() const;
     bool write(std::string_view bytes);
     bool commit();
+    // Publish <destination>.regions.json first, with a durable undo record;
+    // destination replacement is the commit point. Null removes the companion.
+    // Companion bytes and undo storage are bounded to 96 MiB.
+    bool commit_with_companion(const std::string* bytes);
+
+private:
+    bool prepare();
+    bool publish();
+    struct State;
+    std::unique_ptr<State> m_state;
+};
+// Holds the directory's interprocess publication lock, recovering an interrupted
+// pair before admission. Keep it alive across BOTH replay and companion reads.
+// An invalid/unrecoverable journal refuses admission without consuming a pair.
+class ReplayPairReadGuard {
+public:
+    explicit ReplayPairReadGuard(const std::filesystem::path& replay);
+    ~ReplayPairReadGuard();
+    ReplayPairReadGuard(const ReplayPairReadGuard&) = delete;
+    ReplayPairReadGuard& operator=(const ReplayPairReadGuard&) = delete;
+    [[nodiscard]] bool is_open() const;
 
 private:
     struct State;

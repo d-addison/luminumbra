@@ -74,6 +74,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #if defined(__linux__)
@@ -995,10 +996,10 @@ public:
         return refuse("cannot retain unchanged staging identity after closing writer", errors);
     }
 
-    bool read_record(std::string& bytes) const {
+    bool read_record(std::string& bytes, std::uint64_t maximum = 512) const {
         StagingIdentity current{};
-        // Sidecars have a fixed 512-byte admission ceiling, before allocation.
-        if (!identity(current) || current[5] > 512)
+        // Ordinary ownership records admit 512 bytes; pair undo supplies its explicit bound.
+        if (!identity(current) || current[5] > maximum || current[5] > bytes.max_size())
             return false;
         bytes.assign(static_cast<std::size_t>(current[5]), '\0');
 #if defined(_WIN32)
@@ -1015,14 +1016,15 @@ public:
             DWORD received = 0;
             if (!::ReadFile(m_handle,
                             bytes.data() + offset,
-                            static_cast<DWORD>(bytes.size() - offset),
+                            static_cast<DWORD>(std::min<std::size_t>(bytes.size() - offset, 65536)),
                             &received,
                             nullptr) ||
                 received == 0)
                 return false;
 #else
-            const auto received =
-                ::read(m_descriptor, bytes.data() + offset, bytes.size() - offset);
+            const auto received = ::read(m_descriptor,
+                                         bytes.data() + offset,
+                                         std::min<std::size_t>(bytes.size() - offset, 65536));
             if (received < 0 && errno == EINTR)
                 continue;
             if (received <= 0)
@@ -1834,8 +1836,7 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
             retained_payload->retain_publication_identity();
         // Payload and transaction undo bytes are flushed before publication.
         // ReplaceFileW does not support write-through; use the supported same-volume move.
-        const DWORD flags = durable_namespace ? MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-                                              : MOVEFILE_REPLACE_EXISTING;
+        const DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
         if (::MoveFileExW(temp.c_str(), destination.c_str(), flags))
             return true;
         const DWORD error = ::GetLastError();
@@ -6749,6 +6750,234 @@ bool StagingFile::replace(const std::filesystem::path& destination) {
 }
 } // namespace
 
+namespace {
+constexpr std::uint64_t kPairTraceBytes = 96u * 1024u * 1024u;
+constexpr std::size_t kPairHeaderBytes = 4096;
+constexpr const char* kPairUndo = ".replay-pair.undo";
+using PairIdentity = std::array<std::uint64_t, 3>;
+
+std::mutex& PairMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool FlushPairDirectory(const std::filesystem::path& directory) {
+#if defined(_WIN32)
+    // Windows namespace operations below use MoveFileExW write-through.
+    (void)directory;
+    return true;
+#else
+    return FlushDirectoryEntry(directory, nullptr);
+#endif
+}
+
+bool PairMember(const std::filesystem::path& path, PairIdentity& identity, std::string* bytes) {
+    const SavedInputFile input(path);
+    identity = {};
+    if (input.missing()) {
+        if (bytes)
+            bytes->clear();
+        return true;
+    }
+    SavedInputFile::Version before{}, after{};
+    return input.identity(identity) && input.version(before) &&
+           (!bytes || input.read(*bytes, kPairTraceBytes)) && input.version(after) &&
+           before == after;
+}
+
+bool DecodePairIdentity(const nlohmann::json& value, PairIdentity& identity) {
+    if (!value.is_array() || value.size() != identity.size())
+        return false;
+    for (std::size_t index = 0; index < identity.size(); ++index) {
+        if (!value[index].is_number_unsigned())
+            return false;
+        identity[index] = value[index].get<std::uint64_t>();
+    }
+    return true;
+}
+
+bool RestorePairTrace(const std::filesystem::path& companion,
+                      const std::string_view undo,
+                      const PairIdentity& expected) {
+    std::filesystem::path temporary;
+    PairIdentity incoming{};
+    if (!WorldSaveService::prepare_restoration(
+            companion.parent_path() / ".output", std::string(undo), temporary, incoming, nullptr))
+        return false;
+    // Bound retirement to the trace this transaction installed. A substituted
+    // occupant is preserved; an interrupted retirement is retryable from undo.
+    try {
+        const bool restored = WorldSaveService::publish_restoration(
+            temporary, companion, expected, incoming, nullptr);
+        if (!restored)
+            WorldSaveService::remove_owned_entry(temporary, incoming, nullptr);
+        return restored;
+    } catch (const std::exception&) {
+        WorldSaveService::remove_owned_entry(temporary, incoming, nullptr);
+        throw;
+    }
+}
+
+// The journal is a bounded JSON header followed by the exact old companion
+// bytes (at most 96 MiB). No replay payload is copied or scanned for recovery.
+bool RecoverReplayPair(const std::filesystem::path& directory) {
+    const auto journal_path = directory / kPairUndo;
+    StagingFile journal(journal_path, StagingFile::Mode::Inspect);
+    StagingIdentity journal_identity{};
+    if (!journal.identity(journal_identity))
+        return StagingPathMissing(journal_path);
+    std::string record;
+    if (!journal.read_record(record, kPairTraceBytes + kPairHeaderBytes))
+        return false;
+    const auto separator = record.find('\n');
+    if (separator == std::string::npos || separator > kPairHeaderBytes ||
+        record.size() - separator - 1 > kPairTraceBytes)
+        return false;
+    const auto header =
+        nlohmann::json::parse(record.begin(),
+                              record.begin() + static_cast<std::string::difference_type>(separator),
+                              nullptr,
+                              false);
+    if (!header.is_object() || header.size() != 9 ||
+        header.value("schema", std::string{}) != "luminumbra.replay_pair.v1" ||
+        !header.contains("replay") || !header["replay"].is_string())
+        return false;
+    const auto name = header["replay"].get<std::string>();
+    const auto filename = Filesystem::PathFromUtf8(name);
+    if (name.empty() || name.find_first_of("/\\:") != std::string::npos ||
+        name.find('\0') != std::string::npos || filename != filename.filename() || name == "." ||
+        name == ".." || StagingNameEquals(filename, kPairUndo))
+        return false;
+    PairIdentity previous{}, incoming{}, old_trace{}, new_trace{};
+    if (!header.contains("previous") || !DecodePairIdentity(header["previous"], previous) ||
+        !header.contains("incoming") || !DecodePairIdentity(header["incoming"], incoming) ||
+        !header.contains("old_trace") || !DecodePairIdentity(header["old_trace"], old_trace) ||
+        !header.contains("new_trace") || !DecodePairIdentity(header["new_trace"], new_trace) ||
+        incoming == PairIdentity{} ||
+        (old_trace == PairIdentity{} && separator + 1 != record.size()))
+        return false;
+    const std::string_view undo(record.data() + separator + 1, record.size() - separator - 1);
+    if (!header.contains("undo_bytes") || !header["undo_bytes"].is_number_unsigned() ||
+        header["undo_bytes"].get<std::uint64_t>() != undo.size() ||
+        !header.contains("undo_checksum") || !header["undo_checksum"].is_number_unsigned() ||
+        header["undo_checksum"].get<std::uint64_t>() != fnv1a64_bytes(undo.data(), undo.size()))
+        return false;
+    const auto replay = directory / filename;
+    auto companion = replay;
+    companion += ".regions.json";
+    PairIdentity installed{}, trace_identity{};
+    std::string trace_bytes;
+    if (!PairMember(replay, installed, nullptr) ||
+        !PairMember(companion, trace_identity, &trace_bytes))
+        return false;
+    if (installed == incoming) {
+        // The replay rename is the commit point; the new trace preceded it.
+        if (trace_identity != new_trace)
+            return false;
+    } else if (installed == previous) {
+        // Recovery may itself have been interrupted after restoring the bytes.
+        if (trace_identity != old_trace && !(old_trace != PairIdentity{} && trace_bytes == undo)) {
+            if (trace_identity != new_trace && trace_identity != PairIdentity{})
+                return false;
+            if (old_trace == PairIdentity{}) {
+                StagingFile trace_file(companion, StagingFile::Mode::Inspect);
+                StagingIdentity held{};
+                if (!trace_file.identity(held) ||
+                    !std::equal(new_trace.begin(), new_trace.end(), held.begin()) ||
+                    !trace_file.remove())
+                    return false;
+            } else {
+                if (!RestorePairTrace(companion, undo, trace_identity))
+                    return false;
+            }
+        }
+    } else {
+        return false; // Never overwrite an unrelated replay or companion.
+    }
+    // Keep undo until the chosen pair's namespace has reached stable storage.
+    return FlushPairDirectory(directory) && journal.remove() && FlushPairDirectory(directory);
+}
+} // namespace
+
+struct ReplayPairReadGuard::State {
+    explicit State(const std::filesystem::path& replay)
+        : thread_lock(PairMutex(), std::try_to_lock) {
+        if (!thread_lock.owns_lock())
+            return;
+        directory = Filesystem::AbsolutePath(replay).parent_path();
+#if defined(_WIN32)
+        const Detail::WindowsPublicationHandle parent(
+            ::CreateFileW(directory.c_str(),
+                          FILE_READ_ATTRIBUTES,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS,
+                          nullptr));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (parent.get() == INVALID_HANDLE_VALUE ||
+            !::GetFileInformationByHandle(parent.get(), &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            return;
+        // Three 32-bit identity words bound the mutex name to fewer than 80
+        // UTF-16 units. Directory aliases (including short names) share it.
+        const auto name =
+            L"Global\\Luminumbra.ReplayPair." + std::to_wstring(info.dwVolumeSerialNumber) + L"." +
+            std::to_wstring(info.nFileIndexHigh) + L"." + std::to_wstring(info.nFileIndexLow);
+        handle = ::CreateMutexW(nullptr, FALSE, name.c_str());
+        if (!handle)
+            return;
+        const auto acquired = ::WaitForSingleObject(handle, 0);
+        locked = acquired == WAIT_OBJECT_0 || acquired == WAIT_ABANDONED;
+        if (!locked)
+            return;
+#else
+        // Lock the existing directory, so playback also works on read-only
+        // media and there is no removable lock-file name to substitute.
+        descriptor = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (descriptor < 0 || ::flock(descriptor, LOCK_EX | LOCK_NB) != 0)
+            return;
+#endif
+        try {
+            ready = RecoverReplayPair(directory);
+        } catch (const std::exception&) {
+            ready = false;
+        }
+    }
+    ~State() {
+#if defined(_WIN32)
+        if (locked)
+            ::ReleaseMutex(handle);
+        if (handle)
+            ::CloseHandle(handle);
+#else
+        if (descriptor >= 0)
+            ::close(descriptor);
+#endif
+    }
+    std::unique_lock<std::mutex> thread_lock;
+    std::filesystem::path directory;
+    bool ready = false;
+#if defined(_WIN32)
+    HANDLE handle = nullptr;
+    bool locked = false;
+#else
+    int descriptor = -1;
+#endif
+};
+
+ReplayPairReadGuard::ReplayPairReadGuard(const std::filesystem::path& replay) {
+    try {
+        m_state = std::make_unique<State>(replay);
+    } catch (const std::exception&) {
+        // A malformed or unreadable journal refuses both files as a unit.
+    }
+}
+ReplayPairReadGuard::~ReplayPairReadGuard() = default;
+bool ReplayPairReadGuard::is_open() const {
+    return m_state && m_state->ready;
+}
+
 struct ReplacementOutputFile::State {
     explicit State(const std::filesystem::path& destination_path)
         : destination(destination_path.empty() ? destination_path
@@ -6778,7 +7007,9 @@ ReplacementOutputFile::ReplacementOutputFile(const std::filesystem::path& destin
     if (error)
         return;
     // A random sibling is attempted once; an occupied name is never adopted.
-    const auto candidate = NextLedgerTempPath(output_path);
+    // Fixed stem plus at most two 20-digit integers and 32 hex digits: 86
+    // bytes at most, independent of the destination component's length.
+    const auto candidate = NextLedgerTempPath(output_path.parent_path() / ".output");
     report_snapshot_step("output-create", candidate);
     auto payload = std::make_unique<StagingFile>(candidate, StagingFile::Mode::Create);
     StagingIdentity identity{};
@@ -6816,7 +7047,7 @@ bool ReplacementOutputFile::write(std::string_view bytes) {
     return !m_state->failed;
 }
 
-bool ReplacementOutputFile::commit() {
+bool ReplacementOutputFile::prepare() {
     if (!is_open())
         return false;
     m_state->failed = true;
@@ -6830,11 +7061,105 @@ bool ReplacementOutputFile::commit() {
     if (!m_state->payload->finish_write(StagingFile::RetainedAccess::Identity, nullptr))
         return false;
     report_snapshot_step("output-close", m_state->destination);
+    return true;
+}
+
+bool ReplacementOutputFile::publish() {
     report_snapshot_step("output-publish", m_state->destination);
     if (!m_state->payload->replace(m_state->destination))
         return false;
     m_state->published = true;
     return true;
+}
+
+bool ReplacementOutputFile::commit() {
+    return prepare() && publish();
+}
+
+bool ReplacementOutputFile::commit_with_companion(const std::string* bytes) {
+    if (!is_open() || (bytes && bytes->size() > kPairTraceBytes))
+        return false;
+    const auto& destination = m_state->destination;
+    const auto directory = destination.parent_path();
+    const auto name = Filesystem::GenericUtf8PathString(destination.filename());
+    if (StagingNameEquals(destination.filename(), kPairUndo))
+        return false;
+    const ReplayPairReadGuard ownership(destination);
+    if (!ownership.is_open())
+        return false;
+    auto companion = destination;
+    companion += ".regions.json";
+    bool committed = false;
+    try {
+        PairIdentity previous{}, old_trace{}, incoming{}, new_trace{};
+        std::string undo;
+        if (!PairMember(destination, previous, nullptr) ||
+            !PairMember(companion, old_trace, &undo) || !prepare())
+            return false;
+        StagingIdentity replay_identity{};
+        if (!m_state->payload->identity(replay_identity))
+            return false;
+        std::copy_n(replay_identity.begin(), incoming.size(), incoming.begin());
+        std::unique_ptr<ReplacementOutputFile> trace;
+        if (bytes) {
+            trace = std::make_unique<ReplacementOutputFile>(companion);
+            StagingIdentity trace_identity{};
+            if (!trace->write(*bytes) || !trace->prepare() ||
+                !trace->m_state->payload->identity(trace_identity))
+                return false;
+            std::copy_n(trace_identity.begin(), new_trace.size(), new_trace.begin());
+        }
+        const nlohmann::json header{{"schema", "luminumbra.replay_pair.v1"},
+                                    {"replay", name},
+                                    {"previous", previous},
+                                    {"incoming", incoming},
+                                    {"old_trace", old_trace},
+                                    {"new_trace", new_trace},
+                                    {"undo_bytes", undo.size()},
+                                    {"undo_checksum", fnv1a64_bytes(undo.data(), undo.size())}};
+        const auto encoded = header.dump() + '\n';
+        if (encoded.size() > kPairHeaderBytes)
+            return false;
+        ReplacementOutputFile journal(directory / kPairUndo);
+        if (!journal.write(encoded) || !journal.write(undo) || !journal.commit() ||
+            !FlushPairDirectory(directory))
+            return false;
+        // Undo is durable before the first namespace change. Every later refusal
+        // recovers according to the replay identity, including a failed rollback.
+        if (trace) {
+            if (!trace->publish()) {
+                RecoverReplayPair(directory);
+                return false;
+            }
+        } else {
+            report_snapshot_step("output-publish", companion);
+            if (old_trace != PairIdentity{}) {
+                StagingFile stale(companion, StagingFile::Mode::Inspect);
+                StagingIdentity held{};
+                if (!stale.identity(held) ||
+                    !std::equal(old_trace.begin(), old_trace.end(), held.begin()) ||
+                    !stale.remove()) {
+                    RecoverReplayPair(directory);
+                    return false;
+                }
+            }
+        }
+        if (!FlushPairDirectory(directory) || !publish()) {
+            RecoverReplayPair(directory);
+            return false;
+        }
+        committed = true;
+        // After the replay rename, cleanup failure must never report refusal.
+        // A retained journal completes cleanup at the next guarded admission.
+        RecoverReplayPair(directory);
+    } catch (const std::exception&) {
+        try {
+            RecoverReplayPair(directory);
+        } catch (const std::exception&) {
+            // Retain durable undo for the next guarded reader/writer.
+        }
+    }
+    return committed;
 }
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,

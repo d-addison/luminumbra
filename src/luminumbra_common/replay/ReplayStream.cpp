@@ -308,6 +308,10 @@ void ReplayWriter::RecordCheckpoint(const CheckpointRecord& checkpoint) {
 }
 
 bool ReplayWriter::Finalize(std::uint64_t tick_count) {
+    return Finish(tick_count, nullptr, false);
+}
+
+bool ReplayWriter::Finish(std::uint64_t tick_count, const std::string* trace_bytes, bool paired) {
     if (!m_open)
         return false;
     m_open = false;
@@ -323,8 +327,9 @@ bool ReplayWriter::Finalize(std::uint64_t tick_count) {
         PutU64(buffer, m_input_count);
         PutU64(buffer, m_checkpoint_count);
         Persistence::ReplacementOutputFile output(m_path);
-        return output.write({reinterpret_cast<const char*>(buffer.data()), buffer.size()}) &&
-               output.commit();
+        if (!output.write({reinterpret_cast<const char*>(buffer.data()), buffer.size()}))
+            return false;
+        return paired ? output.commit_with_companion(trace_bytes) : output.commit();
     } catch (const std::exception&) {
         return false;
     }
