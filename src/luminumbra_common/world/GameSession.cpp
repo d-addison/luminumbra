@@ -17,7 +17,8 @@
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
+#include "../ai/CreatureTickAdmission.h"
+#include "../ai/DecompositionSystem.h" // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
@@ -547,6 +548,52 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
+namespace {
+
+// Captures this tick's creature admission before any movement, reusing the cache in the
+// registry context. Returns null when active regions are off, so every creature runs.
+luminumbra::ai::CreatureTickAdmission* CaptureCreatureTickAdmission(
+    entt::registry& registry, bool active_regions_enabled, const RegionConsumerGate& gate) {
+    if (!active_regions_enabled) {
+        return nullptr;
+    }
+    auto& admission = registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
+    admission.Capture(registry, gate);
+    return &admission;
+}
+
+void BlendCreatureSurvivalWishes(entt::registry& registry,
+                                 const luminumbra::ai::CreatureTickAdmission* admission) {
+    // Additive blend of the survival wishes into CreatureComponent.wish so a
+    // thirsty/scavenging creature actually steers to water/carrion. Entities
+    // without the opt-in components are untouched (try_get -> null), keeping
+    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+    auto sv = registry.view<Luminumbra::Components::CreatureComponent>();
+    for (auto e : sv) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
+        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+        // the thirst pull applies ONLY when the arbiter
+        // actually chose Drink — the old unconditional blend let a
+        // FLEEING creature be simultaneously steered toward water
+        // (the contract's exact defect). Thirst now competes inside
+        // DecideCreatureAction; this blend is its motor output.
+        if (cr.last_action == static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+            if (const auto* th = registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
+                cr.wish_x += th->wish_x;
+                cr.wish_z += th->wish_z;
+            }
+        }
+        if (const auto* scv = registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
+            cr.wish_x += scv->wish_x;
+            cr.wish_z += scv->wish_z;
+        }
+    }
+}
+
+} // namespace
+
 std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
@@ -606,6 +653,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault)
                     return i + 1;
             }
+            const auto foliage_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
+            luminumbra::ai::CreatureTickAdmission* const creature_admission =
+                CaptureCreatureTickAdmission(m_registry, m_activeRegionsEnabled, foliage_gate);
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
             auto* field_candidate = scheduled_fields ? &*scheduled_fields : nullptr;
             m_regionalFieldView = field_candidate;
@@ -686,7 +739,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // world_hash is UNCHANGED (byte-identical) -- same discipline as the
             // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
             luminumbra::ai::RunPerceptionSystemOnTick(
-                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()), creature_admission);
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
@@ -738,20 +791,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    luminumbra::ai::RunMateSeekingOnTick(
+                        m_registry, m_reproductionTuning, creature_admission);
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
                     // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                     // integration layer is unit-tested independently of the producers.
-                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry, creature_admission);
 
                     // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
                     // systems wired into the live tick. Opt-in via ThirstComponent /
@@ -766,36 +821,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         m_thirstTuning);
                     luminumbra::ai::RunScavengingOnTick(
                         m_registry, current_tick, m_scavengingTuning);
-                    {
-                        // Additive blend of the survival wishes into CreatureComponent.wish so a
-                        // thirsty/scavenging creature actually steers to water/carrion. Entities
-                        // without the opt-in components are untouched (try_get -> null), keeping
-                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                        for (auto e : sv) {
-                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                            // the thirst pull applies ONLY when the arbiter
-                            // actually chose Drink — the old unconditional blend let a
-                            // FLEEING creature be simultaneously steered toward water
-                            // (the contract's exact defect). Thirst now competes inside
-                            // DecideCreatureAction; this blend is its motor output.
-                            if (cr.last_action ==
-                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                                if (const auto* th =
-                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
-                                            e)) {
-                                    cr.wish_x += th->wish_x;
-                                    cr.wish_z += th->wish_z;
-                                }
-                            }
-                            if (const auto* scv =
-                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
-                                        e)) {
-                                cr.wish_x += scv->wish_x;
-                                cr.wish_z += scv->wish_z;
-                            }
-                        }
-                    }
+                    BlendCreatureSurvivalWishes(m_registry, creature_admission);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                     // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
@@ -821,7 +847,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                 const auto& cp =
                                     phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
                                 m_physicsSystem->set_avatar_wish_velocity(
-                                    cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
+                                    cp.avatar_index,
+                                    creature_admission && !creature_admission->Allows(e)
+                                        ? glm::vec2(0.0f)
+                                        : glm::vec2(cr.wish_x, cr.wish_z));
                             }
                             m_physicsSystem->update_avatars(
                                 static_cast<float>(m_simulationClock.fixed_dt()));
@@ -850,7 +879,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         current_tick,
                         static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -956,10 +986,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-            const auto foliage_gate =
-                m_activeRegionsEnabled
-                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
-                    : RegionConsumerGate{};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -1214,7 +1240,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
+                    luminumbra::ai::RunLifespanOnTick(
+                        m_registry, current_tick, foliage_gate, creature_admission);
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
