@@ -758,12 +758,16 @@ TEST_F(ReplayPairRecoveryTest, MalformedOrPartialUndoRefusesWithoutChangingEithe
 }
 
 TEST_F(ReplayPairRecoveryTest, UnknownOccupantsAndNonregularJournalRefuseRecovery) {
-    PrepareInterruption(false, true, true);
+    PrepareInterruption(false, true, true, false);
+    const auto companion = m_path + ".regions.json";
+    fs::rename(companion, m_directory / "old_trace_inode");
+    fs::rename(m_directory / "incoming_trace", companion);
     fs::rename(m_path, m_directory / "retained_replay");
     Write(m_path, "foreign replay");
     {
         const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
         EXPECT_FALSE(guard.is_open());
+        EXPECT_TRUE(fs::exists(m_directory / ".replay-pair.undo"));
         EXPECT_EQ(ReadBytes(), "foreign replay");
     }
     fs::remove(m_path);
@@ -773,6 +777,24 @@ TEST_F(ReplayPairRecoveryTest, UnknownOccupantsAndNonregularJournalRefuseRecover
     {
         const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
         EXPECT_FALSE(guard.is_open());
+        const Luminumbra::Persistence::SavedInputFile trace(m_path + ".regions.json");
+        std::string bytes;
+        ASSERT_TRUE(trace.read(bytes, 64));
+        EXPECT_EQ(bytes, "foreign trace");
+        EXPECT_TRUE(fs::exists(m_directory / ".replay-pair.undo"));
+    }
+    // Also force reuse of the recorded old identity, independent of allocation.
+    fs::remove(companion);
+    fs::rename(m_directory / "old_trace_inode", companion);
+    Write(companion, "foreign trace");
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard refused(m_path);
+        EXPECT_FALSE(refused.is_open());
+        const Luminumbra::Persistence::SavedInputFile trace(companion);
+        std::string bytes;
+        ASSERT_TRUE(trace.read(bytes, 64));
+        EXPECT_EQ(bytes, "foreign trace");
+        EXPECT_TRUE(fs::exists(m_directory / ".replay-pair.undo"));
     }
     fs::remove(m_path + ".regions.json");
     fs::rename(m_directory / "retained_trace", m_path + ".regions.json");
@@ -782,6 +804,136 @@ TEST_F(ReplayPairRecoveryTest, UnknownOccupantsAndNonregularJournalRefuseRecover
     EXPECT_FALSE(guard.is_open());
     EXPECT_EQ(ReadBytes(), "old replay");
 }
+
+TEST_F(ReplayPairRecoveryTest, OldTraceIdentityWithForeignBytesRefusesRecovery) {
+    const auto header = PrepareInterruption(false, true, true, false);
+    const auto companion = m_path + ".regions.json";
+    // An in-place edit deterministically exercises the same identity collision
+    // as reuse of an unlinked old trace's inode.
+    Write(companion, "foreign trace");
+    EXPECT_EQ(Identify(companion), header["old_trace"].get<Identity>());
+    const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
+    EXPECT_FALSE(guard.is_open());
+    EXPECT_EQ(ReadBytes(), "old replay");
+    const Luminumbra::Persistence::SavedInputFile trace(companion);
+    std::string bytes;
+    ASSERT_TRUE(trace.read(bytes, 64));
+    EXPECT_EQ(bytes, "foreign trace");
+    EXPECT_TRUE(fs::exists(m_directory / ".replay-pair.undo"));
+}
+
+TEST_F(ReplayPairRecoveryTest, DifferentDirectoriesAdmitReadersAndWritersDuringContention) {
+    const auto other = m_directory / "other";
+    ASSERT_TRUE(fs::create_directory(other));
+    const auto other_replay = other / "recording.lrec1";
+    bool reader_open = false;
+    bool contended_open = true;
+    bool writer_committed = false;
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard first(m_path);
+        ASSERT_TRUE(first.is_open());
+        const Luminumbra::Persistence::ReplayPairReadGuard alias(m_directory / "." /
+                                                                 "recording.lrec1");
+        EXPECT_FALSE(alias.is_open());
+        {
+            const Luminumbra::Persistence::ReplayPairReadGuard second(other_replay);
+            EXPECT_TRUE(second.is_open());
+        }
+        std::thread worker([&] {
+            {
+                const Luminumbra::Persistence::ReplayPairReadGuard reader(other_replay);
+                reader_open = reader.is_open();
+            }
+            {
+                const Luminumbra::Persistence::ReplayPairReadGuard contended(m_path);
+                contended_open = contended.is_open();
+            }
+            replay::ReplayWriter writer;
+            const replay::RegionScheduleTrace trace{{1, "0123456789abcdef"}};
+            writer_committed =
+                writer.Open(other_replay.string(), MakeHeader()) && writer.Finalize(1, &trace) &&
+                writer.Open(other_replay.string(), MakeHeader()) && writer.Finalize(1, nullptr);
+        });
+        worker.join();
+        EXPECT_TRUE(reader_open);
+        EXPECT_FALSE(contended_open);
+        EXPECT_TRUE(writer_committed);
+        EXPECT_FALSE(fs::exists(other_replay.string() + ".regions.json"));
+    }
+    const Luminumbra::Persistence::ReplayPairReadGuard released(m_path);
+    EXPECT_TRUE(released.is_open());
+    EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+}
+
+#if !defined(_WIN32)
+TEST_F(ReplayPairRecoveryTest, RemovingHardLinkedPreviousTracePreservesBackup) {
+    replay::ReplayWriter writer;
+    const replay::RegionScheduleTrace original{{1, "0123456789abcdef"}};
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(1, &original));
+    const auto companion = m_path + ".regions.json";
+    const auto backup = m_directory / "trace-backup";
+    std::string previous;
+    {
+        const Luminumbra::Persistence::SavedInputFile trace(companion);
+        ASSERT_TRUE(trace.read(previous, 4096));
+    }
+    std::error_code error;
+    fs::create_hard_link(companion, backup, error);
+    if (error) {
+        GTEST_SKIP() << "Hard links unavailable: " << error.message();
+    }
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {9});
+    ASSERT_TRUE(writer.Finalize(1, nullptr));
+    EXPECT_FALSE(fs::exists(companion));
+    EXPECT_EQ(fs::hard_link_count(backup), 1u);
+    const Luminumbra::Persistence::SavedInputFile retained(backup);
+    std::string bytes;
+    ASSERT_TRUE(retained.read(bytes, 4096));
+    EXPECT_EQ(bytes, previous);
+    EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(contents->trailer_present);
+    EXPECT_EQ(contents->inputs.size(), 1u);
+}
+
+TEST_F(ReplayPairRecoveryTest, RollbackUnlinksOnlyHardLinkedIncomingTrace) {
+    for (const bool old_trace : {false, true}) {
+        SCOPED_TRACE(old_trace);
+        fs::remove_all(m_directory);
+        fs::create_directory(m_directory);
+        PrepareInterruption(false, old_trace, true);
+        const auto companion = m_path + ".regions.json";
+        const auto backup = m_directory / "trace-backup";
+        std::error_code error;
+        fs::create_hard_link(companion, backup, error);
+        if (error) {
+            GTEST_SKIP() << "Hard links unavailable: " << error.message();
+        }
+        const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
+        ASSERT_TRUE(guard.is_open());
+        EXPECT_EQ(ReadBytes(), "old replay");
+        const Luminumbra::Persistence::SavedInputFile trace(companion);
+        std::string bytes;
+        if (old_trace) {
+            ASSERT_TRUE(trace.read(bytes, 64));
+            EXPECT_EQ(bytes, "old trace");
+        } else {
+            EXPECT_TRUE(trace.missing());
+        }
+        EXPECT_EQ(fs::hard_link_count(backup), 1u);
+        const Luminumbra::Persistence::SavedInputFile retained(backup);
+        ASSERT_TRUE(retained.read(bytes, 64));
+        EXPECT_EQ(bytes, "new trace");
+        EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+    }
+}
+#endif
 
 TEST_F(ReplayPairRecoveryTest, PairLockContentionAndInvalidDirectoryRefuseAdmission) {
     {

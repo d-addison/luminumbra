@@ -33,6 +33,7 @@
 #include <atomic>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -6766,10 +6767,71 @@ bool ValidPairFilename(const std::filesystem::path& filename) {
            !StagingNameEquals(filename, ".replay-pair.lock");
 }
 
-std::mutex& PairMutex() {
-    static std::mutex mutex;
-    return mutex;
+struct PairDirectoryMutex {
+    std::recursive_timed_mutex mutex;
+    bool active = false;
+};
+
+struct PairDirectoryLocks {
+    std::mutex mutex;
+    std::map<PairIdentity, std::weak_ptr<PairDirectoryMutex>> directories;
+};
+
+PairDirectoryLocks& DirectoryLocks() {
+    static PairDirectoryLocks locks;
+    return locks;
 }
+
+class PairDirectoryLock {
+public:
+    explicit PairDirectoryLock(const PairIdentity& identity)
+        : m_identity(identity) {
+        auto& locks = DirectoryLocks();
+        {
+            const std::lock_guard registry_lock(locks.mutex);
+            const auto found = locks.directories.find(identity);
+            if (found != locks.directories.end())
+                m_mutex = found->second.lock();
+            if (!m_mutex) {
+                m_mutex = std::make_shared<PairDirectoryMutex>();
+                locks.directories.insert_or_assign(identity, m_mutex);
+            }
+        }
+        m_lock = std::unique_lock(m_mutex->mutex, std::defer_lock);
+        // Wait at most one second for another thread. Reentrant admission must
+        // refuse immediately: waiting for our own guard would deadlock.
+        if (!m_lock.try_lock_for(std::chrono::seconds(1)))
+            return;
+        if (m_mutex->active) {
+            m_lock.unlock();
+            return;
+        }
+        m_mutex->active = true;
+        m_admitted = true;
+    }
+    ~PairDirectoryLock() {
+        if (m_admitted) {
+            m_mutex->active = false;
+            m_lock.unlock();
+        }
+        // Keep registry storage bounded to directories with live guards/waiters.
+        auto& locks = DirectoryLocks();
+        const std::lock_guard registry_lock(locks.mutex);
+        m_mutex.reset();
+        const auto found = locks.directories.find(m_identity);
+        if (found != locks.directories.end() && found->second.expired())
+            locks.directories.erase(found);
+    }
+    [[nodiscard]] bool is_open() const {
+        return m_admitted;
+    }
+
+private:
+    PairIdentity m_identity;
+    std::shared_ptr<PairDirectoryMutex> m_mutex;
+    std::unique_lock<std::recursive_timed_mutex> m_lock;
+    bool m_admitted = false;
+};
 
 bool FlushPairDirectory(const std::filesystem::path& directory) {
 #if defined(_WIN32)
@@ -6817,8 +6879,12 @@ bool RestorePairTrace(const std::filesystem::path& companion,
     // Bound retirement to the trace this transaction installed. A substituted
     // occupant is preserved; an interrupted retirement is retryable from undo.
     try {
-        const bool restored = WorldSaveService::publish_restoration(
-            temporary, companion, expected, incoming, nullptr);
+        // Retire only this companion name, including when other hard links
+        // retain the incoming trace. Undo also recovers the resulting vacancy.
+        const bool retired = expected == PairIdentity{} ||
+                             WorldSaveService::remove_owned_entry(companion, expected, nullptr);
+        const bool restored = retired && WorldSaveService::publish_restoration(
+                                             temporary, companion, {}, incoming, nullptr);
         if (!restored)
             WorldSaveService::remove_owned_entry(temporary, incoming, nullptr);
         return restored;
@@ -6885,16 +6951,16 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
         if (trace_identity != new_trace)
             return false;
     } else if (installed == previous) {
+        // An unlinked old inode can be recycled for an unrelated occupant.
+        // Its identity alone is insufficient; the durable undo binds its bytes.
+        if (trace_identity == old_trace && trace_bytes != undo)
+            return false;
         // Recovery may itself have been interrupted after restoring the bytes.
         if (trace_identity != old_trace && !(old_trace != PairIdentity{} && trace_bytes == undo)) {
             if (trace_identity != new_trace && trace_identity != PairIdentity{})
                 return false;
             if (old_trace == PairIdentity{}) {
-                StagingFile trace_file(companion, StagingFile::Mode::Inspect);
-                StagingIdentity held{};
-                if (!trace_file.identity(held) ||
-                    !std::equal(new_trace.begin(), new_trace.end(), held.begin()) ||
-                    !trace_file.remove())
+                if (!WorldSaveService::remove_owned_entry(companion, new_trace, nullptr))
                     return false;
             } else {
                 if (!RestorePairTrace(companion, undo, trace_identity))
@@ -6910,10 +6976,7 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
 } // namespace
 
 struct ReplayPairReadGuard::State {
-    explicit State(const std::filesystem::path& replay)
-        : thread_lock(PairMutex(), std::try_to_lock) {
-        if (!thread_lock.owns_lock())
-            return;
+    explicit State(const std::filesystem::path& replay) {
         directory = Filesystem::AbsolutePath(replay).parent_path();
 #if defined(_WIN32)
         const Detail::WindowsPublicationHandle parent(
@@ -6928,6 +6991,10 @@ struct ReplayPairReadGuard::State {
         if (parent.get() == INVALID_HANDLE_VALUE ||
             !::GetFileInformationByHandle(parent.get(), &info) ||
             (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            return;
+        thread_lock = std::make_unique<PairDirectoryLock>(
+            PairIdentity{info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow});
+        if (!thread_lock->is_open())
             return;
         // Three 32-bit identity words bound the mutex name to fewer than 80
         // UTF-16 units. Directory aliases (including short names) share it.
@@ -6945,7 +7012,12 @@ struct ReplayPairReadGuard::State {
         // Lock the existing directory, so playback also works on read-only
         // media and there is no removable lock-file name to substitute.
         descriptor = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (descriptor < 0 || ::flock(descriptor, LOCK_EX | LOCK_NB) != 0)
+        struct stat info {};
+        if (descriptor < 0 || ::fstat(descriptor, &info) != 0 || !S_ISDIR(info.st_mode))
+            return;
+        thread_lock = std::make_unique<PairDirectoryLock>(PairIdentity{
+            static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino), 0});
+        if (!thread_lock->is_open() || ::flock(descriptor, LOCK_EX | LOCK_NB) != 0)
             return;
 #endif
         try {
@@ -6965,7 +7037,7 @@ struct ReplayPairReadGuard::State {
             ::close(descriptor);
 #endif
     }
-    std::unique_lock<std::mutex> thread_lock;
+    std::unique_ptr<PairDirectoryLock> thread_lock;
     std::filesystem::path directory;
     bool ready = false;
 #if defined(_WIN32)
@@ -7144,11 +7216,7 @@ bool ReplacementOutputFile::commit_with_companion(const std::string* bytes) {
         } else {
             report_snapshot_step("output-publish", companion);
             if (old_trace != PairIdentity{}) {
-                StagingFile stale(companion, StagingFile::Mode::Inspect);
-                StagingIdentity held{};
-                if (!stale.identity(held) ||
-                    !std::equal(old_trace.begin(), old_trace.end(), held.begin()) ||
-                    !stale.remove()) {
+                if (!WorldSaveService::remove_owned_entry(companion, old_trace, nullptr)) {
                     RecoverReplayPair(directory);
                     return false;
                 }
