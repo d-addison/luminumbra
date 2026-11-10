@@ -543,6 +543,7 @@ jobs:
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1
+          -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         continue-on-error: true
