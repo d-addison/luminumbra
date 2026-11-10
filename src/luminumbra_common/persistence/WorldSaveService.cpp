@@ -20,6 +20,7 @@
 #include "world/Chunk.h"
 #include "world/FarLodStore.h"
 #include "world/WorldClock.h"
+#include "world/WorldMetadata.h"
 #include "world/WorldStreamingState.h"
 
 #include "nlohmann/json.hpp"
@@ -3446,6 +3447,8 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
             return "unsupported future world metadata container version " + version.dump();
         return "corrupt world metadata container version";
     }
+    if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty())
+        return seed_error;
     if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
         metadata.contains("renderCalendar")) {
         world::WorldClock clock;
@@ -4084,6 +4087,10 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
             "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
         return false;
     }
+    if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty()) {
+        AddError(errors, seed_error);
+        return false;
+    }
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     const bool has_render_calendar = metadata.contains("renderCalendar");
     if (has_clock || has_render_calendar) {
@@ -4504,6 +4511,11 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         }
         if (missing)
             return true;
+        if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata);
+            !seed_error.empty()) {
+            AddError(errors, seed_error);
+            return false;
+        }
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||

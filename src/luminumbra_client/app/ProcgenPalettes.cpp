@@ -261,7 +261,7 @@ void BakeCreatureMarkers(Luminumbra::Rendering::PlantProcgenPass* pp,
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
                          const Luminumbra::Components::TransformComponent>();
     constexpr float r = 1.0f, halfH = 1.3f; // ~matches the Jolt capsule; reads from the demo camera
-    static const int tri[8][3] = {
+    static constexpr std::uint32_t tri[8][3] = {
         {0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2}, {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
     // Append one octahedron (centre c, horizontal radius rr, vertical half-height hh, colour).
     auto emitOcta = [&](const glm::vec3& c, float rr, float hh, const glm::vec3& color) {
@@ -416,7 +416,7 @@ void BakeCombustibleMarkers(Luminumbra::Rendering::PlantProcgenPass* pp,
     auto view = reg.view<const Luminumbra::Components::CombustibleComponent,
                          const Luminumbra::Components::TransformComponent>();
     constexpr float r = 0.7f, halfH = 0.9f;
-    static const int tri[8][3] = {
+    static constexpr std::uint32_t tri[8][3] = {
         {0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2}, {1, 3, 2}, {1, 4, 3}, {1, 5, 4}, {1, 2, 5}};
     for (auto e : view) {
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);

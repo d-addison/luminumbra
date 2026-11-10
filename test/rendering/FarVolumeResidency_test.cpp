@@ -3,6 +3,7 @@
 #include "luminumbra_client/rendering/FarVolumeHandoff.h"
 #include "luminumbra_client/rendering/FarVolumeResidency.h"
 #include "luminumbra_client/rendering/FarVolumeUpload.h"
+#include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldOwnership.h"
 #include "luminumbra_client/rendering/FarWorldWaterMesh.h"
 #include "world/Chunk.h"
@@ -35,6 +36,7 @@
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -787,7 +789,8 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
              bool wet = false,
              FarFrozenUse use = FarFrozenUse::Committed,
              FarCaveMode caves = FarCaveMode::BandLimited,
-             FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
+             FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat,
+             float water_height = 0) {
     auto wanted = Wanted(key);
     wanted.identity.cave_policy = static_cast<std::uint8_t>(caves);
     wanted.identity.bake_generation = wanted.identity.span_generation = generation;
@@ -813,8 +816,8 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
     source.committed = [](std::uint8_t, const FarVolumePosition&) {
         return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Absent, {}};
     };
-    source.water = [wet](std::int64_t, std::int64_t) {
-        return FarFrozenWaterSample{wet, 0};
+    source.water = [wet, water_height](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{wet, water_height};
     };
     FarVolumeRequest request;
     EXPECT_TRUE(ResolveFarVolumeCoverage(wanted.intent,
@@ -1072,6 +1075,7 @@ TEST(FarVolumeHandoff, PreviewUseWithCommittedIdentityIsRefusedTransactionally) 
         }
         const auto before = owner.Memory();
         EXPECT_FALSE(owner.StageTarget(HandoffManifest(2, preview)));
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::ImmutableAuthorityUnavailable);
         EXPECT_EQ(owner.State().target_serial, phase > 0 ? 1u : 0u);
         EXPECT_EQ(owner.State().serving_serial, phase == 2 ? 1u : 0u);
         const auto after = owner.Memory();
@@ -1099,6 +1103,186 @@ TEST(FarVolumeHandoff, PreviewUseWithCommittedIdentityIsRefusedTransactionally) 
         EXPECT_EQ(owner.State().serving_serial, 2u);
         EXPECT_EQ(calls, 0u);
     }
+}
+
+TEST(FarVolumeHandoff, SessionRenderAdmitsUnsavedTerrainAndWaterAtTheSameDurableGeneration) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const FarTileKey key{5, 0, 0};
+    const std::array committed{HandoffInput(memory, key, 1, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, committed)));
+    auto session = committed;
+    auto source = FarFrozenCaptureSource{};
+    source.pristine = Authority(committed[0].wanted, false);
+    source.content_identity = source.pristine.field_identity;
+    source.durable = {1, FarEditedImageState::Committed};
+    source.use = FarFrozenUse::SessionRender;
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.live = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Present, {-3.0f, 9}};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{};
+    };
+    source.live_water = [](std::int64_t, std::int64_t) {
+        return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Present, {true, 16.0f}};
+    };
+    const auto region = committed[0].observation->Region(0);
+    ASSERT_TRUE(region);
+    if (!region) {
+        return;
+    }
+    std::shared_ptr<const FarFrozenObservation> image;
+    ASSERT_EQ(CaptureFarFrozenObservation({&*region, 1},
+                                          source,
+                                          {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024},
+                                          committed[0].observation->memory_pool_handle(),
+                                          image),
+              FarFrozenCaptureError::None);
+    auto wanted = session[0].wanted;
+    wanted.identity.content_hash = image->content_identity();
+    const auto input = MakeFarHandoffTileInput(wanted, image);
+    ASSERT_TRUE(input);
+    if (!input) {
+        return;
+    }
+    session[0] = *input;
+    auto manifest = HandoffManifest(2, session);
+    manifest.committed_generation = 1;
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    const auto& diagnostic = std::as_const(owner);
+    EXPECT_EQ(diagnostic.AdmissionRefusal(), FarWorldRefusal::None);
+    EXPECT_EQ(owner.State().committed_generation, 1u);
+    const auto retained = HandoffObserve(owner, key);
+    ASSERT_TRUE(retained.target);
+    if (!retained.target) {
+        return;
+    }
+    EXPECT_EQ(retained.target->identity, wanted.identity);
+    EXPECT_NE(wanted.identity.content_hash, committed[0].wanted.identity.content_hash);
+    EXPECT_EQ(image->Sample(5, {0, 0, 0}), (std::optional<FarVolumeSample>{{-3.0f, 9}}));
+    EXPECT_EQ(image->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, 16.0f}}));
+}
+
+TEST(FarVolumeHandoff, TypedAdmissionRefusalsPreserveTargetAndChargesAndExistingNames) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = Limits();
+    limits.entry_slots.fill(1);
+    FarVolumeHandoff owner(jobs, *memory, limits);
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    const std::array original{HandoffInput(memory, {5, 0, 0}, 1, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    const auto next = HandoffInput(memory, {5, 0, 0}, 2, false);
+    const auto outside_water = HandoffInput(memory,
+                                            {5, 0, 0},
+                                            2,
+                                            false,
+                                            -256,
+                                            64,
+                                            false,
+                                            false,
+                                            nullptr,
+                                            true,
+                                            FarFrozenUse::Committed,
+                                            FarCaveMode::BandLimited,
+                                            FarVolumeNumericProfile::RawFloat,
+                                            1024.0f);
+    const auto other = HandoffInput(memory, {5, 1, 0}, 2, false);
+    auto foreign_memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    const auto foreign = HandoffInput(foreign_memory, {5, 0, 0}, 2, false);
+    const auto check =
+        [&](const FarHandoffManifest& manifest, FarWorldRefusal expected, const char* name) {
+            const auto before = owner.Memory();
+            EXPECT_FALSE(owner.StageTarget(manifest));
+            EXPECT_EQ(std::as_const(owner).AdmissionRefusal(), expected);
+            EXPECT_STREQ(FarWorldRefusalName(owner.AdmissionRefusal()), name);
+            EXPECT_EQ(owner.State().target_serial, 1u);
+            EXPECT_EQ(owner.State().committed_generation, 1u);
+            const auto retained = HandoffObserve(owner, {5, 0, 0});
+            ASSERT_TRUE(retained.target);
+            if (!retained.target) {
+                return;
+            }
+            EXPECT_EQ(retained.target->identity, original[0].wanted.identity);
+            EXPECT_EQ(retained.target->intent, original[0].wanted.intent);
+            const auto after = owner.Memory();
+            for (std::size_t i = 0; i < before.size(); ++i) {
+                EXPECT_EQ(after[i].bytes_cpu, before[i].bytes_cpu);
+                EXPECT_EQ(after[i].bytes_gpu, before[i].bytes_gpu);
+                EXPECT_EQ(after[i].bytes_total, before[i].bytes_total);
+            }
+        };
+    std::array inputs{next};
+    auto manifest = HandoffManifest(2, inputs);
+    manifest.caves = static_cast<FarCaveMode>(255);
+    manifest.world_epoch = 0;
+    check(manifest, FarWorldRefusal::InvalidCavePolicy, "InvalidCavePolicy");
+    manifest = HandoffManifest(2, inputs);
+    manifest.world_epoch = 0;
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    manifest.numeric = static_cast<FarVolumeNumericProfile>(255);
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    manifest.tiles = {};
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    ++inputs[0].wanted.identity.content_hash;
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    manifest.committed_generation = 0;
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    manifest.committed_generation = 3;
+    inputs[0].wanted.water.reset();
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    manifest = HandoffManifest(2, inputs);
+    manifest.caves = FarCaveMode::BoxFiltered;
+    check(manifest, FarWorldRefusal::CavePolicyMismatch, "CavePolicyMismatch");
+    manifest = HandoffManifest(2, inputs);
+    inputs[0].observation.reset();
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    inputs[0].wanted.water.reset();
+    check(manifest, FarWorldRefusal::WaterUnavailable, "WaterUnavailable");
+    inputs[0] = next;
+    inputs[0].wanted.intent.extra_span = FarVolumeCoverageSpan{64.0f, -256.0f};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0].wanted.intent.extra_span =
+        FarVolumeCoverageSpan{-256.0f, std::numeric_limits<float>::quiet_NaN()};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-1024.0f, 64.0f};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0] = outside_water;
+    check(manifest, FarWorldRefusal::WaterSpanRefused, "WaterSpanRefused");
+    inputs[0] = foreign;
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    inputs[0] = next;
+    const std::array excess{next, other};
+    manifest.tiles = excess;
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    manifest.tiles = inputs;
+    auto* pool = memory->Pool(5);
+    pool->RefuseAttemptsFrom(pool->attempts());
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    pool->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    manifest.publication_serial = 0;
+    EXPECT_FALSE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
+    owner.CancelAndDrain();
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
 }
 
 TEST(FarVolumeHandoff, NewPublicationCannotRegressCommittedGenerationWithinEpoch) {
@@ -1608,6 +1792,7 @@ TEST(FarVolumeHandoff, DuplicateKeysWithFreshSerialAreTransactional) {
     manifest.committed_generation = 1;
     const auto before = owner.Memory();
     EXPECT_FALSE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
     EXPECT_EQ(owner.State().target_serial, 1u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
     EXPECT_EQ(owner.State().committed_generation, 1u);
@@ -1947,6 +2132,7 @@ TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     const std::array c{HandoffInput(memory, {5, 0, 0}, 3, false)};
     const auto used = memory->Pool(5)->used();
     EXPECT_FALSE(owner.StageTarget(HandoffManifest(3, c)));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
     EXPECT_EQ(owner.State().serving_serial, 2u);
     EXPECT_EQ(owner.State().target_serial, 2u);
     EXPECT_EQ(memory->Pool(5)->used(), used);
