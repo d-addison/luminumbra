@@ -1136,6 +1136,8 @@ target_link_libraries(ui_layout_test PRIVATE gtest_main nlohmann_json::nlohmann_
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
+    ui/graphics_preset_startup_test.cpp
+    ui/graphics_blur_style_test.cpp
 ../src/luminumbra_client/ui/core/UIComponent.cpp
 ../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
@@ -1574,6 +1576,7 @@ endif()
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
+    common/RegionConsumerGate_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp
@@ -1741,6 +1744,9 @@ target_link_libraries(audio_propagation_metrics_test PRIVATE
     miniaudio
     nlohmann_json
     glm
+)
+target_compile_definitions(audio_propagation_metrics_test PRIVATE
+    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1
 )
 luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 

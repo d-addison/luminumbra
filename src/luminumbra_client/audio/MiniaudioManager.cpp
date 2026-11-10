@@ -463,7 +463,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
 
     auto sound = std::make_unique<ma_sound>();
 
-    std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
+    std::uniform_int_distribution<std::size_t> dist(0, def->files.size() - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
 
@@ -534,7 +534,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     if (!def || def->files.empty())
         return false;
 
-    std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
+    std::uniform_int_distribution<std::size_t> dist(0, def->files.size() - 1);
     const std::string& rel = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel;
 
@@ -570,7 +570,7 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
     if (!def || def->files.empty())
         return false;
 
-    std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
+    std::uniform_int_distribution<std::size_t> dist(0, def->files.size() - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
 
