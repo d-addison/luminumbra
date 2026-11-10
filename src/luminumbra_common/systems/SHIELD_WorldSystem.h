@@ -306,6 +306,7 @@ public:
         std::size_t vertical_generation_scheduled = 0;
         std::size_t deferred_generation = 0;
         std::size_t meshing_candidates = 0;
+        std::size_t water_meshing_inputs = 0; // Owners visited for water mesh wakeups.
         std::size_t scheduled_meshing = 0;
         // Accepted items matching this update's current candidates, excluding
         // promotion refusals and stage-B dispatches from earlier selections.
@@ -1104,6 +1105,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> scratch;
             u32 mesh_version = 0;
             u32 water_mesh_version = 0;
+            u64 authority_revision = 0;
             u32 voxel_revision = 0;
         };
         struct MeshingBatch {
@@ -1193,6 +1195,7 @@ private:
     // itself deterministic. `m_dirty_generation` is bumped at the chunk insert/erase +
     // synchronous-rebuild sites that mutate a settled world.
     std::uint64_t m_dirty_generation = 0;
+    std::vector<std::weak_ptr<Chunk>> m_water_mesh_watch;
     std::uint64_t m_last_serviced_generation = 0;
     std::function<void(const IVec3&)> m_voxelEditObserver;
     std::function<void(const IVec3&)> m_waterAuthorityObserver;

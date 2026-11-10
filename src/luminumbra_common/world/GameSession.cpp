@@ -4095,6 +4095,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         // chunk. Voxel data (sdf/heightmap) and meshes are kept verbatim.
         chunk->has_collision.store(false, std::memory_order_release);
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
+        chunk->pending_water_mesh_generated.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(-1, std::memory_order_release);
         chunk->pending_mesh_vertices.clear();
@@ -4105,7 +4106,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
         // stable state; Ready and Idle are restored verbatim (a Ready chunk
         // with an empty mesh is a legitimate air chunk).
-        const bool has_mesh = !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
+        const bool has_mesh =
+            (!chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty()) ||
+            (!chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty());
         const ChunkState state = chunk->get_state();
         if (state != ChunkState::Ready && state != ChunkState::Idle) {
             chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
