@@ -1843,7 +1843,8 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
                     WaterCursorHashInput(water_sim_cursor));
 }
 
-RegionContentHasher::RegionContentHasher() {
+RegionContentHasher::RegionContentHasher(bool diagnostics)
+    : m_diagnostics(diagnostics) {
     feed("{\n    \"chunks\": [");
 }
 
@@ -1905,8 +1906,10 @@ void RegionContentHasher::append(const Chunk& chunk) {
     m_hasChunks = true;
     auto content = TerrainAuthorityJson(chunk);
     const auto water = WaterAuthorityJson(chunk);
-    HashTerrainFields(m_terrainHash, content);
-    HashAuthorityBytes(m_waterHash, DumpJson(water));
+    if (m_diagnostics) {
+        HashTerrainFields(m_terrainHash, content);
+        HashAuthorityBytes(m_waterHash, DumpJson(water));
+    }
     content.update(water);
     // Match StableDump's four-space layout, at the array's eight-space depth.
     // The byte protocol stays identical without retaining the whole region JSON.

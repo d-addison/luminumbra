@@ -413,12 +413,8 @@ void Rml_UIManager::ReloadActiveDocument() {
     // Drop cached stylesheets/templates so edited.rcss/.rml is re-read from disk.
     Rml::Factory::ClearStyleSheetCache();
     Rml::Factory::ClearTemplateCache();
-    // LoadDocument early-returns when the path equals the active document; clear it to force
-    // a genuine reload of the same screen.
     const std::string doc = m_activeDocument;
-    m_activeDocument.clear();
-    LoadDocument(doc);
-    LUMINUMBRA_CORE_INFO("UI hot-reloaded: {}", doc);
+    LoadDocument(doc, true);
 }
 
 // REMOVED: GetContext is now in the header.
@@ -432,28 +428,31 @@ void Rml_UIManager::ProcessDocumentLoadRequest() {
     }
 }
 
-void Rml_UIManager::LoadDocument(const std::string& rml_path) {
+void Rml_UIManager::LoadDocument(const std::string& rml_path, bool reload) {
     const Luminumbra::Client::Attribution::PhaseScope phase_scope(
         Luminumbra::Client::Attribution::Phase::DocumentLoad);
-    if (!m_context || rml_path == m_activeDocument)
+    if (!m_context || (!reload && rml_path == m_activeDocument))
         return;
+
+    Rml::ElementDocument* document = m_context->LoadDocument("data/ui/" + rml_path);
+    // RmlUi can return an empty document after a parse failure.
+    if (!document || document->GetNumChildren() == 0) {
+        if (document)
+            document->Close();
+        LUMINUMBRA_CORE_ERROR("Failed to load RML document: {}", rml_path);
+        return;
+    }
 
     ++m_documentGeneration;
     m_savedWorldScan.Cancel();
     m_worldScanPending = false;
     m_pendingPresetOverwrite.reset();
-    // Close existing documents (except the debugger)
+    // Retire existing documents only after the replacement loads (except the debugger).
     for (int i = m_context->GetNumDocuments() - 1; i >= 0; --i) {
         Rml::ElementDocument* doc = m_context->GetDocument(i);
-        if (doc && doc->GetId().find("rmlui-debug") == Rml::String::npos) {
+        if (doc && doc != document && doc->GetId().find("rmlui-debug") == Rml::String::npos) {
             doc->Close();
         }
-    }
-
-    Rml::ElementDocument* document = m_context->LoadDocument("data/ui/" + rml_path);
-    if (!document) {
-        LUMINUMBRA_CORE_ERROR("Failed to load RML document: {}", rml_path);
-        return;
     }
 
     m_activeDocument = rml_path;
@@ -469,6 +468,8 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
         ShowMessage("Settings could not be saved. Reopen settings for details.");
         m_settingsSaveFailed = false;
     }
+    if (reload)
+        LUMINUMBRA_CORE_INFO("UI hot-reloaded: {}", rml_path);
 }
 
 void Rml_UIManager::ShowMessage(const std::string& message) {

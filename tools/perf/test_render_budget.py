@@ -46,6 +46,68 @@ class RenderBudgetTests(unittest.TestCase):
         self.assertEqual(verdict['floor']['verdict'], 'fail')
         self.assertFalse(budget.verdict_passes(verdict))
 
+    def test_window_visibility_evidence_for_both_schemas(self):
+        script = FIXTURES / 'save-load.traversal'
+        for schema in contract.SCHEMAS:
+            for mode in ('windowed', 'borderless', 'fullscreen', 'headless'):
+                for visible in (True, False, None, 0, 1, 'true', 'false', [], {}, 'missing'):
+                    data = (base.workload_artifact('save_load', script)
+                            if schema == contract.WORKLOAD_SCHEMA else base.artifact())
+                    render = data['settings']['effective_render']
+                    render.update(window_mode=mode, window_visible=visible)
+                    if visible == 'missing':
+                        del render['window_visible']
+                    with self.subTest(schema=schema, mode=mode, visible=visible):
+                        if mode == 'headless' and schema == contract.WORKLOAD_SCHEMA:
+                            with self.assertRaisesRegex(budget.BudgetInputError, 'headless'):
+                                budget.evaluate(data)
+                        elif mode == 'headless' or visible is True:
+                            self.assertTrue(budget.verdict_passes(budget.evaluate(data)))
+                        else:
+                            message = 'hidden-window' if visible is False else 'window_visible'
+                            with self.assertRaisesRegex(budget.BudgetInputError, message):
+                                budget.evaluate(data)
+
+    def test_missing_or_malformed_visibility_blocks(self):
+        for schema in contract.SCHEMAS:
+            for settings in (None, [], {}, {'effective_render': None}, {'effective_render': []}, 'missing'):
+                data = base.artifact()
+                data['schema'] = schema
+                data['settings'] = settings
+                if settings == 'missing':
+                    del data['settings']
+                with self.subTest(schema=schema, settings=settings), self.assertRaisesRegex(budget.BudgetInputError, 'window_visible'):
+                    budget.evaluate(data)
+
+    def test_cli_refuses_hidden_override_and_missing_visibility(self):
+        script = FIXTURES / 'save-load.traversal'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'capture.json'
+            verdict = Path(tmp) / 'verdict.json'
+            for schema in contract.SCHEMAS:
+                for visible in (False, 'missing'):
+                    data = (base.workload_artifact('save_load', script)
+                            if schema == contract.WORKLOAD_SCHEMA else base.artifact())
+                    render = data['settings']['effective_render']
+                    if visible is False:
+                        render['window_visible'] = False
+                        override = {'cli:--hidden-window': 'true', 'cli:--window-mode': 'windowed'}
+                        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+                        data['settings']['render_overrides'] = dict(override)
+                    else:
+                        del render['window_visible']
+                    if schema == contract.WORKLOAD_SCHEMA:
+                        data['render_identity'] = contract.render_identity(data['settings'])
+                    path.write_text(json.dumps(data), encoding='utf-8')
+                    for flags in ((), ('--enforce-floor', '--verdict-out', str(verdict))):
+                        extra = ('--traversal', str(script)) if schema == contract.WORKLOAD_SCHEMA else ()
+                        with self.subTest(schema=schema, visible=visible, flags=flags):
+                            result = self.run_cli(path, *extra, *flags)
+                            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                            message = 'hidden-window' if visible is False else 'window_visible'
+                            self.assertIn(message, result.stdout + result.stderr)
+                            self.assertFalse(verdict.exists())
+
     def test_v4_headless_cannot_pass_floor(self):
         script = FIXTURES / 'save-load.traversal'
         data = base.workload_artifact('save_load', script)

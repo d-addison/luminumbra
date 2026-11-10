@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -125,13 +126,20 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
 // JSON is materialized at a time, including when reading a large durable region.
 class RegionContentHasher {
 public:
-    RegionContentHasher();
+    explicit RegionContentHasher(bool diagnostics = false);
     void append(const Chunk& chunk);
     [[nodiscard]] std::uint64_t value() const;
-    [[nodiscard]] std::uint64_t terrain_value() const {
+    // Diagnostic sub-hashes are absent unless enabled at construction, even for an empty region.
+    [[nodiscard]] std::optional<std::uint64_t> terrain_value() const {
+        if (!m_diagnostics) {
+            return std::nullopt;
+        }
         return m_terrainHash;
     }
-    [[nodiscard]] std::uint64_t water_value() const {
+    [[nodiscard]] std::optional<std::uint64_t> water_value() const {
+        if (!m_diagnostics) {
+            return std::nullopt;
+        }
         return m_waterHash;
     }
     [[nodiscard]] bool empty() const {
@@ -145,6 +153,7 @@ private:
     std::uint64_t m_terrainHash = 14695981039346656037ull;
     ChunkID m_lastId = 0;
     bool m_hasChunks = false;
+    bool m_diagnostics = false;
 };
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
 

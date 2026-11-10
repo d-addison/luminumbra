@@ -1,0 +1,24 @@
+name: Base retarget
+
+on:
+  pull_request:
+    types: [edited]
+
+permissions:
+  contents: read
+
+jobs:
+  base-retarget:
+    name: Base retarget / fresh CI required
+    if: ${{ github.event.changes.base }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require CI on the new base
+        shell: bash
+        env:
+          PREVIOUS_BASE: ${{ github.event.changes.base.ref.from }}
+          CURRENT_BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          printf 'Base retargeted from "%s" to "%s". Fresh CI required.\n' "$PREVIOUS_BASE" "$CURRENT_BASE"
+          printf '%s\n' 'Re-trigger CI on the new base: push a new head, toggle ready for review, or change a label. Land only with a CI run whose base matches the current PR base.'
+          exit 1

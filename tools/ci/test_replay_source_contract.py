@@ -29,6 +29,71 @@ def read_source(path):
 
 
 class ReplaySourceContract(unittest.TestCase):
+    # Pin mode-local admission and its ordering without tightening the
+    # generic reader/writer, whose opaque and sparse records serve lockstep.
+    def assert_mode_admission(self, source):
+        recording, playback = source.split("int RunReplay(", 1)
+        admission, startup = playback.split("auto config = ReplayRunnerConfigFrom", 1)
+        self.assertRegex(admission, r'if \(header.engine_version != engine_now\)\s*\{'
+                         r'\s*LUMINUMBRA_CORE_ERROR\("replay: engine mismatch:')
+        self.assertIn("contents->inputs.size() != contents->tick_count", admission)
+        self.assertIn("for (const auto& input : contents->inputs)", admission)
+        self.assertIn("input.tick != admitted_inputs + 1 || !input.inputs.empty()", admission)
+        self.assertIn("++admitted_inputs;", admission)
+        self.assertIn("contents->tick_count != 0 && terminal == nullptr", admission)
+        self.assertIn("missing authenticated terminal checkpoint", admission)
+        self.assertIn("older positive recordings without one cannot be replayed", admission)
+        self.assertNotIn("FindInput(", playback)
+        self.assertRegex(recording, r'if \(executed != 0 && '
+                         r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
+                         r'writer.RecordCheckpoint\(CaptureCheckpoint\(executed, runner\)\);\s*\}'
+                         r'\s*if \(!writer.Finalize\(executed\)\)')
+        self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
+                      "executed == contents->tick_count", startup)
+        for field in ("world_hash", "terrain", "water", "entities"):
+            self.assertIn(f"live.{field} != recorded->{field}", startup)
+        self.assertIn("terminal ? terminal->world_hash : header.start_world_hash", startup)
+        tick_loop = startup.split("while (!diverged", 1)[1].split("const std::string live_end", 1)[0]
+        self.assertNotIn("FindCheckpoint(", tick_loop)
+        self.assertIn("++checkpoint;", tick_loop)
+
+    def test_replay_mode_admits_identity_inputs_and_terminal_before_startup(self):
+        self.assert_mode_admission(read_source(MODES + "Replay.cpp"))
+
+    def test_mode_admission_contract_detects_isolated_regressions(self):
+        source = read_source(MODES + "Replay.cpp")
+        for token in ("header.engine_version != engine_now",
+                      "contents->inputs.size() != contents->tick_count",
+                      "input.tick != admitted_inputs + 1 || !input.inputs.empty()",
+                      "contents->tick_count != 0 && terminal == nullptr",
+                      "executed != 0 && (executed % kCheckpointIntervalTicks) != 0",
+                      " || executed == contents->tick_count",
+                      "terminal ? terminal->world_hash : header.start_world_hash"):
+            self.assertIn(token, source)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_mode_admission(source.replace(token, "false", 1))
+
+    def test_mode_admission_regressions_use_registered_shipping_entry_points(self):
+        path = "common/ReplayModeAdmission_test.cpp"
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)', cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1].split().count(path), 1)
+        native = read_source("test/" + path)
+        self.assertNotIn("#define Run", native)
+        self.assertRegex(native, r'ASSERT_EQ\(RunRecord\(options\), 0\)')
+        self.assertRegex(native, r'ASSERT_EQ\(RunReplay\(options\), 0\)')
+        self.assertIn("testing::Values(std::uint64_t{0}, 1, 2, 29, 30, 31, 60, 90)", native)
+        for case in ("AuthenticatesEveryExecutedTickAndPreservesCadenceBytes",
+                     "ForeignEngineIsReadableButRefusedBeforeConfiguration",
+                     "IsolatedInputMutationsAreReadableButRefusedBeforeConfiguration",
+                     "ZeroTicksUseStartHashAndRefuseExtraInputs",
+                     "MissingTerminalIsExplicitlyRefusedBeforeConfiguration",
+                     "EveryTerminalHashIsVerifiedAndLocalized",
+                     "MissingCadenceCheckpointStillFails",
+                     "UnreadableAndPartialStreamsRefuseBeforeConfiguration"):
+            self.assertRegex(native, rf'TEST_[FP]\(\w+,\s*{case}\)')
+
     def assert_fixture_ownership(self, fixture):
         includes = list(re.finditer(
             r'^#include "../../src/luminumbra_server/modes/(Replay|Server)\.cpp"$',
@@ -777,7 +842,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         adopt.index("m_streaming_state.chunks.emplace("))
         self.assertLess(adopt.index("m_streaming_state.chunks.emplace("),
                         adopt.index("bump_far_lod_authority_revision("))
-        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty())", 1)[1]
+        promotion = source.split("if (ready && !failed && !chunk->pending_sdf_data.empty() &&", 1)[1]
         self.assertLess(promotion.index("SaveOwnership ownership;"),
                         promotion.index("chunk->sdf_data ="))
         self.assertLess(promotion.index("chunk->sdf_data ="),
@@ -1133,6 +1198,12 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
         self.assertIn("CancelAt(index)", forget)
         self.assertNotIn("Find(", forget)
         self.assertNotIn("Cancel(", forget)
+
+
+def load_tests(loader, tests, pattern):
+    tests.addTests(loader.discover(str(ROOT / "test/tools"),
+                                   pattern="test_region_authority_wiring.py"))
+    return tests
 
 
 if __name__ == "__main__":

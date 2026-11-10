@@ -59,6 +59,7 @@ PYTHON_TESTS = (
     "tools/perf/test_foliage_evidence.py",
     "tools/perf/test_perf.py",
     "tools/perf/test_plan_qualification.py",
+    "tools/perf/test_prepare_server_comparison.py",
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",

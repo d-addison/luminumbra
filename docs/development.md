@@ -378,15 +378,19 @@ No new required-check configuration is needed.
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
-branch and path filters still apply. CI also listens for `labeled`, `unlabeled`,
-and `edited`. Only `edited` events with `github.event.changes.base` present run
-normal CI, so retargeting a ready PR to main runs Windows/UCRT64 validation even
-for confirmed non-C++ changes. Its aggregate requires successful native producers.
-Title/body edits skip every CI job before runner allocation, use unique
-non-cancelling concurrency groups, and give skipped checks a ` (metadata edit)`
-suffix. This keeps their skipped results separate from required check names on
-the same SHA. A pre-job dependency skip alone would still emit skipped checks
-under those required names. Other workflows retain their existing event types.
+branch and path filters still apply. CI also listens for `labeled` and
+`unlabeled`. CI does not listen for `edited`; its required check names are plain
+strings. The separate Base retarget workflow listens only for `edited`. A base
+change produces a failing `Base retarget / fresh CI required` check that names
+the old and new base refs and asks the author to re-trigger CI on the new base
+(push a new head, toggle ready for review, or change a label). Title/body edits
+skip this static-named, non-required job and leave required check names intact.
+Landing must use a CI run whose base matches the PR's current base; rerunning a
+run made for the previous base reuses its stored event payload and is insufficient.
+Windows validation separately admits only same-repository PRs labelled
+`windows-proof`; admitted proof runs select full MSVC and UCRT64 validation,
+including for confirmed non-C++ changes. Their aggregates require successful
+native producers. Other workflows retain their existing event types.
 Maintainers must not merge until the `ready_for_review` run's required checks are green on the current head, and must
 wait again after any head update. This repository does not implement a separate
 merge gate. The external campaign gate (`campaign_control.py land`, outside this
