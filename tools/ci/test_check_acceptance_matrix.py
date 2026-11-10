@@ -2042,7 +2042,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
             inventory=self.root / "tools/ci/acceptance_requirements.json",
             generated_doc=self.root / "docs/acceptance-matrix.md", refresh_inventory=True,
             write_doc=self.tmp / "export.md", execution_receipt=self.tmp / "receipt.json",
-            junit=[], discovery=None)
+            junit=[], discovery=None, check_doc=None)
 
     def test_overlap_metadata_work_is_bounded_by_distinct_paths(self) -> None:
         self.prepare_refresh()
@@ -5318,6 +5318,61 @@ script.write_text('changed input', encoding='utf-8')
         self.assertNotIn(b"\r", doc.read_bytes())
         code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
         self.assertEqual(code, 0, err)
+
+    def _check_receipt_alias_of_checked_document(self, kind: str) -> None:
+        matrix = self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        checked = self.tmp / "checked.md"
+        checked.write_bytes(MODULE.render_doc(matrix).encode("utf-8"))
+        receipt = checked if kind == "direct" else self.tmp / "receipt-alias.json"
+        if kind == "hardlink":
+            receipt.hardlink_to(checked)
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in (checked, receipt, self.matrix_path,
+                               self.root / "docs/acceptance-matrix.md")}
+        with mock.patch.object(MODULE, "_replace_outputs", wraps=MODULE._replace_outputs) as publish:
+            code, _, err = self.run_main(
+                *self.base_args(), "--check-doc", str(checked), "--junit", str(report),
+                "--discovery", str(discovery), "--execution-receipt", str(receipt))
+        self.assertEqual(code, 2, err)
+        self.assertIn("output path overlaps an input", err)
+        publish.assert_not_called()
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns)
+                          for path in before}, before)
+
+    def test_receipt_direct_alias_of_checked_document_is_refused(self) -> None:
+        self._check_receipt_alias_of_checked_document("direct")
+
+    def test_receipt_hardlink_alias_of_checked_document_is_refused(self) -> None:
+        self._check_receipt_alias_of_checked_document("hardlink")
+
+    def test_checked_document_allows_intentional_regeneration_with_receipt(self) -> None:
+        matrix = self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        checked, receipt = self.tmp / "checked.md", self.tmp / "receipt.json"
+        checked.write_bytes(b"stale document\n")
+        code, _, err = self.run_main(
+            *self.base_args(), "--write-doc", str(checked), "--check-doc", str(checked),
+            "--junit", str(report), "--discovery", str(discovery),
+            "--execution-receipt", str(receipt))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(checked.read_bytes(), MODULE.render_doc(matrix).encode("utf-8"))
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["matrix_sha256"],
+                         hashlib.sha256(self.matrix_path.read_bytes()).hexdigest())
+
+    def test_checked_document_allows_distinct_receipt(self) -> None:
+        matrix = self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        checked, receipt = self.tmp / "checked.md", self.tmp / "receipt.json"
+        checked.write_bytes(MODULE.render_doc(matrix).encode("utf-8"))
+        before = checked.read_bytes(), checked.stat().st_mtime_ns
+        code, _, err = self.run_main(
+            *self.base_args(), "--check-doc", str(checked), "--junit", str(report),
+            "--discovery", str(discovery), "--execution-receipt", str(receipt))
+        self.assertEqual(code, 0, err)
+        self.assertEqual((checked.read_bytes(), checked.stat().st_mtime_ns), before)
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["matrix_sha256"],
+                         hashlib.sha256(self.matrix_path.read_bytes()).hexdigest())
 
     def test_crlf_doc_is_accepted(self) -> None:
         self.write_matrix(baseline_matrix())
@@ -9060,9 +9115,9 @@ watchdog.join()
                           for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
                           for name in loader.getTestCaseNames(case)
                           if name != "test_crash_fixture_matches_terminated_publication"})
-        self.assertEqual(len(original), 252)
+        self.assertEqual(len(original), 256)
         self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
-                         "44160a315d62abb65391cbf8bf512816dbc86db2f5955941311a642b47c43cf2")
+                         "5e1914e4b76f800b1b1a69592af1ac5b4e3edb167250c867a9d844204cc057cd")
         selected = [test.id() for number in range(_CONTRACT_PARTITIONS) for test in contract_suite(number)]
         known = {type(test).__name__ + "." + test._testMethodName for number in range(_CONTRACT_PARTITIONS)
                  for test in contract_suite(number)}
