@@ -1,5 +1,6 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 
 #include <algorithm>
@@ -121,29 +122,16 @@ int RunRecord(const ServerCliOptions& options) {
         writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
     }
 
-    if (!writer.Finalize(executed)) {
-        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay stream '{}'", options.record_path);
+    const auto* trace = runner.Session()->ActiveRegionsEnabled() ? &schedule_trace : nullptr;
+    if (!writer.Finalize(executed, trace)) {
+        LUMINUMBRA_CORE_ERROR("record: failed to finalize replay pair '{}': {}",
+                              options.record_path,
+                              trace
+                                  ? "cannot publish replay or region schedule trace"
+                                  : "cannot remove stale region schedule trace or publish replay");
         return 1;
     }
 
-    if (runner.Session()->ActiveRegionsEnabled()) {
-        std::string error;
-        if (!Luminumbra::Replay::WriteRegionScheduleTrace(
-                options.record_path, schedule_trace, error)) {
-            LUMINUMBRA_CORE_ERROR("record: {}", error);
-            return 1;
-        }
-    } else {
-        std::error_code ec;
-        const auto companion = options.record_path + ".regions.json";
-        fs::remove(companion, ec);
-        if (ec) {
-            LUMINUMBRA_CORE_ERROR("record: cannot remove stale region schedule trace '{}': {}",
-                                  companion,
-                                  ec.message());
-            return 1;
-        }
-    }
     const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();
@@ -165,6 +153,12 @@ int RunRecord(const ServerCliOptions& options) {
 int RunReplay(const ServerCliOptions& options) {
     LUMINUMBRA_CORE_INFO("Headless server REPLAY (LREC1): {}", options.replay_path);
 
+    auto pair_guard =
+        std::make_unique<Luminumbra::Persistence::ReplayPairReadGuard>(options.replay_path);
+    if (!pair_guard->is_open()) {
+        LUMINUMBRA_CORE_ERROR("replay: cannot recover replay pair '{}'", options.replay_path);
+        return 1;
+    }
     auto contents = Luminumbra::Replay::ReadReplay(options.replay_path);
     if (!contents.has_value()) {
         LUMINUMBRA_CORE_ERROR("replay: '{}' is invalid or has an unsupported LREC1 version; "
@@ -267,6 +261,8 @@ int RunReplay(const ServerCliOptions& options) {
             "replay: incompatible configuration: region trace requires sim.active_regions");
         return 1;
     }
+
+    pair_guard.reset(); // Both inputs are owned before releasing publication.
 
     // The post-boot hash must match the recorded start_world_hash, else the boot
     // parameters or worldgen drifted before tick 1 (a tick-0 divergence).

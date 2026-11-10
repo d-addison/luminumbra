@@ -1,7 +1,5 @@
 #include "ActiveRegionLedger.h"
 
-#include "persistence/WorldPersistenceRoundtrip.h"
-
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -388,101 +386,185 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
             ++it;
     }
 }
-RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
-                                            std::optional<std::span<const Vec3>> replicated_anchors,
-                                            std::span<const RegionWork> work,
-                                            const DurableDigest& durable_digest,
-                                            const OwnershipProbe& owned) {
-    // Callbacks may read the original ledger, so keep it intact until scheduling succeeds.
-    ActiveRegionLedger next(m_config);
-    next.m_records = m_records;
-    next.m_waterDebts = m_waterDebts;
-    next.m_legacyFrozenDigests = m_legacyFrozenDigests;
-    next.m_localAnchor = m_localAnchor;
-    next.m_tick = m_tick;
-    next.m_headerTick = m_headerTick;
-    next.m_nextPersistentId = m_nextPersistentId;
-    next.m_scheduleRegisters = this;
-    std::vector<RegionWork> combined(work.begin(), work.end());
-    // Restored clock gaps expire stale work only after this schedule commits successfully.
-    if (m_tick + 1 == clock.tick())
-        for (const auto& [key, total] : m_completedWork)
-            combined.push_back(RegionWork{key, total, 0, 0, 0});
-    auto result =
-        next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned);
-    // No register nodes were copied into the candidate. Retain ages and recycle
-    // completed work only after every refusing scheduler callback has succeeded.
-    if (m_energyPublication)
-        m_energyPublication->recycle(m_completedWork);
-    else
-        m_completedWork.clear();
-    next.m_energyAges.swap(m_energyAges);
-    next.m_energyPublication = std::move(m_energyPublication);
-    next.m_scheduleRegisters = nullptr;
-    *this = std::move(next);
-    return result;
-}
-RegionSchedule
-ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
-                                      std::optional<std::span<const Vec3>> replicated_anchors,
-                                      std::span<const RegionWork> work,
-                                      const DurableDigest& durable_digest,
-                                      const OwnershipProbe& owned) {
+struct ActiveRegionLedger::ScheduleScratch {
+    struct Row {
+        RegionKey key;
+        ActiveRegionRecord* record;
+        std::uint64_t proximity;
+    };
+    // Rows and new nodes are bounded by kMaxRegions; input scratch follows the supplied spans.
+    std::vector<Row> rows;
+    std::vector<RegionKey> visits, evictions;
+    std::vector<RegionWork> work;
+    std::map<RegionKey, ActiveRegionRecord> added;
+    RegionSchedule result;
+    std::string trace;
+};
+
+const RegionSchedule&
+ActiveRegionLedger::schedule(const WorldClock& clock,
+                             std::optional<std::span<const Vec3>> replicated_anchors,
+                             std::span<const RegionWork> work,
+                             const DurableDigest& durable_digest,
+                             const OwnershipProbe& owned) {
     // The ceiling, not the canonical tick, is the latest world time this ledger
     // knows about. After reconciling an interrupted save the canonical tick is
     // older, and scheduling at an already elapsed tick would re-run it.
     if (clock.tick() <= m_headerTick)
         throw std::invalid_argument("Region schedule requires a new absolute tick");
-    RegionSchedule result;
+    if (!m_scheduleScratch)
+        m_scheduleScratch = std::make_shared<ScheduleScratch>();
+    auto& scratch = *m_scheduleScratch;
+    auto& result = scratch.result;
     result.tick = clock.tick();
-    const auto all_anchors = replicated_anchors.value_or(std::span<const Vec3>{});
-    std::vector<Vec3> anchors;
-    anchors.reserve(all_anchors.size());
-    for (const auto& anchor : all_anchors) {
-        if (valid_anchor(anchor))
-            anchors.push_back(anchor);
-        else
+    result.work = 0;
+    result.rejected = {};
+    result.due.clear();
+    result.transitions.clear();
+    scratch.added.clear();
+    auto& visits = scratch.visits;
+    visits.clear();
+    scratch.evictions.clear();
+    const auto visit_anchor = [&](const Vec3& anchor) {
+        if (!valid_anchor(anchor)) {
             ++result.rejected.anchors;
-    }
-    std::vector<RegionWork> accepted_work;
-    accepted_work.reserve(work.size());
-    for (const auto& units : work) {
-        if (m_records.contains(units.key))
-            accepted_work.push_back(units);
-        else
-            ++result.rejected.work;
-    }
-    if (m_localAnchor && !replicated_anchors)
-        visit(*m_localAnchor, clock, result.rejected);
-    for (const auto& anchor : anchors)
-        visit(anchor, clock, result.rejected);
-
-    // Each map key contributes one row and at most one due entry. Nodes are pointer stable
-    // and nothing is inserted after this point.
-    struct Row {
-        RegionKey key;
-        ActiveRegionRecord* record;
+            return;
+        }
+        for (const auto key : activation_regions(anchor)) {
+            if (!m_records.contains(key) && !scratch.added.contains(key)) {
+                const auto count = m_records.size() + scratch.added.size();
+                if (count == kMaxRegions ||
+                    !encodable_with_counts(
+                        m_energyAges.size(), m_waterDebts.size(), std::nullopt, false, count + 1)) {
+                    ++result.rejected.capacity;
+                    continue;
+                }
+                scratch.added[key].first_active = clock.tick();
+            }
+            visits.push_back(key);
+        }
     };
-    std::vector<Row> rows;
-    rows.reserve(m_records.size());
-    for (auto& [key, record] : m_records) {
-        record.pressure = 0;
-        rows.push_back({key, &record});
+    if (m_localAnchor && !replicated_anchors)
+        visit_anchor(*m_localAnchor);
+    const auto all_anchors = replicated_anchors.value_or(std::span<const Vec3>{});
+    for (const auto& anchor : all_anchors)
+        visit_anchor(anchor);
+    std::sort(visits.begin(), visits.end());
+    visits.erase(std::unique(visits.begin(), visits.end()), visits.end());
+    auto& accepted_work = scratch.work;
+    accepted_work.clear();
+    // Size for every candidate report, so a warm tick that accepts more of the
+    // same inputs does not grow the retained storage.
+    accepted_work.reserve(work.size() + m_completedWork.size());
+    const auto accept_work = [&](const RegionWork& units) {
+        // Work is filtered against records present before this call's anchors.
+        if (m_records.contains(units.key)) {
+            accepted_work.push_back(units);
+            const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
+                                   Sum(units.water_cells, units.page_updates));
+            result.work = Sum(result.work, total);
+        } else
+            ++result.rejected.work;
+    };
+    for (const auto& units : work)
+        accept_work(units);
+    if (m_tick + 1 == clock.tick())
+        for (const auto& [key, total] : m_completedWork)
+            accept_work(RegionWork{key, total, 0, 0, 0});
+
+    auto& rows = scratch.rows;
+    rows.clear();
+    rows.reserve(m_records.size() + scratch.added.size());
+    scratch.evictions.reserve(rows.capacity());
+    auto existing = m_records.begin();
+    auto added = scratch.added.begin();
+    auto next_visit = visits.begin();
+    while (existing != m_records.end() || added != scratch.added.end()) {
+        const auto current = added == scratch.added.end() ||
+                                     (existing != m_records.end() && existing->first < added->first)
+                                 ? existing++
+                                 : added++;
+        const auto& key = current->first;
+        auto& r = current->second;
+        const bool nearby = next_visit != visits.end() && *next_visit == key;
+        if (nearby)
+            ++next_visit;
+        const auto proximity = nearby ? clock.tick() : r.last_proximity;
+        const bool idle =
+            clock.tick() >= proximity && clock.tick() - proximity >= kIdleEvictionTicks;
+        const bool evict = !r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
+                           !m_energyAges.contains(key) && !m_waterDebts.contains(key) &&
+                           !m_completedWork.contains(key);
+        if (evict)
+            scratch.evictions.push_back(key);
+        rows.push_back({key, &r, proximity});
     }
-    for (const auto& units : accepted_work) {
-        const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
-                               Sum(units.water_cells, units.page_updates));
-        auto& record = m_records.at(units.key);
-        record.pressure = Sum(record.pressure, total);
-        result.work = Sum(result.work, total);
-    }
-    std::sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) {
+    std::sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
         const auto& ra = *a.record;
         const auto& rb = *b.record;
-        return std::tuple(Rank(ra), clock.tick() - ra.last_proximity, a.key) <
-               std::tuple(Rank(rb), clock.tick() - rb.last_proximity, b.key);
+        return std::tuple(Rank(ra), clock.tick() - a.proximity, a.key) <
+               std::tuple(Rank(rb), clock.tick() - b.proximity, b.key);
     });
     const bool over = result.work > m_config.work_limit;
+    // Select at most one budget transition from the complete tick's totals.
+    // Degrade the lowest priority eligible region; recover the highest. Then
+    // apply all transitions (including forced wakes) in the forward total order.
+    std::optional<RegionKey> selected;
+    const auto eligible = [&](const ScheduleScratch::Row& row) {
+        const auto& r = *row.record;
+        if (row.proximity == clock.tick() || r.wake_pending)
+            return false;
+        return over ? r.state != RegionState::Frozen && r.over_hold >= m_config.hold_ticks - 1
+                    : r.state != RegionState::Active && r.under_hold >= m_config.hold_ticks - 1;
+    };
+    if (over) {
+        for (auto it = rows.rbegin(); it != rows.rend(); ++it)
+            if (eligible(*it)) {
+                selected = it->key;
+                break;
+            }
+    } else {
+        for (const auto& row : rows)
+            if (eligible(row)) {
+                selected = row.key;
+                break;
+            }
+    }
+    std::uint64_t frozen_digest = 0;
+    if (over && selected && m_records.at(*selected).state == RegionState::Reduced) {
+        if (!durable_digest)
+            throw std::invalid_argument("Freezing requires a durable region digest provider");
+        frozen_digest = durable_digest(*selected);
+    }
+    std::erase_if(scratch.evictions, [&](const RegionKey& key) { return !owned || owned(key); });
+    // Complete every throwing operation before publishing any record changes.
+    result.due.reserve(rows.size());
+    result.transitions.reserve(rows.size());
+    result.digest.resize(16);
+    auto& trace = scratch.trace;
+    trace.clear();
+    // At most 20 trace bytes per record, plus the fixed header and rejection counters.
+    static_assert(kMaxRegions <= (std::numeric_limits<std::size_t>::max() - 55) / 20);
+    trace.reserve(55 + 20 * rows.size());
+    if (m_energyPublication)
+        m_energyPublication->recycle(m_completedWork);
+    else
+        m_completedWork.clear();
+    m_records.merge(scratch.added);
+    for (const auto& row : rows) {
+        auto& r = *row.record;
+        r.pressure = 0;
+        if (row.proximity == clock.tick()) {
+            r.visited = true;
+            r.last_proximity = clock.tick();
+        }
+    }
+    for (const auto& units : accepted_work) {
+        auto& r = m_records.at(units.key);
+        r.pressure = Sum(r.pressure,
+                         Sum(Sum(units.region_ticks, units.entity_updates),
+                             Sum(units.water_cells, units.page_updates)));
+    }
     for (const auto& row : rows) {
         auto& r = *row.record;
         const bool nearby = r.visited && r.last_proximity == clock.tick();
@@ -495,29 +577,6 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
             r.under_hold = std::min(r.under_hold, m_config.hold_ticks - 1) + 1;
             r.over_hold = 0;
         }
-    }
-    // Select at most one budget transition from the complete tick's totals.
-    // Degrade the lowest priority eligible region; recover the highest. Then
-    // apply all transitions (including forced wakes) in the forward total order.
-    std::optional<RegionKey> selected;
-    const auto eligible = [&](const ActiveRegionRecord& r) {
-        if ((r.visited && r.last_proximity == clock.tick()) || r.wake_pending)
-            return false;
-        return over ? r.state != RegionState::Frozen && r.over_hold == m_config.hold_ticks
-                    : r.state != RegionState::Active && r.under_hold == m_config.hold_ticks;
-    };
-    if (over) {
-        for (auto it = rows.rbegin(); it != rows.rend(); ++it)
-            if (eligible(*it->record)) {
-                selected = it->key;
-                break;
-            }
-    } else {
-        for (const auto& row : rows)
-            if (eligible(*row.record)) {
-                selected = row.key;
-                break;
-            }
     }
     for (const auto& row : rows) {
         const auto key = row.key;
@@ -535,10 +594,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         }
         if (previous != r.state) {
             if (r.state == RegionState::Frozen) {
-                if (!durable_digest)
-                    throw std::invalid_argument(
-                        "Freezing requires a durable region digest provider");
-                r.frozen_digest = durable_digest(key);
+                r.frozen_digest = frozen_digest;
                 m_legacyFrozenDigests.erase(key);
                 r.frozen_at = clock.tick();
             }
@@ -557,7 +613,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     }
     m_tick = clock.tick();
     m_headerTick = std::max(m_headerTick, clock.tick());
-    std::string trace = "region_schedule:v1:";
+    trace = "region_schedule:v1:";
     Append(trace, result.tick, 8);
     Append(trace, result.work, 8);
     Append(trace, rows.size(), 4);
@@ -581,9 +637,15 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         Append(trace, result.rejected.work, 4);
         Append(trace, result.rejected.capacity, 4);
     }
-    result.digest = Persistence::StableChecksum(trace);
-    // Retention runs after the digest so the digest and trace describe the pre-eviction state.
-    evict_idle(clock, owned);
+    const auto digest = Hash(trace);
+    constexpr std::string_view digits = "0123456789abcdef";
+    for (unsigned digit = 0; digit < 16; ++digit)
+        result.digest[digit] = digits[(digest >> (4 * (15 - digit))) & 15];
+    // Retention runs after the digest so the trace describes the pre-eviction state.
+    for (const auto& key : scratch.evictions) {
+        m_legacyFrozenDigests.erase(key);
+        m_records.erase(key);
+    }
     std::erase_if(result.due, [this](const RegionKey& key) { return !m_records.contains(key); });
     result.ledger_records = m_records.size();
     return result;

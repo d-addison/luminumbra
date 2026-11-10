@@ -37,6 +37,18 @@ struct FieldEmitterGatherStats {
     std::uint64_t deposits = 0; // QueueDeposit calls issued this tick
 };
 
+// Registry-owned scratch follows the existing exclusive owner-thread gather contract.
+// The ordinary roster is bounded by live entities; regional buffers by kMaxRegionalBatchDeposits.
+struct FieldEmitterScratch {
+    std::vector<entt::entity> emitters, regional_emitters;
+    std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit> deposits;
+};
+
+inline FieldEmitterScratch& EmitterScratch(entt::registry& registry) {
+    auto* scratch = registry.ctx().find<FieldEmitterScratch>();
+    return scratch ? *scratch : registry.ctx().emplace<FieldEmitterScratch>();
+}
+
 // Queue this tick's emitter deposits into `field` (call right before the
 // layer's Tick, which sorts and applies them). Centre cell receives the full
 // rate; when radius_cells > 0 every cell within that Chebyshev radius receives
@@ -55,7 +67,8 @@ GatherFieldEmitterDeposits(entt::registry& registry,
 
     // id-ordered traversal (the EcologyHash rule) so the queue order is a pure
     // function of sim state, never of entt storage layout.
-    std::vector<entt::entity> emitters;
+    auto& emitters = EmitterScratch(registry).emitters;
+    emitters.clear();
     {
         auto view = registry.view<const TransformComponent, const FieldEmitterComponent>();
         for (auto e : view)
@@ -179,7 +192,11 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
     // Both scratch vectors are bounded by kMaxRegionalBatchDeposits, including
     // a roster of emitters whose footprints eventually clip to nothing. They grow
     // with the roster, so an ordinary tick with a few emitters allocates little.
-    std::vector<entt::entity> emitters;
+    auto& scratch = EmitterScratch(registry);
+    auto& emitters = scratch.regional_emitters;
+    auto& deposits = scratch.deposits;
+    emitters.clear();
+    deposits.clear();
     const auto view =
         registry
             .view<const Components::TransformComponent, const Components::FieldEmitterComponent>();
@@ -198,7 +215,6 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
     std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    std::vector<EnergyFieldState::RegionalDeposit> deposits;
     FieldEmitterGatherStats queued;
     for (auto entity : emitters) {
         const auto previous = deposits.size();
