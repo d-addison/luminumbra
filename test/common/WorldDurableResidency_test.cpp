@@ -1118,6 +1118,14 @@ TEST(WorldDurableResidency, RepeatedSuccessfulSavesLeaveSettledActivationElided)
     fx.world->debug_set_streaming_radius_cap(1);
     const auto anchor = fx.SpawnAnchor();
     fx.Settle(anchor, kSettleIterations);
+    // Streaming quiescence does not imply stationary water: active grids can
+    // legitimately request a remesh later. Freeze simulation, then drain those
+    // requests before measuring whether saves alone wake the settled scheduler.
+    auto* water = fx.session->GetWaterSystem();
+    ASSERT_NE(water, nullptr);
+    water->SetBootPaused(true);
+    fx.Settle(anchor, kSettleIterations);
+    ASSERT_TRUE(water->mesh_invalidations().empty());
     ASSERT_TRUE(fx.world->get_streaming_telemetry_stats().quiescent());
     ASSERT_EQ(fx.world->parking_status().parked_count, 0u);
     ASSERT_EQ(fx.world->parking_status().blocked_dirty, 0u);
@@ -1128,9 +1136,11 @@ TEST(WorldDurableResidency, RepeatedSuccessfulSavesLeaveSettledActivationElided)
     for (int save = 0; save < 3; ++save) {
         SCOPED_TRACE(save);
         ASSERT_TRUE(fx.session->SaveWorldState());
+        EXPECT_TRUE(water->mesh_invalidations().empty());
         EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
         for (int frame = 0; frame < 8; ++frame) {
             fx.Settle(anchor, 1);
+            EXPECT_TRUE(water->mesh_invalidations().empty());
             EXPECT_EQ(fx.world->get_last_streaming_budget_stats().scheduled_generation, 0u);
             EXPECT_EQ(fx.world->debug_dirty_generation(), generation);
         }
