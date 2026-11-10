@@ -740,12 +740,13 @@ TEST(StreamingHardening, RestoredPendingJobsResetOnlyBeforeExplicitAdoption) {
     EXPECT_EQ(loaded->sdf_data, sdf);
     EXPECT_EQ(loaded->mesh_version.load(), terrain_version);
     EXPECT_EQ(loaded->water_mesh_version.load(), water_version);
+    loaded->pending_water_mesh_generated.store(true);
+    loaded->normalize_for_park();
+    EXPECT_FALSE(loaded->pending_water_mesh_generated.load());
+    EXPECT_EQ(loaded->authority_stamp(), stamp);
+    EXPECT_EQ(loaded->sdf_data, sdf);
     EXPECT_EQ(original->pending_lod.load(), 0);
     EXPECT_TRUE(original->pending_mesh_ready.load());
-    Chunk parked(IVec3(0));
-    parked.pending_water_mesh_generated.store(true);
-    parked.normalize_for_park();
-    EXPECT_FALSE(parked.pending_water_mesh_generated.load());
 }
 
 TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {

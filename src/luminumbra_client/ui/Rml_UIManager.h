@@ -107,8 +107,8 @@ struct SettingsBridge {
 
 class Rml_UIManager {
 public:
-    // Changes on document replacement, including hot reload and failed loads
-    // which have closed the old document. Menu images must not cross that boundary.
+    // Changes on successful document replacement, including hot reload.
+    // Menu images must not cross that boundary.
     std::uint64_t document_generation() const {
         return m_documentGeneration;
     }
@@ -248,7 +248,7 @@ private:
     void ProcessDocumentLoadRequest();
     void AddClickSoundListener(Rml::Element* element, std::function<void(Rml::Event&)> callback);
     void BindEventListeners(Rml::ElementDocument* document);
-    void LoadDocument(const std::string& rml_path);
+    void LoadDocument(const std::string& rml_path, bool reload = false);
     void StartWorldScan(Rml::ElementDocument* document);
     void PollWorldScan();
     void PopulateWorlds(Rml::ElementDocument* document,

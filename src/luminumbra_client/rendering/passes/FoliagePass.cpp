@@ -26,6 +26,7 @@
 #include <glm/ext/vector_float4.hpp>
 #include <glm/ext/vector_int3.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <glm/trigonometric.hpp>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -181,6 +182,38 @@ void FoliagePass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/foliage.frag").string().c_str(),
         std::vector<std::string>{"VS_OUT.worldPos", "VS_OUT.heightT", "gl_Position"});
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.foliage");
+    cache_draw_uniforms();
+}
+
+void FoliagePass::cache_draw_uniforms() {
+    m_draw_uniforms = {};
+    m_draw_shader_generation = 0;
+    if (!m_shader || !m_shader->IsValid())
+        return;
+    const auto program = m_shader->Id();
+    m_draw_uniforms = {
+        .view = glGetUniformLocation(program, "u_view"),
+        .projection = glGetUniformLocation(program, "u_projection"),
+        .camera_pos = glGetUniformLocation(program, "u_cameraPos"),
+        .time = glGetUniformLocation(program, "u_time"),
+        .sway_amplitude = glGetUniformLocation(program, "u_swayAmplitude"),
+        .sway_speed = glGetUniformLocation(program, "u_swaySpeed"),
+        .fade_start = glGetUniformLocation(program, "u_fadeStart"),
+        .fade_end = glGetUniformLocation(program, "u_fadeEnd"),
+        .sun_direction = glGetUniformLocation(program, "u_sunDirection"),
+        .sun_color = glGetUniformLocation(program, "u_sunColor"),
+        .sun_intensity = glGetUniformLocation(program, "u_sunIntensity"),
+        .ambient_color = glGetUniformLocation(program, "u_ambientColor"),
+        .moon_dir = glGetUniformLocation(program, "u_moonDir"),
+        .cloud_shadow_enabled = glGetUniformLocation(program, "u_cloudShadowEnabled"),
+        .cloud_scroll_offset = glGetUniformLocation(program, "u_cloudScrollOffset"),
+        .cloud_coverage_amount = glGetUniformLocation(program, "u_cloudCoverageAmount"),
+        .cloud_biome_variation = glGetUniformLocation(program, "u_cloudBiomeVariation"),
+        .cloud_plane_height = glGetUniformLocation(program, "u_cloudPlaneHeight"),
+        .cloud_shadow_strength = glGetUniformLocation(program, "u_cloudShadowStrength"),
+        .cloud_sun_dir = glGetUniformLocation(program, "u_cloudSunDir"),
+    };
+    m_draw_shader_generation = m_shader->ProgramGeneration();
 }
 
 void FoliagePass::init_buffers() {
@@ -265,6 +298,8 @@ void FoliagePass::destroy_buffers() {
 
 void FoliagePass::reset_shader() {
     m_shader.reset();
+    m_draw_uniforms = {};
+    m_draw_shader_generation = 0;
 }
 
 void FoliagePass::update_ground_mesh(ChunkID id,
@@ -1415,8 +1450,12 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             LUMIN_PROFILE_ZONE_N("Foliage GPU surface miss");
             if (collect_attribution)
                 ++m_rebuild_attribution.surface_misses;
-            std::vector<glm::vec4> grid;
-            grid.reserve(kMaxCandidatesPerChunk);
+            auto& grid = m_surface_build_scratch;
+            if (grid.capacity() < kMaxCandidatesPerChunk) {
+                grid.reserve(kMaxCandidatesPerChunk);
+                ++m_surface_scratch_allocations;
+            }
+            grid.clear();
             if (collect_attribution)
                 m_rebuild_attribution.surface_samples += kMaxCandidatesPerChunk;
             for (uint32_t candidate = 0; candidate < kMaxCandidatesPerChunk; ++candidate) {
@@ -1428,12 +1467,11 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                 const SurfaceSample s = sample_ground(chunk, query, query_ctx, wx, wz);
                 grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
             }
-            gridp = &m_surf_grid_cache
-                         .insert_or_assign(surface_key,
-                                           CachedSurfaceSamples{support_revision,
-                                                                ++m_next_surface_revision,
-                                                                std::move(grid)})
-                         .first->second.samples;
+            auto& cached = m_surf_grid_cache[surface_key];
+            cached.samples.swap(grid);
+            cached.support_revision = support_revision;
+            cached.revision = ++m_next_surface_revision;
+            gridp = &cached.samples;
             --builds_left;
         } else {
             if (collect_attribution)
@@ -1803,19 +1841,19 @@ void FoliagePass::dispatch_scatter() {
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_FALSE);
     Luminumbra::Rendering::AttributedGl::Submit(
-        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_prefix_prog);
     glUniform1ui(m_prefix_uniforms.group_count,
                  groups_x * static_cast<GLuint>(m_uploaded_chunk_count));
     glUniform1ui(m_prefix_uniforms.max_instances, kMaxInstances);
-    Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1);
+    Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_TRUE);
     glUniform2f(m_scatter_uniforms.wind_xz, m_wind_xz.x, m_wind_xz.y);
     Luminumbra::Rendering::AttributedGl::Submit(
-        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+        glDispatchCompute, groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
                     GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
@@ -1944,7 +1982,10 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // forward foliage into the internal scene
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // forward foliage into the internal scene
 
     // Opaque-ish ground cover: depth test AND write against the scene depth so
     // the cards occlude correctly, alpha-tested in the frag shader. Blend on for
@@ -1960,30 +2001,32 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     }
 
     m_shader->use();
+    if (m_draw_shader_generation != m_shader->ProgramGeneration())
+        cache_draw_uniforms();
     const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
                                                       static_cast<float>(ctx.screen_width) /
                                                           static_cast<float>(ctx.screen_height),
                                                       camera.GetNearPlane(),
                                                       camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
-    m_shader->setMat4("u_view", view);
-    m_shader->setMat4("u_projection", projection);
-    m_shader->setVec3("u_cameraPos", camera.Position);
+    glUniformMatrix4fv(m_draw_uniforms.view, 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(m_draw_uniforms.projection, 1, GL_FALSE, glm::value_ptr(projection));
+    glUniform3fv(m_draw_uniforms.camera_pos, 1, glm::value_ptr(camera.Position));
     m_last_draw_shader_time = m_qualification.frozen_inputs ? 1.0f : ctx.time_seconds;
-    m_shader->setFloat("u_time", m_last_draw_shader_time);
-    m_shader->setFloat("u_swayAmplitude", m_sway_amplitude);
-    m_shader->setFloat("u_swaySpeed", m_sway_speed);
-    m_shader->setFloat("u_fadeStart", m_fade_start_m);
-    m_shader->setFloat("u_fadeEnd", m_fade_end_m);
+    glUniform1f(m_draw_uniforms.time, m_last_draw_shader_time);
+    glUniform1f(m_draw_uniforms.sway_amplitude, m_sway_amplitude);
+    glUniform1f(m_draw_uniforms.sway_speed, m_sway_speed);
+    glUniform1f(m_draw_uniforms.fade_start, m_fade_start_m);
+    glUniform1f(m_draw_uniforms.fade_end, m_fade_end_m);
 
-    m_shader->setVec3("u_sunDirection", ctx.sun.direction);
-    m_shader->setVec3("u_sunColor", ctx.sun.color);
-    m_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
-    m_shader->setVec3("u_ambientColor", ctx.sky_ambient_color);
+    glUniform3fv(m_draw_uniforms.sun_direction, 1, glm::value_ptr(ctx.sun.direction));
+    glUniform3fv(m_draw_uniforms.sun_color, 1, glm::value_ptr(ctx.sun.color));
+    glUniform1f(m_draw_uniforms.sun_intensity, ctx.sun.intensity);
+    glUniform3fv(m_draw_uniforms.ambient_color, 1, glm::value_ptr(ctx.sky_ambient_color));
     // foliage-night: feed the SAME moon toward-light direction the deferred lighting
     // pass keys its moon term off (moon-shadows workstream), so night blades pick up
     // the identical cool moonlit tone as the terrain instead of glowing.
-    m_shader->setVec3("u_moonDir", ctx.moon_light_dir);
+    glUniform3fv(m_draw_uniforms.moon_dir, 1, glm::value_ptr(ctx.moon_light_dir));
 
     //  feed the SAME projected cloud cast-shadow state the
     // lighting pass uses, so storm-overcast cells drive the blades DARK like the
@@ -1991,13 +2034,13 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     // off (enabled==0 -> the shader's cloud term is a no-op).
     const Luminumbra::Rendering::CloudRenderState& cloud = ctx.cloud_state;
     const bool cloud_on = cloud.enabled && cloud.shadow_enabled;
-    m_shader->setInt("u_cloudShadowEnabled", cloud_on ? 1 : 0);
-    m_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
-    m_shader->setFloat("u_cloudCoverageAmount", cloud.coverage_amount);
-    m_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
-    m_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
-    m_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
-    m_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
+    glUniform1i(m_draw_uniforms.cloud_shadow_enabled, cloud_on ? 1 : 0);
+    glUniform2fv(m_draw_uniforms.cloud_scroll_offset, 1, glm::value_ptr(cloud.scroll_offset));
+    glUniform1f(m_draw_uniforms.cloud_coverage_amount, cloud.coverage_amount);
+    glUniform1f(m_draw_uniforms.cloud_biome_variation, cloud.biome_variation);
+    glUniform1f(m_draw_uniforms.cloud_plane_height, cloud.plane_height);
+    glUniform1f(m_draw_uniforms.cloud_shadow_strength, cloud.shadow_strength);
+    glUniform3fv(m_draw_uniforms.cloud_sun_dir, 1, glm::value_ptr(cloud.sun_travel_dir));
 
     glBindVertexArray(m_vao);
     PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
@@ -2010,7 +2053,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
             glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysIndirect,
-                GL_TRIANGLES,
+                GLenum{GL_TRIANGLES},
                 reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
             glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
             m_last_draw_calls = 1;
@@ -2020,7 +2063,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         //  12 verts/instance = two crossed quads (6 verts
         // each) so a blade reads as upright cover from any angle, not a flat decal.
         Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
-                                                    GL_TRIANGLES,
+                                                    GLenum{GL_TRIANGLES},
                                                     0,
                                                     12,
                                                     static_cast<GLsizei>(m_draw_instance_limit));
@@ -2143,6 +2186,7 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
     if (feedback_active)
         return false;
     constexpr std::size_t sample_count = 64;
+    static_assert(kMaxInstances <= static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()));
     constexpr std::size_t vertex_bytes = sample_count * 12 * sizeof(std::array<float, 8>);
     if (!m_vertex_selection_ready) {
         // Search once, in bounded linear time, for a contiguous real draw range
@@ -2192,24 +2236,32 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
     // These three ranges partition the ORIGINAL draw. Rasterization remains ON;
     // there is no replacement shader, duplicate draw, or synthetic geometry.
     if (first) {
-        Luminumbra::Rendering::AttributedGl::Submit(
-            glDrawArraysInstancedBaseInstance, GL_TRIANGLES, 0, 12, first, 0);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstancedBaseInstance,
+                                                    GLenum{GL_TRIANGLES},
+                                                    0,
+                                                    12,
+                                                    static_cast<GLsizei>(first),
+                                                    0u);
         ++m_last_draw_calls;
     }
     glBeginTransformFeedback(GL_TRIANGLES);
-    Luminumbra::Rendering::AttributedGl::Submit(
-        glDrawArraysInstancedBaseInstance, GL_TRIANGLES, 0, 12, sample_count, first);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstancedBaseInstance,
+                                                GLenum{GL_TRIANGLES},
+                                                0,
+                                                12,
+                                                static_cast<GLsizei>(sample_count),
+                                                first);
     glEndTransformFeedback();
     ++m_last_draw_calls;
     const auto after = first + sample_count;
     if (after < m_instances.size()) {
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawArraysInstancedBaseInstance,
-            GL_TRIANGLES,
+            GLenum{GL_TRIANGLES},
             0,
             12,
             static_cast<GLsizei>(m_instances.size() - after),
-            after);
+            static_cast<GLuint>(after));
         ++m_last_draw_calls;
     }
     glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, static_cast<GLuint>(previous_feedback));

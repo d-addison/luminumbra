@@ -1105,7 +1105,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> scratch;
             u32 mesh_version = 0;
             u32 water_mesh_version = 0;
-            u64 authority_revision = 0;
+            u64 terrain_edit_generation = 0;
             u32 voxel_revision = 0;
         };
         struct MeshingBatch {

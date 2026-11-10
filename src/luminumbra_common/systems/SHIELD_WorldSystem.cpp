@@ -542,7 +542,7 @@ void clear_streaming_state_counts(SHIELD_WorldSystem::StreamingBudgetFrameStats&
 }
 
 bool HasAuthoritativeHeightmapOnly(const Chunk& chunk) {
-    return chunk.has_simulation_authority() && chunk.sdf_data.empty() &&
+    return chunk.has_terrain_authority() && chunk.sdf_data.empty() &&
            chunk.heightmap_data.size() == kHeightmapCells;
 }
 
@@ -1005,7 +1005,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             const bool ready = chunk->pending_promotion_ready.load(std::memory_order_acquire);
             const bool failed = chunk->pending_promotion_failed.load(std::memory_order_acquire);
             if (ready && !failed && !chunk->pending_sdf_data.empty() &&
-                !chunk->has_simulation_authority()) {
+                !chunk->has_terrain_authority()) {
                 // The LOD0-promotion publish (, moved here from
                 // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
@@ -3556,6 +3556,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                                               closest_anchor,
                                                               chunk_ptr->current_lod.load());
                 }
+                if (terrain_mesh_required) {
+                    required_lod = TerrainMeshLod(*chunk_ptr, required_lod);
+                }
                 // The column-surface cache samples the same chunk positions, so
                 // this replaces per-candidate fractal noise evaluations with a
                 // hash lookup (terrain height is a pure function of seed/params).
@@ -5330,17 +5333,15 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                 }
             }
     if (edited > 0) {
-        // Keep asynchronous rebuilding eligible even if synchronous preparation refuses.
-        ++m_dirty_generation;
+        // Remesh + rebuild colliders for the edited band (rings in chunk units).
+        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
+        if (m_durable_read_failed)
+            return edited;
         // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
         // delta tracks the carve depth at the sphere center (~radius below the surface).
         const std::int32_t delta_mm =
             static_cast<std::int32_t>((fill ? 1.0f : -1.0f) * radius_m * 1000.0f);
         EditTerrainBed(world_pos, delta_mm, radius_m);
-        // Rebuild only after both simulation edits are complete.
-        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
-        if (m_durable_read_failed)
-            return edited;
     }
     return edited;
 }
@@ -6071,14 +6072,16 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                                        work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
-        const bool authority = work_item.chunk->has_simulation_authority();
-        if (authority && (has_malformed_sdf ||
-                          (work_item.terrain_mesh_required && work_item.chunk->sdf_data.empty() &&
-                           work_item.chunk->heightmap_data.size() != kHeightmapCells))) {
+        const bool terrain_authority = work_item.chunk->has_terrain_authority();
+        if (terrain_authority &&
+            (has_malformed_sdf || needs_sim_truth ||
+             (work_item.terrain_mesh_required && work_item.chunk->sdf_data.empty() &&
+              work_item.chunk->heightmap_data.size() != kHeightmapCells))) {
             ++consumed;
             continue;
         }
-        const bool promotion_required = !authority && (needs_sim_truth || has_malformed_sdf);
+        const bool promotion_required =
+            !terrain_authority && (needs_sim_truth || has_malformed_sdf);
         if (promotion_required && promotion_pipeline_pending()) {
             break;
         }
@@ -6103,11 +6106,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                 work_item.chunk->sdf_data.size(),
                 kFullSdfLattice);
         }
-        auto render_item = work_item;
-        if (work_item.terrain_mesh_required) {
-            render_item.lod_level = TerrainMeshLod(*work_item.chunk, render_item.lod_level);
-        }
-        (promotion_required ? promotion_items : mesh_items).push_back(render_item);
+        (promotion_required ? promotion_items : mesh_items).push_back(work_item);
     }
     // Guard: only hand items to the promotion lane when its whole pipeline is
     // idle. This makes the stage-B re-entry into dispatch_meshing_jobs
@@ -6212,7 +6211,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                                      scratch_owner,
                                      chunk->mesh_version.load(std::memory_order_acquire),
                                      chunk->water_mesh_version.load(std::memory_order_acquire),
-                                     chunk->authority_hash_revision(),
+                                     chunk->water_seed_edit_generation(),
                                      voxel_revision});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
@@ -6356,8 +6355,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         const bool terrain_current =
             chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
             chunk->voxel_revision() == job_chunk.voxel_revision &&
-            (job_chunk.voxel_revision != std::numeric_limits<u32>::max() ||
-             chunk->authority_hash_revision() == job_chunk.authority_revision);
+            chunk->water_seed_edit_generation() == job_chunk.terrain_edit_generation;
         const bool water_current = chunk->water_mesh_version.load(std::memory_order_acquire) ==
                                    job_chunk.water_mesh_version;
         if (mesh_ready && !mesh_failed && current_owner) {
