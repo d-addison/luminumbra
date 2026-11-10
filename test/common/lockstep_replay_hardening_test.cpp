@@ -371,7 +371,7 @@ TEST(LockstepCodecHardening, DecodeHelloRejectsTruncatedFrame) {
     net::HelloMsg out;
     // Drop bytes from the tail one at a time; every short frame must be rejected.
     for (std::size_t cut = 1; cut < frame.size(); ++cut) {
-        std::vector<std::uint8_t> shortened(frame.begin(), frame.end() - cut);
+        std::vector<std::uint8_t> shortened(frame.data(), frame.data() + (frame.size() - cut));
         EXPECT_FALSE(net::DecodeHello(shortened, out))
             << "accepted a Hello short by " << cut << " byte(s)";
     }
@@ -385,7 +385,7 @@ TEST(LockstepCodecHardening, DecodeInputRejectsTruncatedFrame) {
     auto frame = net::EncodeInput(in);
     net::InputMsg out;
     for (std::size_t cut = 1; cut < frame.size(); ++cut) {
-        std::vector<std::uint8_t> shortened(frame.begin(), frame.end() - cut);
+        std::vector<std::uint8_t> shortened(frame.data(), frame.data() + (frame.size() - cut));
         EXPECT_FALSE(net::DecodeInput(shortened, out))
             << "accepted an Input short by " << cut << " byte(s)";
     }
@@ -401,7 +401,7 @@ TEST(LockstepCodecHardening, DecodeHashRejectsTruncatedFrame) {
     auto frame = net::EncodeHash(in);
     net::HashMsg out;
     for (std::size_t cut = 1; cut < frame.size(); ++cut) {
-        std::vector<std::uint8_t> shortened(frame.begin(), frame.end() - cut);
+        std::vector<std::uint8_t> shortened(frame.data(), frame.data() + (frame.size() - cut));
         EXPECT_FALSE(net::DecodeHash(shortened, out))
             << "accepted a Hash short by " << cut << " byte(s)";
     }

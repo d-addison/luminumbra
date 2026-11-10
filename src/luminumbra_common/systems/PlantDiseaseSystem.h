@@ -40,6 +40,8 @@
 #include "../core/DeterministicMath.h" // Sqrt (IEEE-deterministic)
 #include "../core/DeterministicRng.h"  // reserved (offset +20) for a stochastic variant
 
+#include "RegionConsumerGate.h"
+
 namespace luminumbra::foliage {
 
 namespace Comp = ::Luminumbra::Components;
@@ -96,7 +98,10 @@ inline std::uint16_t SatSub(std::uint16_t a, std::uint32_t b) {
 // id-ordered, two-phase. `world_seed` lets distinct worlds diverge (reserved for a
 // future stochastic variant); the default deterministic path ignores it.
 inline PlantDiseaseStats
-RunPlantDiseaseOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t world_seed = 0) {
+RunPlantDiseaseOnTick(entt::registry& reg,
+                      std::uint64_t tick,
+                      std::uint64_t world_seed = 0,
+                      const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     (void)tick;       // unused by the deterministic threshold path
     (void)world_seed; // reserved for the +20 stochastic variant
     PlantDiseaseStats stats;
@@ -106,8 +111,11 @@ RunPlantDiseaseOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wor
 
     // id-ordered participant ids so accumulation + transition order is deterministic.
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
