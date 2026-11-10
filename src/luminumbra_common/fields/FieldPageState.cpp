@@ -1221,11 +1221,12 @@ bool FieldPageState::capture_scent_window(ScentCellKey origin,
                                           int side,
                                           std::span<const ScentCell> cells,
                                           std::map<RegionKey, std::uint64_t>& work) {
-    FieldPageState staged;
-    if (!staged.stage_scent_window(*this, origin, side, cells, work)) {
+    const auto previous_visits = m_scentCaptureVisits;
+    if (!stage_scent_window(*this, origin, side, cells, work)) {
         return false;
     }
-    adopt_scent_state(staged);
+    adopt_scent_state(*this);
+    m_scentCaptureVisits = previous_visits;
     return true;
 }
 
@@ -1238,7 +1239,19 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
     if (!stage_scent_window(source, origin, side, cells, completed)) {
         return false;
     }
-    std::map<RegionKey, std::uint64_t> result(completed.begin(), completed.end());
+    auto& result = m_scentChanges.work_scratch;
+    // At most four near owners plus the bounded retirement owner list.
+    auto entry = result.begin();
+    for (const auto& [owner, count] : completed) {
+        while (entry != result.end() && entry->first < owner) {
+            entry = result.erase(entry);
+        }
+        result.insert_or_assign(owner, count);
+        if (entry != result.end() && entry->first == owner) {
+            ++entry;
+        }
+    }
+    result.erase(entry, result.end());
     work.swap(result);
     return true;
 }
@@ -1285,7 +1298,10 @@ bool FieldPageState::stage_scent_window(const FieldPageState& source,
         }
     }
     floor_changes.reserve(block_count * 2);
-    std::map<ScentCellKey, ScentCell> admitted, floor_admitted;
+    auto& admitted = m_scentChanges.admitted;
+    auto& floor_admitted = m_scentChanges.floor_admitted;
+    admitted.clear();
+    floor_admitted.clear();
     ScentWindowWork completed;
     std::size_t added = 0, removed = 0, visits = 0;
     for (int x = 0; x < side; ++x) {

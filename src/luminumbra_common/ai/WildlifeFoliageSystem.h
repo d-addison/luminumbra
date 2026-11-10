@@ -47,6 +47,8 @@
 #include "../components/GrazeableComponent.h" // GrazeableComponent (opt-in)
 #include "../core/DeterministicMath.h"        // Sqrt
 
+#include "../systems/RegionConsumerGate.h"
+
 namespace luminumbra::ai {
 
 // Components live in the capital-L namespace (engine convention).
@@ -97,9 +99,11 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
-inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
-                                                     std::uint64_t tick,
-                                                     const WildlifeFoliageTuning& tuning = {}) {
+inline WildlifeFoliageStats
+RunWildlifeFoliageOnTick(entt::registry& reg,
+                         std::uint64_t tick,
+                         const WildlifeFoliageTuning& tuning = {},
+                         const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -111,7 +115,12 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
     std::vector<Grazer> grazers;
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
-        std::vector<entt::entity> cents(cview.begin(), cview.end());
+        std::vector<entt::entity> cents;
+        for (auto e : cview) {
+            if (gate.Allows(e)) {
+                cents.push_back(e);
+            }
+        }
         std::sort(cents.begin(), cents.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
@@ -128,7 +137,12 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
 
     // --- 2. Gather grazeable plants, id-ordered. ---
     auto pview = reg.view<Comp::GrazeableComponent, const Comp::TransformComponent>();
-    std::vector<entt::entity> pents(pview.begin(), pview.end());
+    std::vector<entt::entity> pents;
+    for (auto e : pview) {
+        if (gate.Allows(e)) {
+            pents.push_back(e);
+        }
+    }
     std::sort(pents.begin(), pents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
