@@ -23,6 +23,8 @@
 // SEED OFFSET REGISTRY: wind+11, weather+12/13, aether+14, plant+15 taken; CREATURE
 // REPRODUCTION CLAIMS +16. Recorded here and at the GameSession wire site.
 
+#include "CreatureTickAdmission.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -88,7 +90,9 @@ struct ReproductionTuning {
 // opposite-sex mate by OVERRIDING the brain's wish velocity — unless they are fleeing a
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
-inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& tuning = {}) {
+inline void RunMateSeekingOnTick(entt::registry& reg,
+                                 const ReproductionTuning& tuning = {},
+                                 const CreatureTickAdmission* admission = nullptr) {
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
@@ -99,7 +103,12 @@ inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& 
         bool ready;
         std::uint16_t species_id;
     };
-    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::vector<entt::entity> ents;
+    for (const auto entity : view) {
+        if (!admission || admission->Allows(entity)) {
+            ents.push_back(entity);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -161,12 +170,18 @@ RunMatingResolveOnTick(entt::registry& reg,
                        std::uint64_t tick,
                        std::uint64_t world_seed = 0,
                        const ReproductionTuning& tuning = {},
-                       const CreatureSpeciesRegistry* species = nullptr) {
+                       const CreatureSpeciesRegistry* species = nullptr,
+                       const CreatureTickAdmission* admission = nullptr) {
     CreatureReproductionStats stats;
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
-    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::vector<entt::entity> ents;
+    for (const auto entity : view) {
+        if (!admission || admission->Allows(entity)) {
+            ents.push_back(entity);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });

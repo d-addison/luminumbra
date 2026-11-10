@@ -68,7 +68,8 @@ int RunRecord(const ServerCliOptions& options) {
     header.version = Luminumbra::Replay::kLrec1Version;
     header.tick_rate_hz = 30;
     header.seed_string = options.seed;
-    header.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
+    header.seed =
+        Luminumbra::Replay::kResolvedSeedTag | runner.Session()->GetMetadata().resolvedSeed;
     header.preset = options.preset;
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(options.preset).c_str(), nullptr, 16);

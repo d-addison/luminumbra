@@ -25,6 +25,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "nlohmann/json.hpp"
 
 #include "ServerWorldRunner.h"
@@ -164,8 +171,21 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i))
                 options.preset = v;
         } else if (std::strcmp(arg, "--seed") == 0) {
-            if (const char* v = next_value(i))
+            if (const char* v = next_value(i)) {
+#if defined(_WIN32)
+                const auto utf8_seed =
+                    Luminumbra::world::WorldSeedFromWindowsCommandLine(GetCommandLineW(), argc, i);
+                if (!utf8_seed) {
+                    LUMINUMBRA_CORE_ERROR("--seed requires valid Unicode text of at most 4 KiB "
+                                          "in UTF-8 and matching native command-line arguments");
+                    options.parse_error = true;
+                } else {
+                    options.seed = *utf8_seed;
+                }
+#else
                 options.seed = v;
+#endif
+            }
         } else if (std::strcmp(arg, "--world-id") == 0) {
             if (const char* v = next_value(i))
                 options.world_id = v;

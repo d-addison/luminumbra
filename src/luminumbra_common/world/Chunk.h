@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "FarWorldAuthorityChanges.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "core/WaterSeedInputs.h"
@@ -88,6 +89,9 @@ public:
             std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         m_state = new_state;
     }
+    void bind_far_world_authority_changes(std::weak_ptr<World::FarWorldAuthorityChanges> changes) {
+        m_far_world_changes.store(std::move(changes), std::memory_order_release);
+    }
 
     // Owner-thread capture at streaming publication. Reuses immutable bytes for
     // identical input; mutation creates a new value while workers retain the old.
@@ -100,6 +104,7 @@ public:
     // clear; runtime voxel edits must call mark_voxel_data_dirty, and a
     // successful save clears it again.
     void mark_voxel_data_dirty() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         advance_water_seed_edit_generation();
         m_terrain_authority.store(true, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
@@ -118,6 +123,7 @@ public:
     // Water shares the durable chunk record but does not change voxel geometry
     // or invalidate SDF/render revisions. Water ownership is sticky after saving.
     void mark_water_data_dirty() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Water);
         m_water_authority.store(true, std::memory_order_release);
         m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_voxel_data_dirty.store(true, std::memory_order_release);
@@ -159,6 +165,7 @@ public:
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         m_terrain_authority.store(false, std::memory_order_release);
         // Terrain ownership and provenance change on every path, so cached authority stamps are
         // stale.
@@ -192,6 +199,7 @@ public:
         }
     }
     void mark_sdf_loaded_or_edited() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         advance_water_seed_edit_generation();
         // Claiming terrain authority changes what the authority projection hashes.
         if (!m_terrain_authority.exchange(true, std::memory_order_acq_rel))
@@ -215,6 +223,7 @@ public:
     // chunks that already need authority. Notifications defer ownership and save data to
     // SHIELD_WorldSystem::sync_water_authority(); simulation writers also mark water data dirty.
     void mark_water_state_dirty() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Water);
         u32 revision = m_water_revision.load(std::memory_order_acquire);
         while (revision != std::numeric_limits<u32>::max() &&
                !m_water_revision.compare_exchange_weak(
@@ -241,6 +250,7 @@ public:
         return m_water_state_dirty.load(std::memory_order_acquire);
     }
     void clear_water_state_dirty() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Water);
         m_water_state_dirty.store(false, std::memory_order_release);
     }
     u32 water_revision() const {
@@ -248,6 +258,7 @@ public:
     }
     // Sticky: set once the chunk's water state has diverged from worldgen initialisation.
     void set_water_authority() {
+        notify_far_world_change(World::FarWorldAuthorityChange::Water);
         m_water_authority.store(true, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
@@ -516,6 +527,12 @@ private:
     std::atomic<bool> m_water_state_dirty{false};
     std::atomic<bool> m_water_authority{false};
     std::atomic<bool> m_terrain_authority{false};
+    void notify_far_world_change(World::FarWorldAuthorityChange change) const {
+        if (const auto changes = m_far_world_changes.load(std::memory_order_acquire).lock()) {
+            changes->notify(m_coords, change);
+        }
+    }
+    std::atomic<std::weak_ptr<World::FarWorldAuthorityChanges>> m_far_world_changes;
     std::shared_ptr<ChunkWaterChanges> m_water_changes;
     std::atomic<bool> m_water_change_queued{false};
     std::atomic<u32> m_water_revision{0};
