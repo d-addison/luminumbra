@@ -127,10 +127,11 @@ public:
         for (auto& field : m_ch) {
             if (advect) {
                 // Snapshot the channel, then rewrite each cell from its upwind source.
-                std::vector<double> src(W * H);
+                m_scratch.resize(field.values().size());
+                const auto& src = m_scratch;
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        src[y * W + x] = field.at(x, y);
+                        m_scratch[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
                         if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
@@ -172,10 +173,11 @@ public:
                 // gaps so the scent gradient is usable from any cell. Evaporation is
                 // folded into the same write. Only runs when diffusing, so a pure
                 // evaporation step (iters 0) stays an exact per-cell decay.
-                std::vector<double> tmp(W * H);
+                m_scratch.resize(field.values().size());
+                const auto& tmp = m_scratch;
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        tmp[y * W + x] = field.at(x, y);
+                        m_scratch[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
                         if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
@@ -307,6 +309,8 @@ public:
 
 private:
     CellGate m_deposit_gate;
+    // One channel-sized snapshot, shared by sequential advection and smoothing passes.
+    std::vector<double> m_scratch;
     [[nodiscard]] bool valid(int ch, int x, int z) const {
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
     }

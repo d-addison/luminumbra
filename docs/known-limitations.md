@@ -50,6 +50,10 @@ and content formats may still change.
 
   The resolution is baked into the hashed water grids, so every peer in a session
   must match and enabling the flag deliberately changes the world hash.
+  With active regions enabled, a regenerable chunk whose water was never promoted
+  to durable authority is not saved and reloads awake with `ticks_below_threshold` at 0,
+  while a saved neighbour retains its counter and can be woken for additional
+  calm steps until the regenerated neighbour sleeps.
 - **Determinism is pinned for x86 hosts only.** Terrain generation and the
   ambient (wind, weather, aether) fields cap FastNoise at its AVX2 implementation
   on x86, so AVX2 and AVX-512 hosts produce the same world hashes. Non-x86
@@ -201,6 +205,11 @@ rosters should not be confused with missing simulation wiring.
 - **Engine performance measurement blocks merges on Linux only.** Windows and
   macOS currently exercise the portable runner contract; see
   [performance measurement](performance.md) for the gate's design.
+- **Acceptance preparation cleanup trusts its own directory.** Marker cleanup
+  serializes cooperating checker processes through the refresh lock. Before
+  unlinking a marker, it verifies the file's identity and digest. It does not
+  defend against another local process that replaces the marker between that
+  final check and the unlink.
 
 ## Packaging
 
