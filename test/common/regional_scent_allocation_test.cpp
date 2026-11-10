@@ -107,6 +107,40 @@ void operator delete(void* storage, std::size_t, std::align_val_t alignment) noe
 void operator delete[](void* storage, std::size_t, std::align_val_t alignment) noexcept {
     ::operator delete(storage, alignment);
 }
+// The standard library also allocates through the nothrow forms (for example
+// std::stable_sort's temporary buffer), so they must share the replaced heap.
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    return ::operator new(size, std::nothrow);
+}
+void operator delete(void* storage, const std::nothrow_t&) noexcept {
+    ::operator delete(storage);
+}
+void operator delete[](void* storage, const std::nothrow_t&) noexcept {
+    ::operator delete(storage);
+}
+void* operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(size, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept {
+    return ::operator new(size, alignment, std::nothrow);
+}
+void operator delete(void* storage, std::align_val_t alignment, const std::nothrow_t&) noexcept {
+    ::operator delete(storage, alignment);
+}
+void operator delete[](void* storage, std::align_val_t alignment, const std::nothrow_t&) noexcept {
+    ::operator delete(storage, alignment);
+}
 
 namespace {
 using namespace Luminumbra::world;
