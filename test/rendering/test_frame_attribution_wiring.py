@@ -1782,7 +1782,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_boot_settle_mode && m_job_system", boot)
         self.assertIn("std::min(kBootSeedBatch, pending.size() - begin)", boot)
         self.assertIn("pending.subspan(begin, count)", boot)
-        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot)", boot)
+        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot, terrain_seed)", boot)
         self.assertIn("[task = std::move(task)] { task->compute(); }", boot)
         self.assertLess(boot.index("dispatch_batch(jobs)"), boot.index("wait(handle)"))
         self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
@@ -1881,7 +1881,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("const bool parallel_boot = use_seed_inputs && "
                       "m_boot_settle_mode && m_job_system;", boot)
         self.assertIn("auto high_seed_inputs = use_seed_inputs ? "
-                      "prepare_high_water_seed_inputs(to_init, parallel_boot) : "
+                      "prepare_high_water_seed_inputs(to_init, parallel_boot, terrain_seed) : "
                       "std::vector<std::shared_ptr<HighWaterSeedInputs>>{};", boot)
         parallel = compact(block(water, "if (parallel_boot)"))
         self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)

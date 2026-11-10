@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CreatureTickAdmission.h"
+
 //  the STEERING CONSUMER — blends the  bias systems' outputs into the creature wish
 // velocity before the physics bridge applies it. This is the INTEGRATION layer between the bias
 // producers (PredatorPackSystem / MigrationSystem / TerritorySystem, which run in slot 7 and
