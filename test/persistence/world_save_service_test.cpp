@@ -53,6 +53,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -5186,26 +5187,150 @@ TEST(WorldSaveService, AuthorityWindowRefusesMalformedLegacyRegionNamesBeforeRea
     }
 }
 
-TEST(WorldSaveService, AuthorityWindowCanonicalMembersAdmitWithUnrelatedSidecars) {
-    for (const bool indexed : {false, true}) {
-        const TempSaveDir save("authority_window_region_sidecars");
-        WorldStreamingState state;
-        const auto chunk = AddWindowChunk(state, {0, 0, 0});
-        AddWindowChunk(state, {-32, 0, 0});
+namespace {
+void CheckRejectedWindowArtifact(const WorldStreamingState& state,
+                                 bool indexed,
+                                 bool populated,
+                                 const char* name,
+                                 int kind,
+                                 AuthorityReader& reader,
+                                 const WorldSaveService::AuthorityWindowResult& original) {
+    std::string error;
+    const TempSaveDir save("authority_window_rejected_artifact");
+    if (indexed || populated) {
         ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, indexed));
-        for (const char* name : {"notes.txt", "r.00.0.txt", "r.00.0.lmr.tmp"})
-            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
-                WorldSaveService::region_directory(save.path()) / name, "unrelated"));
+    }
+    AuthorityReader admitted;
+    ASSERT_TRUE(admitted.admit(save.path(), WindowLimits(), error)) << error;
+    const auto before = admitted.read({}, WindowLimits());
+    const auto path = save.path() / name;
+    std::filesystem::create_directories(path.parent_path());
+    if (kind == 2) {
+        ASSERT_TRUE(std::filesystem::create_directory(path));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, kind == 0 ? "" : "unsupported snapshot"));
+    }
+    WorldStreamingState rejected;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save.path(), errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    EXPECT_FALSE(error.empty());
+    const auto retained = reader.read({}, WindowLimits());
+    EXPECT_EQ(retained.membership, original.membership) << retained.error;
+    EXPECT_EQ(retained.source_identity, original.source_identity);
+    EXPECT_EQ(retained.generation, original.generation);
+    AuthorityReader unadmitted;
+    EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error));
+    ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+    if (std::string_view(name).starts_with("chunks/world-state.json")) {
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_EQ(errors.front(), WorldSaveService::kObsoleteWorldMessage);
+        ExpectWindowUnavailable(admitted.read({}, WindowLimits()));
+    }
+    ASSERT_TRUE(std::filesystem::remove(path));
+    const auto restored = admitted.read({}, WindowLimits());
+    EXPECT_EQ(restored.membership, before.membership) << restored.error;
+    EXPECT_EQ(restored.source_identity, before.source_identity);
+    ASSERT_TRUE(unadmitted.admit(save.path(), WindowLimits(), error)) << error;
+}
+
+#if !defined(_WIN32)
+void CheckWindowObsoleteLinks() {
+    for (const char* name : {"world-state.json", "world-state.json.bak"}) {
+        for (const bool loop : {false, true}) {
+            const TempSaveDir save("authority_window_obsolete_link");
+            AuthorityReader reader;
+            std::string error;
+            ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+            const auto path = save.path() / "chunks" / name;
+            std::filesystem::create_directory(path.parent_path());
+            std::filesystem::create_symlink(loop ? name : "missing-snapshot", path);
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+            ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        }
+    }
+}
+#endif
+
+void CheckWindowInvalidInventoryParents() {
+    for (const char* parent : {"chunks", "chunks/region"}) {
+        const TempSaveDir save("authority_window_uninspectable_inventory");
         AuthorityReader reader;
         std::string error;
         ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
-        const auto result = reader.read({}, WindowLimits());
-        ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
-        ASSERT_EQ(result.chunks.size(), 1u);
-        EXPECT_EQ(result.chunks.front()->sdf_data, chunk->sdf_data);
-        const auto negative = reader.read({-32, -32, 0, 0}, WindowLimits());
-        EXPECT_EQ(negative.membership, AuthorityMembership::Present) << negative.error;
+        const auto path = save.path() / parent;
+        std::filesystem::create_directories(path.parent_path());
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, "not a directory"));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        ASSERT_TRUE(std::filesystem::remove(path));
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
     }
+}
+
+void CheckWindowInventoryProbeBudget() {
+    const TempSaveDir empty("authority_window_inventory_probe_budget");
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(empty.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    // Sweep every probe boundary through admission and both read-time envelope checks.
+    for (std::uint64_t probes = 1; probes <= 18; ++probes) {
+        auto limits = WindowLimits();
+        limits.probes = probes;
+        const bool admitted = reader.admit(empty.path(), limits, error);
+        EXPECT_EQ(admitted, probes >= 15) << probes << ":" << error;
+        const auto result = reader.read({}, limits);
+        if (probes < 18) {
+            ExpectWindowUnavailable(result);
+        } else {
+            EXPECT_EQ(result.membership, AuthorityMembership::ProvenAbsent) << result.error;
+        }
+        if (!admitted) {
+            EXPECT_EQ(reader.read({}, WindowLimits()).source_identity, original.source_identity);
+        }
+    }
+}
+} // namespace
+
+TEST(WorldSaveService, AuthorityWindowRefusesLoaderRejectedArtifactsAndPreservesAdmission) {
+    for (const bool indexed : {false, true}) {
+        for (const bool populated : {false, true}) {
+            const TempSaveDir original_save("authority_window_original_inventory");
+            WorldStreamingState state;
+            if (populated) {
+                AddWindowChunk(state, {0, 0, 0});
+            }
+            if (indexed || populated) {
+                ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state, indexed));
+            }
+            AuthorityReader reader;
+            std::string error;
+            ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+            const auto original = reader.read({}, WindowLimits());
+            ASSERT_NE(original.membership, AuthorityMembership::Unavailable) << original.error;
+            for (const char* name : {"chunks/world-state.json",
+                                     "chunks/world-state.json.bak",
+                                     "chunks/unknown.bin",
+                                     "chunks/region/notes.txt",
+                                     "chunks/region/r.00.0.txt",
+                                     "chunks/region/r.00.0.lmr.tmp"}) {
+                for (const int kind : {0, 1, 2}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << indexed << ":" << populated << ":" << name << ":" << kind);
+                    ASSERT_NO_FATAL_FAILURE(CheckRejectedWindowArtifact(
+                        state, indexed, populated, name, kind, reader, original));
+                }
+            }
+        }
+    }
+#if !defined(_WIN32)
+    ASSERT_NO_FATAL_FAILURE(CheckWindowObsoleteLinks());
+#endif
+    ASSERT_NO_FATAL_FAILURE(CheckWindowInvalidInventoryParents());
+    ASSERT_NO_FATAL_FAILURE(CheckWindowInventoryProbeBudget());
 }
 
 TEST(WorldSaveService, AuthorityWindowUnknownIndexStatusRefusesAndPreservesAdmission) {

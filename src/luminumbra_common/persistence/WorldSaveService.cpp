@@ -3248,6 +3248,112 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
            stem == "r." + std::to_string(rx) + "." + std::to_string(rz);
 }
 
+class WorldPersistenceRefusal : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+void ChargeInventoryProbe(AuthorityReadBudget* budget) {
+    if (budget && !AuthorityReadBudget::Charge(1, budget->limits.probes, budget->probes))
+        throw WorldPersistenceRefusal("authority inventory probe limit exceeded");
+}
+
+void RefuseObsoleteWorldArtifacts(const std::filesystem::path& save_dir,
+                                  AuthorityReadBudget* budget = nullptr) {
+    const std::array paths{WorldSaveService::world_state_path(save_dir),
+                           save_dir / kChunksDirectoryName / kWorldStateBackupFileName};
+    for (const auto& path : paths) {
+        ChargeInventoryProbe(budget);
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if (error && error != std::errc::no_such_file_or_directory)
+            throw WorldPersistenceRefusal("unreadable world persistence artifact: " +
+                                          Filesystem::GenericUtf8PathString(path));
+        if (status.type() != std::filesystem::file_type::not_found)
+            throw WorldPersistenceRefusal(WorldSaveService::kObsoleteWorldMessage);
+    }
+}
+
+struct WorldPersistenceInventory {
+    bool directories_present = false;
+    bool present = false;
+    std::vector<std::filesystem::path> region_files;
+};
+
+WorldPersistenceInventory ReadWorldPersistenceInventory(const std::filesystem::path& save_dir,
+                                                        const std::stop_token& stop,
+                                                        AuthorityReadBudget* budget = nullptr) {
+    RefuseObsoleteWorldArtifacts(save_dir, budget);
+    WorldPersistenceInventory inventory;
+    const auto chunks_dir = save_dir / kChunksDirectoryName;
+    const auto region_dir = WorldSaveService::region_directory(save_dir);
+    ChargeInventoryProbe(budget);
+    const auto chunks_status = InspectPersistenceDirectory(chunks_dir, save_dir);
+    if (chunks_status == PersistenceDirectory::Missing)
+        return inventory;
+    if (chunks_status == PersistenceDirectory::Invalid)
+        throw WorldPersistenceRefusal("corrupt world persistence directory: " +
+                                      Filesystem::GenericUtf8PathString(chunks_dir));
+    ChargeInventoryProbe(budget);
+    for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
+        ChargeInventoryProbe(budget);
+        if (stop.stop_requested())
+            throw WorldPersistenceRefusal("Saved-world validation cancelled.");
+        if (entry.path() != region_dir ||
+            InspectPersistenceDirectory(entry.path(), save_dir) != PersistenceDirectory::Present)
+            throw WorldPersistenceRefusal("corrupt or unknown world persistence artifact: " +
+                                          Filesystem::GenericUtf8PathString(entry.path()));
+    }
+    ChargeInventoryProbe(budget);
+    const auto region_status = InspectPersistenceDirectory(region_dir, save_dir);
+    if (region_status == PersistenceDirectory::Missing)
+        return inventory;
+    if (region_status == PersistenceDirectory::Invalid)
+        throw WorldPersistenceRefusal("corrupt world persistence directory: " +
+                                      Filesystem::GenericUtf8PathString(region_dir));
+    inventory.directories_present = true;
+    ChargeInventoryProbe(budget);
+    for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
+        ChargeInventoryProbe(budget);
+        if (stop.stop_requested())
+            throw WorldPersistenceRefusal("Saved-world validation cancelled.");
+        int rx = 0, rz = 0;
+        if (entry.path() == snapshot_index_path(save_dir))
+            continue;
+        if (budget && entry.path().extension() == kRegionFileExtension &&
+            !ParseRegionFileName(entry.path(), rx, rz))
+            throw WorldPersistenceRefusal("unrecognised region file name");
+        const std::shared_lock read(detail::RegionFileSyncFor(entry.path()).publication);
+        // A retired plant file may disappear under its publication lock; a dangling link
+        // remains invalid. Payload readers verify type and bytes through the same handle.
+        const auto status = std::filesystem::symlink_status(entry.path());
+        if (!std::filesystem::exists(status) &&
+            entry.path() == WorldSaveService::plant_entities_path(save_dir))
+            continue;
+        if (!std::filesystem::is_regular_file(status))
+            throw WorldPersistenceRefusal("corrupt world persistence artifact: " +
+                                          Filesystem::GenericUtf8PathString(entry.path()));
+        if (entry.path() == WorldSaveService::world_manifest_path(save_dir) ||
+            entry.path() == WorldSaveService::plant_entities_path(save_dir) ||
+            entry.path() == WorldSaveService::plant_identities_path(save_dir) ||
+            entry.path() == WorldSaveService::ground_objects_path(save_dir) ||
+            entry.path() == WorldSaveService::field_pages_path(save_dir) ||
+            entry.path() == WorldSaveService::active_regions_path(save_dir)) {
+            inventory.present = true;
+        } else if (ParseRegionFileName(entry.path(), rx, rz)) {
+            if (budget && !AuthorityReadBudget::Charge(1, budget->limits.members, budget->members))
+                throw WorldPersistenceRefusal("authority member limit exceeded");
+            // Authority inventories retain at most limits.members paths, also bounded by probes.
+            inventory.region_files.push_back(entry.path());
+            inventory.present = true;
+        } else {
+            throw WorldPersistenceRefusal("corrupt or unknown region file: " +
+                                          Filesystem::GenericUtf8PathString(entry.path()));
+        }
+    }
+    return inventory;
+}
+
 bool FileBytesEqual(const std::filesystem::path& path, const std::string& bytes);
 
 // Publishes the manifest inside the active transaction. An unprotected manifest
@@ -7301,6 +7407,7 @@ struct WorldSaveService::AuthorityWindowReader::Impl {
 
     void verify_envelope(AuthorityReadBudget& budget) const {
         RequireCommittedAuthority(root, budget);
+        RefuseObsoleteWorldArtifacts(root, &budget);
         if (!AuthorityReadBudget::Charge(1, budget.limits.probes, budget.probes) ||
             AuthorityRootIdentity(root) != root_identity)
             throw std::runtime_error("authority root changed or exceeds probe limit");
@@ -7372,6 +7479,7 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             throw std::runtime_error("unknown authority index status or envelope limit exceeded");
         const auto index = AuthorityEnvelopeIndex(envelope, budget);
         candidate->generation = index.generation;
+        const auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
         if (index.generation != 0) {
             for (const auto& member : index.members) {
                 int rx = 0, rz = 0;
@@ -7386,49 +7494,29 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                 }
             }
         } else {
-            if (!AuthorityReadBudget::Charge(1, limits.probes, budget.probes))
-                throw std::runtime_error("authority probe limit exceeded");
-            std::error_code directory_error;
-            std::filesystem::directory_iterator entry(region_directory(candidate->root),
-                                                      directory_error);
-            if (directory_error && directory_error != std::errc::no_such_file_or_directory)
-                throw std::runtime_error("unreadable legacy authority inventory");
-            const std::filesystem::directory_iterator end;
-            while (entry != end) {
-                if (!AuthorityReadBudget::Charge(1, limits.probes, budget.probes))
-                    throw std::runtime_error("authority inventory probe limit exceeded");
+            for (const auto& path : inventory.region_files) {
                 int rx = 0, rz = 0;
-                if (entry->path().extension() == kRegionFileExtension) {
-                    if (!ParseRegionFileName(entry->path().filename(), rx, rz))
-                        throw std::runtime_error("unrecognised region file name");
-                    if (!AuthorityReadBudget::Charge(1, limits.members, budget.members))
-                        throw std::runtime_error("authority member limit exceeded");
-                    std::vector<RegionRecord> records;
-                    std::vector<std::string> errors;
-                    SavedInputFile::Version version{};
-                    // Identity and bytes are admitted through the same handle.
-                    if (!ReadRegionFile(
-                            entry->path(), records, &errors, {}, false, &budget, nullptr, &version))
-                        throw std::runtime_error(errors.empty() ? "unreadable legacy authority"
-                                                                : errors.front());
-                    const auto digest = Lod0Fingerprint(records);
-                    for (const auto& record : records) {
-                        if (record.lod_level == 0)
-                            DecodeAuthorityRecord(record, entry->path(), rx, rz, true);
-                    }
-                    candidate->members.emplace(
-                        std::pair{rx, rz},
-                        Impl::Member{SnapshotMember{RelativeRegionMember(rx, rz),
-                                                    MemberClass::Authoritative,
-                                                    digest.present,
-                                                    digest.bytes,
-                                                    digest.fnv64,
-                                                    0},
-                                     version});
+                ParseRegionFileName(path, rx, rz);
+                std::vector<RegionRecord> records;
+                std::vector<std::string> errors;
+                SavedInputFile::Version version{};
+                // Identity and bytes are admitted through the same handle.
+                if (!ReadRegionFile(path, records, &errors, {}, false, &budget, nullptr, &version))
+                    throw std::runtime_error(errors.empty() ? "unreadable legacy authority"
+                                                            : errors.front());
+                const auto digest = Lod0Fingerprint(records);
+                for (const auto& record : records) {
+                    if (record.lod_level == 0)
+                        DecodeAuthorityRecord(record, path, rx, rz, true);
                 }
-                entry.increment(directory_error);
-                if (directory_error)
-                    throw std::runtime_error("partial legacy authority inventory");
+                candidate->members.emplace(std::pair{rx, rz},
+                                           Impl::Member{SnapshotMember{RelativeRegionMember(rx, rz),
+                                                                       MemberClass::Authoritative,
+                                                                       digest.present,
+                                                                       digest.bytes,
+                                                                       digest.fnv64,
+                                                                       0},
+                                                        version});
             }
         }
         candidate->verify_envelope(budget);
@@ -7766,68 +7854,11 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             (!manifest_missing && manifest.at("schema") == kIndexedWorldManifestSchema);
         if (!indexed && requires_index)
             return reject("inconsistent snapshot: index missing");
-        const auto chunks_dir = save_dir / kChunksDirectoryName;
-        const auto region_dir = region_directory(save_dir);
-        if (std::filesystem::exists(world_state_path(save_dir)) ||
-            std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
-            return reject(kObsoleteWorldMessage);
-        }
-        const auto chunks_status = InspectPersistenceDirectory(chunks_dir, save_dir);
-        if (chunks_status == PersistenceDirectory::Missing)
+        auto inventory = ReadWorldPersistenceInventory(save_dir, stop);
+        if (!inventory.directories_present)
             return false;
-        if (chunks_status == PersistenceDirectory::Invalid)
-            return reject("corrupt world persistence directory: " +
-                          Filesystem::GenericUtf8PathString(chunks_dir));
-        for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
-            if (stop.stop_requested())
-                return reject("Saved-world validation cancelled.");
-            if (entry.path() != region_dir || InspectPersistenceDirectory(entry.path(), save_dir) !=
-                                                  PersistenceDirectory::Present)
-                return reject("corrupt or unknown world persistence artifact: " +
-                              Filesystem::GenericUtf8PathString(entry.path()));
-        }
-        const auto region_status = InspectPersistenceDirectory(region_dir, save_dir);
-        if (region_status == PersistenceDirectory::Missing)
-            return false;
-        if (region_status == PersistenceDirectory::Invalid)
-            return reject("corrupt world persistence directory: " +
-                          Filesystem::GenericUtf8PathString(region_dir));
-        std::vector<std::filesystem::path> region_files;
-        bool present = false;
-        for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
-            if (stop.stop_requested())
-                return reject("Saved-world validation cancelled.");
-            int rx = 0, rz = 0;
-            if (entry.path() == snapshot_index_path(save_dir))
-                continue;
-            const std::shared_lock read(detail::RegionFileSyncFor(entry.path()).publication);
-            // A plant file can be retired after iterator discovery. Inspect it
-            // under its publication lock and accept that clean disappearance.
-            // Inspect the leaf itself: a dangling link is present and invalid,
-            // never the clean disappearance of a retired plant file. Payload
-            // readers independently open once and verify that same handle.
-            const auto status = std::filesystem::symlink_status(entry.path());
-            if (!std::filesystem::exists(status) && entry.path() == plant_entities_path(save_dir))
-                continue;
-            if (!std::filesystem::is_regular_file(status))
-                return reject("corrupt world persistence artifact: " +
-                              Filesystem::GenericUtf8PathString(entry.path()));
-            if (entry.path() == world_manifest_path(save_dir) ||
-                entry.path() == plant_entities_path(save_dir) ||
-                entry.path() == plant_identities_path(save_dir) ||
-                entry.path() == ground_objects_path(save_dir) ||
-                entry.path() == field_pages_path(save_dir) ||
-                entry.path() == active_regions_path(save_dir)) {
-                present = true;
-            } else if (ParseRegionFileName(entry.path(), rx, rz)) {
-                region_files.push_back(entry.path());
-                present = true;
-            } else {
-                return reject("corrupt or unknown region file: " +
-                              Filesystem::GenericUtf8PathString(entry.path()));
-            }
-        }
-        if (!present) {
+        auto& region_files = inventory.region_files;
+        if (!inventory.present) {
             // An index-only region directory is still an indexed snapshot: verify it before
             // reporting a clean miss, or tampered metadata/energy would go unnoticed.
             if (indexed) {
@@ -7982,6 +8013,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
         return true;
+    } catch (const WorldPersistenceRefusal& failure) {
+        return reject(failure.what());
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
