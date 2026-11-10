@@ -33,6 +33,7 @@
 #include "../components/CreatureComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/MortalComponents.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -72,7 +73,9 @@ struct DecompositionStats {
 // participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
 // parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
 // not absolute-tick driven, so re-running from a snapshot reproduces exactly).
-inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint64_t /*tick*/) {
+inline DecompositionStats RunDecompositionOnTick(entt::registry& reg,
+                                                 std::uint64_t /*tick*/,
+                                                 const CreatureTickAdmission* admission = nullptr) {
     DecompositionStats stats;
 
     auto view = reg.view<Comp::DecayComponent>();
@@ -86,6 +89,9 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
         return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& dc = view.get<Comp::DecayComponent>(e);
 
         // Already finished: inert and stable (latched) — never advance again.

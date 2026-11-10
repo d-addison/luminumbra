@@ -24,6 +24,7 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -275,63 +276,84 @@ bool FarVolumeHandoff::Covers(const Entry& entry, FarHandoffCoverageView view) c
     const auto& request = entry.target->wanted;
     return World::IsFarTileCovering(pair->Status(request.identity, request.intent));
 }
-bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
-                                     const FarHandoffTileInput& input,
-                                     const Tier& tier,
-                                     World::FarVolumeRequest& resolved,
-                                     bool duplicate,
-                                     const Entry* old) const {
+FarWorldRefusal FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
+                                                const FarHandoffTileInput& input,
+                                                const Tier& tier,
+                                                World::FarVolumeRequest& resolved,
+                                                bool duplicate,
+                                                const Entry* old) const {
     if (!input.observation)
-        return false;
+        return FarWorldRefusal::ImmutableAuthorityUnavailable;
     const auto& wanted = input.wanted;
     const auto& identity = wanted.identity;
     const auto& key = identity.key;
     const auto& image = *input.observation;
     const auto* water = dynamic_cast<const HandoffWater*>(wanted.water.get());
-    if (image.use() != World::FarFrozenUse::Committed ||
-        image.memory_pool() != memory_.Pool(key.tier) ||
+    if ((image.use() != World::FarFrozenUse::Committed &&
+         image.use() != World::FarFrozenUse::SessionRender) ||
         image.durable_identity().state != World::FarEditedImageState::Committed ||
         image.durable_identity().generation != manifest.committed_generation ||
-        image.caves() != manifest.caves || image.numeric() != manifest.numeric ||
-        image.content_identity() != identity.content_hash || !water ||
-        water->observation() != &image || water->content_identity() != identity.content_hash ||
+        image.numeric() != manifest.numeric || image.content_identity() != identity.content_hash)
+        return FarWorldRefusal::ImmutableAuthorityUnavailable;
+    if (image.caves() != manifest.caves)
+        return FarWorldRefusal::CavePolicyMismatch;
+    if (!water || water->observation() != &image ||
+        water->content_identity() != identity.content_hash ||
         water->WaterCapability() == FarWorldWaterCapability::Unavailable ||
         water->WaterBound(key) != wanted.water_bound)
-        return false;
+        return FarWorldRefusal::WaterUnavailable;
+    if (image.memory_pool() != memory_.Pool(key.tier))
+        return FarWorldRefusal::AdmissionFailed;
     if (duplicate && (!old || !old->target || !Same(old->target->wanted, wanted)))
-        return false;
+        return FarWorldRefusal::InvalidRequests;
     if (old && old->history && old->history->identity == identity && !Same(*old->history, wanted))
-        return false;
+        return FarWorldRefusal::InvalidRequests;
     if (old && old->target && old->target->wanted.identity == identity &&
         !Same(old->target->wanted, wanted))
-        return false;
+        return FarWorldRefusal::InvalidRequests;
     if (old && old->serving && old->serving->identity == identity && !Same(*old->serving, wanted))
-        return false;
+        return FarWorldRefusal::InvalidRequests;
     if (duplicate) {
         if (!old || !old->target)
-            return false;
+            return FarWorldRefusal::InvalidRequests;
         if (old->target->observation != input.observation)
-            return false;
-        return true;
+            return FarWorldRefusal::InvalidRequests;
+        return FarWorldRefusal::None;
     }
     World::FarVolumeAuthority authority;
     try {
         authority = image.Authority(key.tier);
+    } catch (const std::bad_alloc&) {
+        return FarWorldRefusal::AdmissionFailed;
     } catch (...) {
-        return false;
+        return FarWorldRefusal::ImmutableAuthorityUnavailable;
     }
+    World::FarVolumeFacadeFailure failure;
     if (!World::ResolveFarVolumeCoverageCharged(wanted.intent,
                                                 authority,
                                                 tier.authority_limits,
                                                 {memory_.Pool(key.tier), nullptr, nullptr},
-                                                resolved))
-        return false;
+                                                resolved,
+                                                &failure)) {
+        switch (failure.code) {
+            case World::FarVolumeFacadeError::AllocationFailure:
+            case World::FarVolumeFacadeError::InvalidMemory:
+            case World::FarVolumeFacadeError::HeightLimit:
+            case World::FarVolumeFacadeError::DensityLimit:
+                return FarWorldRefusal::AdmissionFailed;
+            case World::FarVolumeFacadeError::InvalidIntent:
+            case World::FarVolumeFacadeError::CoordinateRange:
+                return FarWorldRefusal::SpanRejected;
+            default:
+                return FarWorldRefusal::ImmutableAuthorityUnavailable;
+        }
+    }
     const auto edge = World::FarTileEdgeMeters(key.tier);
     bool support = false;
     for (std::size_t r = 0; r < image.region_count(); ++r) {
         const auto region = image.Region(r);
         if (!region)
-            return false;
+            return FarWorldRefusal::InvalidRequests;
         if (region->tier == key.tier && region->support.min.x == key.tx * edge &&
             region->support.min.z == key.tz * edge &&
             region->support.max.x == (key.tx + 1) * edge &&
@@ -341,11 +363,14 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
             support = true;
     }
     const auto bound = wanted.water_bound;
-    if (!support || !bound || !std::isfinite(bound->min_y) || !std::isfinite(bound->max_y) ||
-        bound->min_y > bound->max_y ||
-        (!bound->known_dry && (double(bound->min_y) < double(resolved.span.min_y) ||
-                               double(bound->max_y) > double(resolved.span.max_y))))
-        return false;
+    if (!support)
+        return FarWorldRefusal::SpanRejected;
+    if (!bound || !std::isfinite(bound->min_y) || !std::isfinite(bound->max_y) ||
+        bound->min_y > bound->max_y)
+        return FarWorldRefusal::WaterUnavailable;
+    if (!bound->known_dry && (double(bound->min_y) < double(resolved.span.min_y) ||
+                              double(bound->max_y) > double(resolved.span.max_y)))
+        return FarWorldRefusal::WaterSpanRefused;
     if (old && old->history &&
         (resolved.span.min_y > old->history_span.span.min_y ||
          resolved.span.max_y < old->history_span.span.max_y ||
@@ -353,26 +378,35 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
           (!wanted.intent.extra_span ||
            wanted.intent.extra_span->min_y > old->history->intent.extra_span->min_y ||
            wanted.intent.extra_span->max_y < old->history->intent.extra_span->max_y))))
-        return false;
-    return true;
+        return FarWorldRefusal::SpanRejected;
+    return FarWorldRefusal::None;
 }
 bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
     Guard const guard(*this);
     admission_work_ = {};
     auto& work = admission_work_;
+    admission_refusal_ = FarWorldRefusal::None;
+    const auto refuse = [this](FarWorldRefusal reason) {
+        admission_refusal_ = reason;
+        return false;
+    };
+    if (manifest.caves != World::FarCaveMode::BandLimited &&
+        manifest.caves != World::FarCaveMode::BoxFiltered)
+        return refuse(FarWorldRefusal::InvalidCavePolicy);
     if (manifest.world_epoch == 0 || manifest.publication_serial == 0 ||
-        (manifest.caves != World::FarCaveMode::BandLimited &&
-         manifest.caves != World::FarCaveMode::BoxFiltered) ||
         (manifest.numeric != World::FarVolumeNumericProfile::RawFloat &&
          manifest.numeric != World::FarVolumeNumericProfile::LegacySigned16) ||
-        (state_.world_epoch && (manifest.world_epoch != state_.world_epoch ||
-                                manifest.caves != caves_ || manifest.numeric != numeric_)) ||
-        manifest.publication_serial < state_.target_serial ||
-        manifest.committed_generation < state_.committed_generation)
-        return false;
+        (state_.world_epoch &&
+         (manifest.world_epoch != state_.world_epoch || manifest.numeric != numeric_)) ||
+        manifest.publication_serial < state_.target_serial)
+        return refuse(FarWorldRefusal::InvalidRequests);
+    if (manifest.committed_generation < state_.committed_generation)
+        return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
+    if (state_.world_epoch && manifest.caves != caves_)
+        return refuse(FarWorldRefusal::CavePolicyMismatch);
     const bool duplicate = manifest.publication_serial == state_.target_serial;
     if (duplicate && manifest.committed_generation != state_.committed_generation)
-        return false;
+        return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
     std::array<std::size_t, World::kFarTierCount> counts{}, new_keys{}, next_free{};
     std::size_t fallbacks = 0, old_count = 0;
     for (auto& tier : tiers_) {
@@ -385,7 +419,7 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         }
     }
     if (duplicate && old_count != manifest.tiles.size())
-        return false;
+        return refuse(FarWorldRefusal::InvalidRequests);
     // Bound each tier before sorting or resolving authority. Only charged,
     // preallocated scratch changes before the whole manifest validates.
     for (std::size_t index = 0; index < manifest.tiles.size(); ++index) {
@@ -395,17 +429,19 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         World::FarTileKey key;
         if (!World::ToFarTileKey(wanted.intent.key, key) || key != identity.key ||
             identity.world_epoch != manifest.world_epoch ||
-            identity.cave_policy != static_cast<std::uint8_t>(manifest.caves) || !input.observation)
-            return false;
+            identity.cave_policy != static_cast<std::uint8_t>(manifest.caves))
+            return refuse(FarWorldRefusal::InvalidRequests);
+        if (!input.observation)
+            return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
         auto& tier = *tiers_[key.tier - 1];
         auto& count = counts[key.tier - 1];
         if (count == tier.entries.size())
-            return false;
+            return refuse(FarWorldRefusal::AdmissionFailed);
         tier.key_index[tier.entries.size() + count++] = index;
         fallbacks += key.tier == World::kFarTierCount;
     }
     if (fallbacks == 0)
-        return false;
+        return refuse(FarWorldRefusal::InvalidRequests);
     for (std::size_t i = 0; i < tiers_.size(); ++i) {
         auto& tier = *tiers_[i];
         auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
@@ -417,7 +453,7 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             ++work.key_comparisons;
             if (manifest.tiles[incoming[j - 1]].wanted.identity.key ==
                 manifest.tiles[incoming[j]].wanted.identity.key)
-                return false;
+                return refuse(FarWorldRefusal::InvalidRequests);
         }
     }
     std::array<std::size_t, World::kFarTierCount> validated{};
@@ -429,13 +465,10 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             tier.order[static_cast<std::size_t>(existing - tier.entries.data())] = 1;
         else
             ++new_keys[key.tier - 1];
-        if (!ValidateInput(manifest,
-                           input,
-                           tier,
-                           tier.validation[validated[key.tier - 1]++],
-                           duplicate,
-                           existing))
-            return false;
+        const auto refusal = ValidateInput(
+            manifest, input, tier, tier.validation[validated[key.tier - 1]++], duplicate, existing);
+        if (refusal != FarWorldRefusal::None)
+            return refuse(refusal);
     }
     for (std::size_t i = 0; i < tiers_.size(); ++i) {
         const auto& tier = *tiers_[i];
@@ -448,7 +481,7 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             free += !entry.key || (!entry.serving && tier.order[index] == 0);
         }
         if (new_keys[i] > free)
-            return false;
+            return refuse(FarWorldRefusal::AdmissionFailed);
     }
     if (duplicate)
         return true;
@@ -963,5 +996,10 @@ void FarVolumeHandoff::CancelAndDrain() {
         tier->index_count = 0;
     }
     state_ = {};
+    admission_refusal_ = FarWorldRefusal::None;
+}
+FarWorldRefusal FarVolumeHandoff::AdmissionRefusal() const {
+    CheckOwner();
+    return admission_refusal_;
 }
 } // namespace Luminumbra::Rendering

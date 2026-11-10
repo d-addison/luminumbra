@@ -18,6 +18,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
+#include "CreatureTickAdmission.h"
 #include "ScentField.h"
 #include "ScentSteeringSystem.h" // WorldToCell
 
@@ -27,8 +28,12 @@ struct ScentDepositStats {
     std::uint64_t emitters = 0; // entities that deposited this tick
 };
 
-inline ScentDepositStats RunScentDepositOnTick(
-    entt::registry& registry, ScentField& field, float origin_x, float origin_z, float cell_size) {
+inline ScentDepositStats RunScentDepositOnTick(entt::registry& registry,
+                                               ScentField& field,
+                                               float origin_x,
+                                               float origin_z,
+                                               float cell_size,
+                                               const CreatureTickAdmission* admission = nullptr) {
     using Luminumbra::Components::SensableComponent;
     using Luminumbra::Components::TransformComponent;
 
@@ -47,6 +52,9 @@ inline ScentDepositStats RunScentDepositOnTick(
     }
 
     for (auto e : emitters) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         const auto& s = registry.get<const SensableComponent>(e);
         if (s.scent_channel < 0 || s.scent_deposit <= 0.0f)
             continue;
