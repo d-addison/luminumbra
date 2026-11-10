@@ -13588,11 +13588,12 @@ void CheckUnscheduledFoliage(RegionState state, bool owner) {
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     ASSERT_TRUE(session.GetRegionSchedule().due.empty());
+    // Creature admission freezes creatures outside due regions as a unit, mortality included.
     for (const auto creature : {aged, starved}) {
-        EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(creature).age_ticks, 1u);
-        EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(creature).dead, 1u);
-        EXPECT_TRUE(session.GetRegistry().get<C::CreatureComponent>(creature).eaten);
-        EXPECT_EQ(session.GetRegistry().get<C::DecayComponent>(creature).decay_ticks, 1u);
+        EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(creature).age_ticks, 0u);
+        EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(creature).dead, 0u);
+        EXPECT_FALSE(session.GetRegistry().get<C::CreatureComponent>(creature).eaten);
+        EXPECT_EQ(session.GetRegistry().get<C::DecayComponent>(creature).decay_ticks, 0u);
     }
     EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(noncreature).age_ticks, 0u);
     for (const auto entity : session.GetRegistry().view<C::PlantTag>()) {
@@ -13700,7 +13701,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageCallbacksObservePublicationAndKeepWrit
 }
 
 TEST(GameSessionHeadlessWorldTest,
-     UnscheduledFoliageKeepsParticipantWorkAndFullRateCreatureDeaths) {
+     UnscheduledFoliageKeepsParticipantWorkAndFreezesCreatures) {
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Reduced, true));
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Frozen, true));
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Reduced, false));
