@@ -302,6 +302,7 @@ add_executable(common_tests
     common/LayerGraph_test.cpp
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
+    rendering/LiveStrikeTracker_test.cpp
     common/AetherFieldSystem_test.cpp
     common/AmbientDeterminismReceipt_test.cpp
     common/AmbientInputBounds_test.cpp
