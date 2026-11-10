@@ -658,7 +658,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // tick. The engine still names no creature behavior.
             if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
                     .empty()) {
-                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, nullptr, true, creature_admission);
             } else {
                 luminumbra::ai::StimulusContext stimulus_context;
                 stimulus_context.tick = current_tick;
@@ -690,7 +691,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 }
                 const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
                 luminumbra::ai::RunInstinctSystemOnTick(
-                    m_registry, current_tick, &stimulus_registry);
+                    m_registry, current_tick, &stimulus_registry, true, creature_admission);
             }
 
             budget.Next(Stage::Perception, [&] {
@@ -727,7 +728,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // 2d.: action-plan locomotion, then scent gradient bias.
             // The executor writes only LocomotionIntentComponent; physics/render owners
             // consume that intent in their existing lanes.
-            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry, creature_admission);
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
@@ -774,7 +775,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
                     // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                     // integration layer is unit-tested independently of the producers.
-                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry, creature_admission);
 
                     // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
                     // systems wired into the live tick. Opt-in via ThirstComponent /
@@ -796,6 +797,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         // the baseline byte-identical; the physics bridge below consumes wish_x/z.
                         auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
                         for (auto e : sv) {
+                            if (creature_admission && !creature_admission->Allows(e)) {
+                                continue;
+                            }
                             auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
                             // the thirst pull applies ONLY when the arbiter
                             // actually chose Drink — the old unconditional blend let a
@@ -1228,8 +1232,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::GrazeableComponent>().empty())
-                    luminumbra::ai::RunWildlifeFoliageOnTick(
-                        m_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
+                    luminumbra::ai::RunWildlifeFoliageOnTick(m_registry,
+                                                             current_tick,
+                                                             m_wildlifeFoliageTuning,
+                                                             foliage_gate,
+                                                             creature_admission);
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
@@ -1253,7 +1260,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunDecompositionOnTick(
+                        m_registry, current_tick, creature_admission);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
@@ -1266,7 +1274,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                    luminumbra::ai::RunCircadianOnTick(
+                        m_registry, tod01, m_circadianAmplitude, creature_admission);
                 }
                 // Territory: claim home + emit a homing bias (movement blends it like
                 // mate-seeking).

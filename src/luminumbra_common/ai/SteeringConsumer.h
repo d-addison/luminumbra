@@ -18,6 +18,7 @@
 #include "../components/MigratoryComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -29,10 +30,14 @@ struct SteeringConsumerStats {
     int homed = 0;    // creatures given a territory homing bias
 };
 
-inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
+inline SteeringConsumerStats
+RunSteeringConsumerOnTick(entt::registry& reg, const CreatureTickAdmission* admission = nullptr) {
     SteeringConsumerStats stats;
     auto sv = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
     for (auto e : sv) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& cr = sv.get<Comp::CreatureComponent>(e);
         if (cr.eaten)
             continue; // a carcass is inert
