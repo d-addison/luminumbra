@@ -50,6 +50,48 @@ Selection SelectPriorityWindow(std::vector<Candidate> candidates,
 
 } // namespace WaterScheduling
 
+namespace WaterKernels {
+
+// Refuse leaves both integer authority and runtime mirrors unchanged. Saturate retains the
+// legacy solver's depth clamps, saturation sinks and receiver-limited seam transfers.
+enum class OverflowPolicy {
+    Refuse,
+    Saturate
+};
+struct InteriorInputs {
+    bool finite_hydrology = true;
+    std::int32_t rain_mm = 0;
+    std::int32_t evap_mm = 0;
+    const WeatherSystem* weather_rain = nullptr;
+    std::int32_t weather_scale_mm = 0;
+};
+struct Result {
+    bool applied = false;
+    bool saturated = false;
+    bool water_mesh_invalidated = false; // The step reached the water remesh interval.
+    std::int64_t source_mm = 0;
+    std::int64_t sink_mm = 0;
+    std::int64_t depth_before = 0;
+    std::int64_t depth_after = 0;
+    int wet_pairs = 0;
+    std::size_t cells_visited = 0; // Interior cells or seam pairs committed by this call.
+};
+
+// Grids are bounded to 32x32 cells. Invalid shapes refuse before indexing; Refuse also
+// requires complete momentum storage and nonnegative depths. Accounting is per call.
+Result StepInterior(Chunk& chunk,
+                    SHIELD_WorldSystem& shield,
+                    const InteriorInputs& inputs,
+                    OverflowPolicy policy = OverflowPolicy::Refuse);
+// Equal resolution is required. Refuse validates that owner is the neighbor's immediate
+// -X or -Z chunk; Saturate retains the legacy caller's topology selection.
+Result StepSharedFace(Chunk& owner,
+                      Chunk& neighbor,
+                      bool is_x,
+                      OverflowPolicy policy = OverflowPolicy::Refuse);
+
+} // namespace WaterKernels
+
 // Adaptive water grid resolution levels
 enum class WaterDetailLevel {
     Off = 0,    // No simulation
