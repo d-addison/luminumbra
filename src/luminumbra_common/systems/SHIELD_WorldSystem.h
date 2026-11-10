@@ -1041,6 +1041,19 @@ public:
     // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
     // its save-dirty bit. Only call with sim.active_regions on.
     void sync_water_authority();
+    // Owner-thread consumers refuse publication after a committed chunk read has failed.
+    [[nodiscard]] bool durable_read_failed() const noexcept {
+        return m_durable_read_failed;
+    }
+    // Owner thread holds save ownership through preparation and publication. Sparse nodes
+    // cover at most four far regions per changed participant; no whole-index copy.
+    struct WaterAuthorityPublication {
+        std::unique_lock<std::mutex> lock;
+        std::map<std::pair<i32, i32>, u64> revisions;
+        u64 revision = 0;
+    };
+    WaterAuthorityPublication prepare_water_authority_publication(std::span<Chunk* const> chunks);
+    void publish_water_authority(WaterAuthorityPublication&& publication) noexcept;
     // Moves a parked chunk back into the resident map. Returns true iff the id was parked.
     bool unpark_chunk(ChunkID id);
     // Owner-thread committed identity inventory. Durable payloads are loaded only when wanted;

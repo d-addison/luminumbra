@@ -83,14 +83,14 @@ struct Plan {
 // Work: O((R+S+D) log(kMaxRegions+R+S+D)). Storage is bounded by the input
 // caps: at most R entries, S sources, D region outputs, 2*R topology faces and
 // 5*R participant IDs before deduplication. All products fit 32-bit size_t.
-// Callers supply participating snapshots; this API has no production tick caller.
+// Callers supply participating snapshots; never pass a whole-world store.
 [[nodiscard]] Plan Build(std::span<const Resident> residents,
                          std::span<const SourceInput> sources,
                          const world::ActiveRegionLedger& ledger,
                          const world::RegionSchedule& schedule,
                          const Inputs& inputs);
 
-// One owner-thread transaction per executor, with no live tick caller yet.
+// One owner-thread transaction per executor.
 // Begin captures only the supplied participants (<= kMaxResidents, <= 1024 cells
 // each) and owner patches (<= kMaxRegions). Hold exclusive mutation access to
 // those chunks and the ledger through Publish/Rollback; mesh workers use copies.
@@ -114,7 +114,12 @@ public:
                                       SHIELD_WorldSystem& shield,
                                       const WaterKernels::InteriorInputs& inputs);
     WaterKernels::Result StepFace(ChunkID positive, ChunkID other, bool is_x);
-    void Publish();
+    // Preparation and physical inputs mutate private storage only. Preparation preserves
+    // integer bed/depth by endpoint-aligned bilinear sampling and accounts volume changes.
+    void PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolution);
+    void Inject(const Source& source);
+    void FinishInterior(ChunkID id);
+    void Publish(SHIELD_WorldSystem* shield = nullptr);
     void Rollback() noexcept;
     [[nodiscard]] bool pending() const noexcept {
         return m_ledger != nullptr;

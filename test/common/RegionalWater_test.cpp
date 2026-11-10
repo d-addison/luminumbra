@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -17,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 
 namespace {
 using namespace Luminumbra;
@@ -708,8 +711,9 @@ TEST(RegionalWaterPlanning, WorldBoundariesNeverWrapFacesAndZeroSourcesDoNotWake
     EXPECT_TRUE(zero.participants.empty());
 }
 
-std::shared_ptr<Chunk> TransactionChunk(int x, std::int32_t depth = 1000, int resolution = 8) {
-    auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+std::shared_ptr<Chunk>
+TransactionChunkAt(const IVec3& coords, std::int32_t depth = 1000, int resolution = 8) {
+    auto chunk = std::make_shared<Chunk>(coords);
     FillWater(*chunk, resolution, depth);
     const auto cells = chunk->water_depth_mm.size();
     chunk->water_flow_data.assign(cells, Vec2(0.0f));
@@ -717,6 +721,10 @@ std::shared_ptr<Chunk> TransactionChunk(int x, std::int32_t depth = 1000, int re
     chunk->water_rest_level.assign(cells, 0.0f);
     chunk->water_src_mm.assign(cells, 0);
     return chunk;
+}
+
+std::shared_ptr<Chunk> TransactionChunk(int x, std::int32_t depth = 1000, int resolution = 8) {
+    return TransactionChunkAt({x, 0, 0}, depth, resolution);
 }
 
 // Preserve float bit patterns too, so a refused NaN input can be compared exactly.
@@ -1205,6 +1213,493 @@ TEST(RegionalWaterTransaction, ExistingRevisionsAdvanceOnceAndStaleStagesRefuse)
             EXPECT_EQ(chunks[0]->water_revision(), 2u);
             EXPECT_EQ(chunks[0]->authority_hash_revision(), 2u);
         }
+    }
+}
+} // namespace
+
+namespace {
+RegionSchedule ExecutionSchedule(std::uint64_t tick, std::initializer_list<RegionKey> due) {
+    RegionSchedule schedule;
+    schedule.tick = tick;
+    schedule.due = due;
+    return schedule;
+}
+
+auto CompletionBytes(const std::vector<Luminumbra::world::RegionWork>& work) {
+    std::vector<std::tuple<RegionKey, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t>>
+        result;
+    for (const auto& item : work) {
+        result.emplace_back(
+            item.key, item.region_ticks, item.entity_updates, item.water_cells, item.page_updates);
+    }
+    return result;
+}
+
+TEST(RegionalWaterExecution, PublishesPlannedMassRegistersRevisionsAndOnlyParticipatingWork) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    water.SetSimResolution(8);
+    water.SetRegionalScheduling(true);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    for (std::int32_t x = 2; x < 258; ++x) {
+        ledger.mark_edited({x, 0}, WorldClock{});
+    }
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 19}, {{1, 0}, 23}}));
+    const std::vector chunks{TransactionChunk(0), TransactionChunk(1), TransactionChunk(32)};
+    const RegionSchedule schedule = ExecutionSchedule(0, {{0, 0}, {1, 0}});
+    const std::vector<Planning::Resident> residents{ResidentAt(0), ResidentAt(1), ResidentAt(32)};
+    const auto plan =
+        Planning::Build(residents, {}, ledger, schedule, {8, 2 * kPlanningCapacity, false});
+    const auto before = Mass(*chunks[0]) + Mass(*chunks[1]) + Mass(*chunks[2]);
+    std::vector<world::RegionWork> completed{{.key = {9, 0}, .entity_updates = 7}};
+    entt::registry registry;
+    water.UpdateRegional(registry, chunks, ledger, schedule, completed, 2 * kPlanningCapacity);
+    EXPECT_EQ(Mass(*chunks[0]) + Mass(*chunks[1]) + Mass(*chunks[2]), before);
+    EXPECT_EQ(water.regional_work().visits, plan.interiors);
+    EXPECT_EQ(water.regional_work().residents_visited, chunks.size());
+    EXPECT_EQ(water.regional_work().participants_visited, plan.participants.size());
+    EXPECT_EQ(water.regional_work().total_cells, plan.total_cells);
+    EXPECT_TRUE(water.dbg_mass_ok());
+    EXPECT_EQ(water.cells_stepped_last_update(), plan.total_cells - plan.preparation_cells);
+    for (const auto& patch : plan.regions) {
+        EXPECT_EQ(ledger.records().at(patch.owner).water_cursor, patch.next_cursor);
+        const auto debt = ledger.water_debts().find(patch.owner);
+        EXPECT_EQ(debt == ledger.water_debts().end() ? 0 : debt->second, patch.debt);
+    }
+    for (const auto& chunk : chunks) {
+        const bool selected =
+            std::binary_search(plan.interiors.begin(), plan.interiors.end(), chunk->get_id());
+        EXPECT_EQ(chunk->water_revision(), selected ? 1u : 0u);
+        EXPECT_EQ(chunk->authority_hash_revision(), selected ? 1u : 0u);
+        EXPECT_EQ(chunk->ticks_below_threshold, selected ? 1 : 0);
+    }
+    ASSERT_GE(completed.size(), 2u);
+    EXPECT_EQ(completed.front().entity_updates, 7u);
+    std::uint64_t cells = 0;
+    for (std::size_t i = 1; i < completed.size(); ++i) {
+        cells += completed[i].water_cells;
+        EXPECT_EQ(completed[i].region_ticks, 1u);
+    }
+    EXPECT_EQ(cells, water.regional_work().water_cells);
+    const auto bytes = ledger.encode();
+    const auto published_work = water.regional_work();
+    EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, completed),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), bytes);
+    EXPECT_EQ(water.regional_work(), published_work);
+}
+
+TEST(RegionalWaterExecution, LateOverflowPreservesPublishedSleepCompletionAndTelemetry) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    water.SetSimResolution(8);
+    water.SetRegionalScheduling(true);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    const std::vector chunks{TransactionChunk(0), TransactionChunk(32)};
+    chunks[0]->ticks_below_threshold = 118;
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegional(
+        registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}, {1, 0}}), completed);
+    static_cast<void>(ledger.schedule(WorldClock(1)));
+    chunks[1]->water_depth_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+    water.SetHydrology(true, 1, 0);
+    const auto a = TransactionBytes(*chunks[0]), b = TransactionBytes(*chunks[1]);
+    const auto registers = ledger.encode();
+    const auto work = water.regional_work();
+    const auto completion = CompletionBytes(completed);
+    const auto authority = shield.far_lod_authority_revision();
+    const auto cells = water.cells_stepped_last_update();
+    EXPECT_THROW(water.UpdateRegional(
+                     registry, chunks, ledger, ExecutionSchedule(1, {{0, 0}, {1, 0}}), completed),
+                 std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), a);
+    EXPECT_EQ(TransactionBytes(*chunks[1]), b);
+    EXPECT_EQ(ledger.encode(), registers);
+    EXPECT_EQ(water.regional_work(), work);
+    EXPECT_EQ(CompletionBytes(completed), completion);
+    EXPECT_EQ(water.cells_stepped_last_update(), cells);
+    EXPECT_EQ(water.dbg_last_source_mm(), work.source_mm);
+    EXPECT_EQ(water.debug_source_injected_mm(), 0);
+    EXPECT_EQ(shield.far_lod_authority_revision(), authority);
+}
+
+TEST(RegionalWaterExecution, PhysicalSourcesPublishOnceAndOverflowDiscardsInjection) {
+    for (const bool overflow : {false, true}) {
+        SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+        WaterSystem water(nullptr, &shield);
+        water.SetSimResolution(8);
+        water.SetRegionalScheduling(true);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{
+            TransactionChunk(0, overflow ? std::numeric_limits<std::int32_t>::max() : 1000)};
+        chunks[0]->is_water_sleeping.store(true);
+        entt::registry registry;
+        const auto entity = registry.create();
+        registry.emplace<Components::TransformComponent>(
+            entity, Components::TransformComponent{.position = Vec3(1.0f, 100.0f, 1.0f)});
+        registry.emplace<Components::FlowingWaterSourceComponent>(
+            entity, Components::FlowingWaterSourceComponent{.flow_rate = 1.0f});
+        std::vector<world::RegionWork> completed;
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto mass = Mass(*chunks[0]);
+        const RegionSchedule schedule = ExecutionSchedule(0, {{0, 0}});
+        if (overflow) {
+            EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, completed),
+                         std::invalid_argument);
+            EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+            EXPECT_TRUE(completed.empty());
+            EXPECT_EQ(water.debug_sources_seen(), 0);
+            EXPECT_EQ(water.debug_source_injected_mm(), 0);
+        } else {
+            water.UpdateRegional(registry, chunks, ledger, schedule, completed);
+            EXPECT_EQ(Mass(*chunks[0]) - mass, 8);
+            EXPECT_EQ(water.debug_sources_seen(), 1);
+            EXPECT_EQ(water.debug_source_injected_mm(), 8);
+            EXPECT_EQ(water.dbg_last_source_mm(), 8);
+            EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, completed),
+                         std::invalid_argument);
+            EXPECT_EQ(Mass(*chunks[0]) - mass, 8);
+            static_cast<void>(ledger.schedule(WorldClock(1)));
+            water.UpdateRegional(
+                registry, chunks, ledger, ExecutionSchedule(1, {{0, 0}}), completed);
+            EXPECT_EQ(Mass(*chunks[0]) - mass, 16);
+            EXPECT_EQ(water.debug_sources_seen(), 2);
+            EXPECT_EQ(water.debug_source_injected_mm(), 16);
+        }
+    }
+}
+
+TEST(RegionalWaterExecution, GridPreparationPreservesIntegerCornersAndAccountsChangedVolume) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int resolution : {4, 8, 16, 32}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0, 1000, 8)};
+        chunks[0]->water_depth_mm.front() = 2000;
+        chunks[0]->water_bed_mm.back() = -7000;
+        const auto before = TransactionBytes(*chunks[0]);
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        stage.PrepareGrid(chunks[0]->get_id(), shield, resolution);
+        const auto* grid = stage.staged(chunks[0]->get_id());
+        ASSERT_NE(grid, nullptr);
+        EXPECT_EQ(grid->water_depth_mm.front(), 2000);
+        EXPECT_EQ(grid->water_bed_mm.back(), -7000);
+        EXPECT_EQ(grid->water_depth_mm.size(), static_cast<std::size_t>(resolution * resolution));
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        stage.Publish(&shield);
+        EXPECT_EQ(chunks[0]->current_water_resolution.load(), resolution);
+    }
+    WaterSystem water(nullptr, &shield);
+    water.SetSimResolution(8);
+    water.SetRegionalScheduling(true);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{std::make_shared<Chunk>(IVec3(0, 0, 0)), TransactionChunk(2, 1000, 4)};
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_EQ(water.regional_work().preparation_cells, 128u);
+    EXPECT_EQ(water.regional_work().volume_before_qmm +
+                  water.regional_work().preparation_volume_qmm +
+                  water.regional_work().source_volume_qmm,
+              water.regional_work().volume_after_qmm + water.regional_work().sink_volume_qmm);
+    for (const auto& chunk : chunks) {
+        EXPECT_TRUE(chunk->has_complete_water_state());
+    }
+}
+
+TEST(RegionalWaterExecution, SleepAndAuthorityIndexAdvanceOnlyOnPublishedInteriors) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    water.SetSimResolution(8);
+    water.SetRegionalScheduling(true);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    chunks[0]->ticks_below_threshold = 119;
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_TRUE(chunks[0]->is_water_sleeping.load());
+    EXPECT_EQ(chunks[0]->ticks_below_threshold, 120);
+    EXPECT_EQ(shield.far_lod_authority_revision(), 1u);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(0, 0), 1u);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(-1, -1), 1u);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(9, 9), 0u);
+    static_cast<void>(ledger.schedule(WorldClock(1)));
+    water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(1, {{0, 0}}), completed);
+    EXPECT_TRUE(water.regional_work().visits.empty());
+    EXPECT_EQ(chunks[0]->water_revision(), 1u);
+    EXPECT_EQ(shield.far_lod_authority_revision(), 1u);
+}
+
+TEST(RegionalWaterExecution, DisabledEntryPointLeavesLegacyFixturesByteIdentical) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem implicit(nullptr, &shield), explicit_off(nullptr, &shield);
+    explicit_off.SetRegionalScheduling(false);
+    implicit.SetSimResolution(8);
+    explicit_off.SetSimResolution(8);
+    const auto a = TransactionChunk(0), b = TransactionChunk(0);
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> left{{a->get_id(), a}},
+        right{{b->get_id(), b}};
+    entt::registry registry;
+    auto ledger = PlanningLedger({{0, 0}});
+    std::vector<world::RegionWork> completed;
+    const std::vector resident{a};
+    const auto before = TransactionBytes(*a);
+    const auto registers = ledger.encode();
+    implicit.UpdateRegional(registry, resident, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_EQ(TransactionBytes(*a), before);
+    EXPECT_EQ(ledger.encode(), registers);
+    EXPECT_TRUE(completed.empty());
+    for (int tick = 0; tick < 3; ++tick) {
+        implicit.update(registry, left);
+        explicit_off.update(registry, right);
+        EXPECT_EQ(TransactionBytes(*a), TransactionBytes(*b));
+    }
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterExecution, BorderOnlyWorkConservesMassAndLateSeamRefusalRollsBackBothAxes) {
+    for (const bool is_x : {false, true}) {
+        for (const bool overflow : {false, true}) {
+            SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+            WaterSystem water(nullptr, &shield);
+            water.SetRegionalScheduling(true);
+            water.SetSimResolution(8);
+            const RegionKey other_owner = is_x ? RegionKey{1, 0} : RegionKey{0, 1};
+            auto ledger = PlanningLedger({{0, 0}, other_owner});
+            auto a =
+                TransactionChunk(31, overflow ? std::numeric_limits<std::int32_t>::max() : 2000);
+            auto b =
+                TransactionChunk(32, overflow ? std::numeric_limits<std::int32_t>::max() : 1000);
+            if (!is_x) {
+                a = TransactionChunkAt({0, 0, 31},
+                                       overflow ? std::numeric_limits<std::int32_t>::max() : 2000);
+                b = TransactionChunkAt({0, 0, 32},
+                                       overflow ? std::numeric_limits<std::int32_t>::max() : 1000);
+            }
+            if (overflow) {
+                a->water_bed_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+                b->water_bed_mm.assign(64, 1);
+            }
+            const std::vector chunks{b, a};
+            entt::registry registry;
+            std::vector<world::RegionWork> completed;
+            const auto before_a = TransactionBytes(*a), before_b = TransactionBytes(*b);
+            const auto registers = ledger.encode();
+            const auto mass = Mass(*a) + Mass(*b);
+            if (overflow) {
+                EXPECT_THROW(
+                    water.UpdateRegional(
+                        registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed),
+                    std::invalid_argument);
+                EXPECT_EQ(TransactionBytes(*a), before_a);
+                EXPECT_EQ(TransactionBytes(*b), before_b);
+                EXPECT_EQ(ledger.encode(), registers);
+                EXPECT_TRUE(completed.empty());
+                EXPECT_EQ(shield.far_lod_authority_revision(), 0u);
+            } else {
+                water.UpdateRegional(
+                    registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+                EXPECT_EQ(Mass(*a) + Mass(*b), mass);
+                EXPECT_EQ(water.regional_work().border_windows, 2u);
+                EXPECT_EQ(water.regional_work().water_cells, 80u);
+                EXPECT_EQ(a->ticks_below_threshold, 1);
+                EXPECT_EQ(b->ticks_below_threshold, 0);
+                EXPECT_EQ(a->water_revision(), 1u);
+                EXPECT_EQ(b->water_revision(), 1u);
+                ASSERT_EQ(completed.size(), 2u);
+                EXPECT_EQ(completed[0].water_cells, 72u);
+                EXPECT_EQ(completed[1].water_cells, 8u);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterExecution, InvalidExecutionInputsPreserveAllPublishedOutputs) {
+    for (int fault = 0; fault < 8; ++fault) {
+        SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+        WaterSystem water(nullptr, fault == 5 ? nullptr : &shield);
+        water.SetRegionalScheduling(true);
+        water.SetSimResolution(8);
+        auto ledger = PlanningLedger({{0, 0}});
+        std::vector chunks{TransactionChunk(0)};
+        auto schedule = ExecutionSchedule(0, {{0, 0}});
+        if (fault == 0) {
+            chunks.push_back(nullptr);
+        } else if (fault == 1) {
+            chunks.push_back(chunks.front());
+        } else if (fault == 2) {
+            water.SetHydrology(true, -1, 0);
+        } else if (fault == 3) {
+            schedule.tick = 1;
+        } else if (fault == 4) {
+            chunks[0]->water_flow_data.clear();
+        } else if (fault == 7) {
+            water.SetSimResolution(2);
+        }
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto registers = ledger.encode();
+        entt::registry registry;
+        if (fault == 6) {
+            const auto entity = registry.create();
+            registry.emplace<Components::TransformComponent>(entity);
+            registry.emplace<Components::FlowingWaterSourceComponent>(
+                entity, Components::FlowingWaterSourceComponent{.flow_rate = -1.0f});
+        }
+        std::vector<world::RegionWork> completed{{.key = {0, 0}, .page_updates = 2}};
+        const auto completion = CompletionBytes(completed);
+        const auto work = water.regional_work();
+        EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, completed),
+                     std::invalid_argument);
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), registers);
+        EXPECT_EQ(CompletionBytes(completed), completion);
+        EXPECT_EQ(water.regional_work(), work);
+    }
+}
+
+TEST(RegionalWaterExecution, EmptyZeroBudgetAndPausedCallsDoNotPublishWork) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(8);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    const auto before = TransactionBytes(*chunks[0]);
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.SetBootPaused(true);
+    water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    water.SetBootPaused(false);
+    water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed, 0);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    EXPECT_TRUE(completed.empty());
+    EXPECT_EQ(water.cells_stepped_last_update(), 0u);
+    static_cast<void>(ledger.schedule(WorldClock(1)));
+    water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed);
+    EXPECT_TRUE(water.regional_work().visits.empty());
+    EXPECT_EQ(water.regional_work().participants_visited, 0u);
+}
+
+TEST(RegionalWaterExecution, InvalidPreparationAndInjectionAbortPrivateStorage) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (int fault = 0; fault < 5; ++fault) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0)};
+        const auto before = TransactionBytes(*chunks[0]);
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        if (fault == 0) {
+            EXPECT_THROW(stage.PrepareGrid(chunks[0]->get_id(), shield, 3), std::invalid_argument);
+        } else if (fault == 1) {
+            EXPECT_THROW(stage.PrepareGrid(Chunk::calculate_id({1, 0, 0}), shield, 8),
+                         std::invalid_argument);
+        } else if (fault == 2) {
+            EXPECT_THROW(stage.Inject({chunks[0]->get_id(), 64, 1}), std::invalid_argument);
+        } else if (fault == 3) {
+            EXPECT_THROW(stage.Inject({chunks[0]->get_id(), 0, -1}), std::invalid_argument);
+        } else {
+            EXPECT_THROW(stage.FinishInterior(Chunk::calculate_id({1, 0, 0})),
+                         std::invalid_argument);
+        }
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    }
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterExecution, AuthorityPreparationCanBeDiscardedAndRetainsUnrelatedIndexNodes) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    shield.notify_far_lod_authority_changed({100, 0, 100});
+    const auto revision = shield.far_lod_authority_revision();
+    const auto unrelated = shield.far_lod_region_authority_revision(3, 3);
+    ASSERT_EQ(unrelated, revision);
+    const auto chunk = TransactionChunk(0);
+    const std::array<Chunk*, 2> invalid{chunk.get(), nullptr};
+    EXPECT_THROW(shield.prepare_water_authority_publication(invalid), std::invalid_argument);
+    EXPECT_EQ(shield.far_lod_authority_revision(), revision);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(0, 0), 0u);
+    {
+        const std::array valid{chunk.get()};
+        auto prepared = shield.prepare_water_authority_publication(valid);
+        EXPECT_EQ(shield.far_lod_authority_revision(), revision);
+        EXPECT_FALSE(prepared.revisions.empty());
+    }
+    EXPECT_EQ(shield.far_lod_region_authority_revision(0, 0), 0u);
+    auto ledger = PlanningLedger({{0, 0}});
+    Planning::Transaction stage;
+    const std::array chunks{chunk};
+    stage.Begin(ledger, 0, chunks, {});
+    ASSERT_TRUE(stage.StepInterior(chunk->get_id(), shield, {.rain_mm = 1}).applied);
+    stage.Publish(&shield);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(0, 0), revision + 1);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(3, 3), unrelated);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterExecution, LatchedDurableReadFailureRefusesWithoutPublishing) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    shield.set_durable_residency(true);
+    shield.set_durable_chunk_loader([](const IVec3&) -> std::shared_ptr<Chunk> { return {}; }, {});
+    shield.remember_durable_chunks({{1, 0, 0}});
+    WaterSystem water(nullptr, &shield);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(8);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    const auto before = TransactionBytes(*chunks[0]);
+    const auto registers = ledger.encode();
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 1}).applied);
+    ASSERT_TRUE(shield.restore_authoritative_chunk({1, 0, 0}));
+    ASSERT_TRUE(shield.durable_read_failed());
+    EXPECT_THROW(stage.Publish(&shield), std::invalid_argument);
+    EXPECT_FALSE(stage.pending());
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    EXPECT_THROW(
+        water.UpdateRegional(registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed),
+        std::invalid_argument);
+    EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+    EXPECT_EQ(ledger.encode(), registers);
+    EXPECT_TRUE(completed.empty());
+    EXPECT_EQ(shield.far_lod_authority_revision(), 0u);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterExecution, NonfiniteAndOutOfRangeSeedHeightsDiscardPreparedArrays) {
+    for (const float height : {1.0e10f, std::numeric_limits<float>::infinity()}) {
+        TerrainGenParams params;
+        params.height_offset = height;
+        params.island_mask_enabled = false;
+        params.cliffs_enabled = false;
+        params.rivers_enabled = false;
+        params.lakes_enabled = false;
+        SHIELD_WorldSystem shield(nullptr, nullptr, params, 1337);
+        WaterSystem water(nullptr, &shield);
+        water.SetRegionalScheduling(true);
+        water.SetSimResolution(8);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{std::make_shared<Chunk>(IVec3(0, 0, 0))};
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto registers = ledger.encode();
+        entt::registry registry;
+        std::vector<world::RegionWork> completed;
+        EXPECT_THROW(water.UpdateRegional(
+                         registry, chunks, ledger, ExecutionSchedule(0, {{0, 0}}), completed),
+                     std::invalid_argument);
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), registers);
+        EXPECT_TRUE(completed.empty());
+        EXPECT_EQ(shield.far_lod_authority_revision(), 0u);
     }
 }
 } // namespace

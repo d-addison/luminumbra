@@ -1,12 +1,17 @@
 #include "RegionalWater.h"
 
+#include "../components/CoreComponents.h"
+#include "../persistence/WorldSaveService.h"
 #include "../world/Chunk.h"
+#include "SHIELD_WorldSystem.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace Luminumbra::Systems::RegionalWater {
 namespace {
@@ -582,7 +587,141 @@ WaterKernels::Result Transaction::StepFace(ChunkID positive, ChunkID other, bool
     }
 }
 
-void Transaction::Publish() {
+namespace {
+std::int32_t SampleInteger(
+    const std::vector<std::int32_t>& values, int old_resolution, int resolution, int x, int z) {
+    const int denominator = resolution - 1;
+    const int nx = x * (old_resolution - 1), nz = z * (old_resolution - 1);
+    const int x0 = nx / denominator, z0 = nz / denominator;
+    const int x1 = std::min(x0 + 1, old_resolution - 1), z1 = std::min(z0 + 1, old_resolution - 1);
+    const std::int64_t fx = (2 * (nx % denominator) * 256 + denominator) / (2 * denominator);
+    const std::int64_t fz = (2 * (nz % denominator) * 256 + denominator) / (2 * denominator);
+    const auto at = [&](int sx, int sz) {
+        return static_cast<std::int64_t>(
+            values[static_cast<std::size_t>(sz * old_resolution + sx)]);
+    };
+    const auto sum = (256 - fx) * (256 - fz) * at(x0, z0) + fx * (256 - fz) * at(x1, z0) +
+                     (256 - fx) * fz * at(x0, z1) + fx * fz * at(x1, z1) + 32768;
+    return static_cast<std::int32_t>(sum >= 0 ? sum / 65536 : -((-sum + 65535) / 65536));
+}
+
+std::int32_t RoundedMillimetres(double metres) {
+    const auto rounded = std::round(metres * 1000.0);
+    if (!std::isfinite(rounded) || rounded < std::numeric_limits<std::int32_t>::min() ||
+        rounded > std::numeric_limits<std::int32_t>::max()) {
+        Refuse();
+    }
+    return static_cast<std::int32_t>(rounded);
+}
+} // namespace
+
+void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolution) {
+    try {
+        if (!LegalResolution(resolution)) {
+            Refuse();
+        }
+        auto& grid = Grid(id);
+        const bool initialized = grid.has_water_sim.load();
+        const int old_resolution = grid.current_water_resolution.load();
+        if (initialized && old_resolution == resolution) {
+            return;
+        }
+        const auto before = Volume(grid);
+        auto old_depth = std::move(grid.water_depth_mm);
+        auto old_bed = std::move(grid.water_bed_mm);
+        // Legal resolution was checked before allocation: at most 1,024 cells.
+        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        grid.water_depth_mm.resize(cells);
+        grid.water_bed_mm.resize(cells);
+        grid.water_edge_flux.assign(2 * cells, 0);
+        grid.water_src_mm.clear();
+        grid.water_level_data.resize(cells);
+        grid.water_flow_data.assign(cells, Vec2(0.0f));
+        grid.water_rest_level.resize(cells);
+        grid.water_sim_terrain_height.resize(cells);
+        const auto coords = grid.get_coords();
+        for (int z = 0; z < resolution; ++z) {
+            for (int x = 0; x < resolution; ++x) {
+                const auto cell = static_cast<std::size_t>(z * resolution + x);
+                const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                 (static_cast<float>(x) + 0.5f) * static_cast<float>(CHUNK_SIZE_X) /
+                                     static_cast<float>(resolution);
+                const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                 (static_cast<float>(z) + 0.5f) * static_cast<float>(CHUNK_SIZE_Z) /
+                                     static_cast<float>(resolution);
+                const float rest = shield.WaterLevelAt(wx, wz);
+                if (!std::isfinite(rest)) {
+                    Refuse();
+                }
+                if (initialized) {
+                    grid.water_bed_mm[cell] =
+                        SampleInteger(old_bed, old_resolution, resolution, x, z);
+                    grid.water_depth_mm[cell] =
+                        SampleInteger(old_depth, old_resolution, resolution, x, z);
+                } else {
+                    const auto bed = shield.GetTerrainHeightAt(wx, wz);
+                    grid.water_bed_mm[cell] = RoundedMillimetres(bed);
+                    grid.water_depth_mm[cell] = std::max<std::int32_t>(
+                        0, RoundedMillimetres(static_cast<double>(rest) - bed));
+                }
+                grid.water_rest_level[cell] = rest;
+                grid.water_sim_terrain_height[cell] =
+                    static_cast<float>(grid.water_bed_mm[cell]) / 1000.0f;
+                grid.water_level_data[cell] =
+                    static_cast<float>(static_cast<std::int64_t>(grid.water_bed_mm[cell]) +
+                                       grid.water_depth_mm[cell]) /
+                    1000.0f;
+            }
+        }
+        grid.has_water_sim.store(true);
+        grid.current_water_resolution.store(resolution);
+        grid.water_mesh_generated.store(false);
+        grid.water_mesh_dirty_ticks = 0;
+        ValidateStageGrid(grid);
+        m_expectedVolume += Volume(grid) - before;
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+void Transaction::Inject(const Source& source) {
+    try {
+        auto& grid = Grid(source.target);
+        if (source.millimetres < 0 || source.cell >= grid.water_depth_mm.size()) {
+            Refuse();
+        }
+        const auto depth =
+            static_cast<std::int64_t>(grid.water_depth_mm[source.cell]) + source.millimetres;
+        if (depth > std::numeric_limits<std::int32_t>::max()) {
+            Refuse();
+        }
+        grid.water_depth_mm[source.cell] = static_cast<std::int32_t>(depth);
+        m_expectedVolume += static_cast<std::int64_t>(source.millimetres) * CellArea(grid);
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+void Transaction::FinishInterior(ChunkID id) {
+    try {
+        auto& grid = Grid(id);
+        // Only interior visits advance calm time. Later seam flux can wake either endpoint.
+        if (grid.max_water_delta_last_tick < 0.0001f) {
+            grid.ticks_below_threshold = std::min(grid.ticks_below_threshold, 119) + 1;
+            grid.is_water_sleeping.store(grid.ticks_below_threshold >= 120);
+        } else {
+            grid.ticks_below_threshold = 0;
+            grid.is_water_sleeping.store(false);
+        }
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+void Transaction::Publish(SHIELD_WorldSystem* shield) {
     try {
         if (!pending() || !m_lastTick || m_ledger->tick() != *m_lastTick) {
             Refuse();
@@ -600,6 +739,21 @@ void Transaction::Publish() {
         if (volume != m_expectedVolume) {
             Refuse();
         }
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        std::optional<SHIELD_WorldSystem::WaterAuthorityPublication> authority;
+        if (shield) {
+            std::vector<Chunk*> changed;
+            changed.reserve(m_entries.size());
+            for (const auto& entry : m_entries) {
+                if (entry.changed) {
+                    changed.push_back(entry.live.get());
+                }
+            }
+            if (shield->durable_read_failed()) {
+                Refuse();
+            }
+            authority.emplace(shield->prepare_water_authority_publication(changed));
+        }
         // Recheck ledger admission before the first live write. Everything below
         // transfers prepared storage or writes scalars; there is no fallible tail.
         if (!m_ledger->prepare_water_patch(m_patches, m_debts)) {
@@ -609,6 +763,9 @@ void Transaction::Publish() {
             PublishWater(*entry.live, *entry.grid, entry.changed);
         }
         m_ledger->commit_water_patch(m_patches, m_debts);
+        if (shield && authority) {
+            shield->publish_water_authority(std::move(*authority));
+        }
         Rollback();
     } catch (...) {
         Rollback();
@@ -625,3 +782,168 @@ void Transaction::Rollback() noexcept {
     m_visited = 0;
 }
 } // namespace Luminumbra::Systems::RegionalWater
+
+namespace Luminumbra::Systems {
+void WaterSystem::UpdateRegional(entt::registry& registry,
+                                 std::span<const std::shared_ptr<Chunk>> resident,
+                                 world::ActiveRegionLedger& ledger,
+                                 const world::RegionSchedule& schedule,
+                                 std::vector<world::RegionWork>& completed,
+                                 std::uint64_t cell_budget) {
+    if (!m_regional_scheduling || m_boot_paused) {
+        return;
+    }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    if (!m_shield_system || m_shield_system->durable_read_failed() ||
+        resident.size() > RegionalWater::kMaxResidents ||
+        completed.size() > world::ActiveRegionLedger::kMaxRegions ||
+        schedule.tick != ledger.tick() || !RegionalWater::LegalResolution(m_sim_resolution) ||
+        (m_last_regional_tick && schedule.tick <= *m_last_regional_tick) ||
+        m_rain_mm_per_tick < 0 || m_evap_mm_per_tick < 0 || m_weather_rain_scale_mm < 0) {
+        throw std::invalid_argument("Regional water execution input refused");
+    }
+    // The supplied participation snapshot bounds every scan; no store or ledger traversal.
+    std::vector<RegionalWater::Resident> residents;
+    std::vector<std::shared_ptr<Chunk>> sorted(resident.begin(), resident.end());
+    residents.reserve(resident.size());
+    for (const auto& chunk : resident) {
+        if (!chunk) {
+            throw std::invalid_argument("Missing regional water resident");
+        }
+        residents.push_back({.id = chunk->get_id(),
+                             .initialized = chunk->has_water_sim.load(),
+                             .resolution = chunk->current_water_resolution.load(),
+                             .awake = !chunk->is_water_sleeping.load(),
+                             .preparation_ready = true,
+                             .available = chunk->get_state() != ChunkState::Loading});
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        return a->get_id() < b->get_id();
+    });
+    std::vector<RegionalWater::SourceInput> sources;
+    const auto view = registry.view<const Components::TransformComponent,
+                                    const Components::FlowingWaterSourceComponent>();
+    // The entity domain bounds traversal, including entities rejected by the view filter.
+    static_assert(entt::entt_traits<entt::entity>::entity_mask < RegionalWater::kMaxSources);
+    for (const auto entity : view) {
+        sources.push_back(
+            {.id = static_cast<std::uint64_t>(entt::to_integral(entity)),
+             .position = view.get<const Components::TransformComponent>(entity).position,
+             .physical = view.get<const Components::FlowingWaterSourceComponent>(entity)});
+    }
+    const bool raining = m_rain_mm_per_tick > 0 || (m_weather_rain && m_weather_rain_scale_mm > 0);
+    const auto plan = RegionalWater::Build(
+        residents, sources, ledger, schedule, {m_sim_resolution, cell_budget, raining});
+    if (plan.total_cells > cell_budget) {
+        throw std::invalid_argument("Regional water budget exceeded");
+    }
+    std::vector<std::shared_ptr<Chunk>> participants;
+    participants.reserve(plan.participants.size());
+    for (const auto id : plan.participants) {
+        const auto found =
+            std::lower_bound(sorted.begin(), sorted.end(), id, [](const auto& chunk, ChunkID key) {
+                return chunk->get_id() < key;
+            });
+        if (found == sorted.end() || (*found)->get_id() != id) {
+            throw std::invalid_argument("Missing regional water participant");
+        }
+        participants.push_back(*found);
+    }
+    RegionalWater::Transaction stage;
+    stage.Begin(ledger, schedule.tick, participants, plan.regions);
+    RegionalWork result;
+    result.global_windows = plan.global_windows;
+    result.border_windows = plan.border_windows;
+    result.allocated_windows = plan.allocated_windows;
+    result.preparation_cells = plan.preparation_cells;
+    result.total_cells = plan.total_cells;
+    result.water_cells = plan.total_cells - plan.preparation_cells;
+    result.residents_visited = plan.residents_visited;
+    result.participants_visited = stage.participants_visited();
+    result.visits = plan.interiors;
+    for (const auto& chunk : participants) {
+        result.volume_before_qmm += RegionalWater::Volume(*chunk);
+    }
+    const auto resolution = static_cast<std::uint64_t>(m_sim_resolution);
+    const auto cells = resolution * resolution;
+    std::map<world::RegionKey, world::RegionWork> contributions;
+    const auto contribute = [&](ChunkID id, std::uint64_t count) {
+        const auto owner = RegionalWater::StageOwner(*stage.staged(id));
+        auto& work = contributions[owner];
+        work.key = owner;
+        work.region_ticks = 1;
+        work.water_cells += count;
+    };
+    std::int64_t injected = 0;
+    const auto area = static_cast<std::int64_t>(4 * CHUNK_SIZE_X * CHUNK_SIZE_Z) /
+                      static_cast<std::int64_t>(cells);
+    for (const auto id : plan.interiors) {
+        const auto before = RegionalWater::Volume(*stage.staged(id));
+        stage.PrepareGrid(id, *m_shield_system, m_sim_resolution);
+        result.preparation_volume_qmm += RegionalWater::Volume(*stage.staged(id)) - before;
+        auto source = std::lower_bound(
+            plan.sources.begin(), plan.sources.end(), id, [](const auto& input, ChunkID key) {
+                return input.target < key;
+            });
+        for (; source != plan.sources.end() && source->target == id; ++source) {
+            stage.Inject(*source);
+            injected += source->millimetres;
+        }
+        const auto kernel = stage.StepInterior(id,
+                                               *m_shield_system,
+                                               {.finite_hydrology = m_finite_hydrology,
+                                                .rain_mm = m_rain_mm_per_tick,
+                                                .evap_mm = m_evap_mm_per_tick,
+                                                .weather_rain = m_weather_rain,
+                                                .weather_scale_mm = m_weather_rain_scale_mm});
+        result.source_mm += kernel.source_mm;
+        result.sink_mm += kernel.sink_mm;
+        stage.FinishInterior(id);
+        contribute(id, cells);
+    }
+    result.source_mm += injected;
+    int wet_pairs = 0;
+    for (const auto& face : plan.faces) {
+        wet_pairs += stage.StepFace(face.positive, face.other, face.is_x).wet_pairs;
+        contribute(face.positive, resolution);
+        contribute(face.other, resolution);
+    }
+    for (const auto& chunk : participants) {
+        result.volume_after_qmm += RegionalWater::Volume(*stage.staged(chunk->get_id()));
+    }
+    result.source_volume_qmm = result.source_mm * area;
+    result.sink_volume_qmm = result.sink_mm * area;
+    if (result.volume_before_qmm + result.preparation_volume_qmm + result.source_volume_qmm !=
+            result.volume_after_qmm + result.sink_volume_qmm ||
+        injected > std::numeric_limits<std::int64_t>::max() - m_debug_source_injected_mm ||
+        sources.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
+                                                    m_debug_sources_seen) ||
+        contributions.size() > world::ActiveRegionLedger::kMaxRegions - completed.size()) {
+        throw std::invalid_argument("Regional water publication accounting refused");
+    }
+    auto next_completed = completed;
+    next_completed.reserve(completed.size() + contributions.size());
+    for (const auto& [owner, work] : contributions) {
+        static_cast<void>(owner);
+        next_completed.push_back(work);
+    }
+    static_assert(std::is_nothrow_swappable_v<RegionalWork>);
+    stage.Publish(m_shield_system);
+    // Every allocation/refusal precedes this tail: only swaps and scalar writes remain.
+    completed.swap(next_completed);
+    m_debug_source_injected_mm += injected;
+    m_debug_sources_seen += static_cast<std::int64_t>(sources.size());
+    m_dbg_last_source_mm = result.source_mm;
+    m_dbg_last_sink_mm = result.sink_mm;
+    m_dbg_mass_ok = true;
+    m_dbg_seam_wet_pairs = wet_pairs;
+    m_dbg_awake_water_chunks = 0;
+    for (const auto& region : plan.regions) {
+        m_dbg_awake_water_chunks += static_cast<std::size_t>(region.candidates);
+    }
+    m_dbg_cells_simmed = static_cast<std::size_t>(result.water_cells);
+    m_cells_stepped_last_update = static_cast<std::size_t>(result.water_cells);
+    std::swap(m_regional_work, result);
+    m_last_regional_tick = schedule.tick;
+}
+} // namespace Luminumbra::Systems

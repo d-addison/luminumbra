@@ -5,6 +5,7 @@
 #include "entt/entity/registry.hpp"
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -13,6 +14,11 @@ namespace Luminumbra {
 class Chunk;
 struct HighWaterSeedInputs;
 } // namespace Luminumbra
+namespace Luminumbra::world {
+class ActiveRegionLedger;
+struct RegionSchedule;
+struct RegionWork;
+} // namespace Luminumbra::world
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 }
@@ -123,6 +129,33 @@ public:
 
     void update(entt::registry& registry,
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
+
+    // Explicit owner-thread execution; the caller supplies only participating residents.
+    // Disabled by default. Streaming updates bind queries only while enabled; fixed-tick
+    // session integration is separate. Refusal preserves every published output.
+    void SetRegionalScheduling(bool enabled) {
+        m_regional_scheduling = enabled;
+    }
+    struct RegionalWork {
+        std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
+        std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
+        std::int64_t source_mm = 0, sink_mm = 0;
+        // Physical volume in mm * quarter-square-metres, integral at every resolution.
+        std::int64_t volume_before_qmm = 0, volume_after_qmm = 0;
+        std::int64_t preparation_volume_qmm = 0, source_volume_qmm = 0, sink_volume_qmm = 0;
+        std::size_t residents_visited = 0, participants_visited = 0;
+        std::vector<ChunkID> visits;
+        bool operator==(const RegionalWork&) const = default;
+    };
+    [[nodiscard]] const RegionalWork& regional_work() const {
+        return m_regional_work;
+    }
+    void UpdateRegional(entt::registry& registry,
+                        std::span<const std::shared_ptr<Chunk>> resident,
+                        world::ActiveRegionLedger& ledger,
+                        const world::RegionSchedule& schedule,
+                        std::vector<world::RegionWork>& completed,
+                        std::uint64_t cell_budget = 4096);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -328,6 +361,9 @@ private:
                           const std::vector<float>& terrain,
                           const HighWaterSeedInputs* inputs);
 
+    bool m_regional_scheduling = false;
+    std::optional<std::uint64_t> m_last_regional_tick;
+    RegionalWork m_regional_work;
     JobSystem* m_job_system;
     SHIELD_WorldSystem* m_shield_system;
 

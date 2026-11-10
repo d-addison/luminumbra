@@ -7051,6 +7051,55 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     return true;
 }
 
+SHIELD_WorldSystem::WaterAuthorityPublication
+SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> chunks) {
+    if (chunks.size() > (std::size_t{1} << 20)) {
+        throw std::invalid_argument("Water authority participant cap exceeded");
+    }
+    WaterAuthorityPublication publication;
+    publication.lock = std::unique_lock<std::mutex>(m_far_lod_region_revision_mutex);
+    publication.revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
+    constexpr int per_region = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    for (const auto* chunk : chunks) {
+        if (!chunk) {
+            throw std::invalid_argument("Missing water authority participant");
+        }
+        if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+            continue;
+        }
+        if (publication.revision == std::numeric_limits<u64>::max()) {
+            throw std::invalid_argument("Water authority revision overflow");
+        }
+        ++publication.revision;
+        const auto coords = chunk->get_coords();
+        const int rx = static_cast<int>(std::floor(static_cast<double>(coords.x) / per_region));
+        const int rz = static_cast<int>(std::floor(static_cast<double>(coords.z) / per_region));
+        const auto local_x =
+            static_cast<std::int64_t>(coords.x) - static_cast<std::int64_t>(rx) * per_region;
+        const auto local_z =
+            static_cast<std::int64_t>(coords.z) - static_cast<std::int64_t>(rz) * per_region;
+        const int adjacent_x = local_x == 0 ? rx - 1 : local_x == per_region - 1 ? rx + 1 : rx;
+        const int adjacent_z = local_z == 0 ? rz - 1 : local_z == per_region - 1 ? rz + 1 : rz;
+        for (const int x : {rx, adjacent_x}) {
+            for (const int z : {rz, adjacent_z}) {
+                publication.revisions[{x, z}] = publication.revision;
+            }
+        }
+    }
+    return publication;
+}
+
+void SHIELD_WorldSystem::publish_water_authority(WaterAuthorityPublication&& publication) noexcept {
+    for (const auto& [key, revision] : publication.revisions) {
+        const auto found = m_far_lod_region_revisions.find(key);
+        if (found != m_far_lod_region_revisions.end()) {
+            found->second = revision;
+        }
+    }
+    m_far_lod_region_revisions.merge(publication.revisions);
+    m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
+}
+
 void SHIELD_WorldSystem::sync_water_authority() {
     const auto promote = [this](const std::shared_ptr<Luminumbra::Chunk>& chunk) {
         if (chunk)

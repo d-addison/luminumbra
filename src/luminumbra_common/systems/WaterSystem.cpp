@@ -1166,6 +1166,10 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
 
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    if (m_regional_scheduling) {
+        m_active_chunks = &active_chunks;
+        return;
+    }
     m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
