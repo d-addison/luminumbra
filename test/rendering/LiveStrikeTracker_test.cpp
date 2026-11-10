@@ -4,12 +4,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
+#include "luminumbra_client/rendering/LiveStrikeComposer.h"
 #include "luminumbra_client/rendering/LiveStrikeTracker.h"
 
 namespace {
 
+using Luminumbra::Rendering::ComposeLiveStrikes;
+using Luminumbra::Rendering::kLiveBoltPenUp;
 using Luminumbra::Rendering::LiveStrikeTracker;
+using Luminumbra::Rendering::ProjectedLiveStrike;
 using Luminumbra::Systems::StrikeEvent;
 
 TEST(LiveStrikeTracker, DistinctSameTickIdentitiesAreConsumedOnce) {
@@ -121,6 +126,103 @@ TEST(LiveStrikeTracker, TickZeroAndMaximumTickDoNotOverflowTheWindow) {
     tracker.AdvanceTo(last_tick);
     EXPECT_FALSE(tracker.TryConsume(last));
     EXPECT_EQ(tracker.size(), 2u);
+}
+
+std::vector<glm::vec2> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {
+    std::vector<glm::vec2> points;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
+        points.push_back(from + (to - from) * t);
+    }
+    return points;
+}
+
+ProjectedLiveStrike Strike(glm::vec2 origin, std::size_t branches, float pulse) {
+    ProjectedLiveStrike strike;
+    strike.main_channel = Stroke(origin, origin + glm::vec2(0.0f, -0.5f), 30);
+    for (std::size_t i = 0; i < branches; ++i) {
+        strike.branches.push_back(Stroke(origin, origin + glm::vec2(0.2f, -0.2f), 20));
+    }
+    strike.strike_ndc = origin;
+    strike.pulse = pulse;
+    return strike;
+}
+
+std::size_t Strokes(const std::vector<glm::vec2>& points) {
+    std::size_t strokes = points.empty() ? 0 : 1;
+    for (const glm::vec2& point : points) {
+        if (point == kLiveBoltPenUp) {
+            ++strokes;
+        }
+    }
+    return strokes;
+}
+
+TEST(LiveStrikeComposer, LaterVisibleChannelSurvivesHeavilyBranchedEarlierStrikes) {
+    const std::vector<ProjectedLiveStrike> strikes{Strike({-0.5f, 0.5f}, 4, 0.1f),
+                                                   Strike({0.5f, 0.5f}, 4, 0.1f)};
+    // Each strike alone needs 30 + 4 * (1 + 20) = 114 points, beyond the cap.
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_LE(composed.points.size(), 96u);
+    // Both channels (30 + 1 + 30) come first, then one whole branch fits.
+    ASSERT_EQ(composed.points.size(), 61u + 21u);
+    EXPECT_EQ(Strokes(composed.points), 3u);
+    EXPECT_EQ(composed.points.front(), strikes[0].main_channel.front());
+    EXPECT_EQ(composed.points[31], strikes[1].main_channel.front());
+    EXPECT_EQ(composed.points[30], kLiveBoltPenUp);
+    EXPECT_EQ(composed.points[61], kLiveBoltPenUp);
+    EXPECT_EQ(composed.points[62], strikes[0].branches[0].front());
+}
+
+TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
+    ProjectedLiveStrike offscreen = Strike({2.5f, 0.5f}, 4, 0.2f);
+    ProjectedLiveStrike behind;
+    behind.main_channel.assign(30, kLiveBoltPenUp);
+    behind.pulse = 0.05f;
+    const ProjectedLiveStrike visible = Strike({0.0f, 0.5f}, 2, 0.1f);
+    const std::vector<ProjectedLiveStrike> strikes{offscreen, behind, visible};
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    // Only the visible strike is drawn: 30 + 2 * (1 + 20) points.
+    ASSERT_EQ(composed.points.size(), 72u);
+    EXPECT_EQ(composed.points.front(), visible.main_channel.front());
+    EXPECT_EQ(Strokes(composed.points), 3u);
+    // The strongest flash comes from the offscreen strike and still lights the scene.
+    EXPECT_FLOAT_EQ(composed.pulse, 0.2f);
+    EXPECT_EQ(composed.strike_ndc, offscreen.strike_ndc);
+}
+
+TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
+    ProjectedLiveStrike crossing;
+    crossing.main_channel = Stroke({-2.0f, 0.0f}, {2.0f, 0.0f}, 2);
+    crossing.strike_ndc = {-2.0f, 0.0f};
+    crossing.pulse = 0.1f;
+    const ProjectedLiveStrike later = Strike({0.5f, 0.5f}, 0, 0.1f);
+    const std::vector<ProjectedLiveStrike> strikes{crossing, later};
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_EQ(composed.points.size(), 2u + 1u + 30u);
+    EXPECT_EQ(composed.points.front(), crossing.main_channel.front());
+    EXPECT_EQ(composed.strike_ndc, crossing.strike_ndc);
+}
+
+TEST(LiveStrikeComposer, BranchesNeedTheirOwnPlacedChannel) {
+    ProjectedLiveStrike offscreen_channel = Strike({0.0f, 0.5f}, 1, 0.1f);
+    offscreen_channel.main_channel = Stroke({3.0f, 0.5f}, {3.0f, 0.0f}, 30);
+    const std::vector<ProjectedLiveStrike> strikes{offscreen_channel};
+    // The branch is visible, but drawing it without its channel would float in the sky.
+    EXPECT_TRUE(ComposeLiveStrikes(strikes, 96).points.empty());
+}
+
+TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
+    const auto empty = ComposeLiveStrikes({}, 96);
+    EXPECT_TRUE(empty.points.empty());
+    EXPECT_FLOAT_EQ(empty.pulse, 0.0f);
+    const std::vector<ProjectedLiveStrike> strikes{Strike({0.0f, 0.5f}, 1, 0.3f)};
+    // The 20-point branch would fit, but its 30-point channel does not.
+    const auto tiny = ComposeLiveStrikes(strikes, 25);
+    EXPECT_TRUE(tiny.points.empty());
+    EXPECT_FLOAT_EQ(tiny.pulse, 0.3f);
+    const auto none = ComposeLiveStrikes(strikes, 0);
+    EXPECT_TRUE(none.points.empty());
 }
 
 } // namespace

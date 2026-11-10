@@ -121,7 +121,8 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
 #include "rendering/ImpostorBake.h"  //  far-field tree impostor atlas bake (render-only)
 #include "rendering/LightningBolt.h" // Deterministic bolt geometry.
-#include "rendering/PixelIo.h"       // Rendering::WritePixelBufferPpm (capture artifact writer)
+#include "rendering/LiveStrikeComposer.h"
+#include "rendering/PixelIo.h" // Rendering::WritePixelBufferPpm (capture artifact writer)
 #include "rendering/RenderPipeline.h"
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
@@ -2686,6 +2687,9 @@ int main(int argc, char* argv[]) {
         g_app.worldDressing = {};
         g_app.foragers = {};
         g_app.weather = {};
+        // Thunder and the flash from the previous world must not carry over.
+        g_app.audio.pendingThunder.clear();
+        renderPipeline.set_lightning_state({});
         g_app.interactions = {};
         g_app.foliage.cachedScatter.clear();
         g_app.foliage.scatterByChunk.clear();
@@ -5731,9 +5735,10 @@ int main(int argc, char* argv[]) {
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                             if (const auto* lweather = gameSession->GetWeatherSystem()) {
                                 g_app.weather.consumedStrikes.AdvanceTo(sim_tick);
-                                // Strikes consumed on the same frame share one bolt state:
-                                // every channel is drawn and the strongest flash wins.
-                                bool bolt_started = false;
+                                // Strikes consumed on the same frame share one bolt state.
+                                std::vector<Luminumbra::Rendering::ProjectedLiveStrike>
+                                    frame_strikes;
+                                glm::mat4 vp(1.0f);
                                 for (const auto& strike : lweather->StrikeSchedule()) {
                                     if (!g_app.weather.consumedStrikes.TryConsume(strike)) {
                                         continue;
@@ -5749,60 +5754,67 @@ int main(int argc, char* argv[]) {
                                         strike.magnitude,
                                         (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
                                             strike.strike_tick);
-                                    int fbw = 0, fbh = 0;
-                                    glfwGetFramebufferSize(window, &fbw, &fbh);
-                                    const float aspect = (fbh > 0) ? static_cast<float>(fbw) /
-                                                                         static_cast<float>(fbh)
-                                                                   : 1.0f;
-                                    const glm::mat4 vp =
-                                        glm::perspective(
-                                            glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
-                                        g_camera->GetViewMatrix();
-                                    if (!bolt_started) {
-                                        g_app.weather.liveBolt = {};
-                                        bolt_started = true;
+                                    if (frame_strikes.empty()) {
+                                        int fbw = 0, fbh = 0;
+                                        glfwGetFramebufferSize(window, &fbw, &fbh);
+                                        const float aspect = (fbh > 0) ? static_cast<float>(fbw) /
+                                                                             static_cast<float>(fbh)
+                                                                       : 1.0f;
+                                        vp = glm::perspective(glm::radians(g_camera->Zoom),
+                                                              aspect,
+                                                              0.1f,
+                                                              10000.0f) *
+                                             g_camera->GetViewMatrix();
                                     }
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
                                         if (clip.w <= 0.0f)
-                                            return glm::vec2(-3.0f, -3.0f); // behind: pen-up
+                                            return Luminumbra::Rendering::kLiveBoltPenUp;
                                         return glm::vec2(clip.x / clip.w, clip.y / clip.w);
                                     };
-                                    const auto push_stroke =
+                                    const auto project_stroke =
                                         [&](const std::vector<glm::vec3>& stroke) {
-                                            if (!g_app.weather.liveBolt.bolt_points_ndc.empty()) {
-                                                g_app.weather.liveBolt.bolt_points_ndc.emplace_back(
-                                                    -3.0f, -3.0f); // pen-up
-                                            }
+                                            std::vector<glm::vec2> points;
+                                            points.reserve(stroke.size());
                                             for (const glm::vec3& wp : stroke) {
-                                                g_app.weather.liveBolt.bolt_points_ndc.push_back(
-                                                    project(wp));
+                                                points.push_back(project(wp));
                                             }
+                                            return points;
                                         };
-                                    push_stroke(bolt.main_channel);
+                                    auto& projected = frame_strikes.emplace_back();
+                                    projected.main_channel = project_stroke(bolt.main_channel);
+                                    projected.branches.reserve(bolt.branches.size());
                                     for (const auto& br : bolt.branches) {
-                                        push_stroke(br);
+                                        projected.branches.push_back(project_stroke(br));
                                     }
                                     const glm::vec3 ground(strike.world_x, gy, strike.world_z);
                                     const float dist = glm::length(ground - g_camera->Position);
-                                    g_app.weather.liveBolt.active = true;
                                     // Magnitude-scaled flash, attenuated with distance (a far
                                     // strike lights the sky, a near one lights the scene).
-                                    const float pulse = 0.22f *
-                                                        std::clamp(strike.magnitude, 0.2f, 1.0f) /
-                                                        (1.0f + dist / 400.0f);
-                                    if (pulse >= g_app.weather.liveBolt.pulse_intensity) {
-                                        g_app.weather.liveBolt.pulse_intensity = pulse;
-                                        g_app.weather.liveBolt.strike_ndc = project(ground);
-                                    }
-                                    g_app.weather.liveBolt.bolt_width_ndc = 0.010f;
-                                    g_app.weather.liveBolt.bolt_glow_ndc = 0.034f;
-                                    g_app.weather.boltFramesLeft = 3; // a few frames of flash
+                                    projected.pulse = 0.22f *
+                                                      std::clamp(strike.magnitude, 0.2f, 1.0f) /
+                                                      (1.0f + dist / 400.0f);
+                                    projected.strike_ndc = project(ground);
                                     //  hook: queue the physically-delayed thunder cue.
                                     g_app.audio.pendingThunder.push_back({strike.strike_tick,
                                                                           glfwGetTime(),
                                                                           dist,
                                                                           strike.magnitude});
+                                }
+                                if (!frame_strikes.empty()) {
+                                    auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
+                                        frame_strikes,
+                                        static_cast<std::size_t>(
+                                            Luminumbra::Rendering::kMaxBoltSegmentPoints));
+                                    g_app.weather.liveBolt = {};
+                                    g_app.weather.liveBolt.active = true;
+                                    g_app.weather.liveBolt.bolt_points_ndc =
+                                        std::move(composed.points);
+                                    g_app.weather.liveBolt.pulse_intensity = composed.pulse;
+                                    g_app.weather.liveBolt.strike_ndc = composed.strike_ndc;
+                                    g_app.weather.liveBolt.bolt_width_ndc = 0.010f;
+                                    g_app.weather.liveBolt.bolt_glow_ndc = 0.034f;
+                                    g_app.weather.boltFramesLeft = 3; // a few frames of flash
                                 }
                                 if (g_app.weather.boltFramesLeft > 0) {
                                     renderPipeline.set_lightning_state(g_app.weather.liveBolt);
