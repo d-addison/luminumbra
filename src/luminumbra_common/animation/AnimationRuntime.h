@@ -16,6 +16,10 @@
 
 #include "SkinnedMeshFormat.h"
 
+namespace luminumbra::ai {
+class CreatureTickAdmission;
+}
+
 namespace luminumbra::animation {
 
 struct JointPose {
@@ -96,6 +100,8 @@ struct AnimationPlayerComponent {
 // First system in the deterministic tick order (the deterministic runtime contract ).
 // Advances each player's clock by fixed_dt, samples its pose and recomputes
 // its joint palette.
-void SamplePosesOnTick(entt::registry& registry, double fixed_dt);
+void SamplePosesOnTick(entt::registry& registry,
+                       double fixed_dt,
+                       const ai::CreatureTickAdmission* admission = nullptr);
 
 } // namespace luminumbra::animation

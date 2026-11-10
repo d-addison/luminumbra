@@ -41,6 +41,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -85,7 +86,9 @@ struct HerdAlarmStats {
 // RunHerdAlarmOnTick: maintain the propagating alarm field. id-ordered, two-phase snapshot.
 // `dt` scales the decay/propagation rate so the field is frame-rate independent (the sim
 // runs a fixed dt; the parameter keeps the signature honest and lets tests exercise decay).
-inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
+inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
+                                         float dt,
+                                         const CreatureTickAdmission* admission = nullptr) {
     HerdAlarmStats stats;
 
     auto view = reg.view<Comp::AlarmComponent, Comp::CreatureComponent, Comp::TransformComponent>();
@@ -110,6 +113,9 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
     std::vector<Snap> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         const auto& al = view.get<Comp::AlarmComponent>(e);
         const auto& cr = view.get<Comp::CreatureComponent>(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);

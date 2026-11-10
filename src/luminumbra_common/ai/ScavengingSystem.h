@@ -45,6 +45,7 @@
 #include "../components/MortalComponents.h"
 #include "../components/ScavengerComponent.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -105,7 +106,8 @@ struct ScavengingTuning {
 // .wish_x/z + .feeding and CreatureComponent.hunger on feeding scavengers.
 inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
                                            std::uint64_t /*tick*/,
-                                           const ScavengingTuning& tuning = {}) {
+                                           const ScavengingTuning& tuning = {},
+                                           const CreatureTickAdmission* admission = nullptr) {
     ScavengingStats stats;
 
     // ---- First pass: snapshot every carcass position. ----
@@ -118,6 +120,9 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     {
         auto cview = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : cview) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& cr = cview.get<Comp::CreatureComponent>(e);
             const auto* mortal = reg.try_get<Comp::MortalComponent>(e);
             if (!ScavengeIsCarcass(cr, mortal))
@@ -137,10 +142,13 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     });
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
-    stats.scavengers = static_cast<int>(ents.size());
 
     // ---- Second pass: steer and feed against the frozen carcass list. ----
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
+        ++stats.scavengers;
         auto& sc = sview.get<Comp::ScavengerComponent>(e);
         auto& cr = sview.get<Comp::CreatureComponent>(e);
         const auto& tf = sview.get<Comp::TransformComponent>(e);
@@ -169,7 +177,8 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
             const float dx = c.x - tf.position.x;
             const float dz = c.z - tf.position.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (bestD < 0.0f || d < bestD) {
+            if (bestD < 0.0f || d < bestD ||
+                (admission && d == bestD && (dx < bestDx || (dx == bestDx && dz < bestDz)))) {
                 bestD = d;
                 bestDx = dx;
                 bestDz = dz;
