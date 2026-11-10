@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra {
@@ -83,9 +84,13 @@ public:
     void update(entt::registry& registry,
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
 
-    // Owner-thread handoff to the world meshing scheduler. Coalesces render invalidations
-    // until consumed, including edits between updates; never hashed or persisted.
-    [[nodiscard]] bool take_mesh_invalidation();
+    // Owner-thread meshing work set: one id per changed chunk until publication or
+    // loss of residency/eligibility. Never hashed or persisted. Retaining ids lets
+    // water-only scheduler passes visit changed chunks rather than all residents.
+    // Storage is bounded by pending residents plus distinct changes since the last pass.
+    [[nodiscard]] const std::unordered_set<ChunkID>& mesh_invalidations() const;
+    void retain_mesh_invalidation(ChunkID id);
+    void acknowledge_mesh_invalidation(ChunkID id);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -313,7 +318,7 @@ private:
     std::int64_t m_debug_sources_seen = 0;
     std::int64_t m_debug_source_injected_mm = 0;
     std::uint64_t m_water_epoch = 0; //  (see water_epoch())
-    bool m_mesh_invalidated = false;
+    std::unordered_set<ChunkID> m_mesh_invalidations;
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;

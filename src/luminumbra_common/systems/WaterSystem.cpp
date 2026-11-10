@@ -302,10 +302,10 @@ void MarkWaterBookkeeping(Chunk& chunk) {
     }
 }
 
-void InvalidateWaterMesh(Chunk& chunk, bool& mesh_invalidated) {
+void InvalidateWaterMesh(Chunk& chunk, std::unordered_set<ChunkID>& mesh_invalidations) {
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
-    mesh_invalidated = true;
+    mesh_invalidations.insert(chunk.get_id());
 }
 
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
@@ -327,7 +327,7 @@ void InvalidateWaterMesh(Chunk& chunk, bool& mesh_invalidated) {
 // accumulators — the compared difference is identical.
 void StepChunkWaterFixed(Chunk& c,
                          SHIELD_WorldSystem& shield,
-                         bool& mesh_invalidated,
+                         std::unordered_set<ChunkID>& mesh_invalidations,
                          std::int64_t& out_src,
                          std::int64_t& out_sink,
                          std::int64_t& out_depth_before,
@@ -576,7 +576,7 @@ void StepChunkWaterFixed(Chunk& c,
     if (max_delta > 1) {
         c.water_mesh_dirty_ticks++;
         if (c.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL) {
-            InvalidateWaterMesh(c, mesh_invalidated);
+            InvalidateWaterMesh(c, mesh_invalidations);
         }
     }
     if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {
@@ -989,11 +989,19 @@ void WaterSystem::seed_chunk_water(Chunk* cp,
         MarkRuntimeWaterMutation(*cp);
     }
     m_water_activity_cache.erase(cp->get_id());
-    InvalidateWaterMesh(*cp, m_mesh_invalidated);
+    InvalidateWaterMesh(*cp, m_mesh_invalidations);
 }
 
-bool WaterSystem::take_mesh_invalidation() {
-    return std::exchange(m_mesh_invalidated, false);
+const std::unordered_set<ChunkID>& WaterSystem::mesh_invalidations() const {
+    return m_mesh_invalidations;
+}
+
+void WaterSystem::retain_mesh_invalidation(ChunkID id) {
+    m_mesh_invalidations.insert(id);
+}
+
+void WaterSystem::acknowledge_mesh_invalidation(ChunkID id) {
+    m_mesh_invalidations.erase(id);
 }
 
 void WaterSystem::update(entt::registry& registry,
@@ -1362,7 +1370,7 @@ void WaterSystem::update(entt::registry& registry,
     for (Chunk* chunk : chunks_to_sim) {
         StepChunkWaterFixed(*chunk,
                             *m_shield_system,
-                            m_mesh_invalidated,
+                            m_mesh_invalidations,
                             src_mm,
                             sink_mm,
                             depth_before,
@@ -1756,7 +1764,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             c.stage_water_seed_inputs({});
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
             MarkRuntimeWaterMutation(c);
-            InvalidateWaterMesh(c, m_mesh_invalidated);
+            InvalidateWaterMesh(c, m_mesh_invalidations);
             m_water_activity_cache.erase(c.get_id());
         }
     }
@@ -1833,7 +1841,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_flow_data.clear();
         chunk.water_sim_terrain_height.clear();
         chunk.has_water_sim.store(false);
-        InvalidateWaterMesh(chunk, m_mesh_invalidated);
+        InvalidateWaterMesh(chunk, m_mesh_invalidations);
         chunk.current_water_resolution.store(0);
         MarkRuntimeWaterMutation(chunk);
         return true;
@@ -1999,7 +2007,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
 
     chunk.has_water_sim.store(true);
     MarkRuntimeWaterMutation(chunk);
-    InvalidateWaterMesh(chunk, m_mesh_invalidated);
+    InvalidateWaterMesh(chunk, m_mesh_invalidations);
     chunk.current_water_resolution.store(new_resolution);
     return true;
 }

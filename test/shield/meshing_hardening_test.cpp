@@ -1030,6 +1030,47 @@ bool SettleStreaming(SHIELD_WorldSystem& world, entt::registry& registry, const 
     }
     return false;
 }
+
+bool AcknowledgeWaterMeshInvalidations(WaterSystem& water) {
+    const bool pending = !water.mesh_invalidations().empty();
+    while (!water.mesh_invalidations().empty()) {
+        water.acknowledge_mesh_invalidation(*water.mesh_invalidations().begin());
+    }
+    return pending;
+}
+
+void ExpectWaterMeshRetirement(SHIELD_WorldSystem& world,
+                               WaterSystem& water,
+                               entt::registry& registry,
+                               const Vec3& anchor,
+                               const std::shared_ptr<Chunk>& chunk) {
+    ASSERT_TRUE(SettleStreaming(world, registry, anchor));
+    // Retire disabled, coarse and absent owners without reopening terrain scans.
+    ASSERT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::Off));
+    const auto hits = world.activation_index_counters().span_cache_hits;
+    world.update(registry, anchor, nullptr, false);
+    EXPECT_TRUE(water.mesh_invalidations().empty());
+    EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> participants = {
+        {chunk->get_id(), chunk}};
+    water.update(registry, participants); // re-seed at the session grid
+    ASSERT_TRUE(chunk->has_water_sim.load());
+    chunk->current_lod.store(1);
+    world.update(registry, anchor, nullptr, false);
+    EXPECT_TRUE(water.mesh_invalidations().empty());
+    EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+    chunk->current_lod.store(0);
+
+    auto absent = std::make_shared<Chunk>(IVec3(64, 0, 0));
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> nonresidents = {
+        {absent->get_id(), absent}};
+    water.update(registry, nonresidents);
+    ASSERT_TRUE(water.mesh_invalidations().contains(absent->get_id()));
+    world.update(registry, anchor, nullptr, false);
+    EXPECT_TRUE(water.mesh_invalidations().empty());
+    EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+}
 } // namespace
 
 TEST(StreamingHardening, SettledRegenerationPublishesTerrainWithUnchangedAnchorsAndCount) {
@@ -1123,6 +1164,14 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     const auto generation = world.debug_dirty_generation();
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> participants = {
         {chunk->get_id(), chunk}};
+    water.SetHydrology(true, 0, 0);
+    for (int tick = 0; tick < 32; ++tick) {
+        water.update(registry, participants);
+        EXPECT_EQ(water.cells_stepped_last_update(), 64u);
+        EXPECT_TRUE(water.mesh_invalidations().empty());
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        EXPECT_EQ(chunk->water_level_data.front(), 12.0f);
+    }
     water.SetHydrology(true, 0, 2);
 
     // Public simulation updates touch only this participating grid. Streaming
@@ -1152,7 +1201,53 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     EXPECT_NE(HashVec(chunk->water_mesh_vertices), mesh);
     EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
 
+    // Flow can invalidate on different ticks in different chunks. Across repeated
+    // wakes and their publication retries, at most two span lookups per indexed
+    // chunk are allowed (LOD and candidate priority). A full resident scan also
+    // looks up every unrelated ready chunk and exceeds this bound.
+    for (int tick = 0; tick < 64; ++tick) {
+        water.update(registry, participants);
+        const auto pending = water.mesh_invalidations().size();
+        const auto hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, anchor, nullptr, false);
+        EXPECT_LE(world.activation_index_counters().span_cache_hits - hits, 2u * pending);
+        EXPECT_LE(world.get_last_streaming_budget_stats().meshing_candidates, pending);
+        EXPECT_EQ(world.debug_dirty_generation(), generation);
+        world.wait_for_streaming_jobs();
+    }
+    EXPECT_GT(chunk->water_mesh_version.load(), water_version + 1u);
+
     ASSERT_TRUE(SettleStreaming(world, registry, anchor));
+    // An invalidation taken while a worker owns the old snapshot must survive
+    // both the pending frame and rejection of that snapshot's water geometry.
+    for (int tick = 0; tick < 32 && chunk->water_mesh_generated.load(); ++tick) {
+        water.update(registry, participants);
+    }
+    ASSERT_FALSE(chunk->water_mesh_generated.load());
+    ASSERT_TRUE(water.mesh_invalidations().contains(chunk->get_id()));
+    {
+        PausedMeshWorker paused(jobs);
+        world.update(registry, anchor, nullptr, false);
+        ASSERT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        water.update(registry, participants);
+        const auto hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, anchor, nullptr, false);
+        EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 0u);
+        EXPECT_TRUE(water.mesh_invalidations().contains(chunk->get_id()));
+        paused.release();
+        world.wait_for_streaming_jobs();
+    }
+    ASSERT_FALSE(chunk->water_mesh_generated.load());
+    const auto retry_hits = world.activation_index_counters().span_cache_hits;
+    world.update(registry, anchor, nullptr, false);
+    EXPECT_LE(world.activation_index_counters().span_cache_hits - retry_hits, 2u);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+    world.wait_for_streaming_jobs();
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+    ASSERT_TRUE(SettleStreaming(world, registry, anchor));
+    EXPECT_TRUE(water.mesh_invalidations().empty());
     const auto published = chunk->water_mesh_version.load();
     // No invalidation across activation ticks: neither scan nor dispatch runs.
     for (int frame = 0; frame < 8; ++frame) {
@@ -1166,6 +1261,59 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
     world.wait_for_streaming_jobs();
     EXPECT_GT(chunk->water_mesh_version.load(), published);
+
+    ExpectWaterMeshRetirement(world, water, registry, anchor, chunk);
+    world.SetWaterSystem(nullptr);
+}
+
+TEST(StreamingHardening, RetainedWaterDescriptorsDrainWithoutInvalidationOwners) {
+    JobSystem jobs;
+    jobs.startup(1);
+    WaterSystem water(&jobs, nullptr);
+    water.SetBootPaused(true);
+    SHIELD_WorldSystem world(&jobs, &water, MakeFlatSurfaceParams(), 1337);
+    entt::registry registry;
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    // Forty-nine 32*32 grids exceed the 256 KiB snapshot cap, leaving a
+    // retained prefix. All chunks remain in LOD0 at the unchanged origin.
+    for (int z = -3; z <= 3; ++z) {
+        for (int x = -3; x <= 3; ++x) {
+            auto chunk = AdoptFlatMesh(world, 0, IVec3(x, 0, z));
+            ASSERT_NE(chunk, nullptr);
+            chunk->current_water_resolution.store(32);
+            chunk->has_water_sim.store(true);
+            chunk->water_level_data.assign(1024, 12.0f);
+            chunk->water_depth_mm.assign(1024, 2000);
+            chunk->water_mesh_generated.store(true);
+            chunks.push_back(chunk);
+        }
+    }
+    const std::vector<Vec3> anchors;
+    world.update(registry, anchors, nullptr, false);
+    ASSERT_EQ(world.get_last_streaming_budget_stats().meshing_candidates, 0u);
+    for (const auto& chunk : chunks) {
+        chunk->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunk->get_id());
+    }
+    {
+        PausedMeshWorker paused(jobs);
+        world.update(registry, anchors, nullptr, false);
+        ASSERT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+        ASSERT_LT(world.pending_publication_chunks(), chunks.size());
+        // A descriptor retains ownership even when its originating request is
+        // acknowledged; it must still drain without another residency change.
+        ASSERT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+        const auto hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, anchors, nullptr, false);
+        EXPECT_GT(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+        EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+        EXPECT_EQ(world.pending_publication_chunks(), chunks.size());
+        paused.release();
+        world.wait_for_streaming_jobs();
+    }
+    for (const auto& chunk : chunks) {
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+    }
     world.SetWaterSystem(nullptr);
 }
 
@@ -1177,34 +1325,38 @@ TEST(StreamingHardening, WaterMeshInvalidationHandoffCoversSiblingMutationsAndRe
     auto chunk = std::make_shared<Chunk>(IVec3(0));
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> participants = {
         {chunk->get_id(), chunk}};
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     water.update(registry, participants); // first-time seeding invalidates
     // Paused and empty updates must retain a pending handoff.
     water.SetBootPaused(true);
     water.update(registry, participants);
     water.update(registry, {});
-    EXPECT_TRUE(water.take_mesh_invalidation());
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_EQ(water.mesh_invalidations().size(), 1u);
+    EXPECT_TRUE(water.mesh_invalidations().contains(chunk->get_id()));
+    EXPECT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     water.update(registry, participants);
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
 
     ASSERT_GT(water.EditTerrainBed(Vec3(8), 100, 20.0f), 0);
-    EXPECT_TRUE(water.take_mesh_invalidation());
+    ASSERT_GT(water.EditTerrainBed(Vec3(8), 100, 20.0f), 0);
+    EXPECT_EQ(water.mesh_invalidations().size(), 1u);
+    EXPECT_TRUE(AcknowledgeWaterMeshInvalidations(water));
     EXPECT_EQ(water.EditTerrainBed(Vec3(8), 0, 20.0f), 0);
     EXPECT_EQ(water.EditTerrainBed(Vec3(4096), 100, 1.0f), 0);
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     ASSERT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::High));
-    EXPECT_TRUE(water.take_mesh_invalidation());
+    EXPECT_TRUE(AcknowledgeWaterMeshInvalidations(water));
     EXPECT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::High));
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     chunk->water_depth_mm.pop_back();
     EXPECT_FALSE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::Medium));
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     EXPECT_FALSE(water.ResizeSimulationGrid(*chunk, static_cast<WaterDetailLevel>(1)));
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
     ASSERT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::Off));
-    EXPECT_TRUE(water.take_mesh_invalidation());
-    EXPECT_FALSE(water.take_mesh_invalidation());
+    EXPECT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+    EXPECT_FALSE(AcknowledgeWaterMeshInvalidations(water));
 }
 
 TEST(StreamingHardening, DelayedTerrainCompletionRetainsEditInvalidationAcrossBothLanes) {
