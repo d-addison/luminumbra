@@ -64,6 +64,13 @@ bool WriteRegionScheduleTrace(const std::filesystem::path& replay,
     auto path = replay;
     path += ".regions.json";
     try {
+        // Paired publication and its recovery own the companion under this
+        // directory guard; a standalone write must not replace it meanwhile.
+        const Persistence::ReplayPairReadGuard ownership(replay);
+        if (!ownership.is_open()) {
+            error = "Cannot write region schedule trace.";
+            return false;
+        }
         Persistence::ReplacementOutputFile output(path);
         if (!output.write(bytes) || !output.commit()) {
             error = "Cannot write region schedule trace.";

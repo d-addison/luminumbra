@@ -6913,14 +6913,23 @@ constexpr std::size_t kPairHeaderBytes = 4096;
 constexpr const char* kPairUndo = ".replay-pair.undo";
 using PairIdentity = std::array<std::uint64_t, 3>;
 
+bool ReservedPairName(const std::string& name, std::string_view reserved) {
+    // Case-insensitive volumes exist on every platform (NTFS, APFS, exFAT).
+    return name.size() == reserved.size() &&
+           std::equal(name.begin(), name.end(), reserved.begin(), [](char left, char right) {
+               return (left >= 'A' && left <= 'Z' ? static_cast<char>(left + ('a' - 'A')) : left) ==
+                      right;
+           });
+}
+
 bool ValidPairFilename(const std::filesystem::path& filename) {
     const auto name = Filesystem::GenericUtf8PathString(filename);
     // Use the same portable leaf contract before publication and during recovery.
     // Trailing dots/spaces can alias the journal name through Win32 normalization.
     return !name.empty() && name.find_first_of("/\\:") == std::string::npos &&
            name.find('\0') == std::string::npos && filename == filename.filename() &&
-           name.back() != '.' && name.back() != ' ' && !StagingNameEquals(filename, kPairUndo) &&
-           !StagingNameEquals(filename, ".replay-pair.lock");
+           name.back() != '.' && name.back() != ' ' && !ReservedPairName(name, kPairUndo) &&
+           !ReservedPairName(name, ".replay-pair.lock");
 }
 
 struct PairDirectoryMutex {
@@ -7112,7 +7121,11 @@ bool RecoverReplayPair(const std::filesystem::path& directory) {
         if (trace_identity == old_trace && trace_bytes != undo)
             return false;
         // Recovery may itself have been interrupted after restoring the bytes.
-        if (trace_identity != old_trace && !(old_trace != PairIdentity{} && trace_bytes == undo)) {
+        // A missing companion reads as empty bytes, which only proves restoration
+        // when an occupant actually exists (an empty old trace is still undone).
+        const bool restored =
+            old_trace != PairIdentity{} && trace_identity != PairIdentity{} && trace_bytes == undo;
+        if (trace_identity != old_trace && !restored) {
             if (trace_identity != new_trace && trace_identity != PairIdentity{})
                 return false;
             if (old_trace == PairIdentity{}) {

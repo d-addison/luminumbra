@@ -543,9 +543,68 @@ TEST_F(ReplayPairRecoveryTest, RealWriterJournalRoundTripsAcrossCommitAndRollbac
     }
 }
 
+TEST_F(ReplayPairRecoveryTest, RollbackRestoresARemovedEmptyOldTrace) {
+    const auto companion = m_path + ".regions.json";
+    Write(m_path, "old replay");
+    const auto previous = Identify(m_path);
+    Write(companion, "");
+    const auto old_trace = Identify(companion);
+    Write(m_directory / "incoming", "new replay");
+    const auto incoming = Identify(m_directory / "incoming");
+    const std::string undo;
+    const nlohmann::json header{
+        {"schema", "luminumbra.replay_pair.v1"},
+        {"replay", "recording.lrec1"},
+        {"previous", previous},
+        {"incoming", incoming},
+        {"old_trace", old_trace},
+        {"new_trace", Identity{}},
+        {"undo_bytes", undo.size()},
+        {"undo_checksum", Luminumbra::Persistence::fnv1a64_bytes(undo.data(), undo.size())}};
+    Write(m_directory / ".replay-pair.undo", header.dump() + '\n' + undo);
+    // Interrupted after the empty companion was removed, before the replay commit.
+    fs::remove(companion);
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
+        ASSERT_TRUE(guard.is_open());
+    }
+    EXPECT_EQ(ReadBytes(), "old replay");
+    const Luminumbra::Persistence::SavedInputFile trace(companion);
+    EXPECT_FALSE(trace.missing());
+    std::string bytes = "unread";
+    ASSERT_TRUE(trace.read(bytes, 64));
+    EXPECT_TRUE(bytes.empty());
+    EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+}
+
+TEST_F(ReplayPairRecoveryTest, StandaloneTraceWriteWaitsForThePairGuard) {
+    const auto companion = m_path + ".regions.json";
+    const replay::RegionScheduleTrace old{{1, "0123456789abcdef"}};
+    const replay::RegionScheduleTrace next{{1, "fedcba9876543210"}};
+    std::string error;
+    ASSERT_TRUE(replay::WriteRegionScheduleTrace(m_path, old, error)) << error;
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard guard(m_path);
+        ASSERT_TRUE(guard.is_open());
+        EXPECT_FALSE(replay::WriteRegionScheduleTrace(m_path, next, error));
+        EXPECT_EQ(error, "Cannot write region schedule trace.");
+    }
+    replay::RegionScheduleTrace actual;
+    ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error)) << error;
+    EXPECT_EQ(actual, old);
+    ASSERT_TRUE(replay::WriteRegionScheduleTrace(m_path, next, error)) << error;
+    ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error)) << error;
+    EXPECT_EQ(actual, next);
+}
+
 TEST_F(ReplayPairRecoveryTest, PublicationRefusesUnrecoverableFilenamesBeforeChangingThePair) {
-    std::vector<std::string> names{
-        ".replay-pair.undo", ".replay-pair.lock", ".replay-pair.undo.", ".replay-pair.undo "};
+    // Case variants alias the journal on case-insensitive volumes on every platform.
+    std::vector<std::string> names{".replay-pair.undo",
+                                   ".replay-pair.lock",
+                                   ".replay-pair.undo.",
+                                   ".replay-pair.undo ",
+                                   ".REPLAY-PAIR.UNDO",
+                                   ".Replay-Pair.Lock"};
 #if !defined(_WIN32)
     // These are leaf filenames on POSIX, but separators/streams on Windows.
     names.emplace_back("recording:stream");
