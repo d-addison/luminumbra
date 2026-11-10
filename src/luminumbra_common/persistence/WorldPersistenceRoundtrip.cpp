@@ -769,30 +769,37 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
     }
     const int resolution = state.at("current_water_resolution").get<int>();
     const bool initialized = state.at("has_water_sim").get<bool>();
-    if (initialized && (resolution < 2 || resolution > 32 || 32 % resolution != 0))
+    if ((resolution != 0 && (resolution < 2 || resolution > 32 || 32 % resolution != 0)) ||
+        (initialized && resolution == 0))
         throw std::invalid_argument("Saved water resolution refused");
     const std::size_t cells =
-        initialized ? static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)
-                    : 0u;
-    for (const char* field : {"water_depth_mm",
-                              "water_bed_mm",
-                              "water_edge_flux",
-                              "water_level_data",
-                              "water_flow_data",
-                              "water_sim_terrain_height"}) {
+        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    constexpr std::array fields{"water_depth_mm",
+                                "water_bed_mm",
+                                "water_edge_flux",
+                                "water_level_data",
+                                "water_flow_data",
+                                "water_sim_terrain_height"};
+    std::array<std::size_t, fields.size()> counts{};
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        const char* field = fields[index];
         if (!value.contains(field))
             throw std::invalid_argument("Saved water array required");
         const auto& array = value.at(field);
         const std::string_view name(field);
-        const auto expected = name == "water_edge_flux" ? 2u * cells : cells;
+        // Off retains integer arrays without a resolution stamp for their old grid.
+        // Dormant legacy arrays need no active-grid shape, but stay bounded to 32^2 cells.
+        const std::size_t limit = name == "water_edge_flux" ? 2048u : 1024u;
         if (encoded) {
             const auto& count = array.at("count");
-            if (!count.is_number_unsigned() || count.get<std::uint64_t>() != expected)
+            if (!count.is_number_unsigned() || count.get<std::uint64_t>() > limit)
                 throw std::invalid_argument("Saved water grid shape refused");
+            counts[index] = static_cast<std::size_t>(count.get<std::uint64_t>());
             continue;
         }
-        if (!array.is_array() || array.size() != expected)
+        if (!array.is_array() || array.size() > limit)
             throw std::invalid_argument("Saved water grid shape refused");
+        counts[index] = array.size();
         for (const auto& cell : array) {
             if (name == "water_depth_mm" || name == "water_bed_mm" || name == "water_edge_flux") {
                 RequireWaterInteger(
@@ -807,6 +814,16 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
             }
         }
     }
+    // Historical float-only water has no integer grids. Promotion preserves that state
+    // and empty mirrors; neither is a reason to reseed or normalize the saved payload.
+    const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
+    const bool complete_integers =
+        counts[0] == cells && counts[1] == cells && counts[2] == 2u * cells;
+    const bool no_mirrors = counts[3] == 0u && counts[4] == 0u && counts[5] == 0u;
+    const bool complete_mirrors = counts[3] == cells && counts[4] == cells && counts[5] == cells;
+    if ((initialized && !no_integers && !complete_integers) ||
+        (!no_mirrors && (!initialized || !complete_mirrors)))
+        throw std::invalid_argument("Saved water grid shape refused");
 }
 
 template<typename Arrays>

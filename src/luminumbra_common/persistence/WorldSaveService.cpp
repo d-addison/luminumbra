@@ -3672,7 +3672,7 @@ bool DigestRegionRecords(const std::filesystem::path& path,
     for (const RegionRecord& record : records) {
         if (record.lod_level == 0) {
             ChunkRecordFacts facts;
-            if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr, false, false, true)) {
+            if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr)) {
                 error = first_error("corrupt chunk record");
                 return false;
             }
@@ -7323,10 +7323,20 @@ bool AuthorityWaterValid(const Chunk& chunk) {
     if (!chunk.has_water_authority())
         return true;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    if (resolution != 4 && resolution != 8 && resolution != 16 && resolution != 32)
+    if (resolution != 0 && (resolution < 2 || resolution > 32 || 32 % resolution != 0))
+        return false;
+    const bool initialized = chunk.has_water_sim.load(std::memory_order_acquire);
+    if (initialized && resolution == 0)
+        return false;
+    // Off and dormant legacy water retain bounded integer arrays without an active grid.
+    if (chunk.water_bed_mm.size() > 1024u || chunk.water_depth_mm.size() > 1024u ||
+        chunk.water_edge_flux.size() > 2048u)
         return false;
     const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    return chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells &&
+    const bool no_integers =
+        chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty() && chunk.water_edge_flux.empty();
+    return (!initialized || no_integers ||
+            (chunk.water_bed_mm.size() == cells && chunk.water_depth_mm.size() == cells)) &&
            std::all_of(chunk.water_depth_mm.begin(),
                        chunk.water_depth_mm.end(),
                        [](std::int32_t depth) { return depth >= 0; });
@@ -7336,7 +7346,7 @@ bool AuthorityWaterValid(const Chunk& chunk) {
 std::shared_ptr<Chunk> DecodeAuthorityRecord(
     const RegionRecord& record, const std::filesystem::path& path, int rx, int rz, bool legacy) {
     std::vector<std::string> errors;
-    auto chunk = DecodeChunkRecord(record, path, &errors);
+    auto chunk = DecodeChunkRecord(record, path, &errors, !legacy);
     if (!chunk)
         throw std::runtime_error(errors.empty() ? "malformed authority record" : errors.front());
     int actual_rx = 0, actual_rz = 0;

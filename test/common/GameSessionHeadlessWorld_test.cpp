@@ -4970,7 +4970,7 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             chunk->water_mesh_vertices.resize(3);
             chunk->water_mesh_indices = {2, 1, 0};
             chunk->water_mesh_generated.store(true);
-            chunk->water_mesh_dirty_ticks = 17;
+            chunk->water_mesh_dirty_ticks = 14;
         }
         ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
     }
