@@ -33,7 +33,8 @@ namespace P = Persistence;
 
 std::string IndependentChecksum(std::string_view bytes) {
     std::uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char byte : bytes) {
+    for (const char character : bytes) {
+        const auto byte = static_cast<unsigned char>(character);
         hash ^= byte;
         hash *= 1099511628211ull;
     }

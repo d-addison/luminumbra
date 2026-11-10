@@ -1136,6 +1136,8 @@ target_link_libraries(ui_layout_test PRIVATE gtest_main nlohmann_json::nlohmann_
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
+    ui/graphics_preset_startup_test.cpp
+    ui/graphics_blur_style_test.cpp
 ../src/luminumbra_client/ui/core/UIComponent.cpp
 ../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
@@ -1641,6 +1643,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
@@ -1742,6 +1745,9 @@ target_link_libraries(audio_propagation_metrics_test PRIVATE
     miniaudio
     nlohmann_json
     glm
+)
+target_compile_definitions(audio_propagation_metrics_test PRIVATE
+    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1
 )
 luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 
