@@ -76,12 +76,20 @@ public:
 
      * @param registry The main ECS registry.
 
-     * @param active_chunks A map of currently loaded chunks from the SHIELD system.
+     * @param active_chunks Participating admitted chunks, or loaded chunks in legacy mode.
+     * @param deterministic_authority Order admission and resize independently of residency.
 
      */
 
     void update(entt::registry& registry,
-                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
+                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
+                bool deterministic_authority = false);
+
+    // Initializes an exclusively owned generated chunk without stepping water or changing
+    // scheduler state. Optional terrain contains exactly one height per simulation cell.
+    // Incomplete terrain falls back to world generation. Generation workers must hold
+    // the world's sampling scope, as for other world-generation queries.
+    void InitializeGeneratedWater(Chunk& chunk, std::span<const float> terrain = {}) const;
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -126,8 +134,12 @@ public:
 
     // TERRAFORM the water bed: adjust water_bed_mm by delta_mm (dig<0 / dam>0) for
     // cells within radius_m of world_pos + wake them; the fixed-point solver then drains/pools for
-    // free. Deterministic (replicate as a command for host==peer). Returns cells edited.
-    int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+    // free. Returns cells touched, including saturated beds. An explicit owner map is
+    // borrowed for this call only; omission uses the most recent update's map.
+    int EditTerrainBed(const Vec3& world_pos,
+                       std::int32_t delta_mm,
+                       float radius_m,
+                       const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks = nullptr);
 
     //  FINITE HYDROLOGY: configure the conserved-water cycle. finite=true removes the perpetual
     // river source (water becomes finite/drainable); rain_mm_per_tick adds uniform rainfall (the
@@ -253,6 +265,16 @@ public:
         m_water_sim_cursor = cursor;
     }
 
+    // Discard derived selection data after replacing a world snapshot.
+    void ResetActivityCache() {
+        m_water_activity_cache.clear();
+    }
+
+    // Diagnostic: candidates visited during the latest grid preparation pass.
+    [[nodiscard]] std::size_t grid_candidates_visited_last_update() const {
+        return m_grid_candidates_visited_last_update;
+    }
+
     // --- Adaptive Water Grid System ---
 
     /**
@@ -279,13 +301,16 @@ private:
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
+    void inject_water_sources(entt::registry& registry, bool deterministic_authority);
 
     std::vector<std::shared_ptr<HighWaterSeedInputs>>
-    prepare_high_water_seed_inputs(std::span<Chunk* const> to_init, bool defer_fallback);
-    void initialize_water_chunks(std::span<Chunk* const> to_init);
+    prepare_high_water_seed_inputs(std::span<Chunk* const> to_init,
+                                   bool defer_fallback,
+                                   std::span<const std::vector<float>> terrain);
+    void initialize_water_chunks(std::span<Chunk* const> to_init, bool deterministic_authority);
     void seed_chunk_water(Chunk* chunk,
-                          const std::vector<float>& terrain,
-                          const HighWaterSeedInputs* inputs);
+                          std::span<const float> terrain,
+                          const HighWaterSeedInputs* inputs) const;
 
     JobSystem* m_job_system;
     SHIELD_WorldSystem* m_shield_system;
@@ -371,6 +396,7 @@ private:
     std::size_t m_dbg_awake_water_chunks = 0; // see dbg_awake_water_chunks()
     std::size_t m_dbg_cells_simmed = 0;       // see dbg_cells_simmed()
     std::size_t m_cells_stepped_last_update = 0;
+    std::size_t m_grid_candidates_visited_last_update = 0;
     DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
     WaterAttribution::Frame m_seed_attribution{};
 
