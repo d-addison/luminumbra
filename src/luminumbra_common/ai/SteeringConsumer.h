@@ -20,6 +20,7 @@
 #include "../components/MigratoryComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 

@@ -1,4 +1,5 @@
 #include "InstinctLocomotionSystem.h"
+#include "CreatureTickAdmission.h"
 
 #include <algorithm>
 #include <array>
@@ -173,7 +174,8 @@ void VisitNeighbors(const NeighborGrid& grid,
 
 } // namespace
 
-InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry) {
+InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry,
+                                                        const CreatureTickAdmission* admission) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::LocomotionIntentComponent;
     using Luminumbra::Components::LocomotionPathComponent;
@@ -190,7 +192,9 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         auto view =
             registry.view<ActionPlanComponent, const TransformComponent, const LocomotionProfile>();
         for (auto entity : view) {
-            agents.push_back(entity);
+            if (!admission || admission->Allows(entity)) {
+                agents.push_back(entity);
+            }
         }
     }
     std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
@@ -243,6 +247,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
 
         const Luminumbra::EntityID target = plan.plan[plan.current_action_index].target;
         if (target == entt::null || !registry.valid(target) ||
+            (admission && !admission->Allows(target)) ||
             !registry.all_of<TransformComponent>(target)) {
             ++stats.agents_idle;
             continue;

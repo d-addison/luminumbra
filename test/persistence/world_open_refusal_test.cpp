@@ -3,6 +3,7 @@
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
 #include "../support/WorldgenTestData.h"
+#include "core/EngineVersion.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
 #include <chrono>
@@ -38,6 +39,7 @@
 #include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
+#include "luminumbra_server/modes/Modes.h"
 
 #include <algorithm>
 #include <array>
@@ -46,8 +48,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <ios>
 #include <limits>
 #include <map>
@@ -56,6 +60,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <system_error>
@@ -498,6 +503,442 @@ INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
 INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
+
+TEST(WorldSeedConversion, PinnedUtf8AndNumericCompatibility) {
+    EXPECT_EQ(world::ResolveWorldSeed("hello", 1), UINT32_C(614098253));
+    EXPECT_EQ(world::ResolveWorldSeed("portable-\xc3\xa9", 1), UINT32_C(3978087486));
+    EXPECT_EQ(world::ResolveWorldSeed("18446744073709551616", 1), UINT32_C(3574524678));
+    for (const auto& [text, expected] :
+         std::vector<std::pair<std::string, std::uint32_t>>{{"0", 0},
+                                                            {"1337", 1337},
+                                                            {"4294967295", UINT32_MAX},
+                                                            {"4294967296", 0},
+                                                            {"18446744073709551615", UINT32_MAX},
+                                                            {"-1", UINT32_MAX},
+                                                            {"  +42tail", 42},
+                                                            {"42text", 42}}) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(world::ResolveWorldSeed(text, 0), expected);
+        EXPECT_EQ(world::ResolveWorldSeed(text, 1), expected);
+    }
+    EXPECT_THROW(world::ResolveWorldSeed("hello", 2), std::invalid_argument);
+}
+
+#if defined(_WIN32)
+TEST(WorldSeedConversion, NativeWindowsCommandLinePreservesUtf8AndRefusesInvalidInput) {
+    using world::WorldSeedFromWindowsCommandLine;
+    struct SeedCase {
+        std::wstring command;
+        int count;
+        int index;
+        std::string utf8;
+    };
+    std::string utf8_limit;
+    for (int index = 0; index < 2048; ++index)
+        utf8_limit += "\xc3\xa9";
+    for (const auto& input : std::vector<SeedCase>{
+             {L"server --seed portable-\u00e9", 3, 2, "portable-\xc3\xa9"},
+             {L"server --seed \u4e16\u754c-\U0001f30d",
+              3,
+              2,
+              "\xe4\xb8\x96\xe7\x95\x8c-\xf0\x9f\x8c\x8d"},
+             {L"\"C:\\Program Files\\server.exe\" --seed \"with space \\\\backslash\"",
+              3,
+              2,
+              "with space \\\\backslash"},
+             {L"server --seed \"\"", 3, 2, ""},
+             {L"server --seed \"a\"\"\"\"b\"", 3, 2, "a\"\"b"},
+             {L"server --seed \"a\"\"b c\"", 3, 2, "a\"b c"},
+             {L"server --seed a\\\"b", 3, 2, "a\"b"},
+             {L"server --seed a\\\\\"b c\"", 3, 2, "a\\b c"},
+             {L"\"C:\\a\"b\\server.exe --seed \"x\"", 3, 2, "x"},
+             {L"server --seed 0", 3, 2, "0"},
+             {L"server --seed \"  +42tail\"", 3, 2, "  +42tail"},
+             {L"server --seed first --seed portable-\u00e9", 5, 2, "first"},
+             {L"server --seed first --seed portable-\u00e9", 5, 4, "portable-\xc3\xa9"},
+             {L"server --seed " + std::wstring(4096, L'x'), 3, 2, std::string(4096, 'x')},
+             {L"server --seed " + std::wstring(2048, L'\u00e9'), 3, 2, utf8_limit}}) {
+        const auto converted =
+            WorldSeedFromWindowsCommandLine(input.command.c_str(), input.count, input.index);
+        ASSERT_TRUE(converted.has_value());
+        if (converted) {
+            EXPECT_EQ(*converted, input.utf8);
+            if (!input.utf8.empty()) {
+                EXPECT_EQ(world::ResolveWorldSeed(*converted, 1),
+                          world::ResolveWorldSeed(input.utf8, 1));
+            }
+        }
+    }
+    const auto pinned = WorldSeedFromWindowsCommandLine(L"server --seed portable-\u00e9", 3, 2);
+    ASSERT_TRUE(pinned.has_value());
+    if (pinned) {
+        EXPECT_EQ(world::ResolveWorldSeed(*pinned, 1), UINT32_C(3978087486));
+    }
+    EXPECT_FALSE(WorldSeedFromWindowsCommandLine(nullptr, 3, 2).has_value());
+    for (const auto& [count, index] :
+         std::vector<std::pair<int, int>>{{0, 2}, {3, -1}, {3, 0}, {3, 1}, {3, 3}, {4, 2}}) {
+        EXPECT_FALSE(
+            WorldSeedFromWindowsCommandLine(L"server --seed value", count, index).has_value());
+    }
+    for (const std::wstring command :
+         {L"", L"server --seed", L"server --root value", L"server --seed value extra"}) {
+        EXPECT_FALSE(WorldSeedFromWindowsCommandLine(command.c_str(), 3, 2).has_value());
+    }
+    for (const auto& seed :
+         std::vector<std::wstring>{std::wstring(1, static_cast<wchar_t>(0xd800)),
+                                   std::wstring(1, static_cast<wchar_t>(0xdc00)),
+                                   std::wstring(1, static_cast<wchar_t>(0xd800)) + L"x",
+                                   std::wstring(4097, L'x'),
+                                   std::wstring(2049, L'\u00e9'),
+                                   std::wstring(32767, L'x')}) {
+        const auto command = L"server --seed " + seed;
+        EXPECT_FALSE(WorldSeedFromWindowsCommandLine(command.c_str(), 3, 2).has_value());
+    }
+}
+#endif
+
+TEST_F(WorldOpenRefusal, VersionedTextSeedGoldenRoundTripsBothSaveFormats) {
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        GameSession created;
+        created.SetRootPath(RootString());
+        created.SetJobSystem(&jobs);
+        created.SetActiveRegionsEnabled(indexed);
+        ASSERT_TRUE(created.CreateWorld("Text seed", "portable-\xc3\xa9", "default"));
+        const auto directory = created.GetWorldSaveDir();
+        const auto id = created.GetMetadata().worldId;
+        EXPECT_EQ(created.GetMetadata().seedConversionVersion, 1u);
+        EXPECT_EQ(created.GetMetadata().resolvedSeed, UINT32_C(3978087486));
+        EXPECT_EQ(static_cast<std::uint32_t>(created.GetWorldSystem()->get_seed()),
+                  UINT32_C(3978087486));
+        ASSERT_TRUE(created.SaveWorld());
+        auto metadata = nlohmann::json::parse(Read(directory / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+        EXPECT_EQ(metadata.at("container_version"), indexed ? 3 : 2);
+        const auto before = DiskBytes(directory);
+        const auto inspected = Persistence::InspectSavedWorld(root, id);
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.metadata.seedConversionVersion, 1u);
+        EXPECT_EQ(inspected.metadata.resolvedSeed, UINT32_C(3978087486));
+        GameSession reopened;
+        reopened.SetRootPath(RootString());
+        reopened.SetJobSystem(&jobs);
+        reopened.SetActiveRegionsEnabled(indexed);
+        ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetMetadata().seedConversionVersion, 1u);
+        EXPECT_EQ(reopened.GetMetadata().resolvedSeed, UINT32_C(3978087486));
+        EXPECT_EQ(static_cast<std::uint32_t>(reopened.GetWorldSystem()->get_seed()),
+                  UINT32_C(3978087486));
+        EXPECT_EQ(DiskBytes(directory), before);
+        ASSERT_TRUE(reopened.SaveWorld());
+        metadata = nlohmann::json::parse(Read(directory / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+        const auto exported = root / (indexed ? "export-indexed" : "export-unindexed");
+        ASSERT_TRUE(reopened.SaveWorldStateTo(exported, nullptr, true));
+        metadata = nlohmann::json::parse(Read(exported / "world_info.json"));
+        EXPECT_EQ(metadata.at("seedConversionVersion"), 1);
+        EXPECT_EQ(metadata.at("resolvedSeed"), UINT32_C(3978087486));
+    }
+}
+
+TEST_F(WorldOpenRefusal, UnmarkedTextSeedReopensAndResavesWithLegacyConversion) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["seed"] = "portable-\xc3\xa9";
+    Write(save / "world_info.json", metadata.dump());
+    const auto before = DiskBytes(save);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetMetadata().seedConversionVersion, 0u);
+    EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()),
+              static_cast<std::uint32_t>(std::hash<std::string>{}("portable-\xc3\xa9")));
+    EXPECT_EQ(DiskBytes(save), before);
+    ASSERT_TRUE(session.SaveWorld());
+    metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    EXPECT_FALSE(metadata.contains("seedConversionVersion"));
+    EXPECT_FALSE(metadata.contains("resolvedSeed"));
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()),
+              static_cast<std::uint32_t>(std::hash<std::string>{}("portable-\xc3\xa9")));
+}
+
+TEST_F(WorldOpenRefusal, NumericAndEmptyNewSeedsKeepTheirExistingBehavior) {
+    const std::array<std::string, 4> inputs = {"0", "4294967296", "42text", ""};
+    for (const std::string& text : inputs) {
+        SCOPED_TRACE(text);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(session.CreateWorld("Numeric seed", text, "default"));
+        const auto& metadata = session.GetMetadata();
+        ASSERT_FALSE(metadata.seed.empty());
+        const auto expected = static_cast<std::uint32_t>(std::stoull(metadata.seed));
+        EXPECT_EQ(metadata.resolvedSeed, expected);
+        EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()), expected);
+        EXPECT_EQ(metadata.seedConversionVersion, 1u);
+        if (!text.empty()) {
+            EXPECT_EQ(metadata.seed, text);
+        }
+        ASSERT_TRUE(session.LoadWorld(metadata.worldId)) << session.GetWorldOpenError();
+        EXPECT_EQ(static_cast<std::uint32_t>(session.GetWorldSystem()->get_seed()), expected);
+    }
+}
+
+class ReplaySeedCompatibility : public WorldOpenRefusal {};
+
+TEST_P(ReplaySeedCompatibility, RecordedSeedReproducesTheStartingWorld) {
+    const auto [seed_case, new_recording] = GetParam();
+    const std::array<std::string, 15> seeds = {"portable-\xc3\xa9",
+                                               "18446744073709551616",
+                                               "0",
+                                               "4294967295",
+                                               "4294967296",
+                                               "4294967296tail",
+                                               "8589934591",
+                                               "8589934592",
+                                               "18446744073709551615",
+                                               "-1",
+                                               "  +42tail",
+                                               "42text",
+                                               "+",
+                                               " ",
+                                               ""};
+    ServerCliOptions options;
+    options.root = RootString();
+    options.seed = seeds.at(static_cast<std::size_t>(seed_case));
+    options.surface_radius = 0;
+    options.collision_radius = 0;
+    options.test_streaming_radius_cap = 1;
+    options.ticks = 0;
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":false}}})");
+    options.record_path = Filesystem::GenericUtf8PathString(root / "seed.lrec");
+    std::uint32_t expected_seed = 0;
+    if (new_recording != 0) {
+        ASSERT_EQ(RunRecord(options), 0);
+    } else {
+        // Empty legacy headers discarded the random seed; retain their boot policy.
+        if (!options.seed.empty()) {
+            try {
+                expected_seed = static_cast<std::uint32_t>(std::stoull(options.seed));
+            } catch (const std::exception&) {
+                expected_seed = static_cast<std::uint32_t>(std::hash<std::string>{}(options.seed));
+            }
+        }
+        auto reference_config = RunnerConfigFrom(options);
+        reference_config.seed = std::to_string(expected_seed);
+        reference_config.autosave_interval_ticks = 0;
+        Server::ServerWorldRunner reference(std::move(reference_config));
+        ASSERT_TRUE(reference.Boot()) << reference.GetBootError();
+        Replay::ReplayHeader header;
+        header.seed_string = options.seed;
+        header.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
+        header.preset = options.preset;
+        header.surface_radius = 0;
+        header.collision_radius = 0;
+        header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+        header.system_config_identity = reference.Session()->SystemConfigIdentity();
+        header.preset_content_hash = reference.Session()->PresetContentHash();
+        header.start_world_hash = reference.ComputeWorldHash();
+        Replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(options.record_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+    }
+    const auto recording = Replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recording.has_value());
+    if (!recording)
+        return;
+    const auto& header = recording->header;
+    EXPECT_EQ(header.version, Replay::kLrec1Version);
+    EXPECT_EQ(header.seed_string, options.seed);
+    if (new_recording != 0) {
+        EXPECT_EQ(header.seed >> 32, 1u);
+        expected_seed = static_cast<std::uint32_t>(header.seed);
+        if (!options.seed.empty()) {
+            EXPECT_EQ(expected_seed, world::ResolveWorldSeed(options.seed, 1));
+        }
+    }
+    const auto config = ReplayRunnerConfigFrom(options, header);
+    ASSERT_TRUE(config.has_value());
+    if (!config)
+        return;
+    if (new_recording == 0 && options.seed.empty()) {
+        EXPECT_TRUE(config->seed.empty());
+    } else {
+        EXPECT_EQ(world::ResolveWorldSeed(config->seed, 1), expected_seed);
+        Server::ServerWorldRunner playback(*config);
+        ASSERT_TRUE(playback.Boot()) << playback.GetBootError();
+        EXPECT_EQ(static_cast<std::uint32_t>(playback.Session()->GetWorldSystem()->get_seed()),
+                  expected_seed);
+        EXPECT_EQ(playback.ComputeWorldHash(), header.start_world_hash);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(LegacyAndResolvedHeaders,
+                         ReplaySeedCompatibility,
+                         testing::Combine(testing::Range(0, 15), testing::Values(0, 1)));
+
+TEST_F(WorldOpenRefusal, ReplaySeedTagBoundariesAndUnknownTagsKeepLegacyFallback) {
+    ServerCliOptions options;
+    options.root = RootString();
+    const auto hello = RuntimeHelloFrom(options);
+    Replay::ReplayHeader header;
+    header.seed_string = "portable-\xc3\xa9";
+    header.preset = options.preset;
+    header.surface_radius = 0;
+    header.collision_radius = 0;
+    header.system_config_identity = hello.system_config_identity;
+    header.preset_content_hash = hello.preset_content_hash;
+    const auto legacy_seed =
+        static_cast<std::uint32_t>(std::hash<std::string>{}(header.seed_string));
+    for (const auto version : {Replay::kLrec1Version, Replay::kLrec1ElidedVersion}) {
+        header.version = version;
+        for (const auto seed : {UINT64_C(0),
+                                Replay::kResolvedSeedTag - 1,
+                                Replay::kResolvedSeedTag,
+                                (Replay::kResolvedSeedTag << 1) - 1,
+                                Replay::kResolvedSeedTag << 1,
+                                UINT64_MAX}) {
+            SCOPED_TRACE(seed);
+            header.seed = seed;
+            const auto config = ReplayRunnerConfigFrom(options, header);
+            ASSERT_TRUE(config.has_value());
+            if (config) {
+                const bool tagged =
+                    seed >= Replay::kResolvedSeedTag && seed < (Replay::kResolvedSeedTag << 1);
+                EXPECT_EQ(world::ResolveWorldSeed(config->seed, 1),
+                          tagged ? static_cast<std::uint32_t>(seed) : legacy_seed);
+            }
+        }
+        for (const auto seed : {UINT64_C(0), Replay::kResolvedSeedTag}) {
+            header.seed = seed;
+            header.seed_string.assign(Persistence::SavedInputLimits::kWorldSeedBytes, 'x');
+            EXPECT_TRUE(ReplayRunnerConfigFrom(options, header).has_value());
+            header.seed_string.push_back('x');
+            const auto before = DiskBytes(root);
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        header.seed_string = "portable-\xc3\xa9";
+    }
+}
+
+TEST_F(WorldOpenRefusal, SyntheticNumericSeedsRemainCompatibleWithoutConversionMetadata) {
+    Persistence::SyntheticSaveSpec spec;
+    spec.seed = UINT64_MAX;
+    spec.chunk_count = 1;
+    spec.world_id = "versioned-synthetic";
+    spec.preset_source = root / "worlds/atlas/presets/default.json";
+    const auto report = Persistence::WriteSyntheticSave(spec, root);
+    ASSERT_TRUE(report.ok) << report.error;
+    const auto metadata = nlohmann::json::parse(Read(report.save_dir / "world_info.json"));
+    EXPECT_FALSE(metadata.contains("seedConversionVersion"));
+    EXPECT_FALSE(metadata.contains("resolvedSeed"));
+    EXPECT_EQ(world::ResolveWorldSeed(metadata.at("seed").get<std::string>(), 0), UINT32_MAX);
+    const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.metadata.seedConversionVersion, 0u);
+    EXPECT_EQ(world::ResolveWorldSeed(inspected.metadata.seed, 0), UINT32_MAX);
+}
+
+class SeedMetadataRefusal : public WorldOpenRefusal {};
+
+TEST_P(SeedMetadataRefusal, RefusesEveryReaderAndWriterWithoutPublishing) {
+    const auto [metadata_only, defect] = GetParam();
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    const auto* previous_world = session.GetWorldSystem();
+    const auto previous_seed = previous_world->get_seed();
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["seed"] = "hello";
+    metadata["seedConversionVersion"] = 1;
+    metadata["resolvedSeed"] = UINT32_C(614098253);
+    if (defect == 0)
+        metadata["resolvedSeed"] = UINT32_C(614098254);
+    else if (defect == 1)
+        metadata["seedConversionVersion"] = 2;
+    else if (defect == 2)
+        metadata.erase("resolvedSeed");
+    else if (defect == 3)
+        metadata.erase("seedConversionVersion");
+    else if (defect < 11) {
+        const std::array<nlohmann::json, 7> invalid = {0, -1, 1.0, true, "1", nullptr, UINT64_MAX};
+        metadata["seedConversionVersion"] = invalid.at(static_cast<std::size_t>(defect - 4));
+    } else if (defect < 18) {
+        const std::array<nlohmann::json, 7> invalid = {
+            -1, UINT64_C(4294967296), 614098253.0, true, "614098253", nullptr, 1e38};
+        metadata["resolvedSeed"] = invalid.at(static_cast<std::size_t>(defect - 11));
+    } else if (defect == 18)
+        metadata.erase("seed");
+    else if (defect == 19)
+        metadata["seed"] = "";
+    else if (defect == 20)
+        metadata["seed"] = false;
+    else if (defect == 21)
+        metadata["seed"] = "other text";
+    else
+        metadata["seedConversionVersion"] = 1e38;
+    const auto bytes = metadata.dump();
+    const auto writer_destination = root / "refused-destination";
+    const auto before_write = DiskBytes(root);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::admit_metadata_bytes(bytes, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_FALSE(WorldSaveService::save_metadata(bytes, writer_destination));
+    world::ActiveRegionLedger ledger;
+    EXPECT_FALSE(
+        WorldSaveService::save_metadata_and_active_regions(bytes, ledger, writer_destination));
+    const world::GroundObjectStore objects;
+    EXPECT_FALSE(WorldSaveService::save_metadata_active_regions_and_ground_objects(
+        bytes, ledger, objects, {}, writer_destination));
+    EXPECT_EQ(DiskBytes(root), before_write);
+    Write(save / "world_info.json", bytes);
+    if (metadata_only != 0)
+        fs::remove_all(save / "chunks");
+    const auto before_read = DiskBytes(root);
+    EXPECT_FALSE(WorldSaveService::validate_save(save));
+    WorldSaveService::SaveFormat format;
+    EXPECT_FALSE(WorldSaveService::read_save_format(save, format));
+    world::WorldClock clock;
+    bool requires_regions = false;
+    EXPECT_FALSE(WorldSaveService::read_clock_metadata(save, clock, requires_regions));
+    Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(save, "world_info.json", digest, error));
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_FALSE(inspected.error.empty());
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_FALSE(catalog.worlds.front().error.empty());
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    EXPECT_EQ(session.GetWorldSystem(), previous_world);
+    EXPECT_EQ(session.GetWorldSystem()->get_seed(), previous_seed);
+    EXPECT_EQ(session.GetMetadata().seed, "1337");
+    EXPECT_FALSE(session.LoadWorldStateFrom(save));
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.autosave_interval_ticks = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.Session(), nullptr);
+    runner.Shutdown();
+    EXPECT_EQ(DiskBytes(root), before_read);
+}
+
+INSTANTIATE_TEST_SUITE_P(InitializedAndMetadataOnly,
+                         SeedMetadataRefusal,
+                         testing::Combine(testing::Values(0, 1), testing::Range(0, 23)));
 
 TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
     ASSERT_TRUE(fs::remove(save / "world_info.json"));
