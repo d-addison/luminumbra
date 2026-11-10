@@ -105,9 +105,10 @@ public:
     std::size_t create_avatar_character(const glm::vec3& initial_position);
     // Leaves other avatar indices stable. Repeated removal is harmless.
     void remove_avatar_character(std::size_t index);
-    // Frozen avatars keep zero velocity and a static collision capsule, and are
-    // excluded from integration. Stage every avatar before update_avatars so
-    // moving avatars see all frozen capsules independent of creation order.
+    // Frozen avatars keep zero velocity and are excluded from integration, even
+    // if the body pool refuses their static capsule. Repeated freezes retry it.
+    // Release every resuming avatar before staging frozen capsules, then call
+    // update_avatars so movers see all available capsules regardless of order.
     // Finite feet positions also synchronize teleports while frozen or resuming;
     // invalid positions retain the last valid avatar position. Unfrozen avatars
     // that were never frozen retain the legacy movement path byte-for-byte.
@@ -120,7 +121,7 @@ public:
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
     std::size_t avatar_character_count() const {
-        return m_avatar_characters.size();
+        return m_avatars.size();
     }
     glm::vec3 get_avatar_position(std::size_t index) const;
     glm::vec3 get_avatar_velocity(std::size_t index) const;
@@ -233,9 +234,15 @@ private:
 
     // Server-authoritative avatar characters (one per connected player)
     // + the shared avatar capsule shape. Stepped in index order for determinism.
-    std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
-    std::vector<glm::vec2> m_avatar_wish;            // per-avatar horizontal wish velocity (m/s)
-    std::vector<JPH::BodyID> m_avatar_frozen_bodies; // invalid when not frozen
+    // A single, nonthrowing-movable element keeps ownership and movement state
+    // together if vector growth refuses an allocation.
+    struct AvatarState {
+        std::unique_ptr<JPH::CharacterVirtual> character;
+        glm::vec2 wish{0.0f};
+        JPH::BodyID frozen_body;
+        bool frozen = false;
+    };
+    std::vector<AvatarState> m_avatars;
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks

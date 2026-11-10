@@ -2229,6 +2229,50 @@ void ApplicationDefaultAllocatorLifetime() {
 }
 #endif
 
+void ApplicationAvatarAppendRefusal() {
+    Log::Init();
+    InitializeAllocators();
+    std::size_t measured = 0;
+    // Measure the final append allocation after warming the shared shape. Repeat
+    // with identical vector capacity, so refusal reaches state publication.
+    for (bool refuse : {false, true}) {
+        ApplicationPhysics physics;
+        physics.startup();
+        const glm::vec3 position(513.0F, 10000.0F, 10.0F);
+        Require(physics.create_avatar_character(position) == 0);
+        physics.set_avatar_wish_velocity(0, {2.0F, 1.0F});
+        Arm(refuse ? measured : 0, false, false);
+        bool caught = false;
+        try {
+            Require(physics.create_avatar_character({517.0F, 10000.0F, 10.0F}) == 1);
+        } catch (const std::bad_alloc&) {
+            caught = true;
+        }
+        const auto attempts = Allocations().attempts.load();
+        Disarm();
+        if (!refuse) {
+            measured = attempts;
+            Require(measured > 0 && measured < Allocations().blocks.size());
+        } else {
+            Require(caught && Allocations().failures == 1);
+            Require(physics.avatar_character_count() == 1 && Outstanding() == 0);
+            Require(physics.get_avatar_position(0) == position);
+            Require(physics.get_avatar_velocity(0) == glm::vec3(0.0F));
+            physics.update_avatars(1.0F / 30.0F);
+            Require(physics.get_avatar_position(0).x > position.x);
+            Require(physics.create_avatar_character({517.0F, 10000.0F, 10.0F}) == 1);
+        }
+        physics.set_avatar_frozen(1, true, {517.0F, 10000.0F, 10.0F});
+        physics.remove_avatar_character(1);
+        physics.remove_avatar_character(1);
+        Require(physics.avatar_character_count() == 2);
+        physics.clear_avatar_characters();
+        Require(physics.avatar_character_count() == 0);
+    }
+    Require(Outstanding() == 0);
+    std::_Exit(0);
+}
+
 void ApplicationLeaseStorageRefusal() {
     Log::Init();
     InitializeAllocators();
@@ -2341,6 +2385,10 @@ TEST(JoltStartup, ApplicationCandidateLoggingRollbackPreservesBothFactoryOwners)
     }
 }
 #endif
+
+TEST(JoltStartup, ApplicationAvatarAppendFailurePreservesStateAndAllowsRetry) {
+    ASSERT_EXIT(ApplicationAvatarAppendRefusal(), ::testing::ExitedWithCode(0), "");
+}
 
 TEST(JoltStartup, ApplicationLeaseStorageFailureIsIndependentOfStartedFlag) {
     ASSERT_EXIT(ApplicationLeaseStorageRefusal(), ::testing::ExitedWithCode(0), "");

@@ -208,6 +208,52 @@ void RemoveCreatureAvatar(Luminumbra::world::GameSession& session,
             registry.get<Luminumbra::Components::CreaturePhysicsComponent>(entity).avatar_index);
     }
 }
+void StepCreatureAvatars(entt::registry& registry,
+                         Luminumbra::Systems::PhysicsSystem& physics,
+                         const luminumbra::ai::CreatureTickAdmission* admission,
+                         float dt) {
+    namespace Comp = Luminumbra::Components;
+    auto view = registry.view<Comp::CreaturePhysicsComponent,
+                              Comp::CreatureComponent,
+                              Comp::TransformComponent>();
+    if (view.begin() == view.end()) {
+        return;
+    }
+    std::vector<entt::entity> entities(view.begin(), view.end());
+    std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    // Release all resuming capsules before any new freeze can consume their
+    // slots. Both passes visit only the participating physics creatures.
+    for (auto entity : entities) {
+        if (!admission || admission->Allows(entity)) {
+            physics.set_avatar_frozen(view.get<Comp::CreaturePhysicsComponent>(entity).avatar_index,
+                                      false,
+                                      view.get<Comp::TransformComponent>(entity).position);
+        }
+    }
+    for (auto entity : entities) {
+        const auto& creature = view.get<Comp::CreatureComponent>(entity);
+        const auto& motor = view.get<Comp::CreaturePhysicsComponent>(entity);
+        const bool denied = admission && !admission->Allows(entity);
+        if (denied) {
+            physics.set_avatar_frozen(
+                motor.avatar_index, true, view.get<Comp::TransformComponent>(entity).position);
+        }
+        physics.set_avatar_wish_velocity(motor.avatar_index,
+                                         denied ? glm::vec2(0.0f)
+                                                : glm::vec2(creature.wish_x, creature.wish_z));
+    }
+    physics.update_avatars(dt);
+    for (auto entity : entities) {
+        if (admission && !admission->Allows(entity)) {
+            continue;
+        }
+        const auto& motor = view.get<Comp::CreaturePhysicsComponent>(entity);
+        view.get<Comp::TransformComponent>(entity).position =
+            physics.get_avatar_position(motor.avatar_index);
+    }
+}
 } // namespace
 
 namespace Luminumbra::world {
@@ -856,43 +902,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     // transform. Gated on a physics system + at least one physics creature, so
                     // the canonical roster (none) keeps world_hash byte-identical.
                     if (m_physicsSystem) {
-                        auto phys =
-                            m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
-                                            Luminumbra::Components::CreatureComponent,
-                                            Luminumbra::Components::TransformComponent>();
-                        if (phys.begin() != phys.end()) {
-                            std::vector<entt::entity> pe(phys.begin(), phys.end());
-                            std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
-                                return entt::to_integral(a) < entt::to_integral(b);
-                            });
-                            for (auto e : pe) {
-                                const auto& cr =
-                                    phys.get<Luminumbra::Components::CreatureComponent>(e);
-                                const auto& cp =
-                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                                const bool denied =
-                                    creature_admission && !creature_admission->Allows(e);
-                                m_physicsSystem->set_avatar_frozen(
-                                    cp.avatar_index,
-                                    denied,
-                                    phys.get<Luminumbra::Components::TransformComponent>(e)
-                                        .position);
-                                m_physicsSystem->set_avatar_wish_velocity(
-                                    cp.avatar_index,
-                                    denied ? glm::vec2(0.0f) : glm::vec2(cr.wish_x, cr.wish_z));
-                            }
-                            m_physicsSystem->update_avatars(
-                                static_cast<float>(m_simulationClock.fixed_dt()));
-                            for (auto e : pe) {
-                                if (creature_admission && !creature_admission->Allows(e)) {
-                                    continue;
-                                }
-                                const auto& cp =
-                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                                phys.get<Luminumbra::Components::TransformComponent>(e).position =
-                                    m_physicsSystem->get_avatar_position(cp.avatar_index);
-                            }
-                        }
+                        StepCreatureAvatars(m_registry,
+                                            *m_physicsSystem,
+                                            creature_admission,
+                                            static_cast<float>(m_simulationClock.fixed_dt()));
                     }
 
                     // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via

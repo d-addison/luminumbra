@@ -637,33 +637,30 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
 
 // ---  : server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
-    for (std::size_t index = 0; index < m_avatar_characters.size(); ++index) {
+    for (std::size_t index = 0; index < m_avatars.size(); ++index) {
         remove_avatar_character(index);
     }
-    m_avatar_characters.clear();
-    m_avatar_wish.clear();
-    m_avatar_frozen_bodies.clear();
+    m_avatars.clear();
 }
 
 void PhysicsSystem::remove_avatar_character(std::size_t index) {
-    if (index >= m_avatar_characters.size()) {
+    if (index >= m_avatars.size()) {
         return;
     }
-    destroy_body(m_avatar_frozen_bodies[index]);
-    m_avatar_frozen_bodies[index] = JPH::BodyID();
-    m_avatar_characters[index].reset();
-    m_avatar_wish[index] = glm::vec2(0.0f);
+    destroy_body(m_avatars[index].frozen_body);
+    m_avatars[index] = AvatarState{};
 }
 
 void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm::vec3& position) {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) {
+    if (index >= m_avatars.size() || !m_avatars[index].character) {
         return;
     }
-    auto& body = m_avatar_frozen_bodies[index];
-    if (!frozen && body.IsInvalid()) {
+    auto& avatar = m_avatars[index];
+    if (!frozen && !avatar.frozen) {
         return;
     }
-    auto& character = *m_avatar_characters[index];
+    auto& body = avatar.frozen_body;
+    auto& character = *avatar.character;
     const JPH::RVec3 feet =
         std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)
             ? JPH::RVec3(position.x, position.y, position.z)
@@ -674,24 +671,25 @@ void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm:
                                                  JPH::Quat::sIdentity(),
                                                  JPH::EMotionType::Static,
                                                  Layers::NON_MOVING);
+        // CreateAndAddBody returns an invalid ID when CreateBody returns null.
+        // Admission remains authoritative without a capsule; retry next tick.
         body = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::DontActivate);
-        if (body.IsInvalid()) {
-            throw std::runtime_error("No physics body available for frozen avatar");
-        }
     } else if (!frozen) {
         destroy_body(body);
         body = JPH::BodyID();
     } else if (feet != character.GetPosition()) {
         m_body_interface->SetPosition(body, feet, JPH::EActivation::DontActivate);
     }
+    avatar.frozen = frozen;
     character.SetPosition(feet);
     character.SetLinearVelocity(JPH::Vec3::sZero());
-    m_avatar_wish[index] = glm::vec2(0.0f);
+    avatar.wish = glm::vec2(0.0f);
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
-    if (index < m_avatar_wish.size())
-        m_avatar_wish[index] = wish_xz;
+    if (index < m_avatars.size()) {
+        m_avatars[index].wish = m_avatars[index].frozen ? glm::vec2(0.0f) : wish_xz;
+    }
 }
 
 std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
@@ -712,14 +710,15 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
-    m_avatar_characters.push_back(
-        std::make_unique<JPH::CharacterVirtual>(&settings,
-                                                JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
-                                                JPH::Quat::sIdentity(),
-                                                m_jolt_system.get()));
-    m_avatar_wish.emplace_back(0.0f, 0.0f);
-    m_avatar_frozen_bodies.emplace_back();
-    return m_avatar_characters.size() - 1;
+    m_avatars.push_back({.character = std::make_unique<JPH::CharacterVirtual>(
+                             &settings,
+                             JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
+                             JPH::Quat::sIdentity(),
+                             m_jolt_system.get()),
+                         .wish = glm::vec2(0.0f),
+                         .frozen_body = JPH::BodyID(),
+                         .frozen = false});
+    return m_avatars.size() - 1;
 }
 
 void PhysicsSystem::update_avatars(float dt) {
@@ -730,12 +729,12 @@ void PhysicsSystem::update_avatars(float dt) {
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
-    for (std::size_t i = 0; i < m_avatar_characters.size(); ++i) {
-        auto& character = m_avatar_characters[i];
-        if (!character || !m_avatar_frozen_bodies[i].IsInvalid())
+    for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+        auto& character = m_avatars[i].character;
+        if (!character || m_avatars[i].frozen)
             continue;
         ++m_work_items.characters;
-        const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);
+        const glm::vec2 wish = m_avatars[i].wish;
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
         const bool grounded =
             character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
@@ -757,23 +756,23 @@ void PhysicsSystem::update_avatars(float dt) {
 }
 
 glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return glm::vec3(0.0f);
-    const JPH::RVec3 p = m_avatar_characters[index]->GetPosition();
+    const JPH::RVec3 p = m_avatars[index].character->GetPosition();
     return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 }
 
 glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return glm::vec3(0.0f);
-    const JPH::Vec3 v = m_avatar_characters[index]->GetLinearVelocity();
+    const JPH::Vec3 v = m_avatars[index].character->GetLinearVelocity();
     return glm::vec3((float)v.GetX(), (float)v.GetY(), (float)v.GetZ());
 }
 
 bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return false;
-    return m_avatar_characters[index]->GetGroundState() ==
+    return m_avatars[index].character->GetGroundState() ==
            JPH::CharacterBase::EGroundState::OnGround;
 }
 
