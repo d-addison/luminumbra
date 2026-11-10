@@ -47,7 +47,8 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertRegex(recording, r'if \(executed != 0 && '
                          r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
                          r'writer.RecordCheckpoint\(CaptureCheckpoint\(executed, runner\)\);\s*\}'
-                         r'\s*if \(!writer.Finalize\(executed\)\)')
+                         r'\s*const auto\* trace = [^;]*;'
+                         r'\s*if \(!writer.Finalize\(executed, trace\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
                       "executed == contents->tick_count", startup)
         for field in ("world_hash", "terrain", "water", "entities"):
