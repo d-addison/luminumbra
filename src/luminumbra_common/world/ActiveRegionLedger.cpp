@@ -453,6 +453,9 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     visits.erase(std::unique(visits.begin(), visits.end()), visits.end());
     auto& accepted_work = scratch.work;
     accepted_work.clear();
+    // Size for every candidate report, so a warm tick that accepts more of the
+    // same inputs does not grow the retained storage.
+    accepted_work.reserve(work.size() + m_completedWork.size());
     const auto accept_work = [&](const RegionWork& units) {
         // Work is filtered against records present before this call's anchors.
         if (m_records.contains(units.key)) {
