@@ -92,8 +92,10 @@ inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> 
 
 // Combines every same-frame strike into one bolt polyline of at most max_points.
 // Strokes outside the view are skipped and strokes that do not fit whole are
-// dropped. Every visible main channel is placed before any branch, so heavily
-// branched earlier strikes cannot displace a later strike's channel. Branches are
+// dropped. Strikes are placed strongest pulse first, ties keeping the earlier
+// strike, so weaker strikes cannot crowd out a stronger strike's bolt. Every
+// visible main channel is placed before any branch, so heavily branched strikes
+// cannot displace another strike's channel. Branches are
 // drawn for strikes whose main channel was placed or lies outside the view, so a
 // fork reaching into the view from an offscreen channel still shows; a visible
 // channel that did not fit takes its branches with it. Every strike contributes to
@@ -121,11 +123,18 @@ inline ComposedLiveStrikes ComposeLiveStrikes(std::span<const ProjectedLiveStrik
         out.points.insert(out.points.end(), stroke.begin(), stroke.end());
         return Placement::Placed;
     };
+    std::vector<std::size_t> order(strikes.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return strikes[a].pulse > strikes[b].pulse;
+    });
     std::vector<Placement> channels(strikes.size(), Placement::NoRoom);
-    for (std::size_t i = 0; i < strikes.size(); ++i) {
+    for (const std::size_t i : order) {
         channels[i] = append(strikes[i].main_channel);
     }
-    for (std::size_t i = 0; i < strikes.size(); ++i) {
+    for (const std::size_t i : order) {
         if (channels[i] == Placement::NoRoom) {
             continue;
         }

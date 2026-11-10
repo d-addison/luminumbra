@@ -176,6 +176,23 @@ TEST(LiveStrikeComposer, LaterVisibleChannelSurvivesHeavilyBranchedEarlierStrike
     EXPECT_EQ(composed.points[62], strikes[0].branches[0].front());
 }
 
+TEST(LiveStrikeComposer, StrongestStrikeIsPlacedFirstWhenChannelsExceedTheBudget) {
+    const std::vector<ProjectedLiveStrike> strikes{Strike({-0.5f, 0.5f}, 1, 0.1f),
+                                                   Strike({0.0f, 0.5f}, 0, 0.1f),
+                                                   Strike({0.5f, 0.5f}, 1, 0.4f)};
+    // Three channels need 30 + 31 + 31 points; only two fit beside one branch.
+    const auto composed = ComposeLiveStrikes(strikes, 82);
+    ASSERT_EQ(composed.points.size(), 61u + 21u);
+    EXPECT_EQ(Strokes(composed.points), 3u);
+    // The strongest strike comes first, then the earlier of the tied weaker strikes.
+    EXPECT_EQ(composed.points.front(), strikes[2].main_channel.front());
+    EXPECT_EQ(composed.points[31], strikes[0].main_channel.front());
+    // Branches follow the same order, so the strongest strike keeps its fork.
+    EXPECT_EQ(composed.points[62], strikes[2].branches[0].front());
+    EXPECT_FLOAT_EQ(composed.pulse, 0.4f);
+    EXPECT_EQ(composed.strike_ndc, strikes[2].strike_ndc);
+}
+
 TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
     ProjectedLiveStrike offscreen = Strike({2.5f, 0.5f}, 4, 0.2f);
     ProjectedLiveStrike behind;
