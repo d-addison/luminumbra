@@ -12,6 +12,7 @@
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -23,6 +24,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <sstream>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -73,8 +77,86 @@ protected:
         return h;
     }
 
+    std::string ReadBytes() const {
+        std::ifstream file(m_path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    }
+
     std::string m_path;
 };
+
+// A seekable sparse provider: only the prefix is stored. The remainder reads as
+// zeros. Faults occur on this same provider, without filesystem timing or races.
+class ReplayProvider final : public std::streambuf {
+public:
+    explicit ReplayProvider(const std::string& prefix, std::uint64_t size)
+        : prefix_(prefix)
+        , size_(size) {}
+
+    enum class SeekFailure {
+        None,
+        End,
+        Tell,
+        Rewind,
+        Skip
+    };
+    SeekFailure seek_failure = SeekFailure::None;
+    std::uint64_t read_limit = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t bytes_read = 0;
+    std::uint64_t allocation_after = std::numeric_limits<std::uint64_t>::max();
+    std::string suffix;
+
+protected:
+    pos_type seekoff(off_type offset, std::ios::seekdir direction, std::ios::openmode) override {
+        if ((direction == std::ios::end && seek_failure == SeekFailure::End) ||
+            (direction == std::ios::cur && seek_failure == SeekFailure::Tell) ||
+            (direction == std::ios::beg && offset == 0 && seek_failure == SeekFailure::Rewind) ||
+            (direction == std::ios::beg && offset != 0 && seek_failure == SeekFailure::Skip)) {
+            return pos_type(off_type{-1});
+        }
+        if (direction == std::ios::end && offset == 0) {
+            position_ = size_;
+        } else if (direction == std::ios::beg && offset >= 0 &&
+                   static_cast<std::uint64_t>(offset) <= size_) {
+            position_ = static_cast<std::uint64_t>(offset);
+        } else if (direction != std::ios::cur || offset != 0) {
+            return pos_type(off_type{-1});
+        }
+        return pos_type(static_cast<off_type>(position_));
+    }
+    pos_type seekpos(pos_type position, std::ios::openmode mode) override {
+        return seekoff(static_cast<off_type>(position), std::ios::beg, mode);
+    }
+    std::streamsize xsgetn(char* destination, std::streamsize requested) override {
+        if (bytes_read >= allocation_after) {
+            throw std::bad_alloc();
+        }
+        const auto count = std::min(
+            {static_cast<std::uint64_t>(requested), size_ - position_, read_limit - bytes_read});
+        for (std::uint64_t index = 0; index < count; ++index) {
+            destination[index] =
+                position_ < prefix_.size() ? prefix_[static_cast<std::size_t>(position_)] : '\0';
+            if (suffix.size() <= size_ && position_ >= size_ - suffix.size()) {
+                destination[index] =
+                    suffix[static_cast<std::size_t>(position_ - (size_ - suffix.size()))];
+            }
+            ++position_;
+        }
+        bytes_read += count;
+        return static_cast<std::streamsize>(count);
+    }
+
+private:
+    const std::string& prefix_;
+    std::uint64_t size_;
+    std::uint64_t position_ = 0;
+};
+
+void PatchU32(std::string& bytes, std::size_t offset, std::uint32_t value) {
+    for (std::size_t index = 0; index < 4; ++index) {
+        bytes.at(offset + index) = static_cast<char>((value >> (8 * index)) & 0xFF);
+    }
+}
 
 struct RecorderGate {
     std::mutex mutex;
@@ -973,6 +1055,282 @@ TEST_F(ReplayStreamTest, HugeHeaderStringLengthsAreRejected) {
             ASSERT_TRUE(file.good());
         }
         EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+    }
+}
+
+TEST_F(ReplayStreamTest, HeaderAdmissionNeverReadsTheSparseRecordRegion) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto complete = ReadBytes();
+    const auto header_size = complete.size() - 32;
+    // Exercise every short-header boundary, including each string length/data.
+    for (std::size_t length = 0; length < header_size; ++length) {
+        std::istringstream input(complete.substr(0, length));
+        EXPECT_FALSE(replay::ReadReplay(input).has_value()) << length;
+    }
+    auto invalid = complete;
+    invalid[0] = 'X';
+    ReplayProvider provider(invalid, std::uint64_t{1} << 40);
+    std::istream input(&provider);
+    EXPECT_FALSE(replay::ReadReplay(input).has_value());
+    EXPECT_EQ(provider.bytes_read, sizeof(replay::kLrec1Magic));
+
+    // The declared field fits the sparse file but exceeds the owned-byte budget.
+    PatchU32(invalid, 42, 0xFFFFFFFFu);
+    invalid[0] = 'L';
+    ReplayProvider oversized(invalid, std::uint64_t{1} << 40);
+    std::istream oversized_input(&oversized);
+    EXPECT_FALSE(replay::ReadReplay(oversized_input).has_value());
+    EXPECT_EQ(oversized.bytes_read, 46u);
+}
+
+TEST_F(ReplayStreamTest, CheckedProviderFailuresNeverReturnPartialSuccessOrThrow) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {0xA5});
+    ASSERT_TRUE(writer.Finalize(1));
+    const auto bytes = ReadBytes();
+    for (const auto failure : {ReplayProvider::SeekFailure::End,
+                               ReplayProvider::SeekFailure::Tell,
+                               ReplayProvider::SeekFailure::Rewind}) {
+        for (const bool exceptions : {false, true}) {
+            ReplayProvider provider(bytes, bytes.size());
+            provider.seek_failure = failure;
+            std::istream input(&provider);
+            if (exceptions) {
+                input.exceptions(std::ios::failbit | std::ios::badbit);
+            }
+            EXPECT_FALSE(replay::ReadReplay(input).has_value());
+        }
+    }
+    // Includes failures inside the header, frame, field, and final trailer byte.
+    for (std::size_t length = 0; length < bytes.size(); ++length) {
+        ReplayProvider provider(bytes, bytes.size());
+        provider.read_limit = length;
+        std::istream input(&provider);
+        EXPECT_FALSE(replay::ReadReplay(input).has_value()) << length;
+    }
+    for (const std::size_t allocation_after : {std::size_t{0}, bytes.size() - 33}) {
+        for (const bool exceptions : {false, true}) {
+            ReplayProvider provider(bytes, bytes.size());
+            provider.allocation_after = allocation_after;
+            std::istream input(&provider);
+            if (exceptions) {
+                input.exceptions(std::ios::badbit);
+            }
+            EXPECT_FALSE(replay::ReadReplay(input).has_value());
+        }
+    }
+    EXPECT_FALSE(replay::ReadReplay(m_path + ".missing").has_value());
+    EXPECT_FALSE(replay::ReadReplay(ReplayTempDir().string()).has_value());
+}
+
+TEST_F(ReplayStreamTest, FieldAndRecordBudgetsRefuseBeforePayloadReads) {
+    replay::ReplayWriter writer;
+    const auto header = MakeHeader();
+    ASSERT_TRUE(writer.Open(m_path, header));
+    writer.RecordInput(1, {0xA5});
+    writer.RecordInput(9, {});
+    replay::CheckpointRecord checkpoint;
+    checkpoint.tick = 9;
+    checkpoint.world_hash = "world";
+    checkpoint.terrain = "terrain";
+    checkpoint.water = "water";
+    checkpoint.entities = "entities";
+    writer.RecordCheckpoint(checkpoint);
+    ASSERT_TRUE(writer.Finalize(9));
+    const auto bytes = ReadBytes();
+    const auto header_fields = header.seed_string.size() + header.preset.size() +
+                               header.start_world_hash.size() + header.engine_version.size() +
+                               header.system_config_identity.size() +
+                               header.preset_content_hash.size();
+    const auto header_size = 42 + 6 * 4 + header_fields;
+    ReplayProvider provider(bytes, bytes.size());
+    std::istream input(&provider);
+    EXPECT_FALSE(
+        replay::ReadReplay(input, {.field_bytes = header_fields, .records = 3}).has_value());
+    EXPECT_EQ(provider.bytes_read, header_size + 13 + 4);
+    for (const std::size_t count : {0u, 1u, 2u}) {
+        std::istringstream limited(bytes);
+        EXPECT_FALSE(replay::ReadReplay(limited, {.records = count}).has_value());
+    }
+    const auto fields = header_fields + 1 + checkpoint.world_hash.size() +
+                        checkpoint.terrain.size() + checkpoint.water.size() +
+                        checkpoint.entities.size();
+    std::istringstream exact(bytes);
+    const auto admitted = replay::ReadReplay(exact, {.field_bytes = fields, .records = 3});
+    ASSERT_TRUE(admitted.has_value());
+    if (!admitted.has_value()) {
+        return;
+    }
+    EXPECT_FALSE(admitted->truncated);
+    std::istringstream short_budget(bytes);
+    EXPECT_FALSE(
+        replay::ReadReplay(short_budget, {.field_bytes = fields - 1, .records = 3}).has_value());
+    EXPECT_FALSE(replay::ReadReplay(m_path, {.records = 0}).has_value());
+}
+
+TEST_F(ReplayStreamTest, SparseProviderPreservesOpaqueBlobsLargerThanRecorderSegments) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(std::numeric_limits<std::uint64_t>::max(), {});
+    ASSERT_TRUE(writer.Finalize(std::numeric_limits<std::uint64_t>::max()));
+    auto bytes = ReadBytes();
+    const auto header_size = bytes.size() - 32 - 17;
+    constexpr std::uint32_t kBlobBytes = 64 * 1024 * 1024 + 1;
+    PatchU32(bytes, header_size + 9, kBlobBytes + 4);
+    PatchU32(bytes, header_size + 13, kBlobBytes);
+    const auto trailer = bytes.substr(bytes.size() - 32);
+    bytes.resize(header_size + 17);
+    ReplayProvider provider(bytes, bytes.size() + kBlobBytes + trailer.size());
+    provider.suffix = trailer;
+    std::istream input(&provider);
+    const auto contents = replay::ReadReplay(input);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value()) {
+        return;
+    }
+    EXPECT_FALSE(contents->truncated);
+    EXPECT_TRUE(contents->trailer_present);
+    ASSERT_EQ(contents->inputs.size(), 1u);
+    EXPECT_EQ(contents->inputs[0].tick, std::numeric_limits<std::uint64_t>::max());
+    ASSERT_EQ(contents->inputs[0].inputs.size(), kBlobBytes);
+    EXPECT_TRUE(std::all_of(contents->inputs[0].inputs.begin(),
+                            contents->inputs[0].inputs.end(),
+                            [](std::uint8_t byte) { return byte == 0; }));
+    EXPECT_EQ(provider.bytes_read, bytes.size() + kBlobBytes + trailer.size());
+}
+
+TEST_F(ReplayStreamTest, SparseOpaqueFrameExtensionsUseCheckedSeeks) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(5, {});
+    ASSERT_TRUE(writer.Finalize(5));
+    auto bytes = ReadBytes();
+    const auto header_size = bytes.size() - 32 - 17;
+    PatchU32(bytes, header_size + 9, 0xFFFFFFFFu);
+    bytes.resize(header_size + 17);
+    const auto virtual_size = header_size + 13 + std::uint64_t{0xFFFFFFFFu};
+    ReplayProvider provider(bytes, virtual_size);
+    std::istream input(&provider);
+    const auto contents = replay::ReadReplay(input);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(contents->truncated);
+    ASSERT_EQ(contents->inputs.size(), 1u);
+    EXPECT_TRUE(contents->inputs[0].inputs.empty());
+    EXPECT_EQ(provider.bytes_read, bytes.size());
+    ReplayProvider failed(bytes, virtual_size);
+    failed.seek_failure = ReplayProvider::SeekFailure::Skip;
+    std::istream failed_input(&failed);
+    EXPECT_FALSE(replay::ReadReplay(failed_input).has_value());
+}
+
+TEST_F(ReplayStreamTest, TrailingBytesAreFlaggedAndValidReencodingIsByteIdentical) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {});
+    writer.RecordInput(200, {0, 0xFF, 'L'});
+    replay::CheckpointRecord checkpoint;
+    checkpoint.tick = 200;
+    checkpoint.world_hash = "world";
+    checkpoint.terrain = "terrain";
+    checkpoint.water = "water";
+    checkpoint.entities = "entities";
+    writer.RecordCheckpoint(checkpoint);
+    ASSERT_TRUE(writer.Finalize(200));
+    const auto original = ReadBytes();
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value()) {
+        return;
+    }
+    ASSERT_FALSE(contents->truncated);
+    ASSERT_TRUE(writer.Open(m_path, contents->header));
+    for (const auto& record : contents->inputs) {
+        writer.RecordInput(record.tick, record.inputs);
+    }
+    for (const auto& record : contents->checkpoints) {
+        writer.RecordCheckpoint(record);
+    }
+    ASSERT_TRUE(writer.Finalize(contents->tick_count));
+    EXPECT_EQ(ReadBytes(), original);
+    for (const auto& tail : {std::string(1, '\0'), std::string("garbage")}) {
+        {
+            std::ofstream output(m_path, std::ios::binary | std::ios::trunc);
+            output << original << tail;
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        const auto invalid = replay::ReadReplay(m_path);
+        ASSERT_TRUE(invalid.has_value());
+        if (!invalid.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(invalid->truncated);
+        EXPECT_TRUE(invalid->trailer_present);
+        EXPECT_EQ(invalid->inputs.size(), 2u);
+    }
+}
+
+TEST_F(ReplayStreamTest, TruncatedFramesAndNestedFieldsPreserveOnlyCompleteRecords) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    writer.RecordInput(1, {1, 2, 3});
+    replay::CheckpointRecord checkpoint;
+    checkpoint.tick = 7;
+    checkpoint.world_hash = "w";
+    checkpoint.terrain = "t";
+    checkpoint.water = "a";
+    checkpoint.entities = "e";
+    writer.RecordCheckpoint(checkpoint);
+    ASSERT_TRUE(writer.Finalize(7));
+    const auto bytes = ReadBytes();
+    const auto header_size = bytes.size() - 32 - (13 + 4 + 3) - (13 + 4 * 5);
+    for (std::size_t size = header_size; size < bytes.size(); ++size) {
+        std::istringstream input(bytes.substr(0, size));
+        const auto contents = replay::ReadReplay(input);
+        ASSERT_TRUE(contents.has_value()) << size;
+        if (!contents.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(contents->truncated) << size;
+        EXPECT_FALSE(contents->trailer_present) << size;
+    }
+    // The claimed field fits the file but crosses its own payload boundary.
+    for (const std::size_t offset : {header_size + 13,
+                                     header_size + 20 + 13,
+                                     header_size + 20 + 18,
+                                     header_size + 20 + 23,
+                                     header_size + 20 + 28}) {
+        auto invalid = bytes;
+        PatchU32(invalid, offset, 32);
+        std::istringstream input(invalid);
+        const auto contents = replay::ReadReplay(input);
+        ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(contents->truncated);
+        EXPECT_FALSE(contents->trailer_present);
+        EXPECT_TRUE(contents->checkpoints.empty());
+        EXPECT_EQ(contents->inputs.size(), offset == header_size + 13 ? 0u : 1u);
+    }
+    for (const std::size_t offset : {header_size, bytes.size() - 31, bytes.size() - 16}) {
+        auto invalid = bytes;
+        invalid.at(offset) = '\x7F'; // unknown tag, bad trailer magic, wrong record count
+        std::istringstream input(invalid);
+        const auto contents = replay::ReadReplay(input);
+        ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value()) {
+            return;
+        }
+        EXPECT_TRUE(contents->truncated);
+        EXPECT_EQ(contents->trailer_present, offset == bytes.size() - 16);
+        EXPECT_EQ(contents->inputs.size(), offset == header_size ? 0u : 1u);
     }
 }
 

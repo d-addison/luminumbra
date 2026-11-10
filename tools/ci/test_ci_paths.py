@@ -40,6 +40,23 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_fixture_refusal_suite_is_in_standalone_plan(self):
+        path = "tools/perf/test_prepare_server_comparison.py"
+        self.assertEqual(gate.python_test_commands(ROOT).count((path,)), 1)
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        self.assertIn("python " + path, run_block(workflow, "Test performance result contract"))
+
+    def test_fixture_refusal_regressions_run_with_isolated_python(self):
+        result = subprocess.run([
+            sys.executable, "-I", "-B", str(ROOT / "tools/perf/test_prepare_server_comparison.py"),
+            "ComparisonFixtureTest.test_tree_contents_records_real_directory_links_and_cleanup",
+            "ComparisonFixtureTest.test_dependency_status_errors_refuse_before_any_preparation_write",
+        ], cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 2 tests", result.stderr)
+
     def test_rmlui_manifest_requires_python_and_native_lanes(self):
         manifest = "vendor/rmlui/rmlui-6.1-source.json"
         for paths in ([manifest], ["docs/dependency-source.md", manifest],
@@ -338,7 +355,7 @@ class PathGateTests(unittest.TestCase):
         for path in (
             "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
-            ".github/workflows/ci.yml", ".github/workflows/new.yml",
+            ".github/workflows/ci.yml", ".github/workflows/base-retarget.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
             *gate.CI_ENTRYPOINTS,
         ):
@@ -490,8 +507,6 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
                                 expected = not cancelled and ready and cpp != "false"
-                            expected = expected and (workflow != "ci" or event != "pull_request"
-                                                     or action != "edited" or base_changed)
                             actual = expression.replace("github.event.action", repr(action)).replace(
                                 "github.event.changes.base", repr(base_changed))
                             actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(

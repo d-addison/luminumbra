@@ -15,6 +15,7 @@
 // within a run over a deterministic bounded region — there are no golden hashes —
 // and the non-vacuity guards (water_chunks / max_depth / seam_wet / found_water /
 // land_water) still prove real water was exercised.
+#include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
@@ -28,10 +29,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -1107,3 +1110,255 @@ TEST(WaterDeterminism, LegacyUpdateAndCheckedInteriorHaveIdenticalDepthFluxAndHa
         }
     }
 }
+
+namespace {
+
+TEST(WaterDeterminism, DisabledRegionsKeepHistoricalInitAndResizeOrder) {
+    SHIELD_WorldSystem world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Luminumbra::Systems::WaterSystem water_system(nullptr, &world);
+    auto* water = &water_system;
+    entt::registry registry;
+    std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Luminumbra::Chunk>> chunks;
+    std::vector<Luminumbra::ChunkID> resize_ids;
+    water->SetSimResolution(8);
+    for (int index = 0; index < 4; ++index) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+        water->InitializeGeneratedWater(*chunk);
+        resize_ids.push_back(chunk->get_id());
+        chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    water->SetSimResolution(16);
+    for (int index = 4; index < 18; ++index) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+        chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    std::sort(resize_ids.begin(), resize_ids.end());
+    std::vector<Luminumbra::ChunkID> historical_init_order;
+    for (const auto& [id, chunk] : chunks) {
+        if (!chunk->has_water_sim.load())
+            historical_init_order.push_back(id);
+    }
+    // Historical selection: first six pending entries in map order; one resize
+    // from the id-sorted pending list, with a rotating cursor over that list.
+    for (std::size_t tick = 0; tick < 3; ++tick) {
+        water->update(registry, chunks);
+        for (std::size_t index = 0; index < historical_init_order.size(); ++index) {
+            EXPECT_EQ(chunks.at(historical_init_order[index])->has_water_sim.load(),
+                      index < (tick + 1) * 6);
+        }
+        if (tick == 0) {
+            EXPECT_EQ(chunks.at(resize_ids[0])->current_water_resolution.load(), 16);
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 8);
+        } else if (tick == 1) {
+            // Cursor 1 in the remaining [1,2,3] list selects id 2.
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 8);
+            EXPECT_EQ(chunks.at(resize_ids[2])->current_water_resolution.load(), 16);
+        } else {
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 16);
+            EXPECT_EQ(chunks.at(resize_ids[3])->current_water_resolution.load(), 8);
+        }
+    }
+}
+
+using WaterChunks = std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Luminumbra::Chunk>>;
+
+TEST(WaterDeterminism, AdmittedInitAndResizeOrderIgnoresMapInsertionAndLegacyCursor) {
+    SHIELD_WorldSystem world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Luminumbra::Systems::WaterSystem forward(nullptr, &world), reverse(nullptr, &world);
+    entt::registry registry;
+    WaterChunks forward_chunks, reverse_chunks;
+    forward_chunks.reserve(64);
+    reverse_chunks.reserve(128);
+    std::vector<Luminumbra::ChunkID> ordered_ids;
+    // Advance only one legacy resize cursor; authority admission must ignore it.
+    WaterChunks prior_chunks;
+    reverse.SetSimResolution(8);
+    for (int index = 0; index < 4; ++index) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+        reverse.InitializeGeneratedWater(*chunk);
+        prior_chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    reverse.SetSimResolution(16);
+    reverse.update(registry, prior_chunks);
+    reverse.ResetActivityCache();
+    for (auto* water : {&forward, &reverse}) {
+        auto& chunks = water == &forward ? forward_chunks : reverse_chunks;
+        water->SetSimResolution(8);
+        for (int entry = 0; entry < 18; ++entry) {
+            const int index = water == &forward ? entry : 17 - entry;
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+            if (index < 4) {
+                water->InitializeGeneratedWater(*chunk);
+                chunk->mark_water_data_dirty();
+            }
+            if (water == &forward) {
+                ordered_ids.push_back(chunk->get_id());
+            }
+            chunks.emplace(chunk->get_id(), std::move(chunk));
+        }
+        water->SetSimResolution(16);
+    }
+    std::sort(ordered_ids.begin(), ordered_ids.end());
+    for (std::size_t tick = 0; tick < 4; ++tick) {
+        forward.update(registry, forward_chunks, true);
+        reverse.update(registry, reverse_chunks, true);
+        for (std::size_t index = 0; index < ordered_ids.size(); ++index) {
+            const auto& chunk = *forward_chunks.at(ordered_ids[index]);
+            const auto& other = *reverse_chunks.at(ordered_ids[index]);
+            EXPECT_EQ(chunk.has_water_sim.load(), other.has_water_sim.load());
+            EXPECT_EQ(chunk.current_water_resolution.load(), other.current_water_resolution.load());
+            EXPECT_EQ(chunk.water_bed_mm, other.water_bed_mm);
+            EXPECT_EQ(chunk.water_depth_mm, other.water_depth_mm);
+            EXPECT_EQ(chunk.water_edge_flux, other.water_edge_flux);
+            EXPECT_EQ(chunk.authority_stamp(), other.authority_stamp());
+            if (index < 4) {
+                EXPECT_EQ(chunk.current_water_resolution.load(), index <= tick ? 16 : 8);
+            } else {
+                const bool admitted = index - 4 < (tick + 1) * 6;
+                EXPECT_EQ(chunk.has_water_sim.load(), admitted);
+                EXPECT_EQ(chunk.has_water_authority(), admitted);
+            }
+            EXPECT_EQ(chunk.voxel_revision(), 0u);
+        }
+        EXPECT_EQ(forward.GetSimWindowCursor(), reverse.GetSimWindowCursor());
+        EXPECT_TRUE(forward.dbg_mass_ok());
+        EXPECT_TRUE(reverse.dbg_mass_ok());
+    }
+}
+
+std::shared_ptr<Luminumbra::Chunk> MakeSelectionPond(int index, bool active) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index * 2, 0, 0));
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(16);
+    chunk->water_bed_mm.assign(256, 100000);
+    chunk->water_depth_mm.assign(256, 1000);
+    if (active) {
+        chunk->water_depth_mm[136] = 3000;
+    }
+    chunk->water_edge_flux.assign(512, 0);
+    chunk->mark_water_data_dirty();
+    return chunk;
+}
+
+TEST(WaterDeterminism, ResetActivityCacheReselectsRestoredWaterWithoutChangingRawCursor) {
+    SHIELD_WorldSystem world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Luminumbra::Systems::WaterSystem restored(nullptr, &world), fresh(nullptr, &world);
+    entt::registry registry;
+    WaterChunks restored_chunks, fresh_chunks;
+    for (int index = 0; index < 18; ++index) {
+        auto chunk = MakeSelectionPond(index, index >= 16);
+        restored_chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    restored.update(registry, restored_chunks, true);
+    restored_chunks.clear();
+    for (int index = 0; index < 18; ++index) {
+        for (auto* chunks : {&restored_chunks, &fresh_chunks}) {
+            auto chunk = MakeSelectionPond(index, index == 15);
+            chunks->emplace(chunk->get_id(), std::move(chunk));
+        }
+    }
+    // This value is deliberately outside the current set's index range. Resetting
+    // derived acceleration data must not normalize the persisted scheduler state.
+    restored.SetSimWindowCursor(180);
+    fresh.SetSimWindowCursor(180);
+    restored.ResetActivityCache();
+    EXPECT_EQ(restored.GetSimWindowCursor(), 180u);
+    restored.update(registry, restored_chunks, true);
+    fresh.update(registry, fresh_chunks, true);
+    for (const auto& [id, chunk] : restored_chunks) {
+        const auto& other = *fresh_chunks.at(id);
+        EXPECT_EQ(chunk->water_depth_mm, other.water_depth_mm);
+        EXPECT_EQ(chunk->water_edge_flux, other.water_edge_flux);
+        EXPECT_EQ(chunk->authority_stamp(), other.authority_stamp());
+    }
+    const auto active_id = Luminumbra::Chunk::calculate_id(Luminumbra::IVec3(30, 0, 0));
+    // High: +/-2000 mm gives +/-500 before friction, then +390/-391.
+    // The peak loses 390+390+391+391 = 1562 mm in one internal pass.
+    EXPECT_EQ(restored_chunks.at(active_id)->water_depth_mm[136], 1438);
+    EXPECT_EQ(restored.GetSimWindowCursor(), 15u);
+    EXPECT_EQ(restored.GetSimWindowCursor(), fresh.GetSimWindowCursor());
+    EXPECT_EQ(restored.cells_stepped_last_update(), 4096u);
+    EXPECT_TRUE(restored.dbg_mass_ok());
+}
+
+TEST(WaterDeterminism, RefusedLowestGridCannotStarveAdmittedResizes) {
+    for (const int malformed : {0, 1, 2}) {
+        SHIELD_WorldSystem world(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        Luminumbra::Systems::WaterSystem water(nullptr, &world);
+        WaterChunks chunks;
+        water.SetSimResolution(8);
+        for (int index = 0; index < 3; ++index) {
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+            water.InitializeGeneratedWater(*chunk);
+            chunk->is_water_sleeping.store(true);
+            chunks.emplace(chunk->get_id(), std::move(chunk));
+        }
+        auto& refused = *chunks.at(Luminumbra::Chunk::calculate_id(Luminumbra::IVec3(0)));
+        if (malformed == 0) {
+            refused.water_depth_mm.pop_back();
+        } else if (malformed == 1) {
+            refused.current_water_resolution.store(3);
+        } else {
+            refused.water_bed_mm.clear();
+            refused.water_depth_mm.clear();
+            refused.current_water_resolution.store(std::numeric_limits<int>::max());
+        }
+        const auto stamp = refused.authority_stamp();
+        const auto beds = refused.water_bed_mm;
+        const auto depths = refused.water_depth_mm;
+        water.SetSimResolution(16);
+        entt::registry registry;
+        for (int tick = 0; tick < 2; ++tick) {
+            water.update(registry, chunks, true);
+            EXPECT_EQ(refused.authority_stamp(), stamp);
+            EXPECT_EQ(refused.water_bed_mm, beds);
+            EXPECT_EQ(refused.water_depth_mm, depths);
+            for (int index = 1; index < 3; ++index) {
+                const auto& chunk =
+                    *chunks.at(Luminumbra::Chunk::calculate_id(Luminumbra::IVec3(index, 0, 0)));
+                EXPECT_EQ(chunk.current_water_resolution.load(), index <= tick + 1 ? 16 : 8);
+            }
+        }
+    }
+}
+
+TEST(WaterDeterminism, AdmittedAndLegacyInteriorArithmeticKeepGoldenValues) {
+    for (const bool admitted : {false, true}) {
+        for (const int resolution : {8, 16}) {
+            SHIELD_WorldSystem world(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+            Luminumbra::Systems::WaterSystem water(nullptr, &world);
+            water.SetSimResolution(resolution);
+            entt::registry registry;
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+            const auto cells = static_cast<std::size_t>(resolution * resolution);
+            const auto peak =
+                static_cast<std::size_t>((resolution / 2) * resolution + resolution / 2);
+            chunk->has_water_sim.store(true);
+            chunk->is_water_sleeping.store(false);
+            chunk->current_water_resolution.store(resolution);
+            chunk->water_bed_mm.assign(cells, 100000);
+            chunk->water_depth_mm.assign(cells, 1000);
+            chunk->water_depth_mm[peak] = 3000;
+            chunk->water_edge_flux.assign(2 * cells, 0);
+            const WaterChunks owners{{chunk->get_id(), chunk}};
+            water.update(registry, owners, admitted);
+            const int outgoing = resolution == 8 ? 97 : 390;
+            const int incoming = resolution == 8 ? 98 : 391;
+            EXPECT_EQ(chunk->water_depth_mm[peak], resolution == 8 ? 2610 : 1438);
+            EXPECT_EQ(chunk->water_depth_mm[peak + 1], 1000 + outgoing);
+            EXPECT_EQ(chunk->water_depth_mm[peak - 1], 1000 + incoming);
+            EXPECT_EQ(chunk->water_depth_mm[peak + static_cast<std::size_t>(resolution)],
+                      1000 + outgoing);
+            EXPECT_EQ(chunk->water_depth_mm[peak - static_cast<std::size_t>(resolution)],
+                      1000 + incoming);
+            EXPECT_EQ(chunk->water_edge_flux[2 * peak], outgoing);
+            EXPECT_EQ(chunk->water_edge_flux[2 * (peak - 1)], -incoming);
+            EXPECT_EQ(water.cells_stepped_last_update(), cells);
+            EXPECT_TRUE(water.dbg_mass_ok());
+        }
+    }
+}
+
+} // namespace
