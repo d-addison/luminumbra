@@ -13700,8 +13700,7 @@ TEST(GameSessionHeadlessWorldTest, FoliageCallbacksObservePublicationAndKeepWrit
     }
 }
 
-TEST(GameSessionHeadlessWorldTest,
-     UnscheduledFoliageKeepsParticipantWorkAndFreezesCreatures) {
+TEST(GameSessionHeadlessWorldTest, UnscheduledFoliageKeepsParticipantWorkAndFreezesCreatures) {
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Reduced, true));
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Frozen, true));
     ASSERT_NO_FATAL_FAILURE(CheckUnscheduledFoliage(RegionState::Reduced, false));
