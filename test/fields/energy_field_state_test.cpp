@@ -9,9 +9,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <map>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,28 @@
 #include "luminumbra_common/systems/FieldEmitterSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/WorldClock.h"
+
+namespace {
+std::size_t*& AllocationCounter() {
+    static thread_local std::size_t* counter = nullptr;
+    return counter;
+}
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    if (auto* storage = std::malloc(bytes == 0 ? 1 : bytes)) {
+        if (auto* counter = AllocationCounter())
+            ++*counter;
+        return storage;
+    }
+    throw std::bad_alloc();
+}
+void operator delete(void* storage) noexcept {
+    std::free(storage);
+}
+void operator delete(void* storage, std::size_t) noexcept {
+    std::free(storage);
+}
 
 namespace luminumbra::fields {
 
@@ -1159,6 +1183,37 @@ void AddBatchEmitter(entt::registry& registry,
     const auto entity = registry.create();
     registry.emplace<TransformComponent>(entity).position = position;
     registry.emplace<FieldEmitterComponent>(entity, emitter);
+}
+
+TEST(AetherEmitterDeterminism, WarmGatherRetainsStorageAcrossRosterChanges) {
+    entt::registry registry;
+    EnergyFieldState field(2);
+    const auto records = TwoEnergyOwners();
+    AddBatchEmitter(registry, {0, 0, 0}, {0, 1000, 0});
+    const auto entity = registry.view<FieldEmitterComponent>().front();
+    for (const bool regional : {false, true}) {
+        registry.get<TransformComponent>(entity).position =
+            regional ? Luminumbra::Vec3{0, 0, 0} : Luminumbra::Vec3{16777248, 0, 16777248};
+        const auto gather = [&] {
+            if (regional) {
+                return std::uint64_t{
+                    GatherRegionalFieldEmitterDeposits(registry, field, records, false, 0)
+                        .accepted};
+            }
+            return Luminumbra::Systems::GatherFieldEmitterDeposits(registry, field, true).deposits;
+        };
+        EXPECT_EQ(gather(), 0u);
+        std::size_t allocations = 0;
+        AllocationCounter() = &allocations;
+        const auto deposits = gather();
+        AllocationCounter() = nullptr;
+        EXPECT_EQ(deposits, 0u);
+        EXPECT_EQ(allocations, 0u);
+        registry.remove<FieldEmitterComponent>(entity);
+        EXPECT_EQ(gather(), regional ? 1u : 0u);
+        registry.emplace<FieldEmitterComponent>(entity, FieldEmitterComponent{0, 1000, 0});
+        EXPECT_EQ(gather(), 0u);
+    }
 }
 
 void CheckBatchCapacityRefusal() {

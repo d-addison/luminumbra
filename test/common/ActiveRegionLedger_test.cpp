@@ -11,9 +11,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <map>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -21,6 +23,28 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+namespace {
+std::size_t*& AllocationCounter() {
+    static thread_local std::size_t* counter = nullptr;
+    return counter;
+}
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    if (auto* storage = std::malloc(bytes == 0 ? 1 : bytes)) {
+        if (auto* counter = AllocationCounter())
+            ++*counter;
+        return storage;
+    }
+    throw std::bad_alloc();
+}
+void operator delete(void* storage) noexcept {
+    std::free(storage);
+}
+void operator delete(void* storage, std::size_t) noexcept {
+    std::free(storage);
+}
 
 namespace {
 using namespace Luminumbra::world;
@@ -852,6 +876,52 @@ const std::uint64_t kIdle = ActiveRegionLedger::kIdleEvictionTicks;
 const ActiveRegionLedger::OwnershipProbe kNobodyOwns = [](RegionKey) {
     return false;
 };
+
+TEST(ActiveRegionLedgerTest, WarmScheduleRetainsNodesAndMatchesFreshScratchAfterShrinkAndGrowth) {
+    ActiveRegionLedger ledger({0, 1, 1});
+    ledger.pin(kFar, true, WorldClock{});
+    const std::array home{Vec3{256, 0, 256}};
+    const std::array away{Vec3{10240, 0, 10240}};
+    const auto digest = [](RegionKey) {
+        return 42u;
+    };
+    const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+    ledger.schedule(WorldClock(1), home, work);
+    const auto* retained = &ledger.records().at(kFar);
+    const auto initial = ledger.records().size();
+    constexpr auto idle = ActiveRegionLedger::kIdleEvictionTicks;
+    for (const auto tick : {std::uint64_t{2}, std::uint64_t{3}, idle + 4, idle + 5, idle + 6}) {
+        auto fresh = ledger; // Copies carry no derived scheduler scratch.
+        const auto anchors =
+            tick == idle + 5 ? std::span<const Vec3>(away) : std::span<const Vec3>{};
+        if (tick == idle + 4) {
+            EXPECT_THROW(
+                ledger.schedule(WorldClock(tick),
+                                anchors,
+                                work,
+                                digest,
+                                [](RegionKey) -> bool { throw std::runtime_error("probe"); }),
+                std::runtime_error);
+            EXPECT_EQ(ledger.encode(), fresh.encode());
+        }
+        std::size_t allocations = 0;
+        AllocationCounter() = tick == idle + 5 ? nullptr : &allocations;
+        const auto& actual = ledger.schedule(WorldClock(tick), anchors, work, digest, kNobodyOwns);
+        AllocationCounter() = nullptr;
+        EXPECT_EQ(allocations, 0u);
+        EXPECT_EQ(&ledger.records().at(kFar), retained);
+        EXPECT_EQ(actual, fresh.schedule(WorldClock(tick), anchors, work, digest, kNobodyOwns));
+        EXPECT_EQ(ledger.records(), fresh.records());
+        EXPECT_EQ(ledger.canonical_bytes(), fresh.canonical_bytes());
+        EXPECT_EQ(ledger.encode(), fresh.encode());
+        if (tick == idle + 4) {
+            EXPECT_EQ(ledger.records().size(), 1u);
+        }
+        if (tick == idle + 5) {
+            EXPECT_EQ(ledger.records().size(), initial);
+        }
+    }
+}
 
 // One replicated visit at tick 1 near the origin; every record it creates has last_proximity 1.
 ActiveRegionLedger HomeVisit() {
