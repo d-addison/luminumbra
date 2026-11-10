@@ -102,6 +102,7 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/FarWantedSet.h"
+#include "luminumbra_common/world/FarWorldAuthorityProducer.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
@@ -13023,4 +13024,126 @@ TEST(GameSessionHeadlessWorldTest, SessionEnergyReusesRegistersAndPublishesOnlyP
 
 TEST(GameSessionHeadlessWorldTest, EnergyRegistersStayTransactionalAcrossSchedulerRefusal) {
     ASSERT_NO_FATAL_FAILURE(CheckEnergyRegistersSurviveSchedulerRefusal());
+}
+
+TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndOpenFences) {
+    GameSession session;
+    Configure(session);
+    ASSERT_TRUE(session.CreateWorld("Source capture", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    constexpr std::size_t samples = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(samples, -1.0f);
+    chunk->mark_voxel_data_dirty();
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    session.GetWorldSystem()->SetWaterSimWindowCursor(7);
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), nullptr);
+    const Luminumbra::World::FarWorldAuthorityConfig config{
+        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+    std::string error;
+    GameSession cold;
+    EXPECT_FALSE(cold.EnableFarWorldAuthorityProducer(config, error));
+    EXPECT_EQ(cold.GetFarWorldAuthorityProducer(), nullptr);
+    cold.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    auto invalid = config;
+    invalid.capture.deadline_frames = 0;
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
+    ASSERT_TRUE(producer->request_capture(windows));
+    const auto hashes = SessionWorldSubHashes(session);
+    const auto cursor = session.GetWorldSystem()->GetWaterSimWindowCursor();
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_NE(producer->capture(), nullptr);
+    const auto* accepted = producer->capture();
+    EXPECT_EQ(SessionWorldSubHashes(session), hashes);
+    EXPECT_EQ(session.GetWorldSystem()->GetWaterSimWindowCursor(), cursor);
+    const auto canonical = session.GetWorldSaveDir();
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    {
+        P::SaveTransaction transaction(
+            canonical, session.GetSimulationTickCount(), {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(session.SaveWorld());
+        EXPECT_EQ(producer->capture(), accepted);
+        EXPECT_TRUE(producer->capture_status().active);
+        session.PumpFarWorldAuthorityCapture();
+        EXPECT_TRUE(producer->capture_status().active);
+        EXPECT_EQ(producer->capture(), accepted);
+        transaction.abort(nullptr);
+    }
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_NE(producer->capture(), nullptr);
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    const auto source_identity = producer->capture()->committed.source_identity;
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(session.SaveWorldStateTo(Root().path() / "capture-export", nullptr, true));
+    EXPECT_EQ(producer->capture()->committed.source_identity, source_identity);
+    EXPECT_TRUE(producer->capture_status().active);
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    EXPECT_EQ(producer->capture()->committed.source_identity, source_identity);
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_NE(producer->capture(), nullptr);
+    EXPECT_NE(producer->capture()->committed.source_identity, source_identity);
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(canonical, index, nullptr));
+    EXPECT_EQ(producer->capture()->committed.generation, index.generation);
+    const auto* before_failure = producer->capture();
+    chunk->sdf_data[0] = 3.0f;
+    chunk->mark_voxel_data_dirty();
+    {
+        struct PublicationReset {
+            ~PublicationReset() {
+                P::detail::set_file_publication_hook_for_testing(nullptr);
+            }
+        } reset;
+        P::detail::set_file_publication_hook_for_testing([](const fs::path& destination, bool) {
+            return destination.filename() != "world_info.json";
+        });
+        EXPECT_FALSE(session.SaveWorld());
+    }
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_EQ(producer->capture(), before_failure);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    chunk->sdf_data[0] = -1.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.SaveWorld());
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    const auto* before_open = producer->capture();
+    session.FenceFarWorldAuthorityReads(true);
+    EXPECT_FALSE(session.LoadWorld("absent-source-world"));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    EXPECT_EQ(producer->capture(), before_open);
+    session.FenceFarWorldAuthorityReads(false);
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    EXPECT_EQ(SessionWorldSubHashes(session), hashes);
+    EXPECT_EQ(session.GetWorldSystem()->GetWaterSimWindowCursor(), cursor);
+    session.GetWorldSystem()->dispatch_generation_jobs(std::vector<Luminumbra::IVec3>{{20, 0, 20}});
+    const auto pending = session.GetWorldSystem()->pending_publication_chunks();
+    ASSERT_GT(pending, 0u);
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(config, error));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    EXPECT_EQ(session.GetWorldSystem()->pending_publication_chunks(), pending);
+    ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), nullptr);
 }
