@@ -120,7 +120,7 @@ std::vector<Entry> Admit(std::span<const Resident> residents,
 
 std::int32_t SourceAmount(const SourceInput& source, int resolution) {
     const auto& position = source.position;
-    if (!ActiveRegionLedger::valid_anchor(position) ||
+    if (!std::isfinite(position.y) || !ActiveRegionLedger::valid_anchor(position) ||
         static_cast<double>(position.y) < -2097152.0 * CHUNK_SIZE_Y ||
         static_cast<double>(position.y) >= 2097152.0 * CHUNK_SIZE_Y) {
         Refuse();
@@ -158,12 +158,14 @@ void PlanSources(std::span<const SourceInput> sources,
         if (!target || !target->admitted || amount == 0) {
             continue;
         }
-        const auto x = static_cast<int>(
-            std::floor((static_cast<double>(position.x) - coords.x * CHUNK_SIZE_X) * resolution /
-                       CHUNK_SIZE_X));
-        const auto z = static_cast<int>(
-            std::floor((static_cast<double>(position.z) - coords.z * CHUNK_SIZE_Z) * resolution /
-                       CHUNK_SIZE_Z));
+        // Floor before subtracting the integer origin: a tiny negative position
+        // can otherwise round up to the chunk width when the origin is added.
+        const auto x = static_cast<int>(std::floor(static_cast<double>(position.x) * resolution /
+                                                   CHUNK_SIZE_X)) -
+                       coords.x * resolution;
+        const auto z = static_cast<int>(std::floor(static_cast<double>(position.z) * resolution /
+                                                   CHUNK_SIZE_Z)) -
+                       coords.z * resolution;
         if (x < 0 || x >= resolution || z < 0 || z >= resolution) {
             Refuse();
         }
@@ -344,8 +346,13 @@ Plan Build(std::span<const Resident> residents,
         plan.faces.push_back(face);
     }
     if (!plan.faces.empty()) {
+        std::uint8_t common_shift = 0;
+        for (const auto& face : plan.faces) {
+            common_shift = std::max(common_shift, face.common_shift);
+        }
+        const auto opportunity = schedule.tick >> common_shift;
         const auto start =
-            static_cast<std::vector<Face>::difference_type>(schedule.tick % plan.faces.size());
+            static_cast<std::vector<Face>::difference_type>(opportunity % plan.faces.size());
         std::rotate(plan.faces.begin(), plan.faces.begin() + start, plan.faces.end());
         const auto pairs =
             std::min(static_cast<std::uint64_t>(plan.faces.size()), (remaining - keep) / 2);

@@ -72,10 +72,12 @@ struct Plan {
 // are excluded. Interiors and both owners of a face require due membership and
 // their persisted cadence phase.
 // Each window pays for preparation, one interior and four face endpoints. Keep
-// one interior window when claims exist, then reserve cross-owner pairs atomically.
-// Sorted eligible cross-owner faces start at tick modulo their count. With fixed
-// eligibility every tick and at least one funded pair, all N faces are served
-// within N ticks. Face outputs are sorted again after reservation.
+// one window for interior credit when claims exist, then reserve cross-owner pairs
+// atomically. Fractional owner credit can defer interior selection to a later call.
+// Sorted eligible cross-owner faces start at (tick >> coarsest face cadence)
+// modulo their count. With a fixed eligible set and at least one funded pair,
+// all N faces are served within N common cadence opportunities, including skipped
+// off-phase ticks. Face outputs are sorted again after reservation.
 // Region outputs are patches for due admitted owners only (debt zero means erase);
 // all other registers must be retained by the eventual publisher. Region windows
 // and allocated_windows count selected interiors only. Unselected grants retain
