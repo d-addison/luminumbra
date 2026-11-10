@@ -205,6 +205,11 @@ rosters should not be confused with missing simulation wiring.
 - **Engine performance measurement blocks merges on Linux only.** Windows and
   macOS currently exercise the portable runner contract; see
   [performance measurement](performance.md) for the gate's design.
+- **Acceptance preparation cleanup trusts its own directory.** Marker cleanup
+  serializes cooperating checker processes through the refresh lock. Before
+  unlinking a marker, it verifies the file's identity and digest. It does not
+  defend against another local process that replaces the marker between that
+  final check and the unlink.
 
 ## Packaging
 
