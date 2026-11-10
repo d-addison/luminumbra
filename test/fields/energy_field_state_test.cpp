@@ -46,6 +46,17 @@ void operator delete(void* storage) noexcept {
 void operator delete(void* storage, std::size_t) noexcept {
     std::free(storage);
 }
+void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+    auto* storage = std::malloc(bytes == 0 ? 1 : bytes);
+    if (storage != nullptr) {
+        if (auto* counter = AllocationCounter())
+            ++*counter;
+    }
+    return storage;
+}
+void operator delete(void* storage, const std::nothrow_t&) noexcept {
+    std::free(storage);
+}
 
 namespace luminumbra::fields {
 
