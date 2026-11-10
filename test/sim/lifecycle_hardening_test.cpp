@@ -264,9 +264,9 @@ TEST(ReproHardening, PopulationIsBounded) {
     entt::registry r;
     // 3 females + 3 males clustered so they court, off cooldown, mature.
     for (int i = 0; i < 3; ++i)
-        spawnFertile(r, 0.1f * i, 0.0f, /*female=*/true);
+        spawnFertile(r, 0.1f * static_cast<float>(i), 0.0f, /*female=*/true);
     for (int i = 0; i < 3; ++i)
-        spawnFertile(r, 0.1f * i, 0.2f, /*female=*/false);
+        spawnFertile(r, 0.1f * static_cast<float>(i), 0.2f, /*female=*/false);
 
     const std::size_t start = creatureCount(r);
     int totalBirths = 0;
@@ -286,9 +286,9 @@ TEST(ReproHardening, PopulationIsBounded) {
 TEST(ReproHardening, RunEqualsReplay) {
     auto build = [](entt::registry& r) {
         for (int i = 0; i < 3; ++i)
-            spawnFertile(r, 0.1f * i, 0.0f, true);
+            spawnFertile(r, 0.1f * static_cast<float>(i), 0.0f, true);
         for (int i = 0; i < 3; ++i)
-            spawnFertile(r, 0.1f * i, 0.2f, false);
+            spawnFertile(r, 0.1f * static_cast<float>(i), 0.2f, false);
     };
     auto run = [](entt::registry& r) {
         for (std::uint64_t t = 0; t < 500; ++t) {
@@ -587,7 +587,7 @@ TEST(DecompHardening, LiveDoesNotDecay) {
     auto& dc = r.emplace<Comp::DecayComponent>(e);
     dc.decay_duration = 10;
     for (int t = 0; t < 20; ++t)
-        luminumbra::ai::RunDecompositionOnTick(r, t);
+        luminumbra::ai::RunDecompositionOnTick(r, static_cast<std::uint64_t>(t));
     EXPECT_EQ(dc.decay_ticks, 0u);
     EXPECT_EQ(dc.nutrient_released_milli, 0u);
     EXPECT_EQ(dc.fully_decomposed, 0u);
@@ -607,7 +607,7 @@ TEST(DecompHardening, MilliContractMonotonicLandsExact) {
     std::uint32_t prev = 0;
     std::uint64_t summedPerTick = 0;
     for (std::uint32_t t = 0; t < dur + 5; ++t) {
-        auto s = luminumbra::ai::RunDecompositionOnTick(r, t);
+        auto s = luminumbra::ai::RunDecompositionOnTick(r, static_cast<std::uint64_t>(t));
         summedPerTick += s.released_total;
         const std::uint32_t now = dc.nutrient_released_milli;
         EXPECT_GE(now, prev) << "release not monotonic at t=" << t; // never decreases
@@ -628,12 +628,12 @@ TEST(DecompHardening, FinishedIsLatchedStable) {
     auto& dc = r.emplace<Comp::DecayComponent>(e);
     dc.decay_duration = 3;
     for (int t = 0; t < 3; ++t)
-        luminumbra::ai::RunDecompositionOnTick(r, t);
+        luminumbra::ai::RunDecompositionOnTick(r, static_cast<std::uint64_t>(t));
     ASSERT_EQ(dc.fully_decomposed, 1u);
     const auto t0 = dc.decay_ticks;
     const auto n0 = dc.nutrient_released_milli;
     for (int t = 0; t < 30; ++t) {
-        auto s = luminumbra::ai::RunDecompositionOnTick(r, t);
+        auto s = luminumbra::ai::RunDecompositionOnTick(r, static_cast<std::uint64_t>(t));
         EXPECT_EQ(s.decaying, 0);
         EXPECT_EQ(s.released_total, 0u);
         EXPECT_EQ(dc.decay_ticks, t0);
@@ -679,7 +679,7 @@ TEST(DecompHardening, RunEqualsReplay) {
     };
     auto run = [](entt::registry& r) {
         for (int t = 0; t < 40; ++t)
-            luminumbra::ai::RunDecompositionOnTick(r, t);
+            luminumbra::ai::RunDecompositionOnTick(r, static_cast<std::uint64_t>(t));
         std::vector<std::uint32_t> out;
         std::vector<entt::entity> es;
         for (auto e : r.view<Comp::DecayComponent>())
@@ -857,7 +857,7 @@ TEST(WildlifeHardening, RegrowthCappedAtOne) {
     entt::registry r;
     auto p = spawnGrazePlant(r, 0.0f, 0.0f, 0.999f); // already near full, no grazers
     for (int t = 0; t < 50; ++t)
-        luminumbra::ai::RunWildlifeFoliageOnTick(r, t);
+        luminumbra::ai::RunWildlifeFoliageOnTick(r, static_cast<std::uint64_t>(t));
     EXPECT_LE(r.get<Comp::GrazeableComponent>(p).biomass, 1.0f);
     EXPECT_NEAR(r.get<Comp::GrazeableComponent>(p).biomass, 1.0f, 1e-5f);
 }
@@ -952,13 +952,13 @@ TEST(WildlifeHardening, CoincidentNoNaN) {
 TEST(WildlifeHardening, RunEqualsReplay) {
     auto build = [](entt::registry& r) {
         for (int i = 0; i < 6; ++i)
-            spawnGrazePlant(r, 0.4f * i, 0.0f, 1.0f);
+            spawnGrazePlant(r, 0.4f * static_cast<float>(i), 0.0f, 1.0f);
         for (int i = 0; i < 4; ++i)
-            spawnHerbivore(r, 0.4f * i, 0.3f, 0.4f);
+            spawnHerbivore(r, 0.4f * static_cast<float>(i), 0.3f, 0.4f);
     };
     auto run = [](entt::registry& r) {
         for (std::uint64_t t = 0; t < 120; ++t)
-            luminumbra::ai::RunWildlifeFoliageOnTick(r, t);
+            luminumbra::ai::RunWildlifeFoliageOnTick(r, static_cast<std::uint64_t>(t));
         std::vector<float> out;
         std::vector<entt::entity> ps;
         for (auto e : r.view<Comp::GrazeableComponent>())
