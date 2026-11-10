@@ -9,6 +9,7 @@
 #include "../simulation/SimBudgetTelemetry.h"
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
+#include "FarWorldAuthorityProducer.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -102,6 +103,7 @@
 #include <ios>
 #include <limits>
 #include <map>
+#include <new>
 #include <span>
 #include <string>
 #include <system_error>
@@ -433,6 +435,7 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
+    DisableFarWorldAuthorityProducer();
     // Jobs can read world, water, weather and physics. Drain before member destruction.
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -442,6 +445,7 @@ GameSession::~GameSession() {
 }
 
 void GameSession::ResetWorldSystems() {
+    DisableFarWorldAuthorityProducer();
     m_regionalEnergyStep.reset();
     m_foliageStep.reset();
     m_worldUsable = false;
@@ -3483,6 +3487,85 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 
 } // namespace
 
+bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthorityConfig& config,
+                                                  std::string& error) {
+    error.clear();
+    if (!m_worldUsable || !m_worldSystem || m_transientWorld || !IsSimulationTickBoundary()) {
+        error = "Source capture requires a saved world at an owner boundary.";
+        return false;
+    }
+    if (m_worldSystem->pending_publication_chunks() != 0 ||
+        !m_worldSystem->get_streaming_telemetry_stats().quiescent()) {
+        error = "Source capture attachment requires settled streaming publication.";
+        return false;
+    }
+    try {
+        auto candidate = std::make_unique<World::FarWorldAuthorityProducer>(config.source);
+        if (!candidate->configure_capture(config.capture)) {
+            error = "Source capture requires finite limits.";
+            return false;
+        }
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+        if (!candidate->admit_saved_source(GetWorldSaveDir(), config.capture.read, error)) {
+            return false;
+        }
+        if (!m_worldSystem->set_far_world_authority_changes(candidate->changes())) {
+            error = "Source capture membership exceeds its limit.";
+            return false;
+        }
+        m_farWorldAuthorityProducer = std::move(candidate);
+        m_farWorldSourceNeedsRefresh = false;
+        return true;
+    } catch (const std::bad_alloc&) {
+        error = "Source capture allocation refused.";
+        return false;
+    }
+}
+World::FarWorldAuthorityProducer* GameSession::GetFarWorldAuthorityProducer() {
+    return m_farWorldAuthorityProducer.get();
+}
+void GameSession::PumpFarWorldAuthorityCapture() {
+    if (!m_farWorldAuthorityProducer || !m_worldUsable || !IsSimulationTickBoundary()) {
+        return;
+    }
+    if (m_farWorldAuthorityProducer->capture_status().paused) {
+        m_farWorldAuthorityProducer->pump_capture();
+        return;
+    }
+    if (m_farWorldSourceNeedsRefresh) {
+        if (Persistence::SaveTransaction::active_for(GetWorldSaveDir())) {
+            const bool paused = m_farWorldAuthorityProducer->capture_status().paused;
+            FenceFarWorldAuthorityReads(true);
+            m_farWorldAuthorityProducer->pump_capture();
+            FenceFarWorldAuthorityReads(paused);
+            return;
+        }
+        std::string error;
+        if (!m_farWorldAuthorityProducer->refresh_saved_source(GetWorldSaveDir(), error)) {
+            return;
+        }
+        m_farWorldSourceNeedsRefresh = false;
+    }
+    if (m_farWorldAuthorityProducer->needs_capture_boundary()) {
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+    }
+    m_farWorldAuthorityProducer->pump_capture();
+}
+void GameSession::FenceFarWorldAuthorityReads(bool paused) {
+    if (m_farWorldAuthorityProducer) {
+        m_farWorldAuthorityProducer->fence_source_reads(paused);
+    }
+}
+void GameSession::DisableFarWorldAuthorityProducer() {
+    m_farWorldSourceNeedsRefresh = false;
+    if (m_farWorldAuthorityProducer) {
+        if (m_worldSystem) {
+            m_worldSystem->set_far_world_authority_changes({});
+        }
+        m_farWorldAuthorityProducer.reset();
+    }
+}
+
 bool GameSession::SaveWorld() {
     if (m_transientWorld || m_metadata.worldId.empty())
         return false;
@@ -3757,6 +3840,33 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                          .count());
         }
     } outcome{*this, save_started, false};
+
+    struct SourceReadFence {
+        World::FarWorldAuthorityProducer* producer;
+        bool previous;
+        const bool& accepted;
+        bool& refresh_needed;
+        bool canonical;
+        ~SourceReadFence() {
+            if (producer) {
+                if (canonical && !accepted) {
+                    producer->invalidate_source();
+                    refresh_needed = true;
+                }
+                producer->fence_source_reads(previous);
+            }
+        }
+    } source_fence{.producer = m_farWorldAuthorityProducer.get(),
+                   .previous = m_farWorldAuthorityProducer &&
+                               m_farWorldAuthorityProducer->capture_status().paused,
+                   .accepted = outcome.accepted,
+                   .refresh_needed = m_farWorldSourceNeedsRefresh,
+                   .canonical = canonical_save};
+    FenceFarWorldAuthorityReads(true);
+    // Rollback may restore identical committed bytes through new file handles.
+    // Re-admit at the next pump after the enclosing transaction has closed.
+    m_farWorldSourceNeedsRefresh =
+        m_farWorldSourceNeedsRefresh || (canonical_save && m_farWorldAuthorityProducer != nullptr);
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -4062,6 +4172,19 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                 });
         defer_success();
     }
+    if (canonical_save && m_farWorldAuthorityProducer) {
+        const auto invalidate_source = [this, revision = m_worldRevision]() {
+            if (revision == m_worldRevision && m_farWorldAuthorityProducer) {
+                m_farWorldAuthorityProducer->invalidate_source();
+                m_farWorldSourceNeedsRefresh = true;
+            }
+        };
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir)) {
+            transaction->defer_until_commit(invalidate_source);
+        } else {
+            invalidate_source();
+        }
+    }
     if (outer && !outer->Commit()) {
         return false;
     }
@@ -4318,6 +4441,7 @@ bool GameSession::ReadPreparedWorldState(
 }
 
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
+    DisableFarWorldAuthorityProducer();
     // All refusing readers have passed; publish the staged state together.
     m_lastLoadedChunkCount = 0;
     m_fieldPages = std::move(saved.field_pages);
