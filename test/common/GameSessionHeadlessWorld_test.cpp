@@ -13391,13 +13391,28 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
             }
         } reset;
         P::detail::set_file_publication_hook_for_testing([](const fs::path& destination, bool) {
-            return destination.filename() != "world_info.json";
+            return destination.filename() !=
+                   P::WorldSaveService::region_file_path({}, 0, 0).filename();
         });
         EXPECT_FALSE(session.SaveWorld());
     }
+    EXPECT_EQ(producer->capture(), before_failure);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    session.FenceFarWorldAuthorityReads(true);
     session.PumpFarWorldAuthorityCapture();
     EXPECT_EQ(producer->capture(), before_failure);
     EXPECT_FALSE(producer->capture_status().latest_ready);
+    EXPECT_FALSE(producer->request_capture(windows));
+    session.FenceFarWorldAuthorityReads(false);
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_EQ(producer->capture(), before_failure);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    EXPECT_EQ(producer->capture()->committed.generation, index.generation);
     chunk->sdf_data[0] = -1.0f;
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.SaveWorld());
@@ -13424,4 +13439,60 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
     EXPECT_EQ(session.GetWorldSystem()->pending_publication_chunks(), pending);
     ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId));
     EXPECT_EQ(session.GetFarWorldAuthorityProducer(), nullptr);
+}
+
+TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
+    GameSession session;
+    Configure(session);
+    ASSERT_TRUE(session.CreateWorld("Source rollback", "1337", "default"));
+    const Luminumbra::World::FarWorldAuthorityConfig config{
+        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+    std::string error;
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(producer->capture_status().latest_ready);
+    const auto* accepted = producer->capture();
+    const auto generation = accepted->committed.generation;
+    const auto canonical = session.GetWorldSaveDir();
+    {
+        P::SaveTransaction transaction(
+            canonical, session.GetSimulationTickCount(), {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(session.SaveWorld());
+        session.PumpFarWorldAuthorityCapture();
+        EXPECT_EQ(producer->capture(), accepted);
+        transaction.abort(nullptr);
+    }
+    ASSERT_EQ(P::SaveTransaction::active_for(canonical), nullptr);
+    const auto metadata = canonical / "world_info.json";
+    const auto committed_bytes = ReadClockTestFile(metadata);
+    ASSERT_FALSE(committed_bytes.empty());
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, "{"));
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_EQ(producer->capture(), accepted);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_FALSE(producer->request_capture(windows));
+    EXPECT_FALSE(producer->capture_read_error().empty());
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_EQ(producer->capture(), accepted);
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata, committed_bytes));
+    session.FenceFarWorldAuthorityReads(true);
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_EQ(producer->capture(), accepted);
+    EXPECT_FALSE(producer->request_capture(windows));
+    session.FenceFarWorldAuthorityReads(false);
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(producer->capture_status().latest_ready);
+    EXPECT_EQ(producer->capture()->committed.generation, generation);
 }

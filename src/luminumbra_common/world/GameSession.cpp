@@ -3352,7 +3352,9 @@ void GameSession::PumpFarWorldAuthorityCapture() {
             return;
         }
         std::string error;
-        m_farWorldAuthorityProducer->refresh_saved_source(GetWorldSaveDir(), error);
+        if (!m_farWorldAuthorityProducer->refresh_saved_source(GetWorldSaveDir(), error)) {
+            return;
+        }
         m_farWorldSourceNeedsRefresh = false;
     }
     if (m_farWorldAuthorityProducer->needs_capture_boundary()) {
@@ -3656,7 +3658,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             if (producer) {
                 if (canonical && !accepted) {
                     producer->invalidate_source();
-                    refresh_needed = false;
+                    refresh_needed = true;
                 }
                 producer->fence_source_reads(previous);
             }
