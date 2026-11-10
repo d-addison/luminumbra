@@ -355,7 +355,7 @@ class PathGateTests(unittest.TestCase):
         for path in (
             "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
-            ".github/workflows/ci.yml", ".github/workflows/new.yml",
+            ".github/workflows/ci.yml", ".github/workflows/base-retarget.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
             *gate.CI_ENTRYPOINTS,
         ):
@@ -507,8 +507,6 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (cpp != "false" or python != "false")
                             else:
                                 expected = not cancelled and ready and cpp != "false"
-                            expected = expected and (workflow != "ci" or event != "pull_request"
-                                                     or action != "edited" or base_changed)
                             actual = expression.replace("github.event.action", repr(action)).replace(
                                 "github.event.changes.base", repr(base_changed))
                             actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), actual).replace(
