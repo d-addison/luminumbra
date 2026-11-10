@@ -775,7 +775,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                        *m_scentField,
                                                        ScentDomainOrigin(true),
                                                        ScentDomainOrigin(false),
-                                                       kScentCellSize);
+                                                       kScentCellSize,
+                                                       creature_admission);
             }
 
             budget.Next(Stage::Creatures, [&] {
@@ -2213,7 +2214,8 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
                  input,
                  m_activeRegionLedger.records(),
                  true,
-                 m_energyFieldState->regional_deposit_capacity())
+                 m_energyFieldState->regional_deposit_capacity(),
+                 m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>())
                  .accepted)
             throw std::runtime_error("Regional energy emitter batch refused");
         if (!m_energyFieldState->BeginRegionalTick(
@@ -4621,6 +4623,9 @@ void GameSession::CaptureRegionalScent(FieldPageState*& fields) {
 }
 
 bool GameSession::AdvanceNearScent(FieldPageState*& fields) {
+    const auto* admission = m_activeRegionsEnabled
+                                ? m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>()
+                                : nullptr;
     const bool scent_active = HasScentParticipants();
     const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
     const bool foraging_active =
@@ -4636,9 +4641,10 @@ bool GameSession::AdvanceNearScent(FieldPageState*& fields) {
                                               *m_scentField,
                                               ScentDomainOrigin(true),
                                               ScentDomainOrigin(false),
-                                              kScentCellSize);
+                                              kScentCellSize,
+                                              admission);
     if (foraging_active)
-        luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+        luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning, admission);
     double wind_cx = 0.0, wind_cz = 0.0;
     if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
         const auto wind = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
