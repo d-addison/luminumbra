@@ -204,9 +204,11 @@ public:
     bool set_energy_age(const RegionKey& key, std::uint64_t age);
     bool set_energy_ages(const EnergyAges& ages);
     // Prepare sparse consumer registers without copying records or unchanged ages.
-    // Preparation can allocate/refuse; publication only transfers prepared nodes.
+    // Preparation can allocate/refuse; publication only transfers prepared nodes and IDs.
+    // An optional candidate cursor reserves IDs against the combined envelope capacity.
     bool prepare_energy_work(std::span<const std::pair<RegionKey, std::uint64_t>> ages,
-                             std::span<const RegionWork> work);
+                             std::span<const RegionWork> work,
+                             std::optional<std::uint64_t> next_id = std::nullopt);
     // Requires a successful preparation with no intervening ledger mutation.
     void commit_energy_work() noexcept;
     [[nodiscard]] std::size_t energy_publication_growths() const noexcept;

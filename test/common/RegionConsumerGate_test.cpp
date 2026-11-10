@@ -23,6 +23,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/FoliageRegistryStage.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
@@ -1970,6 +1971,52 @@ TEST(RegionConsumerGate, GrazingRetainsAdmissionAcrossBothBoundaryCrossingDirect
         AI::RunWildlifeFoliageOnTick(registry, 3u, {}, resumed, &admission);
         EXPECT_LT(registry.get<C::CreatureComponent>(creature).hunger, hunger);
         EXPECT_LT(registry.get<C::GrazeableComponent>(plant).biomass, biomass);
+    }
+}
+
+TEST(RegionConsumerGate, StagedConsumersRetainCapturedCreatureAdmissionAcrossOwnerCrossings) {
+    for (const bool staged : {false, true}) {
+        for (const bool initially_due : {false, true}) {
+            for (const bool dead : {false, true}) {
+                entt::registry registry;
+                const auto plant = Plant(registry, 511.75f);
+                registry.get<C::TransformComponent>(plant).position.z = 10.0f;
+                registry.emplace<C::GrazeableComponent>(plant).biomass = 0.8f;
+                const auto creature = Creature(registry, initially_due ? 511.9f : 512.1f);
+                registry.get<C::MortalComponent>(creature).dead = dead ? 1 : 0;
+                registry.get<C::CreatureComponent>(creature).eaten = dead;
+                registry.emplace<C::DecayComponent>(creature).decay_duration = 2u;
+                const std::array<RegionKey, 1> due{{{0, 0}}};
+                AI::CreatureTickAdmission admission;
+                admission.Capture(registry, RegionConsumerGate(registry, due));
+                registry.get<C::TransformComponent>(creature).position.x =
+                    initially_due ? 512.1f : 511.9f;
+                F::FoliageRegistryStage stage;
+                if (staged) {
+                    stage.Begin(registry, 1u);
+                }
+                auto& candidate = staged ? stage.registry() : registry;
+                ASSERT_TRUE(candidate.valid(creature));
+                const RegionConsumerGate gate(candidate, due);
+                const auto grazing =
+                    AI::RunWildlifeFoliageOnTick(candidate, 1u, {}, gate, &admission);
+                const auto lifespan = AI::RunLifespanOnTick(candidate, 1u, gate, &admission);
+                const auto decay = AI::RunDecompositionOnTick(candidate, 1u, &admission);
+                if (staged) {
+                    stage.PreparePublication(registry);
+                    stage.Commit(registry);
+                }
+                EXPECT_EQ(grazing.grazers, initially_due && !dead ? 1 : 0);
+                EXPECT_EQ(lifespan.aged, initially_due && !dead ? 1 : 0);
+                EXPECT_EQ(decay.decaying, initially_due && dead ? 1 : 0);
+                EXPECT_EQ(registry.get<C::MortalComponent>(creature).age_ticks,
+                          initially_due && !dead ? 1u : 0u);
+                EXPECT_EQ(registry.get<C::DecayComponent>(creature).decay_ticks,
+                          initially_due && dead ? 1u : 0u);
+                EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(creature).hunger,
+                                initially_due && !dead ? 0.18f : 0.2f);
+            }
+        }
     }
 }
 
