@@ -985,6 +985,7 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
 }
 
 TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounter) {
+    using Luminumbra::Persistence::WorldSaveService;
     DurableFixture fx(/*durable=*/true, /*active_regions=*/true, /*high_res=*/false);
     ASSERT_TRUE(fx.created) << fx.error;
     ASSERT_TRUE(fx.world->durable_residency());
@@ -1000,17 +1001,21 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
     const auto generate = [](const IVec3& coords) {
         auto chunk = std::make_shared<Chunk>(coords);
         chunk->set_state(ChunkState::Idle);
+        chunk->current_lod.store(0);
         chunk->heightmap_data.assign(std::size_t{17} * 17, 10000.0f);
         chunk->mark_sdf_generated_current_params();
         return chunk;
     };
-    const auto saved = generate(IVec3(0, 0, 0));
+    // Incremental saves include every resident in a dirty region. Straddle a
+    // region boundary so the sleeping neighbour's region stays unsaved.
+    const auto saved = generate(IVec3(WorldSaveService::kRegionChunkSpan - 1, 0, 0));
     saved->mark_water_state_dirty();
     ASSERT_TRUE(fx.world->adopt_streamed_chunk(saved));
     // Establish the snapshot before the regenerable neighbour arrives, so later
     // saves exercise incremental selection rather than the initial cache write.
     ASSERT_TRUE(fx.session->SaveWorldState());
-    const auto unsaved = generate(IVec3(1, 0, 0));
+    ASSERT_TRUE(WorldSaveService::has_chunk_snapshot(fx.session->GetWorldSaveDir()));
+    const auto unsaved = generate(IVec3(WorldSaveService::kRegionChunkSpan, 0, 0));
     ASSERT_TRUE(fx.world->adopt_streamed_chunk(unsaved));
     const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> uninterrupted{
         {saved->get_id(), saved}, {unsaved->get_id(), unsaved}};
@@ -1025,13 +1030,17 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
         ASSERT_TRUE(chunk->has_water_sim.load());
         ASSERT_TRUE(chunk->is_water_sleeping.load());
         ASSERT_EQ(chunk->ticks_below_threshold, kCalmTicksToSleep);
+        ASSERT_EQ(chunk->water_bed_mm, std::vector<std::int32_t>(kCellsPerChunk, 10000000));
+        ASSERT_EQ(chunk->water_sim_terrain_height, std::vector<float>(kCellsPerChunk, 10000.0f));
         ASSERT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(kCellsPerChunk, 0));
         ASSERT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(2u * kCellsPerChunk, 0));
     }
     ASSERT_TRUE(saved->has_water_authority());
+    ASSERT_TRUE(saved->is_voxel_data_dirty());
     ASSERT_FALSE(unsaved->needs_authority());
+    ASSERT_FALSE(unsaved->is_water_state_dirty());
+    ASSERT_FALSE(unsaved->is_voxel_data_dirty());
     ASSERT_TRUE(fx.session->SaveWorldState());
-    using Luminumbra::Persistence::WorldSaveService;
     const auto absent =
         WorldSaveService::read_chunk(fx.session->GetWorldSaveDir(), unsaved->get_coords(), true);
     ASSERT_EQ(absent.status, WorldSaveService::ChunkReadStatus::Absent) << absent.error;
@@ -1052,6 +1061,7 @@ TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounte
     ASSERT_FALSE(loaded_world->find_authoritative_chunk(unsaved->get_coords()));
     const auto regenerated = generate(unsaved->get_coords());
     ASSERT_TRUE(loaded_world->adopt_streamed_chunk(regenerated));
+    EXPECT_FALSE(regenerated->has_water_sim.load());
     EXPECT_FALSE(regenerated->is_water_sleeping.load());
     EXPECT_EQ(regenerated->ticks_below_threshold, 0);
     const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> resumed{
