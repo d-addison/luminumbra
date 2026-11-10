@@ -1,9 +1,15 @@
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/CreatureReproductionSystem.h"
+#include "luminumbra_common/ai/DecompositionSystem.h"
+#include "luminumbra_common/ai/InstinctLocomotionSystem.h"
+#include "luminumbra_common/ai/InstinctSystem.h"
 #include "luminumbra_common/ai/LifespanSystem.h"
 #include "luminumbra_common/ai/PerceptionSystem.h"
+#include "luminumbra_common/ai/ScavengingSystem.h"
 #include "luminumbra_common/ai/SteeringConsumer.h"
+#include "luminumbra_common/ai/ThirstSystem.h"
 #include "luminumbra_common/ai/WildlifeFoliageSystem.h"
 #include "luminumbra_common/components/ScavengerComponent.h"
 #include "luminumbra_common/components/ThirstComponents.h"
@@ -1776,10 +1782,35 @@ TEST(RegionConsumerGate, InactiveCreaturePipelineMatchesIndependentFullRateOracl
         registry->get<C::CreatureComponent>(predator).is_predator = true;
         registry->get<C::CreatureGenomeComponent>(predator).vision_range = 0.0f;
         registry->get<C::CreatureGenomeComponent>(predator).hearing_range = 0.0f;
+        registry->emplace<C::MigratoryComponent>(predator).wish_z = 0.25f;
+        registry->emplace<C::TerritoryBiasComponent>(predator).wish_x = 0.5f;
+        registry->emplace<C::PackHunterComponent>(predator) = {0.0f, 1.0f, 1};
     }
     for (std::uint64_t tick = 1u; tick <= 32u; ++tick) {
         CoreCreatureTick(actual, tick);
         CoreCreatureTick(reference, tick, {}, nullptr, true);
+        AI::RunSteeringConsumerOnTick(actual);
+        // Independent full-rate blend for the wishes compared by CreatureBytes.
+        for (const auto entity : reference.view<C::CreatureComponent>()) {
+            auto& cr = reference.get<C::CreatureComponent>(entity);
+            if (cr.eaten) {
+                continue;
+            }
+            if (const auto* pack = reference.try_get<C::PackHunterComponent>(entity);
+                cr.is_predator && pack && pack->in_pack &&
+                (pack->coord_x != 0.0f || pack->coord_z != 0.0f)) {
+                cr.wish_x = pack->coord_x * (cr.move_speed * 1.5f);
+                cr.wish_z = pack->coord_z * (cr.move_speed * 1.5f);
+            }
+            if (const auto* migration = reference.try_get<C::MigratoryComponent>(entity)) {
+                cr.wish_x += migration->wish_x;
+                cr.wish_z += migration->wish_z;
+            }
+            if (const auto* territory = reference.try_get<C::TerritoryBiasComponent>(entity)) {
+                cr.wish_x += territory->wish_x;
+                cr.wish_z += territory->wish_z;
+            }
+        }
         ASSERT_EQ(actual.view<C::CreatureComponent>().size(),
                   reference.view<C::CreatureComponent>().size());
         for (const auto entity : reference.view<C::CreatureComponent>()) {
@@ -1809,6 +1840,387 @@ TEST(RegionConsumerGate, AdmittedPredatorCannotChangeDeniedPreyAcrossBoundary) {
 } // namespace
 
 namespace {
+void AddInstinctState(entt::registry& registry, entt::entity creature, entt::entity target) {
+    auto& agent = registry.emplace<C::InstinctAgentComponent>(creature);
+    agent.actor_id = "grazer";
+    agent.archetype = "herbivore";
+    agent.replan_interval_ticks = 1u;
+    registry.emplace<C::NeedsComponent>(creature).needs = {{"food", 0.2f, 0.1f}};
+    registry.emplace<C::LocomotionProfile>(creature);
+    auto& intent = registry.emplace<C::LocomotionIntentComponent>(creature);
+    intent.wish_xz = {7.0f, 9.0f};
+    intent.arrived = true;
+    registry.emplace<C::ActionPlanComponent>(creature).plan = {{"feed", target, 1.0f, false}};
+    registry.emplace<C::LocomotionPathComponent>(creature).waypoints = {
+        {registry.get<C::TransformComponent>(creature).position.x, 10.0f}};
+}
+
+entt::entity FoodOpportunity(entt::registry& registry, float x) {
+    const auto entity = registry.create();
+    registry.emplace<C::TransformComponent>(entity).position = {x, 0.0f, 10.0f};
+    auto& opportunity = registry.emplace<C::OpportunityComponent>(entity);
+    opportunity.id = "food";
+    opportunity.action = "feed";
+    opportunity.need = "food";
+    opportunity.satisfaction = 1.0f;
+    opportunity.urgency = 1.0f;
+    return entity;
+}
+
+std::string InstinctBytes(const entt::registry& registry, entt::entity entity) {
+    const auto& agent = registry.get<C::InstinctAgentComponent>(entity);
+    const auto& plan = registry.get<C::ActionPlanComponent>(entity);
+    const auto& path = registry.get<C::LocomotionPathComponent>(entity);
+    const auto& intent = registry.get<C::LocomotionIntentComponent>(entity);
+    nlohmann::json bytes = {agent.last_planned_tick,
+                            agent.plans_executed,
+                            AI::SerializeInstinctPlanJson(agent.current_plan, "test"),
+                            plan.current_action_index,
+                            plan.time_in_current_action,
+                            path.index,
+                            intent.wish_xz.x,
+                            intent.wish_xz.y,
+                            intent.arrived};
+    for (const auto& need : registry.get<C::NeedsComponent>(entity).needs) {
+        bytes.push_back({need.name, need.pressure, need.growth_per_tick});
+    }
+    for (const auto& action : plan.plan) {
+        bytes.push_back(
+            {action.name, entt::to_integral(action.target), action.duration, action.flee});
+    }
+    for (const auto& waypoint : path.waypoints) {
+        bytes.push_back({waypoint.x, waypoint.y});
+    }
+    return bytes.dump();
+}
+
+TEST(RegionConsumerGate, SessionFreezesNeedsLocomotionAndCircadianUntilPlantOwnerIsDue) {
+    for (const bool active : {false, true}) {
+        for (const bool subscribed : {false, true}) {
+            W::GameSession session;
+            session.SetActiveRegionsEnabled(active);
+            session.SetReplicatedSimulationAnchors({});
+            session.PinActiveRegion({0, 0}, true);
+            auto& registry = session.GetRegistry();
+            const auto creature = Creature(registry, 513.0f);
+            const auto target = FoodOpportunity(registry, 530.0f);
+            AddInstinctState(registry, creature, target);
+            registry.emplace<C::CircadianComponent>(creature).activity = 0.4f;
+            if (subscribed) {
+                registry.emplace<C::StimulusSubscriptionComponent>(creature).subscriptions = {
+                    {AI::StimulusChannel::Aether, "food", 0.1f}};
+            }
+            const auto plant = Plant(registry, 513.0f);
+            registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+            const auto before = InstinctBytes(registry, creature);
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            EXPECT_EQ(InstinctBytes(registry, creature) == before, active);
+            EXPECT_EQ(registry.get<C::CircadianComponent>(creature).activity == 0.4f, active);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 0u : 1u);
+            session.PinActiveRegion({1, 0}, true);
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            EXPECT_NE(InstinctBytes(registry, creature), before);
+            EXPECT_EQ(registry.get<C::InstinctAgentComponent>(creature).plans_executed,
+                      active ? 1u : 2u);
+            EXPECT_FLOAT_EQ(registry.get<C::NeedsComponent>(creature).needs.front().pressure,
+                            active ? 0.3f : 0.4f);
+            EXPECT_EQ(registry.get<C::LocomotionPathComponent>(creature).index, 1u);
+            EXPECT_NE(registry.get<C::CircadianComponent>(creature).activity, 0.4f);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 1u : 2u);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, GrazingRetainsAdmissionAcrossBothBoundaryCrossingDirections) {
+    for (const bool initially_due : {false, true}) {
+        entt::registry registry;
+        const auto plant = Plant(registry, 511.75f);
+        registry.get<C::TransformComponent>(plant).position.z = 10.0f;
+        registry.emplace<C::GrazeableComponent>(plant).biomass = 0.8f;
+        const auto creature = Creature(registry, initially_due ? 511.9f : 512.1f);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        registry.get<C::TransformComponent>(creature).position.x = initially_due ? 512.1f : 511.9f;
+        const auto stats = AI::RunWildlifeFoliageOnTick(registry, 1u, {}, gate, &admission);
+        EXPECT_EQ(stats.grazers, initially_due ? 1 : 0);
+        EXPECT_EQ(stats.grazed_plants, initially_due ? 1 : 0);
+        EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(creature).hunger,
+                        initially_due ? 0.18f : 0.2f);
+        EXPECT_FLOAT_EQ(registry.get<C::GrazeableComponent>(plant).biomass,
+                        initially_due ? 0.75f : 0.81f);
+        const auto hunger = registry.get<C::CreatureComponent>(creature).hunger;
+        const auto biomass = registry.get<C::GrazeableComponent>(plant).biomass;
+        const RegionConsumerGate blocked(registry, {});
+        admission.Capture(registry, blocked);
+        AI::RunWildlifeFoliageOnTick(registry, 2u, {}, blocked, &admission);
+        EXPECT_EQ(registry.get<C::CreatureComponent>(creature).hunger, hunger);
+        EXPECT_EQ(registry.get<C::GrazeableComponent>(plant).biomass, biomass);
+        const std::array<RegionKey, 2> all_due{{{0, 0}, {1, 0}}};
+        const RegionConsumerGate resumed(registry, all_due);
+        admission.Capture(registry, resumed);
+        AI::RunWildlifeFoliageOnTick(registry, 3u, {}, resumed, &admission);
+        EXPECT_LT(registry.get<C::CreatureComponent>(creature).hunger, hunger);
+        EXPECT_LT(registry.get<C::GrazeableComponent>(plant).biomass, biomass);
+    }
+}
+
+TEST(RegionConsumerGate, SessionDefersDecompositionAndCompletionUntilPlantOwnerIsDue) {
+    for (const std::uint32_t duration : {0u, 2u}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(true);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto corpse = Creature(registry, 513.0f);
+        registry.get<C::CreatureComponent>(corpse).eaten = true;
+        registry.get<C::MortalComponent>(corpse).dead = 1;
+        registry.emplace<C::DecayComponent>(corpse).decay_duration = duration;
+        const auto plant = Plant(registry, 513.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        const auto& decay = registry.get<C::DecayComponent>(corpse);
+        EXPECT_EQ(decay.decay_ticks, 0u);
+        EXPECT_EQ(decay.nutrient_released_milli, 0u);
+        EXPECT_EQ(decay.fully_decomposed, 0u);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+        session.PinActiveRegion({1, 0}, true);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(decay.decay_ticks, duration == 0u ? 0u : 1u);
+        EXPECT_EQ(decay.nutrient_released_milli, duration == 0u ? 1000u : 500u);
+        EXPECT_EQ(decay.fully_decomposed, duration == 0u ? 1u : 0u);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, DeniedOpportunitiesAndNeighborsCannotChangeAdmittedPlansOrSteering) {
+    for (const bool substrate : {false, true}) {
+        entt::registry actual, reference;
+        for (auto* registry : {&actual, &reference}) {
+            const auto blocked = Creature(*registry, 512.1f);
+            const auto target = FoodOpportunity(*registry, 520.0f);
+            const auto admitted = Creature(*registry, 511.9f);
+            AddInstinctState(*registry, blocked, target);
+            AddInstinctState(*registry, admitted, target);
+            registry->get<C::LocomotionPathComponent>(admitted).index = 1u;
+            registry->emplace<C::OpportunityComponent>(blocked) =
+                registry->get<C::OpportunityComponent>(target);
+            registry->get<C::OpportunityComponent>(blocked).id = "better-food";
+        }
+        const auto blocked = entt::entity{0};
+        const auto admitted = entt::entity{2};
+        const auto before = InstinctBytes(actual, blocked);
+        reference.remove<C::OpportunityComponent>(blocked);
+        reference.remove<C::ActionPlanComponent>(blocked);
+        reference.remove<C::InstinctAgentComponent>(blocked);
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(actual, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(actual, gate);
+        const auto plans = AI::RunInstinctSystemOnTick(actual, 1u, nullptr, substrate, &admission);
+        AI::RunInstinctSystemOnTick(reference, 1u, nullptr, substrate);
+        const auto movement = AI::RunInstinctLocomotionOnTick(actual, &admission);
+        AI::RunInstinctLocomotionOnTick(reference);
+        EXPECT_EQ(plans.agents_seen, 1u);
+        EXPECT_EQ(plans.opportunities_considered, 1u);
+        EXPECT_EQ(movement.agents_seen, 1u);
+        EXPECT_LE(movement.neighbor_candidates_examined, 2u);
+        EXPECT_EQ(InstinctBytes(actual, blocked), before);
+        EXPECT_EQ(InstinctBytes(actual, admitted), InstinctBytes(reference, admitted));
+    }
+}
+
+TEST(RegionConsumerGate, DeniedLocomotionTargetIsIgnoredAndMissingIntentIsNotCreated) {
+    entt::registry registry;
+    const auto blocked = Creature(registry, 512.1f);
+    const auto admitted = Creature(registry, 511.9f);
+    AddInstinctState(registry, blocked, admitted);
+    AddInstinctState(registry, admitted, blocked);
+    registry.remove<C::LocomotionIntentComponent>(blocked);
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, RegionConsumerGate(registry, due));
+    const auto stats = AI::RunInstinctLocomotionOnTick(registry, &admission);
+    EXPECT_FALSE(registry.all_of<C::LocomotionIntentComponent>(blocked));
+    EXPECT_EQ(stats.agents_idle, 1u);
+    EXPECT_EQ(stats.agents_arrived, 0u);
+    EXPECT_EQ(registry.get<C::ActionPlanComponent>(admitted).current_action_index, 0u);
+    EXPECT_EQ(registry.get<C::LocomotionPathComponent>(admitted).index, 0u);
+    EXPECT_EQ(registry.get<C::LocomotionIntentComponent>(admitted).wish_xz.x, 0.0f);
+}
+
+TEST(RegionConsumerGate, SteeringDenialFreezesPackMigrationAndTerritoryWishes) {
+    for (const bool predator : {false, true}) {
+        entt::registry registry;
+        const auto creature = Creature(registry, 513.0f);
+        auto& cr = registry.get<C::CreatureComponent>(creature);
+        cr.is_predator = predator;
+        registry.emplace<C::PackHunterComponent>(creature) = {1.0f, 0.0f, 1};
+        registry.emplace<C::MigratoryComponent>(creature).wish_z = 1.0f;
+        registry.emplace<C::TerritoryBiasComponent>(creature).wish_x = 2.0f;
+        const auto before = CreatureBytes(registry, creature);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, RegionConsumerGate(registry, {}));
+        const auto stats = AI::RunSteeringConsumerOnTick(registry, &admission);
+        EXPECT_EQ(stats.packed + stats.migrated + stats.homed, 0);
+        EXPECT_EQ(CreatureBytes(registry, creature), before);
+        const auto resumed = AI::RunSteeringConsumerOnTick(registry);
+        EXPECT_EQ(resumed.packed, predator ? 1 : 0);
+        EXPECT_EQ(resumed.migrated, 1);
+        EXPECT_EQ(resumed.homed, 1);
+        EXPECT_EQ(cr.wish_x, predator ? cr.move_speed * 1.5f + 2.0f : 2.0f);
+        EXPECT_EQ(cr.wish_z, 1.0f);
+    }
+}
+
+TEST(RegionConsumerGate, SessionDoesNotBlendSurvivalWishesIntoDeniedCreatures) {
+    for (const bool drink : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(true);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto creature = Creature(registry, 513.0f);
+        auto& cr = registry.get<C::CreatureComponent>(creature);
+        cr.hunger = 0.5f;
+        cr.last_action = static_cast<int>(AI::CreatureAction::Drink);
+        if (drink) {
+            registry.emplace<C::ThirstComponent>(creature).thirst = 1.0f;
+            const auto water = registry.create();
+            registry.emplace<C::TransformComponent>(water).position = {533.0f, 0.0f, 10.0f};
+            registry.emplace<C::WaterHoleComponent>(water);
+        } else {
+            registry.emplace<C::ScavengerComponent>(creature);
+            const auto corpse = Creature(registry, 533.0f);
+            registry.get<C::CreatureComponent>(corpse).eaten = true;
+        }
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        if (drink) {
+            EXPECT_GT(registry.get<C::ThirstComponent>(creature).wish_x, 0.0f);
+        } else {
+            EXPECT_GT(registry.get<C::ScavengerComponent>(creature).wish_x, 0.0f);
+        }
+        EXPECT_EQ(cr.wish_x, 0.0f);
+        EXPECT_EQ(cr.wish_z, 0.0f);
+    }
+}
+} // namespace
+
+namespace {
+TEST(RegionConsumerGate, NewConsumersDenyMissingInvalidAndEmptyOwnersBeforeMutation) {
+    for (const bool empty : {false, true}) {
+        entt::registry registry;
+        const auto target = FoodOpportunity(registry, 20.0f);
+        const auto missing = Creature(registry, 10.0f);
+        const auto invalid = Creature(registry, 10.0f);
+        const auto valid = Creature(registry, 10.0f);
+        for (const auto entity : {missing, invalid, valid}) {
+            AddInstinctState(registry, entity, target);
+            registry.get<C::MortalComponent>(entity).dead = 1;
+            registry.emplace<C::DecayComponent>(entity).decay_duration = 0u;
+            registry.emplace<C::CircadianComponent>(entity).activity = 0.4f;
+            registry.emplace<C::MigratoryComponent>(entity).wish_x = 1.0f;
+        }
+        registry.remove<C::TransformComponent>(missing);
+        registry.get<C::TransformComponent>(invalid).position.x =
+            std::numeric_limits<float>::infinity();
+        const std::vector<RegionKey> due =
+            empty ? std::vector<RegionKey>{} : std::vector<RegionKey>{{0, 0}, {0, 0}};
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, RegionConsumerGate(registry, due));
+        const std::array before{InstinctBytes(registry, missing),
+                                InstinctBytes(registry, invalid),
+                                InstinctBytes(registry, valid)};
+        const auto plans = AI::RunInstinctSystemOnTick(registry, 1u, nullptr, true, &admission);
+        const auto moves = AI::RunInstinctLocomotionOnTick(registry, &admission);
+        const auto steering = AI::RunSteeringConsumerOnTick(registry, &admission);
+        const auto decay = AI::RunDecompositionOnTick(registry, 1u, &admission);
+        const auto circadian = AI::RunCircadianOnTick(registry, 0.5f, 1.0f, &admission);
+        EXPECT_EQ(plans.agents_seen, empty ? 0u : 1u);
+        EXPECT_EQ(moves.agents_seen, empty ? 0u : 1u);
+        EXPECT_EQ(steering.migrated, empty ? 0 : 1);
+        EXPECT_EQ(decay.finished, empty ? 0 : 1);
+        EXPECT_EQ(circadian.participants, empty ? 0 : 1);
+        const std::array entities{missing, invalid, valid};
+        for (std::size_t index = 0; index < entities.size(); ++index) {
+            const auto entity = entities[index];
+            if (entity == valid && !empty) {
+                continue;
+            }
+            EXPECT_EQ(InstinctBytes(registry, entity), before[index]);
+            EXPECT_EQ(registry.get<C::DecayComponent>(entity).nutrient_released_milli, 0u);
+            EXPECT_EQ(registry.get<C::DecayComponent>(entity).fully_decomposed, 0u);
+            EXPECT_EQ(registry.get<C::CircadianComponent>(entity).activity, 0.4f);
+            EXPECT_EQ(registry.get<C::CreatureComponent>(entity).wish_x, 0.0f);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, NewConsumersKeepFullRateDefaultsAndAdmitBirthsAfterCapture) {
+    for (const bool cached : {false, true}) {
+        entt::registry registry;
+        const auto target = FoodOpportunity(registry, 30.0f);
+        const auto creature = Creature(registry, 10.0f);
+        AddInstinctState(registry, creature, target);
+        registry.emplace<C::CircadianComponent>(creature).activity = 0.4f;
+        registry.get<C::MortalComponent>(creature).dead = 1;
+        registry.emplace<C::DecayComponent>(creature).decay_duration = 2u;
+        registry.emplace<C::MigratoryComponent>(creature).wish_x = 1.0f;
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, {});
+        // A newborn is absent from the captured roster; other entity kinds also keep full rate.
+        const auto newborn = Creature(registry, 513.0f);
+        AddInstinctState(registry, newborn, target);
+        const auto other = registry.create();
+        registry.emplace<C::CircadianComponent>(other).nocturnal = 1u;
+        registry.emplace<C::MortalComponent>(other).dead = 1u;
+        registry.emplace<C::DecayComponent>(other).decay_duration = 0u;
+        const auto* cache = cached ? &admission : nullptr;
+        for (std::uint64_t tick = 1u; tick <= 3u; ++tick) {
+            AI::InstinctSystemTickStats plans;
+            AI::InstinctLocomotionTickStats moves;
+            AI::SteeringConsumerStats steering;
+            AI::DecompositionStats decay;
+            AI::CircadianStats circadian;
+            if (cached) {
+                plans = AI::RunInstinctSystemOnTick(registry, tick, nullptr, true, cache);
+                moves = AI::RunInstinctLocomotionOnTick(registry, cache);
+                steering = AI::RunSteeringConsumerOnTick(registry, cache);
+                decay = AI::RunDecompositionOnTick(registry, tick, cache);
+                circadian = AI::RunCircadianOnTick(registry, 0.5f, 1.0f, cache);
+            } else {
+                plans = AI::RunInstinctSystemOnTick(registry, tick);
+                moves = AI::RunInstinctLocomotionOnTick(registry);
+                steering = AI::RunSteeringConsumerOnTick(registry);
+                decay = AI::RunDecompositionOnTick(registry, tick);
+                circadian = AI::RunCircadianOnTick(registry, 0.5f);
+            }
+            EXPECT_EQ(plans.agents_seen, 2u);
+            EXPECT_EQ(plans.agents_replanned, 2u);
+            EXPECT_EQ(moves.agents_seen, 2u);
+            EXPECT_EQ(steering.migrated, 1);
+            EXPECT_EQ(decay.finished, tick <= 2u ? 1 : 0);
+            EXPECT_EQ(circadian.participants, 2);
+            EXPECT_FLOAT_EQ(registry.get<C::NeedsComponent>(creature).needs.front().pressure,
+                            0.2f + 0.1f * static_cast<float>(tick));
+            EXPECT_EQ(registry.get<C::InstinctAgentComponent>(newborn).plans_executed, tick);
+            EXPECT_EQ(registry.get<C::LocomotionPathComponent>(creature).index, 1u);
+            EXPECT_EQ(registry.get<C::CreatureComponent>(creature).wish_x,
+                      static_cast<float>(tick));
+            EXPECT_NEAR(registry.get<C::CircadianComponent>(creature).activity, 1.0f, 1e-5f);
+            EXPECT_NEAR(registry.get<C::CircadianComponent>(other).activity, 0.0f, 1e-5f);
+        }
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).decay_ticks, 2u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(creature).nutrient_released_milli, 1000u);
+    }
+}
+
 TEST(RegionConsumerGate, SessionFreezesDeniedMotorWishesAndSuppressesAvatarInputUntilAdmission) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
