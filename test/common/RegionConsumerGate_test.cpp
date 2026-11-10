@@ -3,14 +3,19 @@
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/CreatureReproductionSystem.h"
 #include "luminumbra_common/ai/DecompositionSystem.h"
+#include "luminumbra_common/ai/HerdAlarmSystem.h"
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/ai/InstinctSystem.h"
 #include "luminumbra_common/ai/LifespanSystem.h"
+#include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/PerceptionSystem.h"
+#include "luminumbra_common/ai/PredatorPackSystem.h"
 #include "luminumbra_common/ai/ScavengingSystem.h"
 #include "luminumbra_common/ai/SteeringConsumer.h"
+#include "luminumbra_common/ai/TerritorySystem.h"
 #include "luminumbra_common/ai/ThirstSystem.h"
 #include "luminumbra_common/ai/WildlifeFoliageSystem.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/ScavengerComponent.h"
 #include "luminumbra_common/components/ThirstComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -2102,9 +2107,9 @@ TEST(RegionConsumerGate, SessionDoesNotBlendSurvivalWishesIntoDeniedCreatures) {
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
         if (drink) {
-            EXPECT_GT(registry.get<C::ThirstComponent>(creature).wish_x, 0.0f);
+            EXPECT_EQ(registry.get<C::ThirstComponent>(creature).wish_x, 0.0f);
         } else {
-            EXPECT_GT(registry.get<C::ScavengerComponent>(creature).wish_x, 0.0f);
+            EXPECT_EQ(registry.get<C::ScavengerComponent>(creature).wish_x, 0.0f);
         }
         EXPECT_EQ(cr.wish_x, 0.0f);
         EXPECT_EQ(cr.wish_z, 0.0f);
@@ -2327,8 +2332,9 @@ TEST(RegionConsumerGate, SessionFreezesDeniedMotorWishesAndSuppressesAvatarInput
                         EXPECT_NEAR(velocity.z, denied ? 0.0f : cr.wish_z, 1.0e-4f);
                     }
                 }
-                EXPECT_NE(registry.get<C::ThirstComponent>(creatures[3]).wish_x, 0.0f);
-                EXPECT_NE(registry.get<C::ScavengerComponent>(creatures[4]).wish_x, 0.0f);
+                EXPECT_EQ(registry.get<C::ThirstComponent>(creatures[3]).wish_x != 0.0f, !denied);
+                EXPECT_EQ(registry.get<C::ScavengerComponent>(creatures[4]).wish_x != 0.0f,
+                          !denied);
             }
         }
     }
@@ -2393,5 +2399,524 @@ TEST(RegionConsumerGate, PerceptionTargetsShareCapturedCreatureAdmissionAndResum
             }
         }
     }
+}
+} // namespace
+
+namespace {
+namespace Anim = luminumbra::animation;
+
+enum class SecondaryConsumer {
+    Animation,
+    Thirst,
+    Scavenging,
+    Alarm,
+    Territory,
+    Pack,
+    Migration
+};
+constexpr std::array kSecondaryConsumers{SecondaryConsumer::Animation,
+                                         SecondaryConsumer::Thirst,
+                                         SecondaryConsumer::Scavenging,
+                                         SecondaryConsumer::Alarm,
+                                         SecondaryConsumer::Territory,
+                                         SecondaryConsumer::Pack,
+                                         SecondaryConsumer::Migration};
+
+void AddSecondaryState(entt::registry& registry,
+                       entt::entity entity,
+                       const Anim::Skeleton& skeleton,
+                       const Anim::AnimationClip& clip) {
+    auto& player = registry.emplace<Anim::AnimationPlayerComponent>(entity);
+    player.skeleton = &skeleton;
+    player.clip = &clip;
+    registry.emplace<C::ThirstComponent>(entity) = {0.8f, 7.0f, 8.0f, 1u, 0.6f};
+    registry.emplace<C::ScavengerComponent>(entity) = {7.0f, 8.0f, 1u};
+    registry.emplace<C::AlarmComponent>(entity) = {.level = 0.8f, .alarmed = 1u};
+    registry.emplace<C::TerritoryComponent>(entity);
+    registry.emplace<C::PackHunterComponent>(entity) = {7.0f, 8.0f, 1u};
+    registry.emplace<C::MigratoryComponent>(entity) = {0.2f, 7.0f, 8.0f};
+    auto& cr = registry.get<C::CreatureComponent>(entity);
+    cr.is_predator = true;
+    cr.hunger = 0.8f;
+    cr.move_speed = 0.0f;
+    if (auto* genome = registry.try_get<C::CreatureGenomeComponent>(entity)) {
+        genome->vision_range = 0.0f;
+        genome->hearing_range = 0.0f;
+    }
+}
+
+std::string
+SecondaryBytes(const entt::registry& registry, entt::entity entity, SecondaryConsumer consumer) {
+    switch (consumer) {
+        case SecondaryConsumer::Animation: {
+            const auto& player = registry.get<Anim::AnimationPlayerComponent>(entity);
+            return nlohmann::json({player.time, Anim::PoseChecksum(player.pose), player.palette})
+                .dump();
+        }
+        case SecondaryConsumer::Thirst: {
+            const auto& th = registry.get<C::ThirstComponent>(entity);
+            return nlohmann::json(
+                       {th.thirst, th.wish_x, th.wish_z, th.drinking, th.water_proximity})
+                .dump();
+        }
+        case SecondaryConsumer::Scavenging: {
+            const auto& sc = registry.get<C::ScavengerComponent>(entity);
+            return nlohmann::json({sc.wish_x,
+                                   sc.wish_z,
+                                   sc.feeding,
+                                   registry.get<C::CreatureComponent>(entity).hunger})
+                .dump();
+        }
+        case SecondaryConsumer::Alarm: {
+            const auto& alarm = registry.get<C::AlarmComponent>(entity);
+            return nlohmann::json({alarm.alarmed, alarm.level}).dump();
+        }
+        case SecondaryConsumer::Territory: {
+            const auto& territory = registry.get<C::TerritoryComponent>(entity);
+            nlohmann::json bytes = {
+                territory.home_x, territory.home_z, territory.radius, territory.established};
+            if (const auto* bias = registry.try_get<C::TerritoryBiasComponent>(entity)) {
+                bytes.push_back({bias->wish_x, bias->wish_z});
+            }
+            return bytes.dump();
+        }
+        case SecondaryConsumer::Pack: {
+            const auto& pack = registry.get<C::PackHunterComponent>(entity);
+            return nlohmann::json({pack.coord_x, pack.coord_z, pack.in_pack}).dump();
+        }
+        case SecondaryConsumer::Migration: {
+            const auto& migration = registry.get<C::MigratoryComponent>(entity);
+            return nlohmann::json({migration.drive, migration.wish_x, migration.wish_z}).dump();
+        }
+    }
+    return {};
+}
+
+void SecondaryTick(entt::registry& registry, const AI::CreatureTickAdmission* admission = nullptr) {
+    Anim::SamplePosesOnTick(registry, 1.0 / 30.0, admission);
+    AI::RunThirstOnTick(registry, 1.0f / 30.0f, {}, admission);
+    AI::RunScavengingOnTick(registry, 1u, {}, admission);
+    AI::RunHerdAlarmOnTick(registry, 1.0f / 30.0f, admission);
+    AI::RunTerritoryOnTick(registry, 1u, admission);
+    AI::RunPredatorPackOnTick(registry, 1u, admission);
+    AI::RunMigrationOnTick(registry, 0.0f, admission);
+}
+
+TEST(RegionConsumerGate, SessionSecondaryConsumersFreezeAndResumeAlongsidePlant) {
+    const Anim::Skeleton skeleton{{Anim::SkeletonJoint{}}};
+    const Anim::AnimationClip clip{.duration = 1.0f, .tracks = {}};
+    for (const bool active : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(active);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto creature = Creature(registry, 513.0f);
+        AddSecondaryState(registry, creature, skeleton, clip);
+        const auto plant = Plant(registry, 513.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        std::array<std::string, kSecondaryConsumers.size()> before;
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            before[index] = SecondaryBytes(registry, creature, kSecondaryConsumers[index]);
+        }
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            SCOPED_TRACE(index);
+            EXPECT_EQ(SecondaryBytes(registry, creature, kSecondaryConsumers[index]) ==
+                          before[index],
+                      active);
+        }
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 0u : 1u);
+        session.PinActiveRegion({1, 0}, true);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            SCOPED_TRACE(index);
+            EXPECT_NE(SecondaryBytes(registry, creature, kSecondaryConsumers[index]),
+                      before[index]);
+        }
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, active ? 1u : 2u);
+        EXPECT_DOUBLE_EQ(registry.get<Anim::AnimationPlayerComponent>(creature).time,
+                         (active ? 1.0 : 2.0) * session.GetSimulationClock().fixed_dt());
+    }
+}
+
+TEST(RegionConsumerGate, SecondaryConsumersDenyInvalidMissingAndEmptyOwnersBeforeAnyWrite) {
+    const Anim::Skeleton skeleton{{Anim::SkeletonJoint{}}};
+    const Anim::AnimationClip clip{.duration = 1.0f, .tracks = {}};
+    for (const bool empty : {false, true}) {
+        entt::registry registry;
+        const auto missing = Creature(registry, 10.0f);
+        const auto invalid = Creature(registry, 10.0f);
+        const auto valid = Creature(registry, 10.0f);
+        for (const auto entity : {missing, invalid, valid}) {
+            AddSecondaryState(registry, entity, skeleton, clip);
+        }
+        registry.remove<C::TransformComponent>(missing);
+        registry.get<C::TransformComponent>(invalid).position.x =
+            std::numeric_limits<float>::infinity();
+        const std::vector<RegionKey> due =
+            empty ? std::vector<RegionKey>{} : std::vector<RegionKey>{{0, 0}, {0, 0}};
+        const auto plant = Plant(registry, 10.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        const auto visits = gate.owner_visits();
+        std::vector<std::string> before;
+        for (const auto entity : {missing, invalid, valid}) {
+            for (const auto consumer : kSecondaryConsumers) {
+                before.push_back(SecondaryBytes(registry, entity, consumer));
+            }
+        }
+        SecondaryTick(registry, &admission);
+        EXPECT_EQ(gate.owner_visits(), visits);
+        EXPECT_EQ(admission.owner_visits(), 3u);
+        AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, empty ? 0u : 1u);
+        std::size_t index = 0;
+        for (const auto entity : {missing, invalid, valid}) {
+            for (const auto consumer : kSecondaryConsumers) {
+                if (entity != valid || empty) {
+                    EXPECT_EQ(SecondaryBytes(registry, entity, consumer), before[index]);
+                }
+                ++index;
+            }
+            if (entity != valid || empty) {
+                EXPECT_FALSE(registry.all_of<C::TerritoryBiasComponent>(entity));
+            }
+        }
+        registry.emplace<C::TransformComponent>(missing).position = {10.0f, 0.0f, 10.0f};
+        registry.get<C::TransformComponent>(invalid).position.x = 10.0f;
+        const std::array<RegionKey, 1> resumed_due{{{0, 0}}};
+        const RegionConsumerGate resumed_gate(registry, resumed_due);
+        admission.Capture(registry, resumed_gate);
+        SecondaryTick(registry, &admission);
+        AI::RunLifespanOnTick(registry, 2u, resumed_gate, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, empty ? 1u : 2u);
+        index = 0;
+        for (const auto entity : {missing, invalid, valid}) {
+            for (const auto consumer : kSecondaryConsumers) {
+                EXPECT_NE(SecondaryBytes(registry, entity, consumer), before[index]);
+                ++index;
+            }
+        }
+    }
+}
+
+TEST(RegionConsumerGate, SecondaryConsumersUseCapturedOwnersAcrossMovementAndResumeWithPlant) {
+    const Anim::Skeleton skeleton{{Anim::SkeletonJoint{}}};
+    const Anim::AnimationClip clip{.duration = 1.0f, .tracks = {}};
+    for (const bool starts_due : {false, true}) {
+        entt::registry registry;
+        const auto entity = Creature(registry, starts_due ? 511.9f : 512.1f);
+        AddSecondaryState(registry, entity, skeleton, clip);
+        const auto plant = Plant(registry, starts_due ? 511.9f : 512.1f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        registry.get<C::TransformComponent>(entity).position.x = starts_due ? 512.1f : 511.9f;
+        std::array<std::string, kSecondaryConsumers.size()> before;
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            before[index] = SecondaryBytes(registry, entity, kSecondaryConsumers[index]);
+        }
+        SecondaryTick(registry, &admission);
+        AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, starts_due ? 1u : 0u);
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            EXPECT_EQ(SecondaryBytes(registry, entity, kSecondaryConsumers[index]) == before[index],
+                      !starts_due);
+        }
+        admission.Capture(registry, {});
+        SecondaryTick(registry, &admission);
+        AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, starts_due ? 2u : 1u);
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            EXPECT_NE(SecondaryBytes(registry, entity, kSecondaryConsumers[index]), before[index]);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, ScavengingRequiresBothFoodSourceAndRecipientAndResumesWithPlant) {
+    for (const bool deny_scavenger : {false, true}) {
+        for (const bool mortal_carcass : {false, true}) {
+            entt::registry registry;
+            const auto scavenger = Creature(registry, deny_scavenger ? 512.1f : 511.9f);
+            const auto carcass = Creature(registry, deny_scavenger ? 511.9f : 512.1f);
+            registry.emplace<C::ScavengerComponent>(scavenger) = {7.0f, 8.0f, 1u};
+            registry.get<C::CreatureComponent>(scavenger).hunger = 0.8f;
+            registry.get<C::CreatureComponent>(carcass).eaten = !mortal_carcass;
+            registry.get<C::MortalComponent>(carcass).dead = mortal_carcass ? 1u : 0u;
+            const auto plant = Plant(registry, 512.1f);
+            registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+            const std::array<RegionKey, 1> due{{{0, 0}}};
+            const RegionConsumerGate gate(registry, due);
+            AI::CreatureTickAdmission admission;
+            admission.Capture(registry, gate);
+            const auto food_before = CreatureBytes(registry, carcass);
+            const auto before = SecondaryBytes(registry, scavenger, SecondaryConsumer::Scavenging);
+            const auto denied = AI::RunScavengingOnTick(registry, 1u, {}, &admission);
+            AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+            EXPECT_EQ(denied.feeding, 0);
+            EXPECT_EQ(denied.seeking, 0);
+            EXPECT_EQ(denied.scavengers, deny_scavenger ? 0 : 1);
+            EXPECT_EQ(denied.carcasses, deny_scavenger ? 1 : 0);
+            EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(scavenger).hunger, 0.8f);
+            if (deny_scavenger) {
+                EXPECT_EQ(SecondaryBytes(registry, scavenger, SecondaryConsumer::Scavenging),
+                          before);
+            } else {
+                EXPECT_EQ(CreatureBytes(registry, carcass), food_before);
+            }
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+            admission.Capture(registry, {});
+            const auto resumed = AI::RunScavengingOnTick(registry, 2u, {}, &admission);
+            AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+            EXPECT_EQ(resumed.feeding, 1);
+            EXPECT_EQ(resumed.carcasses, 1);
+            EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(scavenger).hunger, 0.75f);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, AlarmSourcesAndListenersRequireAdmissionAndResumeWithPlant) {
+    for (const bool deny_source : {false, true}) {
+        entt::registry registry;
+        const auto source = Creature(registry, deny_source ? 512.1f : 511.9f);
+        const auto listener = Creature(registry, deny_source ? 511.9f : 512.1f);
+        registry.emplace<C::AlarmComponent>(source) = {.level = 0.8f, .alarmed = 1u};
+        registry.emplace<C::AlarmComponent>(listener) = {.level = 0.1f, .alarmed = 0u};
+        const auto plant = Plant(registry, 512.1f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        const auto denied = AI::RunHerdAlarmOnTick(registry, 1.0f / 30.0f, &admission);
+        AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+        EXPECT_EQ(denied.participants, 1);
+        EXPECT_EQ(denied.sources, deny_source ? 0 : 1);
+        EXPECT_FLOAT_EQ(registry.get<C::AlarmComponent>(source).level, deny_source ? 0.8f : 1.0f);
+        EXPECT_FLOAT_EQ(registry.get<C::AlarmComponent>(listener).level,
+                        deny_source ? 0.1f * AI::kAlarmDecay : 0.1f);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+        admission.Capture(registry, {});
+        const auto resumed = AI::RunHerdAlarmOnTick(registry, 1.0f / 30.0f, &admission);
+        AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+        EXPECT_EQ(resumed.participants, 2);
+        EXPECT_EQ(resumed.sources, 1);
+        EXPECT_FLOAT_EQ(registry.get<C::AlarmComponent>(source).level, 1.0f);
+        EXPECT_GT(registry.get<C::AlarmComponent>(listener).level, 0.1f);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, PackMembersAndPreyRequireAdmissionAndResumeWithPlant) {
+    for (const bool deny_prey : {false, true}) {
+        entt::registry registry;
+        const auto hunter = Creature(registry, 511.8f);
+        const auto ally = Creature(registry, deny_prey ? 511.9f : 512.1f);
+        const auto prey = Creature(registry, deny_prey ? 512.1f : 510.0f);
+        registry.get<C::CreatureComponent>(hunter).is_predator = true;
+        registry.get<C::CreatureComponent>(ally).is_predator = true;
+        registry.emplace<C::PackHunterComponent>(hunter);
+        registry.emplace<C::PackHunterComponent>(ally) = {7.0f, 8.0f, 1u};
+        const auto plant = Plant(registry, 512.1f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        AI::CreatureTickAdmission admission;
+        admission.Capture(registry, gate);
+        const auto before = SecondaryBytes(registry, ally, SecondaryConsumer::Pack);
+        const auto prey_before = CreatureBytes(registry, prey);
+        const auto denied = AI::RunPredatorPackOnTick(registry, 1u, &admission);
+        EXPECT_EQ(denied.participants, deny_prey ? 2 : 1);
+        EXPECT_EQ(denied.hunting, deny_prey ? 0 : 1);
+        EXPECT_EQ(registry.get<C::PackHunterComponent>(hunter).in_pack, deny_prey ? 1u : 0u);
+        EXPECT_EQ(CreatureBytes(registry, prey), prey_before);
+        if (!deny_prey) {
+            EXPECT_EQ(SecondaryBytes(registry, ally, SecondaryConsumer::Pack), before);
+            EXPECT_LT(registry.get<C::PackHunterComponent>(hunter).coord_x, 0.0f);
+        }
+        AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+        admission.Capture(registry, {});
+        const auto resumed = AI::RunPredatorPackOnTick(registry, 2u, &admission);
+        AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+        EXPECT_EQ(resumed.packed, 2);
+        EXPECT_EQ(resumed.hunting, 2);
+        EXPECT_NE(SecondaryBytes(registry, ally, SecondaryConsumer::Pack), before);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, SecondaryDefaultsAndNewbornsKeepFullRateWhileCapturedOwnersFreeze) {
+    const Anim::Skeleton skeleton{{Anim::SkeletonJoint{}}};
+    const Anim::AnimationClip clip{.duration = 1.0f, .tracks = {}};
+    for (const bool cached : {false, true}) {
+        entt::registry registry;
+        const auto parent = Creature(registry, 513.0f);
+        AddSecondaryState(registry, parent, skeleton, clip);
+        AI::CreatureTickAdmission admission;
+        const auto plant = Plant(registry, 513.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        const RegionConsumerGate gate(registry, {});
+        admission.Capture(registry, gate);
+        std::array<std::string, kSecondaryConsumers.size()> before;
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            before[index] = SecondaryBytes(registry, parent, kSecondaryConsumers[index]);
+        }
+        const auto newborn = Creature(registry, 514.0f);
+        AddSecondaryState(registry, newborn, skeleton, clip);
+        const auto other = registry.create();
+        registry.emplace<C::TransformComponent>(other).position = {515.0f, 0.0f, 10.0f};
+        registry.emplace<Anim::AnimationPlayerComponent>(other).skeleton = &skeleton;
+        registry.get<Anim::AnimationPlayerComponent>(other).clip = &clip;
+        registry.emplace<C::ThirstComponent>(other).thirst = 0.8f;
+        registry.emplace<C::TerritoryComponent>(other);
+        registry.emplace<C::MigratoryComponent>(other);
+        SecondaryTick(registry, cached ? &admission : nullptr);
+        for (const auto entity : {parent, newborn, other}) {
+            if (cached && entity == parent) {
+                continue;
+            }
+            const auto& player = registry.get<Anim::AnimationPlayerComponent>(entity);
+            EXPECT_DOUBLE_EQ(player.time, 1.0 / 30.0);
+            EXPECT_EQ(Anim::PoseChecksum(player.pose),
+                      Anim::PoseChecksum(Anim::MakeBindPose(skeleton)));
+            std::vector<float> expected_palette;
+            Anim::ComputeJointPalette(skeleton, Anim::MakeBindPose(skeleton), expected_palette);
+            EXPECT_EQ(player.palette, expected_palette);
+            const auto& thirst = registry.get<C::ThirstComponent>(entity);
+            EXPECT_FLOAT_EQ(thirst.thirst, 0.8f + AI::kThirstRise * (1.0f / 30.0f));
+            EXPECT_FLOAT_EQ(thirst.wish_x, 0.0f);
+            EXPECT_FLOAT_EQ(thirst.water_proximity, 0.0f);
+            const auto& territory = registry.get<C::TerritoryComponent>(entity);
+            EXPECT_EQ(territory.established, 1u);
+            EXPECT_FLOAT_EQ(territory.home_x,
+                            registry.get<C::TransformComponent>(entity).position.x);
+            EXPECT_FLOAT_EQ(registry.get<C::TerritoryBiasComponent>(entity).wish_x, 0.0f);
+            EXPECT_FLOAT_EQ(registry.get<C::MigratoryComponent>(entity).drive,
+                            AI::MigrationDriveAt(0.0f));
+        }
+        for (const auto entity : {parent, newborn}) {
+            if (cached && entity == parent) {
+                continue;
+            }
+            EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(entity).hunger, 0.8f);
+            EXPECT_FLOAT_EQ(registry.get<C::ScavengerComponent>(entity).wish_x, 0.0f);
+            EXPECT_EQ(registry.get<C::ScavengerComponent>(entity).feeding, 0u);
+            EXPECT_FLOAT_EQ(registry.get<C::AlarmComponent>(entity).level, 1.0f);
+            EXPECT_EQ(registry.get<C::PackHunterComponent>(entity).in_pack, cached ? 0u : 1u);
+            EXPECT_FLOAT_EQ(registry.get<C::PackHunterComponent>(entity).coord_x, 0.0f);
+        }
+        AI::RunLifespanOnTick(
+            registry, 1u, cached ? gate : RegionConsumerGate{}, cached ? &admission : nullptr);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, cached ? 0u : 1u);
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            EXPECT_EQ(SecondaryBytes(registry, parent, kSecondaryConsumers[index]) == before[index],
+                      cached);
+        }
+        admission.Capture(registry, {});
+        SecondaryTick(registry, &admission);
+        AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+        EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, cached ? 1u : 2u);
+        for (std::size_t index = 0; index < kSecondaryConsumers.size(); ++index) {
+            EXPECT_NE(SecondaryBytes(registry, parent, kSecondaryConsumers[index]), before[index]);
+        }
+    }
+}
+TEST(RegionConsumerGate, SecondaryTargetTiesIgnoreRegistryOrder) {
+    for (const bool along_z : {false, true}) {
+        for (const bool reverse : {false, true}) {
+            entt::registry registry;
+            const auto actor = Creature(registry, 100.0f);
+            registry.get<C::CreatureComponent>(actor).hunger = 0.8f;
+            registry.emplace<C::ScavengerComponent>(actor);
+            registry.emplace<C::PackHunterComponent>(actor);
+            for (const float x :
+                 (reverse ? std::array{90.0f, 110.0f} : std::array{110.0f, 90.0f})) {
+                const auto food = Creature(registry, along_z ? 100.0f : x);
+                if (along_z) {
+                    registry.get<C::TransformComponent>(food).position.z = x - 90.0f;
+                }
+                registry.get<C::CreatureComponent>(food).eaten = true;
+            }
+            const auto denied = Creature(registry, 513.0f);
+            registry.get<C::CreatureComponent>(denied).is_predator = true;
+            registry.emplace<C::ScavengerComponent>(denied) = {7.0f, 8.0f, 1u};
+            registry.emplace<C::PackHunterComponent>(denied) = {7.0f, 8.0f, 1u};
+            const auto plant = Plant(registry, 513.0f);
+            registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+            const std::array<RegionKey, 1> due{{{0, 0}}};
+            const RegionConsumerGate gate(registry, due);
+            AI::CreatureTickAdmission admission;
+            admission.Capture(registry, gate);
+            const auto scavenger_before =
+                SecondaryBytes(registry, denied, SecondaryConsumer::Scavenging);
+            const auto pack_before = SecondaryBytes(registry, denied, SecondaryConsumer::Pack);
+            const auto scavenging = AI::RunScavengingOnTick(registry, 1u, {}, &admission);
+            EXPECT_EQ(scavenging.seeking, 1);
+            EXPECT_EQ(SecondaryBytes(registry, denied, SecondaryConsumer::Scavenging),
+                      scavenger_before);
+            EXPECT_FLOAT_EQ(registry.get<C::ScavengerComponent>(actor).wish_x,
+                            along_z ? 0.0f : -1.0f);
+            EXPECT_FLOAT_EQ(registry.get<C::ScavengerComponent>(actor).wish_z,
+                            along_z ? -1.0f : 0.0f);
+            registry.get<C::CreatureComponent>(actor).is_predator = true;
+            for (const auto entity : registry.view<C::CreatureComponent>()) {
+                registry.get<C::CreatureComponent>(entity).eaten = false;
+            }
+            const auto pack = AI::RunPredatorPackOnTick(registry, 1u, &admission);
+            EXPECT_EQ(pack.hunting, 1);
+            EXPECT_EQ(SecondaryBytes(registry, denied, SecondaryConsumer::Pack), pack_before);
+            EXPECT_FLOAT_EQ(registry.get<C::PackHunterComponent>(actor).coord_x,
+                            along_z ? 0.0f : -1.0f);
+            EXPECT_FLOAT_EQ(registry.get<C::PackHunterComponent>(actor).coord_z,
+                            along_z ? -1.0f : 0.0f);
+            AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+            admission.Capture(registry, {});
+            AI::RunScavengingOnTick(registry, 2u, {}, &admission);
+            AI::RunPredatorPackOnTick(registry, 2u, &admission);
+            EXPECT_NE(SecondaryBytes(registry, denied, SecondaryConsumer::Scavenging),
+                      scavenger_before);
+            EXPECT_NE(SecondaryBytes(registry, denied, SecondaryConsumer::Pack), pack_before);
+            AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+        }
+    }
+}
+
+TEST(RegionConsumerGate, DeniedCreatureWaterSourceCannotQuenchAdmittedThirst) {
+    entt::registry registry;
+    const auto drinker = Creature(registry, 511.9f);
+    registry.emplace<C::ThirstComponent>(drinker).thirst = 0.8f;
+    const auto water = Creature(registry, 512.1f);
+    registry.emplace<C::WaterHoleComponent>(water);
+    const auto plant = Plant(registry, 512.1f);
+    registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    AI::CreatureTickAdmission admission;
+    admission.Capture(registry, gate);
+    const auto before = CreatureBytes(registry, water);
+    const auto denied = AI::RunThirstOnTick(registry, 1.0f / 30.0f, {}, &admission);
+    AI::RunLifespanOnTick(registry, 1u, gate, &admission);
+    EXPECT_EQ(denied.drinking, 0);
+    EXPECT_EQ(CreatureBytes(registry, water), before);
+    EXPECT_EQ(registry.get<C::ThirstComponent>(drinker).water_proximity, 0.0f);
+    EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 0u);
+    admission.Capture(registry, {});
+    const auto resumed = AI::RunThirstOnTick(registry, 1.0f / 30.0f, {}, &admission);
+    AI::RunLifespanOnTick(registry, 2u, {}, &admission);
+    EXPECT_EQ(resumed.drinking, 1);
+    EXPECT_EQ(registry.get<C::ThirstComponent>(drinker).drinking, 1u);
+    EXPECT_LT(registry.get<C::ThirstComponent>(drinker).thirst, 0.8f);
+    EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
 }
 } // namespace

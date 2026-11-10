@@ -9,6 +9,7 @@
 
 #include "SkinnedMeshFormat.h"
 
+#include "../ai/CreatureTickAdmission.h"
 #include "../core/DeterministicMath.h"
 
 // Determinism note ( gate): this translation unit is compiled with
@@ -343,9 +344,14 @@ uint64_t PoseChecksum(const Pose& pose, uint64_t seed) {
     return hash;
 }
 
-void SamplePosesOnTick(entt::registry& registry, double fixed_dt) {
+void SamplePosesOnTick(entt::registry& registry,
+                       double fixed_dt,
+                       const ai::CreatureTickAdmission* admission) {
     const auto view = registry.view<AnimationPlayerComponent>();
     for (const entt::entity entity : view) {
+        if (admission && !admission->Allows(entity)) {
+            continue;
+        }
         AnimationPlayerComponent& player = view.get<AnimationPlayerComponent>(entity);
         if (!player.skeleton || !player.clip)
             continue;

@@ -679,7 +679,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_registry);
             });
             // 1. Animation pose sampling: FIRST in the tick order.
-            luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+            luminumbra::animation::SamplePosesOnTick(
+                m_registry, m_simulationClock.fixed_dt(), creature_admission);
 
             budget.Next(Stage::Instinct, [&] {
                 return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
@@ -828,9 +829,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     luminumbra::ai::RunThirstOnTick(
                         m_registry,
                         static_cast<float>(m_simulationClock.fixed_dt()),
-                        m_thirstTuning);
+                        m_thirstTuning,
+                        creature_admission);
                     luminumbra::ai::RunScavengingOnTick(
-                        m_registry, current_tick, m_scavengingTuning);
+                        m_registry, current_tick, m_scavengingTuning, creature_admission);
                     BlendCreatureSurvivalWishes(m_registry, creature_admission);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
@@ -1265,7 +1267,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!m_registry.view<Comp::AlarmComponent>().empty())
                     luminumbra::ai::RunHerdAlarmOnTick(
-                        m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
                 budget.Next(Stage::Decay, [&] {
@@ -1296,7 +1300,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunTerritoryOnTick(
+                        m_registry, current_tick, creature_admission);
                 // Predator pack: flanking coordination (a pack surrounds the prey).
                 budget.Next(Stage::Packs, [&] {
                     return SimParticipantCount<TelemetryComp::PackHunterComponent,
@@ -1304,7 +1309,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::PackHunterComponent>().empty())
-                    luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunPredatorPackOnTick(
+                        m_registry, current_tick, creature_admission);
                 // Migration: seasonal drive toward a moving target (tick-derived year fraction).
                 budget.Next(Stage::Migration, [&] {
                     return SimParticipantCount<TelemetryComp::MigratoryComponent,
@@ -1317,7 +1323,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+                    luminumbra::ai::RunMigrationOnTick(m_registry, season01, creature_admission);
                 }
             }
 
