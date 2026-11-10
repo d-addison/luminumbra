@@ -28,6 +28,7 @@
 #include "entt/entity/registry.hpp"
 
 #include "../components/ForagingComponents.h"
+#include "CreatureTickAdmission.h"
 #include "ScentField.h"
 
 namespace luminumbra::ai {
@@ -51,8 +52,10 @@ struct ForagingStats {
 };
 
 // Advance every forager one cell. Pure function of registry + field state (+ params).
-inline ForagingStats
-RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& p = {}) {
+inline ForagingStats RunForagingOnTick(entt::registry& reg,
+                                       ScentField& field,
+                                       const ForagingParams& p = {},
+                                       const CreatureTickAdmission* admission = nullptr) {
     namespace Comp = ::Luminumbra::Components;
     ForagingStats stats;
 
@@ -81,6 +84,9 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
             return entt::to_integral(a) < entt::to_integral(b);
         });
         for (auto e : fe) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& f = reg.get<Comp::FoodSourceComponent>(e);
             if (!field.SimulationCellAllowed(f.cell_x, f.cell_z))
                 continue;
@@ -92,6 +98,9 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
     static const int kDZ[4] = {0, 0, 1, -1};
 
     for (auto e : ants) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& a = reg.get<Comp::ForagerComponent>(e);
         if (!field.SimulationCellAllowed(a.cell_x, a.cell_z))
             continue;
@@ -105,8 +114,10 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         // tie-break).
         std::int32_t goalX = a.cell_x, goalZ = a.cell_z;
         if (a.carrying_food) {
-            goalX = a.home_x;
-            goalZ = a.home_z;
+            if (!admission || field.SimulationCellAllowed(a.home_x, a.home_z)) {
+                goalX = a.home_x;
+                goalZ = a.home_z;
+            }
         } else {
             std::int64_t best = -1;
             for (const auto& f : foods) {

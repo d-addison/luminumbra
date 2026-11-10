@@ -215,6 +215,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarWorldAuthorityProducer_test.cpp
     common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
@@ -276,6 +277,7 @@ add_executable(common_tests
     common/PromotionSimTruthDecoupling_test.cpp
     common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
+    common/RegionalWater_test.cpp
     common/WaterSeedInputs_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -301,6 +303,7 @@ add_executable(common_tests
     common/LayerGraph_test.cpp
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
+    rendering/LiveStrikeTracker_test.cpp
     common/AetherFieldSystem_test.cpp
     common/AmbientDeterminismReceipt_test.cpp
     common/AmbientInputBounds_test.cpp
@@ -1136,6 +1139,8 @@ target_link_libraries(ui_layout_test PRIVATE gtest_main nlohmann_json::nlohmann_
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
+    ui/graphics_preset_startup_test.cpp
+    ui/graphics_blur_style_test.cpp
 ../src/luminumbra_client/ui/core/UIComponent.cpp
 ../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
@@ -1570,11 +1575,17 @@ else()
     target_link_libraries(shieldrt_far_field_maxmip_gpu PRIVATE OpenGL::GL)
 endif()
 
+# Allocation replacement stays isolated from the other test executables.
+add_executable(regional_scent_allocation_test common/regional_scent_allocation_test.cpp)
+target_include_directories(regional_scent_allocation_test PRIVATE ../src)
+target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
 add_executable(frontier_gates_test
     common/RegionConsumerGate_test.cpp
+    ai/creature_secondary_region_gates_test.cpp
     network/network_state_hash_gate_test.cpp
     network/network_loopback_authority_gate_test.cpp
     ai/instinct_planner_gate_test.cpp
@@ -1641,6 +1652,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_client/ui/core/UIHotReload.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/ReplayModeAdmission_test.cpp
     common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
@@ -1742,6 +1754,9 @@ target_link_libraries(audio_propagation_metrics_test PRIVATE
     miniaudio
     nlohmann_json
     glm
+)
+target_compile_definitions(audio_propagation_metrics_test PRIVATE
+    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1
 )
 luminumbra_configure_first_party_target(audio_propagation_metrics_test)
 
@@ -2128,6 +2143,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     species_behavior_overrides_test
     runtime_world_visual_validation_test
     frontier_gates_test
+    regional_scent_allocation_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test

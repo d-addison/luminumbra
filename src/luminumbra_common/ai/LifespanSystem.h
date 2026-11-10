@@ -35,6 +35,8 @@
 // creature-repro+16, fire+17, soil+18, pollination+19, disease+20 taken;
 // LIFESPAN CLAIMS +22 (reserved; unused — death is a deterministic threshold).
 
+#include "CreatureTickAdmission.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -71,17 +73,20 @@ struct LifespanStats {
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
 inline LifespanStats RunLifespanOnTick(entt::registry& reg,
                                        std::uint64_t /*tick*/ = 0,
-                                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                                       const CreatureTickAdmission* admission = nullptr) {
     LifespanStats stats;
 
     auto view = reg.view<Comp::MortalComponent>();
 
     // id-ordered traversal so death-marking is deterministic / order-stable.
     std::vector<entt::entity> ents;
-    ents.reserve(view.size()); // Single-storage view: exact upper bound.
     for (auto e : view) {
-        // Creature mortality stays full-rate until the creature pipeline has regional scheduling.
-        if (reg.all_of<Comp::CreatureComponent>(e) || gate.Allows(e)) {
+        // Creature decisions survive movement across an owner boundary within this tick.
+        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
+                                 ? admission->Allows(e)
+                                 : gate.Allows(e);
+        if (allowed) {
             ents.push_back(e);
         }
     }

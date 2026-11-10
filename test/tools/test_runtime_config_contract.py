@@ -16,12 +16,110 @@ def compact_cpp(source):
     return re.sub(r"\s+", "", source)
 
 
+def cpp_block(source, anchor):
+    if anchor not in source:
+        raise AssertionError("missing C++ block: " + anchor)
+    start = source.index("{", source.index(anchor))
+    depth = 0
+    for token in re.finditer(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', source[start:]):
+        if token[0] == "{":
+            depth += 1
+        elif token[0] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:start + token.end()]
+    raise AssertionError("unclosed C++ block: " + anchor)
+
+
 class RuntimeConfigSourceContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8"))
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
+
+    # Real UI/GL3 destruction needs a graphics context unavailable to the Python
+    # CI job. Pin the production ownership and refusal order here instead.
+    def test_pipeline_failure_destroys_ui_and_pass_owners_before_context(self):
+        failure = cpp_block(self.client, "if(!graphics_ready||!renderPipeline.startup(")
+        self.assertIn('runtime_state_recorder.capture("render_pipeline_startup_failed",', failure)
+        self.assertIn("teardown_client(ignore_shutdown,[&]{gameSession.reset();"
+                      "jobSystem.shutdown();});return", failure)
+        teardown = cpp_block(self.client, "constautoteardown_client=")
+        stages = ("glfwMakeContextCurrent(window);", "g_uiManager->Shutdown();",
+                  "g_uiManager.reset();", "g_loading_visualizer->Shutdown();",
+                  "g_loading_visualizer.reset();", "audioManager->Shutdown();",
+                  "menuPreviewState.scene_image.release_scene_image();",
+                  "worldgenPreview.reset();", "render_pipeline_owner->shutdown();",
+                  "render_pipeline_owner.reset();", "developerConsole.Shutdown();",
+                  "worldGenViewer.reset();", "ImGui_ImplOpenGL3_Shutdown();",
+                  "ImGui_ImplGlfw_Shutdown();", "ImGui::DestroyContext();",
+                  "finish_shutdown();", "glfwDestroyWindow(window);", "glfwTerminate();")
+        positions = [teardown.index(stage) for stage in stages]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("render_pipeline_owner=std::make_unique<"
+                      "Luminumbra::Rendering::RenderPipeline>();"
+                      "auto&renderPipeline=*render_pipeline_owner;", self.client)
+
+        ui_header = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.h")
+                                .read_text(encoding="utf-8"))
+        gl3_header = compact_cpp((ROOT / "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.h")
+                                 .read_text(encoding="utf-8"))
+        gl3_source = compact_cpp((ROOT / "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp")
+                                 .read_text(encoding="utf-8"))
+        self.assertIn("RenderInterface_GL3m_renderInterface;", ui_header)
+        self.assertIn("RenderLayerStackrender_layers;", gl3_header)
+        gl3_destructor = cpp_block(gl3_source, "RenderInterface_GL3::~RenderInterface_GL3()")
+        self.assertIn("Gfx::DestroyShaders(*program_data);", gl3_destructor)
+        layer_destructor = cpp_block(gl3_source, "RenderInterface_GL3::RenderLayerStack::~RenderLayerStack()")
+        self.assertIn("DestroyFramebuffers();", layer_destructor)
+
+    def test_partial_startup_and_repeated_cleanup_are_guarded(self):
+        teardown = cpp_block(self.client, "constautoteardown_client=")
+        self.assertTrue(teardown.startswith("{if(!glfw_initialized){return;}"))
+        for guard, release in (("if(g_uiManager)", "g_uiManager.reset();"),
+                               ("if(g_loading_visualizer)", "g_loading_visualizer.reset();"),
+                               ("if(audioManager)", "audioManager->Shutdown();"),
+                               ("if(render_pipeline_owner)", "render_pipeline_owner.reset();"),
+                               ("if(imgui_started)", "imgui_started=false;")):
+            self.assertIn(release, cpp_block(teardown, guard))
+        self.assertIn("if(window){glfwDestroyWindow(window);window=nullptr;}"
+                      "glfwTerminate();glfw_initialized=false;", teardown)
+        self.assertIn("GLFWwindow*window=nullptr;boolimgui_started=false;", self.client)
+        self.assertIn('ImGui_ImplOpenGL3_Init("#version450");imgui_started=true;', self.client)
+        self.assertIn("if(window){glfwMakeContextCurrent(window);}", teardown)
+        self.assertIn("if(window){glfwSetWindowCloseCallback(window,nullptr);", teardown)
+        for creation in ("g_uiManager=std::make_unique<", "render_pipeline_owner=std::make_unique<"):
+            self.assertGreater(self.client.index(creation),
+                               self.client.index("if(!gladLoadGLLoader("))
+        mismatch = cpp_block(self.client, "if(!capture_size.empty()&&")
+        self.assertIn("teardown_client(ignore_shutdown,[]{});return2;", mismatch)
+        self.assertLess(self.client.index('ImGui_ImplOpenGL3_Init("#version450");'),
+                        self.client.index("if(!capture_size.empty()&&"))
+        self.assertLess(self.client.index("if(!capture_size.empty()&&"),
+                        self.client.index("g_uiManager=std::make_unique<"))
+
+    def test_all_initialization_refusals_share_normal_teardown(self):
+        for anchor, code in (("if(!window)", "-1"),
+                             ("if(!gladLoadGLLoader(", "-1"),
+                             ('LUMINUMBRA_CORE_ERROR("--capture-size', "2")):
+            self.assertIn(anchor, self.client)
+            start = self.client.index(anchor)
+            refusal = self.client[start:self.client.index("return" + code + ";", start)]
+            self.assertIn("teardown_client(ignore_shutdown,[]{});", refusal)
+        surface = cpp_block(self.client, "if(!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(")
+        self.assertIn("prepare_world_entry();teardown_client(ignore_shutdown,"
+                      "release_capture_session);return2;", surface)
+        self.assertIn("constautorelease_capture_session=[&]{gameSession.reset();"
+                      "jobSystem.shutdown();};", self.client)
+        normal = cpp_block(self.client, "teardown_client(mark_shutdown,")
+        self.assertLess(normal.index("DrainWorldDressing("), normal.index("gameSession.reset();"))
+        self.assertLess(normal.index("gameSession.reset();"), normal.index("jobSystem.shutdown();"))
+        self.assertIn("runtime_state_recorder.write_shutdown(", normal)
+        self.assertIn("hang_watchdog->stop();", normal)
+        self.assertEqual(self.client.count("glfwDestroyWindow(window);"), 1)
+        self.assertEqual(self.client.count("glfwTerminate();"), 1)
+        self.assertEqual(self.client.count("teardown_client("), 7)
 
     def test_client_loads_runtime_defaults_before_explicit_override(self):
         load = ("g_systemConfig=luminumbra::core::SystemConfig::LoadFromRuntimeRoot("
@@ -67,6 +165,28 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                           extension + '");', self.client)
             self.assertNotIn('uiHotReload.WatchDirectory("data/ui","' + extension + '");',
                              self.client)
+
+    def test_creation_validates_selected_dependencies_before_adoption(self):
+        # Source ordering also covers asynchronous and transient creation.
+        source = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                             .read_text(encoding="utf-8"))
+        preparation = source.split("GameSession::PrepareWorldCreation(", 1)[1].split(
+            "boolGameSession::CreateWorldInternal(", 1)[0]
+        self.assertNotIn("ValidateWorldConfig(", preparation)
+        self.assertIn("ValidateWorldConfigInputs(options.root_path,worldType,"
+                      "options.required_assets)", preparation)
+        self.assertEqual(preparation.count("LoadTerrainPresetFromJson("), 1)
+        self.assertLess(preparation.index("ResolveEffectivePreset(resolved,presetUse)"),
+                        preparation.index("LoadTerrainPresetFromJson(resolved,"))
+        self.assertLess(preparation.index("if(!preset.ok)"),
+                        preparation.index("prepared->ready=true"))
+        self.assertNotIn("create_director", preparation)
+        self.assertNotIn("ResetWorldSystems(", preparation)
+        named = source.split("GameSession::ValidateWorldConfig(", 1)[1].split(
+            "boolGameSession::CreateWorld(", 1)[0]
+        self.assertIn("ValidateWorldConfigInputs(root_path,worldType,required_assets)", named)
+        self.assertIn("LoadTerrainPreset(result.preset_path,RuntimeRoot(root_path)/"
+                      '"data",stop)', named)
 
     def test_preset_rename_refuses_occupied_targets_before_publication(self):
         writer = compact_cpp((ROOT / "src/luminumbra_client/world/WorldgenOverride.cpp")
@@ -244,7 +364,34 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertEqual(self.admission.count("!ReadPresetInput(options,"), 2)
         trace = compact_cpp((ROOT / "src/luminumbra_common/replay/RegionScheduleTrace.cpp").read_text())
         self.assertIn("ReadSavedJson(path,kMaxTraceBytes,value,missing,false)", trace)
-        self.assertLess(trace.index("BoundedJsonDump("), trace.index("write_file_durably(path,bytes)"))
+        self.assertLess(trace.index("BoundedJsonDump("), trace.index("ReplacementOutputFileoutput(path)"))
+
+    def test_replay_pair_publication_and_reader_share_recovery_guard(self):
+        mode = compact_cpp((ROOT / "src/luminumbra_server/modes/Replay.cpp").read_text())
+        record = cpp_block(mode, "intRunRecord(")
+        self.assertIn("writer.Finalize(executed,trace)", record)
+        self.assertNotIn("WriteRegionScheduleTrace(", record)
+        self.assertNotIn("fs::remove(companion", record)
+        playback = cpp_block(mode, "intRunReplay(")
+        self.assertLess(playback.index("ReplayPairReadGuard>"), playback.index("ReadReplay("))
+        self.assertLess(playback.index("ReadRegionScheduleTrace("), playback.index("pair_guard.reset()"))
+        stream = compact_cpp((ROOT / "src/luminumbra_common/replay/ReplayStream.cpp").read_text())
+        self.assertIn("paired?output.commit_with_companion(trace_bytes):output.commit()", stream)
+
+    def test_replay_output_staging_has_a_fixed_stem_and_journals_before_pair_changes(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text())
+        constructor = cpp_block(service, "ReplacementOutputFile::ReplacementOutputFile(")
+        self.assertIn('NextLedgerTempPath(output_path.parent_path()/".output")', constructor)
+        self.assertNotIn("NextLedgerTempPath(output_path)", constructor)
+        pair = cpp_block(service, "boolReplacementOutputFile::commit_with_companion(")
+        self.assertLess(pair.index("!journal.commit()"), pair.index("!trace->publish()"))
+        self.assertLess(pair.index("!trace->publish()"), pair.index("!publish()"))
+        self.assertIn("RecoverReplayPair(directory)", pair)
+        recovery = cpp_block(service, "boolRecoverReplayPair(")
+        self.assertIn("installed==incoming", recovery)
+        self.assertIn("installed==previous", recovery)
+        self.assertIn('header["undo_bytes"]', recovery)
+        self.assertIn('header["undo_checksum"]', recovery)
 
     def test_overlay_failure_regression_reaches_the_owned_staging_writer(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -304,9 +451,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         for required in ("O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC", "::fstat(m_descriptor,&info)",
                          "FILE_FLAG_OPEN_REPARSE_POINT", "::GetFileInformationByHandle(m_handle,&info)",
                          "Detail::WindowsDisposeLink(retiring)", "ReadFileIdentity(path,named)",
-                         "current[5]>512", "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
+                         "std::uint64_tmaximum=512", "current[5]>maximum", "current[5]>bytes.max_size()",
+                         "::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
             self.assertIn(required, native)
-        self.assertLess(native.index("current[5]>512"), native.index("bytes.assign("))
+        self.assertLess(native.index("current[5]>maximum"), native.index("bytes.assign("))
         identity = service[service.index("boolReadFileIdentity("):service.index("boolSameFileIdentity(")]
         self.assertIn("::lstat(path.c_str(),&information)", identity)
 
@@ -469,8 +617,9 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         record.index("artifacts.record_staged_file(m_path,m_handle)"))
         self.assertIn("artifacts.record_staged_file(m_path,m_descriptor)", record)
         publication = service.split("boolReplaceRegionFileAtomically(", 2)[1]
+        self.assertIn("constDWORDflags=MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH;", publication)
         ordered = ("if(artifacts){artifacts->publish_file(temp,destination);returntrue;}",
-                   "::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)", "constDWORDattributes_error=::GetLastError()",
+                   "::MoveFileExW(temp.c_str(),destination.c_str(),flags)", "constDWORDattributes_error=::GetLastError()",
                    "if(retained_payload)retained_payload->retain_publication_identity();",
                    "autofile=::CreateFileW(temp.c_str(),",
                    "Detail::WindowsPublishWithoutReplacement(")
@@ -480,7 +629,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             position = publication.index(value, offset)
             positions.append(position)
             offset = position + len(value)
-        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)")
+        replacement = publication.index("::MoveFileExW(temp.c_str(),destination.c_str(),flags)")
         self.assertIn("if(retained_payload)retained_payload->retain_publication_identity();",
                       publication[:replacement])
         self.assertEqual(positions, sorted(positions))
@@ -540,10 +689,18 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("::renamex_np(m_path.c_str(),destination.c_str(),RENAME_EXCL)", posix)
         self.assertLess(posix.index("::link(m_path.c_str(),destination.c_str())"),
                         posix.index("!matches_name(2)||::unlink(m_path.c_str())"))
-        writer = service[service.index("boolwrite(conststd::string&bytes)"):
-                         service.index("boolpromote_seed(")]
+        staging = service[service.index("classStagingFile{"):
+                          service.index("classLedgerStaging{")]
+        writer = staging[staging.index("boolwrite(conststd::string&bytes)"):
+                         staging.index("boolappend(")]
+        self.assertIn("returnappend(bytes)&&flush();", writer)
+        flushing = staging[staging.index("boolflush()const{"):
+                           staging.index("boolreplace(")]
         for flush in ("::FlushFileBuffers(m_handle)", "::fsync(m_descriptor)"):
-            self.assertIn(flush, writer)
+            self.assertIn(flush, flushing)
+        windows, posix = flushing.split("#ifdefined(_WIN32)", 1)[1].split("#else", 1)
+        self.assertIn("return::FlushFileBuffers(m_handle)!=0;", windows)
+        self.assertIn("while(flushed!=0&&errno==EINTR);returnflushed==0;", posix)
         self.assertIn("if(!payload_remains&&m_claim_created&&!m_claim.remove())", transaction)
 
     def test_incomplete_ledger_reclaim_requires_reserved_identity_and_nofollow_inspection(self):
@@ -668,7 +825,14 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("extensions.insert(extension);", watcher)
         self.assertIn("std::filesystem::recursive_directory_iterator(directoryPath)", watcher)
         self.assertIn("if(m_watchedFiles.contains(path))continue;", watcher)
-        self.assertIn("m_reloadCallback(Filesystem::GenericUtf8PathString(filePath));", watcher)
+        self.assertIn("(*callback)(Filesystem::GenericUtf8PathString(filePath));", watcher)
+        for method, next_method in (("TriggerReload", "ReloadAll"),
+                                    ("ReloadAll", "CheckFileChanged")):
+            delivery = watcher[watcher.index("UIHotReload::" + method):
+                               watcher.index("UIHotReload::" + next_method)]
+            self.assertIn("constautocallback=m_reloadCallback;", delivery)
+            self.assertLess(delivery.index("constautocallback=m_reloadCallback;"),
+                            delivery.index("(*callback)("))
         fixture = compact_cpp((ROOT / "test/persistence/world_open_refusal_test.cpp")
                               .read_text(encoding="utf-8"))
         start = fixture.index("TEST_F(WorldOpenRefusal,DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles)")

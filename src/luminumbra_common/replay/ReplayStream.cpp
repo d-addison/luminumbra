@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -27,8 +28,11 @@
 #include <utility>
 #include <vector>
 
+#include "core/FilesystemPath.h"
 #include "core/JobSystem.h"
 #include "core/Log.h"
+#include "persistence/ReplacementOutputFile.h"
+#include "persistence/SaveTransaction.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
@@ -154,39 +158,6 @@ struct Cursor {
         pos += 8;
         return true;
     }
-    bool GetString(std::string& s) {
-        std::uint32_t len = 0;
-        if (!GetU32(len))
-            return false;
-        if (!Remaining(len)) {
-            ok = false;
-            return false;
-        }
-        s.assign(reinterpret_cast<const char*>(data + pos), len);
-        pos += len;
-        return true;
-    }
-    bool GetBlob(std::vector<std::uint8_t>& b) {
-        std::uint32_t len = 0;
-        if (!GetU32(len))
-            return false;
-        if (!Remaining(len)) {
-            ok = false;
-            return false;
-        }
-        b.assign(data + pos, data + pos + len);
-        pos += len;
-        return true;
-    }
-    bool GetBytes(void* dst, std::size_t n) {
-        if (!Remaining(n)) {
-            ok = false;
-            return false;
-        }
-        std::memcpy(dst, data + pos, n);
-        pos += n;
-        return true;
-    }
 };
 
 // Header layout. The tick_count field is written as a backpatch slot and finalized
@@ -224,7 +195,8 @@ void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     PutString(out, h.preset_content_hash);
 }
 
-bool ParseHeader(Cursor& c, ReplayHeader& h) {
+template<typename Reader>
+bool ParseHeader(Reader& c, ReplayHeader& h) {
     char magic[sizeof(kLrec1Magic)] = {0};
     if (!c.GetBytes(magic, sizeof(magic)))
         return false;
@@ -336,36 +308,31 @@ void ReplayWriter::RecordCheckpoint(const CheckpointRecord& checkpoint) {
 }
 
 bool ReplayWriter::Finalize(std::uint64_t tick_count) {
+    return Finish(tick_count, nullptr, false);
+}
+
+bool ReplayWriter::Finish(std::uint64_t tick_count, const std::string* trace_bytes, bool paired) {
     if (!m_open)
         return false;
-
-    // Patch the header tick_count in place (fixed offset; see AppendHeader).
-    for (std::size_t i = 0; i < 8; ++i) {
-        m_buffer[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
-    }
-
-    // Trailer: magic + tick_count + input_count + checkpoint_count. A reader
-    // that reaches the trailer knows the stream was finalized (not truncated).
-    m_buffer.insert(m_buffer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
-    PutU64(m_buffer, tick_count);
-    PutU64(m_buffer, m_input_count);
-    PutU64(m_buffer, m_checkpoint_count);
-
-    std::error_code ec;
-    const fs::path out_path(m_path);
-    if (out_path.has_parent_path()) {
-        fs::create_directories(out_path.parent_path(), ec);
-    }
-    std::ofstream out(m_path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        LUMINUMBRA_CORE_ERROR("ReplayWriter: cannot open '{}' for write", m_path);
+    m_open = false;
+    auto buffer = std::move(m_buffer);
+    try {
+        // Patch the fixed header slot and append exactly one trailer per attempt.
+        for (std::size_t i = 0; i < 8; ++i) {
+            buffer[kTickCountOffset + i] =
+                static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
+        }
+        buffer.insert(buffer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
+        PutU64(buffer, tick_count);
+        PutU64(buffer, m_input_count);
+        PutU64(buffer, m_checkpoint_count);
+        Persistence::ReplacementOutputFile output(m_path);
+        if (!output.write({reinterpret_cast<const char*>(buffer.data()), buffer.size()}))
+            return false;
+        return paired ? output.commit_with_companion(trace_bytes) : output.commit();
+    } catch (const std::exception&) {
         return false;
     }
-    out.write(reinterpret_cast<const char*>(m_buffer.data()),
-              static_cast<std::streamsize>(m_buffer.size()));
-    out.close();
-    m_open = false;
-    return out.good();
 }
 
 // --- BoundedReplayRecorder ---------------------------------------------------
@@ -610,85 +577,97 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
 bool BoundedReplayRecorder::Finalize(const std::string& destination,
                                      std::uint64_t tick_count,
                                      std::uint64_t divergence_tick) {
-    if (m_directory.empty() || divergence_tick <= m_elided_tick)
-        return false;
-    if (m_output.is_open()) {
-        m_output.close();
-        if (m_output.fail())
+    struct CloseOnExit {
+        BoundedReplayRecorder& recorder;
+        ~CloseOnExit() {
+            recorder.Close();
+        }
+    };
+    const CloseOnExit close{*this};
+    try {
+        if (m_directory.empty() || divergence_tick <= m_elided_tick)
             return false;
-    }
-    std::vector<std::uint8_t> header;
-    if (m_elided_tick != 0)
-        m_header.version = kLrec1ElidedVersion;
-    AppendHeader(header, m_header);
-    for (std::size_t i = 0; i < 8; ++i)
-        header[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
-    if (m_elided_tick != 0) {
-        PutU8(header, static_cast<std::uint8_t>(RecordType::ElidedPrefix));
-        PutU64(header, m_elided_tick);
-        PutU32(header, 8);
-        PutU64(header, m_elided_digest);
-    }
-    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
-    if (!out.is_open())
-        return false;
-    if (!out.write(reinterpret_cast<const char*>(header.data()),
-                   static_cast<std::streamsize>(header.size())))
-        return false;
-    std::uint64_t input_count = 0;
-    std::uint64_t checkpoint_count = 0;
-    // Finalization streams through a fixed 64 KiB scratch buffer; the replay
-    // artifact is never assembled in memory, regardless of the negotiated bound.
-    std::array<char, std::size_t{64} * 1024> scratch{};
-    for (const auto& segment : m_segments) {
-        std::ifstream in(segment.path, std::ios::binary);
-        if (!in.is_open())
+        if (m_output.is_open()) {
+            m_output.close();
+            if (m_output.fail())
+                return false;
+        }
+        Persistence::report_snapshot_step("replay-segment-close", destination);
+        std::vector<std::uint8_t> header;
+        if (m_elided_tick != 0)
+            m_header.version = kLrec1ElidedVersion;
+        AppendHeader(header, m_header);
+        for (std::size_t i = 0; i < 8; ++i)
+            header[kTickCountOffset + i] =
+                static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
+        if (m_elided_tick != 0) {
+            PutU8(header, static_cast<std::uint8_t>(RecordType::ElidedPrefix));
+            PutU64(header, m_elided_tick);
+            PutU32(header, 8);
+            PutU64(header, m_elided_digest);
+        }
+        Persistence::ReplacementOutputFile out(destination);
+        if (!out.is_open())
             return false;
-        std::size_t remaining = segment.bytes;
-        while (remaining != 0) {
-            std::array<std::uint8_t, 13> frame{};
-            if (remaining < frame.size() || !in.read(reinterpret_cast<char*>(frame.data()),
-                                                     static_cast<std::streamsize>(frame.size())))
+        if (!out.write({reinterpret_cast<const char*>(header.data()), header.size()}))
+            return false;
+        std::uint64_t input_count = 0;
+        std::uint64_t checkpoint_count = 0;
+        // Finalization streams through a fixed 64 KiB scratch buffer; the replay
+        // artifact is never assembled in memory, regardless of the negotiated bound.
+        std::array<char, std::size_t{64} * 1024> scratch{};
+        for (const auto& segment : m_segments) {
+            Persistence::report_snapshot_step("replay-segment", segment.path);
+            Filesystem::ReplacementSafeInputFile in;
+            in.open(segment.path);
+            if (!in.is_open())
                 return false;
-            Cursor cursor{frame.data(), frame.size(), 0, true};
-            std::uint8_t type = 0;
-            std::uint64_t tick = 0;
-            std::uint32_t payload = 0;
-            if (!cursor.GetU8(type) || !cursor.GetU64(tick) || !cursor.GetU32(payload) ||
-                payload > remaining - frame.size())
-                return false;
-            const bool keep = type != static_cast<std::uint8_t>(RecordType::Checkpoint) ||
-                              tick <= divergence_tick;
-            if (type == static_cast<std::uint8_t>(RecordType::Input))
-                ++input_count;
-            else if (type == static_cast<std::uint8_t>(RecordType::Checkpoint))
-                checkpoint_count += keep;
-            else
-                return false;
-            if (keep && !out.write(reinterpret_cast<const char*>(frame.data()),
-                                   static_cast<std::streamsize>(frame.size())))
-                return false;
-            remaining -= frame.size() + payload;
-            std::size_t pending = payload;
-            while (pending != 0) {
-                const auto count = std::min(pending, scratch.size());
-                if (!in.read(scratch.data(), static_cast<std::streamsize>(count)))
+            std::size_t remaining = segment.bytes;
+            while (remaining != 0) {
+                std::array<std::uint8_t, 13> frame{};
+                if (remaining < frame.size() ||
+                    !in.read(reinterpret_cast<char*>(frame.data()), frame.size()))
                     return false;
-                if (keep && !out.write(scratch.data(), static_cast<std::streamsize>(count)))
+                Persistence::report_snapshot_step("replay-read", segment.path);
+                Cursor cursor{frame.data(), frame.size(), 0, true};
+                std::uint8_t type = 0;
+                std::uint64_t tick = 0;
+                std::uint32_t payload = 0;
+                if (!cursor.GetU8(type) || !cursor.GetU64(tick) || !cursor.GetU32(payload) ||
+                    payload > remaining - frame.size())
                     return false;
-                pending -= count;
+                const bool keep = type != static_cast<std::uint8_t>(RecordType::Checkpoint) ||
+                                  tick <= divergence_tick;
+                if (type == static_cast<std::uint8_t>(RecordType::Input))
+                    ++input_count;
+                else if (type == static_cast<std::uint8_t>(RecordType::Checkpoint))
+                    checkpoint_count += keep;
+                else
+                    return false;
+                if (keep && !out.write({reinterpret_cast<const char*>(frame.data()), frame.size()}))
+                    return false;
+                remaining -= frame.size() + payload;
+                std::size_t pending = payload;
+                while (pending != 0) {
+                    const auto count = std::min(pending, scratch.size());
+                    if (!in.read(scratch.data(), count))
+                        return false;
+                    if (keep && !out.write({scratch.data(), count}))
+                        return false;
+                    pending -= count;
+                }
             }
         }
+        std::vector<std::uint8_t> trailer;
+        trailer.insert(trailer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
+        PutU64(trailer, tick_count);
+        PutU64(trailer, input_count);
+        PutU64(trailer, checkpoint_count);
+        return out.write({reinterpret_cast<const char*>(trailer.data()), trailer.size()}) &&
+               out.commit();
+    } catch (const std::exception&) {
+        return false;
     }
-    std::vector<std::uint8_t> trailer;
-    trailer.insert(trailer.end(), kLrec1Trailer, kLrec1Trailer + sizeof(kLrec1Trailer));
-    PutU64(trailer, tick_count);
-    PutU64(trailer, input_count);
-    PutU64(trailer, checkpoint_count);
-    out.write(reinterpret_cast<const char*>(trailer.data()),
-              static_cast<std::streamsize>(trailer.size()));
-    out.close();
-    return out.good();
 }
 
 void BoundedReplayRecorder::Close() {
@@ -978,24 +957,38 @@ bool QueuedReplayRecorder::State::Finalize(const std::string& destination,
     if (!state.open)
         return false;
     state.Stop();
-    if (state.failure == State::Failure::None &&
-        state.sink->Finalize(destination, tick_count, divergence_tick)) {
-        // A later successful recording at the same destination supersedes any
-        // earlier incomplete companion. All handles are closed before removal.
-        std::error_code ec;
-        fs::remove(destination + ".incomplete", ec);
-        if (!ec)
-            return true;
+    bool finalized = false;
+    try {
+        if (state.failure == State::Failure::None) {
+            // Clear a stale marker before the replay commit point. A removal
+            // refusal must not follow successful replacement of the replay.
+            std::error_code ec;
+            fs::remove(destination + ".incomplete", ec);
+            finalized = !ec && state.sink->Finalize(destination, tick_count, divergence_tick);
+        }
+    } catch (const std::exception&) {
+        finalized = false;
+    }
+    if (finalized) {
+        state.Close();
+        return true;
     }
     {
         const std::lock_guard lock(state.mutex);
         state.Fail(State::Failure::Finalization, divergence_tick);
     }
+    state.Close();
     // Never advertise a partial recording as a successful LREC1. The companion
     // is deliberately outside the versioned format and includes an explicit cause.
-    std::ofstream reason(destination + ".incomplete", std::ios::trunc);
-    reason << "Incomplete replay at tick " << state.failure_tick << ": " << FailureReason() << '\n';
-    reason.close();
+    try {
+        Persistence::ReplacementOutputFile reason(destination + ".incomplete");
+        const auto message = "Incomplete replay at tick " + std::to_string(state.failure_tick) +
+                             ": " + FailureReason() + '\n';
+        if (reason.write(message))
+            reason.commit();
+    } catch (const std::exception&) {
+        // The original failure remains authoritative if its diagnostic cannot be written.
+    }
     LUMINUMBRA_CORE_ERROR("Replay recording incomplete at tick {}: {} ({})",
                           state.failure_tick,
                           FailureReason(),
@@ -1123,76 +1116,185 @@ std::size_t QueuedReplayRecorder::PendingBytes() const {
 
 // --- Reader ------------------------------------------------------------------
 
-std::optional<ReplayContents> ReadReplay(const std::string& path) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in.is_open()) {
-        return std::nullopt;
+namespace {
+
+struct StreamReplaySource {
+    std::istream& input;
+
+    bool seek(std::uint64_t offset) {
+        return offset <= static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()) &&
+               static_cast<bool>(input.seekg(static_cast<std::streamoff>(offset)));
     }
-    const std::streamsize size = in.tellg();
-    if (size < 0) {
-        return std::nullopt;
+    bool read(char* destination, std::size_t bytes) {
+        // A transfer is at most 64 KiB, including on providers with narrow streamsize.
+        constexpr std::size_t kTransferBytes = 64 * 1024;
+        while (bytes != 0) {
+            const auto count = std::min(bytes, kTransferBytes);
+            if (!input.read(destination, static_cast<std::streamsize>(count))) {
+                return false;
+            }
+            destination += count;
+            bytes -= count;
+        }
+        return true;
     }
-    in.seekg(0);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (size > 0) {
-        in.read(reinterpret_cast<char*>(bytes.data()), size);
+};
+
+struct ReadBudget {
+    ReplayReadLimits limits;
+    std::size_t records = 0;
+    bool failed = false;
+
+    bool Field(std::uint32_t bytes) {
+        if (bytes > limits.field_bytes) {
+            failed = true;
+            return false;
+        }
+        limits.field_bytes -= bytes;
+        return true;
+    }
+};
+
+// Reads directly into admitted fields. Scalar scratch is at most eight bytes;
+// there is no allocation proportional to the file or an unvalidated frame.
+// Each cursor's end is checked before subtraction or allocation. A payload
+// cursor shares the same source and budget but cannot read outside its frame.
+template<typename Source>
+struct ReplayCursor {
+    Source& source;
+    ReadBudget& budget;
+    std::uint64_t size;
+    std::uint64_t pos = 0;
+    bool ok = true;
+
+    bool Remaining(std::uint64_t bytes) const {
+        return ok && pos <= size && bytes <= size - pos;
+    }
+    bool GetBytes(void* destination, std::size_t bytes) {
+        if (!Remaining(bytes)) {
+            ok = false;
+            return false;
+        }
+        if (bytes != 0 && !source.read(static_cast<char*>(destination), bytes)) {
+            budget.failed = true;
+            ok = false;
+            return false;
+        }
+        pos += bytes;
+        return true;
+    }
+    template<typename Integer>
+    bool GetInteger(Integer& value) {
+        std::array<std::uint8_t, sizeof(Integer)> bytes{};
+        if (!GetBytes(bytes.data(), bytes.size())) {
+            return false;
+        }
+        std::uint64_t decoded = 0;
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            decoded |= static_cast<std::uint64_t>(bytes[index]) << (8 * index);
+        }
+        value = static_cast<Integer>(decoded);
+        return true;
+    }
+    bool GetU8(std::uint8_t& value) {
+        return GetInteger(value);
+    }
+    bool GetU16(std::uint16_t& value) {
+        return GetInteger(value);
+    }
+    bool GetU32(std::uint32_t& value) {
+        return GetInteger(value);
+    }
+    bool GetU64(std::uint64_t& value) {
+        return GetInteger(value);
     }
 
-    Cursor c{bytes.data(), bytes.size(), 0, true};
+    template<typename Field>
+    bool GetField(Field& field) {
+        std::uint32_t length = 0;
+        if (!GetU32(length) || !Remaining(length) || !budget.Field(length)) {
+            ok = false;
+            return false;
+        }
+        field.resize(length);
+        return GetBytes(field.data(), field.size());
+    }
+    bool GetString(std::string& text) {
+        return GetField(text);
+    }
+    bool GetBlob(std::vector<std::uint8_t>& bytes) {
+        return GetField(bytes);
+    }
+
+    bool SkipTo(std::uint64_t end) {
+        if (end < pos || !Remaining(end - pos)) {
+            ok = false;
+            return false;
+        }
+        if (end != pos && !source.seek(end)) {
+            budget.failed = true;
+            ok = false;
+            return false;
+        }
+        pos = end;
+        return true;
+    }
+};
+
+template<typename Source>
+std::optional<ReplayContents>
+ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
+    if (!source.seek(0)) {
+        return std::nullopt;
+    }
+    ReadBudget budget{limits, 0, false};
+    ReplayCursor<Source> c{source, budget, size, 0, true};
     ReplayContents contents;
     if (!ParseHeader(c, contents.header)) {
-        // Not a valid LREC1 stream at all (bad magic / header too short).
         return std::nullopt;
     }
 
-    // Record region: parse frames until the trailer magic appears, the buffer
-    // is exhausted, or a frame is truncated. The trailer's first byte cannot
-    // collide with a record type tag (Input=0x01/Checkpoint=0x02 vs 'L'=0x4C),
-    // so peeking the type byte disambiguates trailer-vs-record cleanly.
+    // Work is bounded by the admitted field bytes plus constant framing per
+    // admitted record. Opaque extension bytes are skipped, never buffered.
     while (c.ok && c.pos < c.size) {
-        // Trailer probe: does the remaining buffer start with the trailer magic?
-        if (c.Remaining(sizeof(kLrec1Trailer)) &&
-            std::memcmp(c.data + c.pos, kLrec1Trailer, sizeof(kLrec1Trailer)) == 0) {
-            c.pos += sizeof(kLrec1Trailer);
+        std::uint8_t type_byte = 0;
+        if (!c.GetU8(type_byte)) {
+            break;
+        }
+        if (type_byte == static_cast<std::uint8_t>(kLrec1Trailer[0])) {
+            std::array<char, sizeof(kLrec1Trailer) - 1> suffix{};
             std::uint64_t trailer_ticks = 0;
             std::uint64_t trailer_inputs = 0;
             std::uint64_t trailer_checkpoints = 0;
-            if (c.GetU64(trailer_ticks) && c.GetU64(trailer_inputs) &&
+            if (c.GetBytes(suffix.data(), suffix.size()) &&
+                std::memcmp(suffix.data(), kLrec1Trailer + 1, suffix.size()) == 0 &&
+                c.GetU64(trailer_ticks) && c.GetU64(trailer_inputs) &&
                 c.GetU64(trailer_checkpoints)) {
                 contents.tick_count = trailer_ticks;
                 contents.trailer_present = true;
-                // Trailer record counts must match what we parsed, else the
-                // body was truncated/corrupted before the trailer.
-                if (trailer_inputs != contents.inputs.size() ||
-                    trailer_checkpoints != contents.checkpoints.size()) {
-                    contents.truncated = true;
-                }
-            } else {
-                contents.truncated = true; // trailer itself was short
+                contents.truncated = trailer_inputs != contents.inputs.size() ||
+                                     trailer_checkpoints != contents.checkpoints.size() ||
+                                     c.pos != c.size;
             }
             break;
         }
 
-        std::uint8_t type_byte = 0;
         std::uint64_t tick = 0;
         std::uint32_t payload_len = 0;
-        if (!c.GetU8(type_byte) || !c.GetU64(tick) || !c.GetU32(payload_len)) {
-            contents.truncated = true;
+        if (!c.GetU64(tick) || !c.GetU32(payload_len) || !c.Remaining(payload_len)) {
             break;
         }
-        if (!c.Remaining(payload_len)) {
-            contents.truncated = true; // frame claims more payload than exists
-            break;
+        if (budget.records == limits.records) {
+            return std::nullopt;
         }
-        Cursor payload{c.data + c.pos, payload_len, 0, true};
-        c.pos += payload_len;
-
+        ++budget.records;
+        const auto payload_end = c.pos + payload_len; // Remaining checked the sum.
+        ReplayCursor<Source> payload{source, budget, payload_end, c.pos, true};
         const auto type = static_cast<RecordType>(type_byte);
         if (type == RecordType::Input) {
             InputRecord rec;
             rec.tick = tick;
             if (!payload.GetBlob(rec.inputs)) {
-                contents.truncated = true;
                 break;
             }
             contents.inputs.push_back(std::move(rec));
@@ -1201,7 +1303,6 @@ std::optional<ReplayContents> ReadReplay(const std::string& path) {
             rec.tick = tick;
             if (!payload.GetString(rec.world_hash) || !payload.GetString(rec.terrain) ||
                 !payload.GetString(rec.water) || !payload.GetString(rec.entities)) {
-                contents.truncated = true;
                 break;
             }
             contents.checkpoints.push_back(std::move(rec));
@@ -1210,23 +1311,63 @@ std::optional<ReplayContents> ReadReplay(const std::string& path) {
                    contents.checkpoints.empty() && contents.elided_through_tick == 0 && tick != 0 &&
                    payload_len == 8) {
             if (!payload.GetU64(contents.elided_prefix_digest)) {
-                contents.truncated = true;
                 break;
             }
             contents.elided_through_tick = tick;
         } else {
-            // Unknown record type: the explicit payload length let us skip it,
-            // but an unknown type in a stream we wrote is corruption -- flag it.
-            contents.truncated = true;
+            break;
+        }
+        c.pos = payload.pos;
+        if (!c.SkipTo(payload_end)) {
             break;
         }
     }
-
-    // Reaching end-of-buffer WITHOUT a trailer is a truncated tail.
+    if (budget.failed) {
+        return std::nullopt;
+    }
     if (!contents.trailer_present) {
         contents.truncated = true;
     }
     return contents;
+}
+
+} // namespace
+
+std::optional<ReplayContents> ReadReplay(const std::string& path) {
+    return ReadReplay(path, ReplayReadLimits{});
+}
+
+std::optional<ReplayContents> ReadReplay(const std::string& path, ReplayReadLimits limits) {
+    try {
+        Filesystem::ReplacementSafeInputFile source;
+        if (!source.open(fs::path(path))) {
+            return std::nullopt;
+        }
+        std::error_code error;
+        const auto size = source.size(error);
+        if (error) {
+            return std::nullopt;
+        }
+        return ParseReplay(source, size, limits);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<ReplayContents> ReadReplay(std::istream& input, ReplayReadLimits limits) {
+    try {
+        if (!input.seekg(0, std::ios::end)) {
+            return std::nullopt;
+        }
+        const auto end = input.tellg();
+        if (end < std::streampos{0}) {
+            return std::nullopt;
+        }
+        StreamReplaySource source{input};
+        return ParseReplay(source, static_cast<std::uint64_t>(end), limits);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 const InputRecord* FindInput(const ReplayContents& contents, std::uint64_t tick) {

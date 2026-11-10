@@ -126,6 +126,197 @@ public:
 };
 } // namespace
 
+TEST(FarFrozenObservation, SessionRenderResolvesPublishedTerrainAndWaterWithoutSaving) {
+    auto source = Source();
+    source.use = FarFrozenUse::SessionRender;
+    const auto terrain = [](std::int64_t selected, float density) {
+        return [selected, density](std::uint8_t, const FarVolumePosition& p) {
+            return FarFrozenOverride<FarVolumeSample>{p.x <= selected ? FarFrozenPresence::Present
+                                                                      : FarFrozenPresence::Absent,
+                                                      {density, 9}};
+        };
+    };
+    const auto water = [](std::int64_t selected, float height) {
+        return [selected, height](std::int64_t x, std::int64_t) {
+            return FarFrozenOverride<FarFrozenWaterSample>{
+                x <= selected ? FarFrozenPresence::Present : FarFrozenPresence::Absent,
+                {true, height}};
+        };
+    };
+    source.live = terrain(0, -10.0f);
+    source.parked = terrain(4, -20.0f);
+    source.committed = terrain(8, -30.0f);
+    source.live_water = water(0, 10.0f);
+    source.parked_water = water(4, 20.0f);
+    source.water = [](std::int64_t x, std::int64_t) {
+        return FarFrozenWaterSample{x == 8, x == 8 ? 30.0f : 0.0f};
+    };
+    const FarFrozenRegion region{1, {{0, 0, 0}, {12, 0, 0}}};
+    std::shared_ptr<const FarFrozenObservation> frozen;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), frozen),
+              Error::None);
+    EXPECT_EQ(frozen->use(), FarFrozenUse::SessionRender);
+    EXPECT_EQ(frozen->durable_identity().generation, 7u);
+    const std::array<float, 4> densities{-10.0f, -20.0f, -30.0f, -0.25f};
+    const std::array<float, 4> heights{10.0f, 20.0f, 30.0f, 0.0f};
+    for (std::size_t i = 0; i < densities.size(); ++i) {
+        const auto x = static_cast<std::int64_t>(i) * 4;
+        const auto sample = frozen->Sample(1, {x, 0, 0});
+        const auto wet = frozen->WaterSample(0, x, 0);
+        ASSERT_TRUE(sample);
+        ASSERT_TRUE(wet);
+        if (!sample || !wet) {
+            return;
+        }
+        EXPECT_EQ(sample->density, densities[i]);
+        EXPECT_EQ(wet->wet, i != 3);
+        EXPECT_EQ(wet->surface_height, heights[i]);
+    }
+    const auto fingerprint = frozen->content_identity();
+    // Ownership changes preserve the resolved observations, including water.
+    source.parked = [live = source.live, parked = source.parked](auto tier, const auto& p) {
+        const auto value = live(tier, p);
+        return value.presence == FarFrozenPresence::Absent ? parked(tier, p) : value;
+    };
+    source.parked_water = [live = source.live_water, parked = source.parked_water](auto x, auto z) {
+        const auto value = live(x, z);
+        return value.presence == FarFrozenPresence::Absent ? parked(x, z) : value;
+    };
+    source.live = {};
+    source.live_water = {};
+    std::shared_ptr<const FarFrozenObservation> parked;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), parked),
+              Error::None);
+    EXPECT_EQ(parked->content_identity(), fingerprint);
+    source.parked = Constant(100.0f);
+    source.parked_water = water(0, 100.0f);
+    EXPECT_EQ(frozen->content_identity(), fingerprint);
+    EXPECT_EQ(frozen->Sample(1, {0, 0, 0}), parked->Sample(1, {0, 0, 0}));
+    EXPECT_EQ(frozen->WaterSample(0, 0, 0), parked->WaterSample(0, 0, 0));
+}
+
+TEST(FarFrozenObservation, SessionRenderRefusesExpectedPartialOrInvalidAuthorityTransactionally) {
+    auto pool = Pool();
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    std::shared_ptr<const FarFrozenObservation> output;
+    auto source = Source();
+    source.use = FarFrozenUse::SessionRender;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+              Error::None);
+    const auto held = output;
+    const auto used = pool->used();
+    for (unsigned layer = 0; layer < 5; ++layer) {
+        for (const auto presence :
+             {FarFrozenPresence::Unavailable, static_cast<FarFrozenPresence>(255)}) {
+            source = Source();
+            source.use = FarFrozenUse::SessionRender;
+            if (layer < 3) {
+                auto* callback = layer == 0   ? &source.live
+                                 : layer == 1 ? &source.parked
+                                              : &source.committed;
+                *callback = [presence](std::uint8_t, const FarVolumePosition& p) {
+                    return FarFrozenOverride<FarVolumeSample>{
+                        p.x == 0 ? presence : FarFrozenPresence::Absent, {}};
+                };
+            } else {
+                auto* callback = layer == 3 ? &source.live_water : &source.parked_water;
+                *callback = [presence](std::int64_t x, std::int64_t) {
+                    return FarFrozenOverride<FarFrozenWaterSample>{
+                        x == 0 ? presence : FarFrozenPresence::Absent, {}};
+                };
+            }
+            EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+                      presence == FarFrozenPresence::Unavailable ? Error::Unavailable
+                                                                 : Error::InvalidSource);
+            EXPECT_EQ(output, held);
+            EXPECT_EQ(pool->used(), used);
+        }
+    }
+    source = Source();
+    source.use = FarFrozenUse::SessionRender;
+    source.water = [](std::int64_t, std::int64_t) {
+        return std::optional<FarFrozenWaterSample>{};
+    };
+    EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+              Error::Unavailable);
+    EXPECT_EQ(output, held);
+    EXPECT_EQ(pool->used(), used);
+    source = Source();
+    source.use = FarFrozenUse::SessionRender;
+    source.durable.state = FarEditedImageState::Prepared;
+    const auto attempts = pool->attempts();
+    EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+              Error::IdentityMismatch);
+    EXPECT_EQ(output, held);
+    EXPECT_EQ(pool->used(), used);
+    EXPECT_EQ(pool->attempts(), attempts);
+}
+
+TEST(FarFrozenObservation, SessionRenderLeavesCommittedBytesAndFingerprintUnchanged) {
+    auto source = Source();
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    std::shared_ptr<const FarFrozenObservation> committed, session, recaptured;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), committed),
+              Error::None);
+    source.live = Constant(-10.0f);
+    source.parked = Constant(-20.0f);
+    source.live_water = [](std::int64_t, std::int64_t) {
+        return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Present, {true, 12.0f}};
+    };
+    source.use = FarFrozenUse::SessionRender;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), session),
+              Error::None);
+    EXPECT_NE(session->content_identity(), committed->content_identity());
+    source.use = FarFrozenUse::Committed;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), recaptured),
+              Error::None);
+    EXPECT_EQ(committed->content_identity(), 11243690055911358406ULL);
+    EXPECT_EQ(recaptured->content_identity(), committed->content_identity());
+    for (std::int64_t z = -4; z <= 4; z += 4) {
+        for (std::int64_t x = -4; x <= 4; x += 4) {
+            EXPECT_EQ(recaptured->WaterSample(0, x, z), committed->WaterSample(0, x, z));
+            for (std::int64_t y = -4; y <= 4; y += 4) {
+                const auto before = committed->Sample(1, {x, y, z});
+                const auto after = recaptured->Sample(1, {x, y, z});
+                ASSERT_TRUE(before);
+                ASSERT_TRUE(after);
+                if (!before || !after) {
+                    return;
+                }
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(after->density),
+                          std::bit_cast<std::uint32_t>(before->density));
+                EXPECT_EQ(after->material, before->material);
+            }
+        }
+    }
+    EXPECT_EQ(session->durable_identity().generation, committed->durable_identity().generation);
+}
+
+TEST(FarFrozenObservation, SessionRenderCannotReplaceDurableBakeEvenWithMatchingIdentity) {
+    auto source = Source();
+    std::array<FarFrozenRegion, kFarTierCount> regions;
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        regions[i] = SmallRegion(static_cast<std::uint8_t>(i + 1));
+    }
+    std::shared_ptr<const FarFrozenObservation> frozen;
+    ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), frozen), Error::None);
+    EditedImage edited;
+    const FarEditedFootprint changed{{0, 0, 0}, {1, 1, 1}};
+    FarEditedBakeResult baked;
+    ASSERT_EQ(BakeFarEditedTilesFrozen(edited, {&changed, 1}, *frozen, BakeLimits(), baked),
+              FarEditedBakeError::None);
+    const auto bytes = baked.tiles.front().bytes;
+    const auto count = baked.tiles.size();
+    source.use = FarFrozenUse::SessionRender;
+    source.live = Constant(-50.0f);
+    ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), frozen), Error::None);
+    EXPECT_EQ(BakeFarEditedTilesFrozen(edited, {&changed, 1}, *frozen, BakeLimits(), baked),
+              FarEditedBakeError::IdentityMismatch);
+    EXPECT_EQ(baked.tiles.size(), count);
+    EXPECT_EQ(baked.tiles.front().bytes, bytes);
+    EXPECT_EQ(baked.source.generation, 7u);
+}
+
 TEST(FarFrozenObservation, WorkerCompilationRetainsOnlyFrozenMemoryAfterOwnerRelease) {
     auto source = Source();
     std::size_t owner_calls = 0;
@@ -362,7 +553,8 @@ TEST(FarFrozenObservation, MissingCommittedResolverRefusesWithoutLosingDurableEd
     // Preview authority cannot substitute for missing durable authority.
     source.live = Constant(-30);
     source.parked = Constant(-20);
-    for (const auto use : {FarFrozenUse::Committed, FarFrozenUse::Preview}) {
+    for (const auto use :
+         {FarFrozenUse::Committed, FarFrozenUse::Preview, FarFrozenUse::SessionRender}) {
         source.use = use;
         EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
                   Error::InvalidSource);
@@ -379,7 +571,8 @@ TEST(FarFrozenObservation, MissingCommittedResolverRefusesWithoutLosingDurableEd
 TEST(FarFrozenObservation, WaterWorkCapIncludesAllRegionsHalosAndPreviewLayers) {
     const std::array<FarFrozenRegion, 2> regions{
         {{1, {{0, 0, 0}, {0, 0, 0}}}, {1, {{4, 0, 0}, {4, 0, 0}}}}};
-    for (const auto use : {FarFrozenUse::Committed, FarFrozenUse::Preview}) {
+    for (const auto use :
+         {FarFrozenUse::Committed, FarFrozenUse::Preview, FarFrozenUse::SessionRender}) {
         auto source = Source();
         source.use = use;
         std::size_t height_calls = 0, water_calls = 0;
@@ -397,7 +590,7 @@ TEST(FarFrozenObservation, WaterWorkCapIncludesAllRegionsHalosAndPreviewLayers) 
         };
         // Each point support has a 3 by 3 horizontal halo. Overlaps are sampled
         // separately; preview falls through both override layers to base water.
-        const std::uint64_t per_region = 9ULL * (use == FarFrozenUse::Preview ? 3 : 1);
+        const std::uint64_t per_region = 9ULL * (use != FarFrozenUse::Committed ? 3 : 1);
         const auto total = 2 * per_region;
         auto limits = Limits();
         limits.max_water_samples = per_region;

@@ -17,11 +17,13 @@
 #include "../core/WaterComponents.h"
 #include "../world/ActiveRegionLedger.h"
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <entt/entt.hpp>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace luminumbra::foliage {
@@ -40,6 +42,21 @@ void Copy(const entt::registry& from,
         if (const auto* component = from.try_get<const T>(source))
             to.emplace_or_replace<T>(target, *component);
     }
+}
+template<typename Function>
+void Participants(const Function& function) {
+    function.template operator()<C::PlantTag>();
+    function.template operator()<C::PollinationTag>();
+    function.template operator()<C::CropLifecycleComponent>();
+    function.template operator()<C::SoilFeederComponent>();
+    function.template operator()<C::WaterSourceComponent>();
+    function.template operator()<C::CombustibleComponent>();
+    function.template operator()<C::IgnitionSourceComponent>();
+    function.template operator()<C::GrazeableComponent>();
+    function.template operator()<C::MortalComponent>();
+    function.template operator()<C::CreatureComponent>();
+    function.template operator()<C::AlarmComponent>();
+    function.template operator()<C::DecayComponent>();
 }
 template<typename Function>
 void Components(const Function& function) {
@@ -76,18 +93,13 @@ inline void CopyFoliage(const entt::registry& from,
 class FoliageRegistryStage {
 public:
     static bool HasWork(const entt::registry& original) {
-        namespace C = ::Luminumbra::Components;
-        return !original.view<const C::PlantTag>().empty() ||
-               !original.view<const C::SoilFeederComponent>().empty() ||
-               !original.view<const C::WaterSourceComponent>().empty() ||
-               !original.view<const C::CombustibleComponent>().empty() ||
-               !original.view<const C::IgnitionSourceComponent>().empty() ||
-               !original.view<const C::GrazeableComponent>().empty() ||
-               !original.view<const C::MortalComponent>().empty() ||
-               !original.view<const C::CreatureComponent>().empty();
+        bool has_work = false;
+        stage_detail::Participants(
+            [&]<typename T> { has_work = has_work || !original.view<const T>().empty(); });
+        return has_work;
     }
     void Begin(const entt::registry& original, std::uint64_t next_id) {
-        if (!m_births.empty()) {
+        if (m_prepared && !m_committed) {
             throw std::runtime_error("Unfinished foliage publication");
         }
         ++m_visits;
@@ -97,18 +109,7 @@ public:
         m_registry.clear();
         m_retained.clear();
         // EnTT pools have the entity-mask bound; known capacities survive ticks.
-        namespace C = ::Luminumbra::Components;
-        Collect<C::PlantTag>(original);
-        Collect<C::SoilFeederComponent>(original);
-        Collect<C::WaterSourceComponent>(original);
-        Collect<C::CombustibleComponent>(original);
-        Collect<C::IgnitionSourceComponent>(original);
-        Collect<C::GrazeableComponent>(original);
-        Collect<C::MortalComponent>(original);
-        Collect<C::CreatureComponent>(original);
-        // Downstream consumers must read same-tick death and grazing results.
-        Collect<C::AlarmComponent>(original);
-        Collect<C::DecayComponent>(original);
+        stage_detail::Participants([&]<typename T> { Collect<T>(original); });
         std::sort(m_retained.begin(), m_retained.end());
         stage_detail::Components([&]<typename T> {
             if (const auto* storage = original.storage<T>()) {
@@ -141,17 +142,21 @@ public:
     std::uint64_t entity_visits() const {
         return m_entityVisits;
     }
+    // Counts participant and birth visits during publication, excluding unrelated entities.
+    std::uint64_t publication_entity_visits() const {
+        return m_publicationEntityVisits;
+    }
     std::uint64_t publications() const {
         return m_publications;
     }
-    // All potentially allocating publication work precedes retained mutations.
-    // Abort restores provisional births in reverse allocation order, including
-    // their versions, so the next live handle is unchanged after a refusal.
+    // Birth payloads stay in the candidate. Detached indexes reserve sparse pages
+    // without installing entities or components in live registry queries.
     void PreparePublication(entt::registry& original) {
         if (m_prepared || m_committed) {
             throw std::runtime_error("Repeated foliage preparation");
         }
         for (const auto entity : m_retained) {
+            ++m_publicationEntityVisits;
             if (!original.valid(entity)) {
                 throw std::runtime_error("Stale foliage handle");
             }
@@ -168,6 +173,7 @@ public:
         m_newPlants.clear();
         m_newPlants.reserve(plants.size());
         for (const auto entity : plants) {
+            ++m_publicationEntityVisits;
             if (!std::binary_search(m_retained.begin(), m_retained.end(), entity)) {
                 m_newPlants.push_back(entity);
             }
@@ -181,24 +187,91 @@ public:
             const auto right_id = right_region ? right_region->persistent_id : std::uint64_t{0};
             return left_id == right_id ? left < right : left_id < right_id;
         });
+        m_births.clear();
         m_births.reserve(m_newPlants.size());
-        try {
-            for (const auto entity : m_newPlants) {
-                const auto live = original.create();
-                m_births.push_back(live);
-                stage_detail::CopyFoliage(m_registry, entity, original, live);
+        {
+            using EntityStorage = entt::storage<entt::entity>;
+            auto& entities = static_cast<EntityStorage&>(original.storage<entt::entity>());
+            // Entity storage is bounded by EnTT's entity mask, including recycled handles.
+            if (m_newPlants.size() >
+                entt::entt_traits<entt::entity>::entity_mask - entities.free_list()) {
+                throw std::length_error("Foliage entity space exhausted");
             }
-            m_prepared = true;
-        } catch (...) {
-            Abort(original);
-            throw;
+            DetachedStorage<EntityStorage> detached(entities);
+            try {
+                for (std::size_t index = 0; index < m_newPlants.size(); ++index) {
+                    ++m_publicationEntityVisits;
+                    m_births.push_back(detached.storage.generate());
+                }
+            } catch (...) {
+                ReleaseHandles(detached.storage);
+                throw;
+            }
+            ReleaseHandles(detached.storage);
+            detached.keep_cursor = true;
         }
+        stage_detail::Components([&]<typename T> {
+            auto& storage = original.storage<T>();
+            std::size_t count = 0;
+            static_assert(entt::storage<T>::storage_policy == entt::deletion_policy::swap_and_pop);
+            for (const auto entity : m_newPlants) {
+                ++m_publicationEntityVisits;
+                count += static_cast<std::size_t>(m_registry.all_of<T>(entity));
+            }
+            if (count == 0) {
+                return;
+            }
+            // Each pool has at most entity_mask entries. Check before adding sizes.
+            if (count > entt::entt_traits<entt::entity>::entity_mask - storage.size()) {
+                throw std::length_error("Foliage component space exhausted");
+            }
+            const auto required = storage.size() + count;
+            const auto capacity = std::min<std::size_t>(
+                entt::entt_traits<entt::entity>::entity_mask,
+                std::min(storage.entt::sparse_set::capacity(), storage.capacity()));
+            if (required > capacity) {
+                // Geometric growth keeps shared dense indexes amortized O(1) per birth.
+                const auto growth =
+                    capacity +
+                    std::min(capacity, entt::entt_traits<entt::entity>::entity_mask - capacity);
+                storage.reserve(std::max(required, growth));
+            }
+            // Payload capacity alone does not reserve EnTT's sparse entity pages.
+            // Move only the index; existing payloads and their addresses stay put.
+            DetachedStorage<entt::sparse_set> detached(storage);
+            const auto size = detached.storage.size();
+            try {
+                for (std::size_t index = 0; index < m_newPlants.size(); ++index) {
+                    ++m_publicationEntityVisits;
+                    if (m_registry.all_of<T>(m_newPlants[index])) {
+                        detached.storage.push(m_births[index]);
+                    }
+                }
+            } catch (...) {
+                TrimIndex(detached.storage, size);
+                throw;
+            }
+            TrimIndex(detached.storage, size);
+        });
+        m_prepared = true;
     }
     void Commit(entt::registry& original) noexcept {
         if (!m_prepared || m_committed) {
             return;
         }
+        // Preparation reserved every dense slot, payload page and sparse page.
+        // Publish births before deaths so reserved handle order stays unchanged.
+        for (std::size_t index = 0; index < m_newPlants.size(); ++index) {
+            ++m_publicationEntityVisits;
+            const auto live = original.create();
+            assert(live == m_births[index]);
+            stage_detail::Components([&]<typename T> {
+                static_assert(std::is_nothrow_copy_constructible_v<T>);
+                stage_detail::Copy<T>(m_registry, m_newPlants[index], original, live);
+            });
+        }
         for (const auto entity : m_retained) {
+            ++m_publicationEntityVisits;
             if (!m_registry.valid(entity)) {
                 original.destroy(entity);
                 continue;
@@ -216,19 +289,46 @@ public:
         m_committed = true;
         ++m_publications;
     }
-    void Abort(entt::registry& original) noexcept {
-        for (auto birth = m_births.rbegin(); birth != m_births.rend(); ++birth) {
-            original.destroy(*birth, entt::to_version(*birth));
-        }
+    void Abort() noexcept {
         m_births.clear();
         m_prepared = false;
     }
 
 private:
+    template<typename Storage>
+    struct DetachedStorage {
+        Storage& original;
+        Storage storage;
+        bool keep_cursor = false;
+        explicit DetachedStorage(Storage& source)
+            : original(source)
+            , storage(std::move(source)) {}
+        ~DetachedStorage() {
+            if (keep_cursor) {
+                original = std::move(storage);
+            } else {
+                // Generation can advance its detached cursor before allocation
+                // throws. Restore indexes while preserving the live cursor.
+                static_cast<entt::sparse_set&>(original).swap(storage);
+            }
+        }
+    };
+    static void TrimIndex(entt::sparse_set& storage, std::size_t size) noexcept {
+        while (storage.size() > size) {
+            storage.erase(storage.data()[storage.size() - 1]);
+        }
+    }
+    void ReleaseHandles(entt::storage<entt::entity>& storage) const noexcept {
+        for (auto birth = m_births.rbegin(); birth != m_births.rend(); ++birth) {
+            storage.erase(*birth);
+            storage.bump(*birth);
+        }
+    }
     entt::registry m_registry;
     std::vector<entt::entity> m_retained, m_births, m_newPlants;
     std::uint64_t m_initialId = 1, m_nextId = 1;
     std::uint64_t m_visits = 0, m_entityVisits = 0, m_publications = 0;
+    std::uint64_t m_publicationEntityVisits = 0;
     bool m_prepared = false, m_committed = false;
     template<typename T>
     void Collect(const entt::registry& original) {

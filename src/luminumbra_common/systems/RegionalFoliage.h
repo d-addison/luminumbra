@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../ai/CreatureTickAdmission.h"
 #include "../fields/FieldPageState.h"
 #include "FoliageRegistryStage.h"
 #include "IrrigationSystem.h"
@@ -558,9 +559,11 @@ inline std::map<RegionKey, std::uint64_t> ExchangeFoliageBorders(FieldPageState&
     }
     return work;
 }
-inline entt::registry SelectFoliageRegistry(const entt::registry& original,
-                                            const RegionalFoliageWindows& windows,
-                                            const std::set<FieldPageKey>& borders) {
+inline entt::registry
+SelectFoliageRegistry(const entt::registry& original,
+                      const RegionalFoliageWindows& windows,
+                      const std::set<FieldPageKey>& borders,
+                      const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
     entt::registry selected;
     const auto collect = [&]<typename T>() {
         for (auto entity : original.view<const T>()) {
@@ -579,6 +582,11 @@ inline entt::registry SelectFoliageRegistry(const entt::registry& original,
                 include = (found != windows.elapsed.end() && found->second != 0) ||
                           borders.contains({page(cell.x), page(cell.z)});
             }
+            // Creature ownership was captured before movement. Keep admitted
+            // creatures even when their current position crossed a region boundary.
+            if (admission && original.all_of<Comp::CreatureComponent>(entity)) {
+                include = admission->Allows(entity);
+            }
             if (include) {
                 if (selected.create(entity) != entity) {
                     throw std::runtime_error("Foliage handle refused");
@@ -587,16 +595,7 @@ inline entt::registry SelectFoliageRegistry(const entt::registry& original,
             }
         }
     };
-    collect.template operator()<Comp::PlantTag>();
-    collect.template operator()<Comp::SoilFeederComponent>();
-    collect.template operator()<Comp::WaterSourceComponent>();
-    collect.template operator()<Comp::CombustibleComponent>();
-    collect.template operator()<Comp::IgnitionSourceComponent>();
-    collect.template operator()<Comp::GrazeableComponent>();
-    collect.template operator()<Comp::MortalComponent>();
-    collect.template operator()<Comp::CreatureComponent>();
-    collect.template operator()<Comp::AlarmComponent>();
-    collect.template operator()<Comp::DecayComponent>();
+    stage_detail::Participants(collect);
     return selected;
 }
 } // namespace luminumbra::foliage

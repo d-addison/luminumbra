@@ -48,6 +48,7 @@
 #include "../core/DeterministicMath.h"        // Sqrt
 
 #include "../systems/RegionConsumerGate.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -103,7 +104,8 @@ inline WildlifeFoliageStats
 RunWildlifeFoliageOnTick(entt::registry& reg,
                          std::uint64_t tick,
                          const WildlifeFoliageTuning& tuning = {},
-                         const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                         const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                         const CreatureTickAdmission* admission = nullptr) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -116,9 +118,8 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
         std::vector<entt::entity> cents;
-        cents.reserve(cview.size_hint()); // Bounded by the smallest participating pool.
         for (auto e : cview) {
-            if (gate.Allows(e)) {
+            if (admission ? admission->Allows(e) : gate.Allows(e)) {
                 cents.push_back(e);
             }
         }
@@ -139,7 +140,6 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     // --- 2. Gather grazeable plants, id-ordered. ---
     auto pview = reg.view<Comp::GrazeableComponent, const Comp::TransformComponent>();
     std::vector<entt::entity> pents;
-    pents.reserve(pview.size_hint()); // Bounded by the smallest participating pool.
     for (auto e : pview) {
         if (gate.Allows(e)) {
             pents.push_back(e);

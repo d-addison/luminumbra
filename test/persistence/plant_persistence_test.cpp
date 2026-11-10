@@ -1321,3 +1321,165 @@ TEST(PlantPersistence, IdentityMapUsesPayloadOrderAndExactLegacyProjection) {
     EXPECT_EQ(map.at("plants")[0].at("persistent_id"), 18u);
     EXPECT_EQ(map.at("plants")[1].at("persistent_id"), 17u);
 }
+
+namespace {
+void ExpectSnapshotRecordsEqual(const E::EntityRegistrySnapshot& actual,
+                                const E::EntityRegistrySnapshot& expected) {
+    EXPECT_EQ(actual.persistent_identity, expected.persistent_identity);
+    ASSERT_EQ(actual.entities.size(), expected.entities.size());
+    for (std::size_t i = 0; i < expected.entities.size(); ++i) {
+        const auto& actual_entity = actual.entities[i];
+        const auto& expected_entity = expected.entities[i];
+        EXPECT_EQ(actual_entity.entity_id, expected_entity.entity_id);
+        EXPECT_EQ(actual_entity.legacy_entity_id, expected_entity.legacy_entity_id);
+        EXPECT_EQ(actual_entity.name, expected_entity.name);
+        ASSERT_EQ(actual_entity.components.size(), expected_entity.components.size());
+        for (std::size_t j = 0; j < expected_entity.components.size(); ++j) {
+            EXPECT_EQ(actual_entity.components[j].type, expected_entity.components[j].type);
+            EXPECT_EQ(actual_entity.components[j].data, expected_entity.components[j].data);
+        }
+    }
+}
+
+void ExpectSnapshotNumberRefused(const nlohmann::json& original,
+                                 const std::string& token,
+                                 std::string_view field,
+                                 std::string_view expected_error) {
+    auto encoded = original;
+    if (field == "entity_id")
+        encoded["entities"].back()[field] = "invalid_number";
+    else
+        encoded[field] = "invalid_number";
+    auto bytes = encoded.dump();
+    constexpr std::string_view marker = "\"invalid_number\"";
+    const auto position = bytes.find(marker);
+    ASSERT_NE(position, std::string::npos);
+    bytes.replace(position, marker.size(), token);
+    for (const bool sort_entities : {false, true}) {
+        auto retained = IdentityPlants();
+        retained.entities.front().legacy_entity_id = 101u;
+        retained.entities.back().legacy_entity_id = 202u;
+        auto loaded = retained;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors, sort_entities));
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_EQ(errors.front(), expected_error);
+        ExpectSnapshotRecordsEqual(loaded, retained);
+    }
+}
+
+void CheckSnapshotIdRefusal(const std::string& token) {
+    for (const bool persistent_identity : {false, true}) {
+        auto snapshot = IdentityPlants();
+        snapshot.persistent_identity = persistent_identity;
+        const auto encoded =
+            nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(snapshot));
+        ExpectSnapshotNumberRefused(
+            encoded, token, "entity_id", "entity ID must be an unsigned integer");
+    }
+}
+} // namespace
+
+TEST(PlantPersistence, SnapshotParserRefusesNegativeEntityIdsAtomically) {
+    CheckSnapshotIdRefusal("-1");
+    CheckSnapshotIdRefusal("-0");
+}
+
+TEST(PlantPersistence, SnapshotParserRefusesFractionalEntityIdsAtomically) {
+    CheckSnapshotIdRefusal("1.5");
+}
+
+TEST(PlantPersistence, SnapshotParserRefusesExponentEntityIdsAtomically) {
+    CheckSnapshotIdRefusal("1e30");
+    CheckSnapshotIdRefusal("1e0");
+}
+
+TEST(PlantPersistence, SnapshotParserRefusesOutOfRangeEntityIdsAtomically) {
+    CheckSnapshotIdRefusal("18446744073709551616");
+}
+
+TEST(PlantPersistence, SnapshotParserRefusesNonNumericEntityIdsAtomically) {
+    for (const auto* token : {"null", "true", "\"17\"", "[]", "{}"}) {
+        SCOPED_TRACE(token);
+        CheckSnapshotIdRefusal(token);
+    }
+}
+
+TEST(PlantPersistence, SnapshotParserRequiresUnsignedCountsAtomically) {
+    for (const bool persistent_identity : {false, true}) {
+        const E::EntityRegistrySnapshot empty{.entities = {},
+                                              .persistent_identity = persistent_identity};
+        const auto encoded = nlohmann::json::parse(E::SerializeEntityRegistrySnapshotJson(empty));
+        for (const auto* field : {"entity_count", "component_count"}) {
+            SCOPED_TRACE(field);
+            for (const auto* token : {"-1",
+                                      "-0",
+                                      "0.5",
+                                      "0e0",
+                                      "1e30",
+                                      "18446744073709551616",
+                                      "null",
+                                      "true",
+                                      "\"0\"",
+                                      "[]",
+                                      "{}"}) {
+                SCOPED_TRACE(token);
+                ExpectSnapshotNumberRefused(
+                    encoded, token, field, std::string(field) + " must be an unsigned integer");
+            }
+            ExpectSnapshotNumberRefused(
+                encoded,
+                "18446744073709551615",
+                field,
+                std::string("loaded ") +
+                    (std::string_view(field) == "entity_count" ? "entity" : "component") +
+                    " count does not match " + field);
+        }
+    }
+}
+
+TEST(PlantPersistence, SnapshotParserPreservesLegacyAndSharedAllocatorRecordsAndBytes) {
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    barePlant(plants, 2.0f, 1, 10);
+    for (auto snapshot : {F::BuildPlantEntitySnapshot(plants), IdentityPlants()}) {
+        for (const bool empty : {false, true}) {
+            if (empty)
+                snapshot.entities.clear();
+            const auto bytes = E::SerializeEntityRegistrySnapshotJson(snapshot);
+            for (const bool sort_entities : {false, true}) {
+                E::EntityRegistrySnapshot loaded;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(
+                    E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors, sort_entities));
+                EXPECT_TRUE(errors.empty());
+                auto expected = snapshot;
+                E::SortEntityRegistrySnapshot(expected);
+                for (auto& entity : expected.entities)
+                    entity.legacy_entity_id = entity.entity_id;
+                ExpectSnapshotRecordsEqual(loaded, expected);
+                EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), bytes);
+            }
+        }
+    }
+}
+
+TEST(PlantPersistence, SnapshotParserPreservesFullUnsignedIdRange) {
+    for (const bool persistent_identity : {false, true}) {
+        E::EntityRegistrySnapshot snapshot;
+        snapshot.persistent_identity = persistent_identity;
+        for (const auto id : {std::uint64_t{0},
+                              std::uint64_t{1} << 32,
+                              std::numeric_limits<std::uint64_t>::max()}) {
+            snapshot.entities.push_back(
+                {.entity_id = id, .name = "extension", .components = {}, .legacy_entity_id = id});
+        }
+        const auto bytes = E::SerializeEntityRegistrySnapshotJson(snapshot);
+        E::EntityRegistrySnapshot loaded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(E::LoadEntityRegistrySnapshotJson(bytes, loaded, errors));
+        EXPECT_TRUE(errors.empty());
+        ExpectSnapshotRecordsEqual(loaded, snapshot);
+        EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded), bytes);
+    }
+}

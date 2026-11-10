@@ -9,7 +9,10 @@ namespace Luminumbra::World {
 
 enum class FarFrozenUse : std::uint8_t {
     Committed,
-    Preview
+    Preview,
+    // Immutable presentation of a committed baseline plus published session
+    // edits. Unsaved edits retain the baseline generation and cannot be baked.
+    SessionRender
 };
 enum class FarFrozenWaterCapability : std::uint8_t {
     Unavailable,
@@ -181,8 +184,8 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             std::shared_ptr<const FarFrozenObservation>& output);
 
 // Uses the existing edited-image/bake contract unchanged. The source identity
-// and LegacySigned16 profile must match capture; unsaved composed observations
-// never enter the bake sampler.
+// and LegacySigned16 profile must match capture. SessionRender is refused;
+// Preview retains its existing pristine-only bake sampler.
 FarEditedBakeError BakeFarEditedTilesFrozen(const FarEditedSourceView& source,
                                             std::span<const FarEditedFootprint> changed,
                                             const FarFrozenObservation& frozen,
