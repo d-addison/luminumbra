@@ -330,6 +330,65 @@ public:
                                                  std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                                  std::vector<std::string>* errors = nullptr,
                                                  const SnapshotIndex* admitted_index = nullptr);
+    // All limits are required and nonzero. Container bytes include controls and derived
+    // records; decoded bytes include validation outside the requested window.
+    struct AuthorityReadLimits {
+        std::uint64_t members = 0;
+        std::uint64_t records = 0;
+        std::uint64_t headers = 0;
+        std::uint64_t probes = 0;
+        std::uint64_t compressed_member_bytes = 0;
+        std::uint64_t compressed_total_bytes = 0;
+        std::uint64_t decoded_member_bytes = 0;
+        std::uint64_t decoded_total_bytes = 0;
+        std::uint64_t control_bytes = 0;
+    };
+    struct AuthorityWindow {
+        int min_chunk_x = 0;
+        int max_chunk_x = 0;
+        int min_chunk_z = 0;
+        int max_chunk_z = 0;
+    };
+    enum class AuthorityMembership {
+        ProvenAbsent,
+        Present,
+        Unavailable
+    };
+    struct AuthorityMemberEvidence {
+        int region_x = 0;
+        int region_z = 0;
+        std::uint64_t generation = 0;
+        AuthorityMembership membership = AuthorityMembership::Unavailable;
+    };
+    struct AuthorityWindowResult {
+        AuthorityMembership membership = AuthorityMembership::Unavailable;
+        std::uint64_t generation = 0;
+        std::uint64_t source_identity = 0;
+        std::vector<AuthorityMemberEvidence> members;
+        std::vector<std::shared_ptr<const Chunk>> chunks;
+        std::string error;
+    };
+    // Admit once at a committed owner boundary. Failed admission leaves the previous
+    // source intact. Quiesce reads before admission. Legacy admission pins generation zero
+    // and a process-local identity without creating an index. No handle survives either call.
+    class AuthorityWindowReader {
+    public:
+        AuthorityWindowReader();
+        ~AuthorityWindowReader();
+        AuthorityWindowReader(const AuthorityWindowReader&) = delete;
+        AuthorityWindowReader& operator=(const AuthorityWindowReader&) = delete;
+        bool admit(const std::filesystem::path& save_dir,
+                   const AuthorityReadLimits& limits,
+                   std::string& error);
+        // Includes a one-chunk XZ halo for shared face/edge/corner contributors,
+        // and every Y layer. Outputs are owned and never enter the chunk-reader cache.
+        [[nodiscard]] AuthorityWindowResult read(const AuthorityWindow& window,
+                                                 const AuthorityReadLimits& limits) const;
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
+    };
     enum class ChunkReadStatus {
         Found,
         Absent,
