@@ -10,7 +10,7 @@
 // of ids so the cross A<->B is symmetric and order-independent.
 //
 // DETERMINISM (this feeds world_hash):
-//   * id-ordered traversal (sorted by entt::to_integral) for receivers AND the
+//   * persistent-id traversal (legacy plants follow in handle order) for receivers AND the
 //     donor scan, so donor selection ties resolve to the lowest id deterministically.
 //   * the per-cross RNG is seeded ONLY from integers — DeterministicRng::seeded(
 //     kPollinationSeedOffset, lower_id, higher_id, tick) — pair-symmetric (sorted
@@ -45,6 +45,8 @@
 #include "../components/PollinationComponents.h"
 #include "../core/DeterministicMath.h" // Sqrt (libm-free / IEEE-deterministic)
 #include "../core/DeterministicRng.h"
+
+#include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
 
@@ -135,16 +137,10 @@ inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponen
     return BreedPlants(a, b, rng, mutation_frac);
 }
 
-// Advance pollination by one fixed tick. Pure function of registry state + the tick
-// (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
-// to still air). `world_seed` lets distinct worlds diverge.
-inline PollinationStats RunPollinationOnTick(entt::registry& reg,
-                                             std::uint64_t tick,
-                                             ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
-                                             std::uint64_t world_seed = 0,
-                                             float mutation_frac = kPollinationMutationFrac) {
-    PollinationStats stats;
-
+// Collect admitted participants in identity order with storage bounded by the view.
+inline std::vector<entt::entity>
+CollectPollinationParticipants(entt::registry& reg,
+                               const ::Luminumbra::world::RegionConsumerGate& gate) {
     auto view = reg.view<Comp::PollinationTag,
                          Comp::PlantGenomeComponent,
                          Comp::PlantGrowthComponent,
@@ -153,11 +149,36 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
 
     // id-ordered participant ids so donor-selection ties + apply order are deterministic.
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    ents.reserve(view.size_hint()); // Bounded by the smallest participating component pool.
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return gate.UsesPersistentPlantIdentity() ? PlantIdentityLess(reg, a, b)
+                                                  : entt::to_integral(a) < entt::to_integral(b);
     });
+    return ents;
+}
+
+// Advance pollination by one fixed tick. Pure function of registry state + the tick
+// (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
+// to still air). `world_seed` lets distinct worlds diverge.
+inline PollinationStats
+RunPollinationOnTick(entt::registry& reg,
+                     std::uint64_t tick,
+                     ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
+                     std::uint64_t world_seed = 0,
+                     float mutation_frac = kPollinationMutationFrac,
+                     const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    PollinationStats stats;
+    auto view = reg.view<Comp::PollinationTag,
+                         Comp::PlantGenomeComponent,
+                         Comp::PlantGrowthComponent,
+                         Comp::TransformComponent,
+                         Comp::PollinationComponent>();
+    const auto ents = CollectPollinationParticipants(reg, gate);
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
     // effective distance within reach; ties -> lowest donor id). Snapshot the cross.
@@ -169,10 +190,13 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
         Comp::PlantGenomeComponent donor_genome;
     };
     std::vector<Cross> crosses;
+    crosses.reserve(ents.size()); // At most one cross per admitted receiver.
 
     for (auto r : ents) {
         ++stats.considered;
-        const std::uint64_t rid = static_cast<std::uint64_t>(entt::to_integral(r));
+        const std::uint64_t rid =
+            (gate.UsesPersistentPlantIdentity() ? PlantSimulationId(reg, r)
+                                                : static_cast<std::uint64_t>(entt::to_integral(r)));
         const auto& r_tf = view.get<Comp::TransformComponent>(r);
         const auto& r_genome = view.get<Comp::PlantGenomeComponent>(r);
 
@@ -184,7 +208,9 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
         for (auto d : ents) { // already id-ordered -> deterministic tie-break
             if (d == r)
                 continue;
-            const std::uint64_t did = static_cast<std::uint64_t>(entt::to_integral(d));
+            const std::uint64_t did = (gate.UsesPersistentPlantIdentity()
+                                           ? PlantSimulationId(reg, d)
+                                           : static_cast<std::uint64_t>(entt::to_integral(d)));
             const auto& d_growth = view.get<Comp::PlantGrowthComponent>(d);
             if (!IsPollenDonor(d_growth))
                 continue; // only reproductive plants donate

@@ -708,6 +708,8 @@ private:
     ActiveRegionLedger m_activeRegionLedger;
     void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
+    // Reused by the per-tick consumer gate so steady-state ticks allocate nothing.
+    std::vector<std::uint64_t> m_consumerGateScratch;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Successful consumer work this tick.
