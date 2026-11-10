@@ -1391,8 +1391,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
             "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
-            "windows-msvc": "3fdfaa2bee1bcd937ee43d5ec74166429c2d581f165d17f04cc859bbbe0b94fb",
-            "windows-ucrt64": "07ce40560092c19c83a9beffff552eb1176077b9a087faa3011b6d98742d3c58",
+            "windows-msvc": "d0e2abdce03da0f9a2338ba50914da691f98fda7a0905f2c027587de0ba98858",
+            "windows-ucrt64": "9b2ceea865a1d637d21d794061f90bbd4d2852838a970be7c0950bce0c05c266",
             "windows-msvc-result": "b7ac3a695046fb6674f05e8cade0ada71e6265cf38e6c50ed9a3dc9b17cf4871",
             "windows-ucrt64-result": "9a918a89c4b910387a63f276bfc917757c2c884147ac44dfa165994454fe3061",
         }
@@ -1437,7 +1437,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                     self.assertIn('& "${{ steps.python.outputs.python-path }}" -I -B', script)
                 configure = re.findall(r"(?m)^cmake (?:-S |--preset )[^\n]*", script)
                 commands = [line.strip() for line in script.splitlines()
-                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_EXECUTABLE" )',
+                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_BASH" )',
                                         line.strip())]
                 if not configure and not commands:
                     continue
@@ -1447,7 +1447,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(step, "CI_PYTHON_EXECUTABLE", 10), output)
                 if value(step, "shell", 8) == "bash":
                     executable = "$CI_PYTHON_EXECUTABLE"
-                    prefix = '"$CI_PYTHON_EXECUTABLE" '
+                    prefix = '"$CI_PYTHON_BASH" '
                 elif "Enter-VsDevShell " in script:
                     executable = "$env:CI_PYTHON_EXECUTABLE"
                     self.assertEqual(script.count("$pythonExecutable ="), 1)

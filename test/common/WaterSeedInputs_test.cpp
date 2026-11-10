@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -92,8 +93,8 @@ public:
         chunk.stage_water_seed_inputs(std::move(inputs));
     }
 
-    void tick() {
-        m_water.update(m_registry, m_chunks);
+    void tick(bool deterministic_authority = false) {
+        m_water.update(m_registry, m_chunks, deterministic_authority);
     }
 };
 
@@ -2464,4 +2465,384 @@ TEST(WaterSeedInputs, ReadinessRequiresPublishedSupportedAndMatchingResolution) 
     oversized.ready.store(true, std::memory_order_release);
     EXPECT_FALSE(oversized.ready_for(32));
 }
+TEST(WaterSeedInputs, ExplicitBedOwnersWorkBeforeUpdateAndPreserveSaturatedEditCounts) {
+    SeedFixture fixture(2);
+    fixture.water().SetSimResolution(8);
+    auto owner_it = fixture.chunks().begin();
+    auto& owner = *owner_it->second;
+    const auto& untouched = *std::next(owner_it)->second;
+    fixture.water().InitializeGeneratedWater(owner);
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> owners{
+        {owner.get_id(), owner_it->second}};
+    const Vec3 center = Vec3(owner.get_coords() * IVec3(16, 0, 16)) + Vec3(8, 0, 8);
+    const auto voxel_before = owner.voxel_revision();
+    const auto seed_generation = owner.water_seed_edit_generation();
+    std::uint64_t epoch = 0;
+    for (const bool lower : {false, true}) {
+        const auto limit = lower ? std::numeric_limits<std::int32_t>::min()
+                                 : std::numeric_limits<std::int32_t>::max();
+        owner.water_bed_mm.assign(64, lower ? limit + 1 : limit - 1);
+        for (int edit = 0; edit < 2; ++edit) {
+            const auto stamp = owner.authority_hash_revision();
+            owner.is_water_sleeping.store(true);
+            owner.water_mesh_generated.store(true);
+            fixture.prepare(owner);
+            EXPECT_EQ(fixture.water().EditTerrainBed(center, lower ? -1 : 1, 16.0f, &owners), 64);
+            EXPECT_EQ(owner.water_bed_mm, std::vector<std::int32_t>(64, limit));
+            EXPECT_EQ(fixture.water().water_epoch(), ++epoch);
+            EXPECT_EQ(owner.authority_hash_revision(), stamp + 1);
+            EXPECT_TRUE(owner.has_water_authority());
+            EXPECT_FALSE(owner.is_water_sleeping.load());
+            EXPECT_FALSE(owner.water_mesh_generated.load());
+            EXPECT_FALSE(owner.water_seed_inputs());
+            EXPECT_EQ(owner.voxel_revision(), voxel_before);
+            EXPECT_EQ(owner.water_seed_edit_generation(), seed_generation);
+        }
+    }
+    EXPECT_FALSE(untouched.has_water_sim.load());
+    EXPECT_FALSE(untouched.has_water_authority());
+    // Supplying an edit map does not bind later queries or implicit edits to its lifetime.
+    EXPECT_EQ(fixture.water().EditTerrainBed(center, 1, 16.0f), 0);
+}
+
+TEST(WaterSeedInputs, SourceColumnRoutingIsOptInAndWaterMutationsPreserveVoxels) {
+    for (const bool deterministic_authority : {false, true}) {
+        SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+        WaterSystem water(nullptr, &world);
+        water.SetSimResolution(8);
+        entt::registry registry;
+        std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks;
+        const std::vector<float> terrain(64, 100.0f);
+        for (const int height : {0, 3}) {
+            auto chunk = std::make_shared<Chunk>(IVec3(0, height, 0));
+            water.InitializeGeneratedWater(*chunk, terrain);
+            chunk->water_depth_mm.assign(64, 0);
+            chunk->is_water_sleeping.store(true);
+            chunks.emplace(chunk->get_id(), std::move(chunk));
+        }
+        const auto source = registry.create();
+        registry.emplace<Components::TransformComponent>(source).position = Vec3(8, 56, 8);
+        registry.emplace<Components::FlowingWaterSourceComponent>(source).flow_rate = 120.0f;
+        if (deterministic_authority) {
+            for (const float height : {std::numeric_limits<float>::quiet_NaN(),
+                                       std::numeric_limits<float>::infinity()}) {
+                const auto invalid = registry.create();
+                registry.emplace<Components::TransformComponent>(invalid).position =
+                    Vec3(8, height, 8);
+                registry.emplace<Components::FlowingWaterSourceComponent>(invalid).flow_rate =
+                    120.0f;
+            }
+        }
+        water.update(registry, chunks, deterministic_authority);
+        // 120 m^3/s * 1/30 s / 4 m^2 = 1 m = 1000 mm in the selected column.
+        EXPECT_EQ(water.debug_source_injected_mm(), 1000);
+        for (const auto& [id, chunk] : chunks) {
+            (void)id;
+            const bool selected = chunk->get_coords().y == (deterministic_authority ? 0 : 3);
+            EXPECT_EQ(std::accumulate(chunk->water_depth_mm.begin(),
+                                      chunk->water_depth_mm.end(),
+                                      std::int64_t{0}),
+                      selected ? 1000 : 0);
+            EXPECT_EQ(chunk->has_water_authority(), deterministic_authority && selected);
+            EXPECT_EQ(chunk->voxel_revision(), 0u);
+        }
+        if (deterministic_authority) {
+            auto& owner = *chunks.at(Chunk::calculate_id(IVec3(0)));
+            auto stamp = owner.authority_hash_revision();
+            water.apply_displacement(Vec3(7, 0, 7), 0.1f);
+            EXPECT_GT(owner.authority_hash_revision(), stamp);
+            EXPECT_EQ(owner.voxel_revision(), 0u);
+            stamp = owner.authority_hash_revision();
+            ASSERT_TRUE(water.ResizeSimulationGrid(owner, Systems::WaterDetailLevel::High));
+            EXPECT_EQ(owner.authority_hash_revision(), stamp + 1);
+            EXPECT_EQ(owner.voxel_revision(), 0u);
+            stamp = owner.authority_hash_revision();
+            ASSERT_TRUE(water.ResizeSimulationGrid(owner, Systems::WaterDetailLevel::Off));
+            EXPECT_EQ(owner.authority_hash_revision(), stamp + 1);
+            EXPECT_EQ(owner.voxel_revision(), 0u);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, AdmittedEditedHeightmapsIgnoreRendererLodAndInsertionOrder) {
+    for (const int resolution : {2, 4, 8, 16}) {
+        SeedFixture forward(10), reverse(10);
+        forward.water().SetSimResolution(resolution);
+        reverse.water().SetSimResolution(resolution);
+        std::vector<ChunkID> ids;
+        for (auto* fixture : {&forward, &reverse}) {
+            for (const auto& [id, chunk] : fixture->chunks()) {
+                chunk->mark_voxel_data_dirty();
+                chunk->heightmap_data.resize(17u * 17u);
+                for (int z = 0; z < 17; ++z) {
+                    for (int x = 0; x < 17; ++x) {
+                        chunk->heightmap_data[static_cast<std::size_t>(z * 17 + x)] =
+                            -8.0f + static_cast<float>(x) * 0.25f + static_cast<float>(z) * 0.5f;
+                    }
+                }
+                chunk->current_lod.store(fixture == &forward ? 0 : 2);
+                if (fixture == &forward) {
+                    // Ready analytic inputs must not override the edited heightmap.
+                    fixture->prepare(*chunk);
+                    ids.push_back(id);
+                }
+            }
+        }
+        std::sort(ids.begin(), ids.end());
+        std::unordered_map<ChunkID, std::shared_ptr<Chunk>> reverse_chunks;
+        reverse_chunks.reserve(64);
+        for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
+            reverse_chunks.emplace(*it, reverse.chunks().at(*it));
+        }
+        entt::registry registry;
+        for (std::size_t tick = 0; tick < 2; ++tick) {
+            forward.tick(true);
+            reverse.water().update(registry, reverse_chunks, true);
+            ExpectSameWater(forward, reverse);
+            for (std::size_t index = 0; index < ids.size(); ++index) {
+                const auto& chunk = *forward.chunks().at(ids[index]);
+                const bool admitted = index < (tick + 1) * 6;
+                EXPECT_EQ(chunk.has_water_sim.load(), admitted);
+                EXPECT_EQ(chunk.has_water_authority(), admitted);
+                EXPECT_EQ(chunk.voxel_revision(), 1u);
+                if (admitted) {
+                    for (int z = 0; z < resolution; ++z) {
+                        for (int x = 0; x < resolution; ++x) {
+                            const float step = 16.0f / static_cast<float>(resolution);
+                            const float height = -8.0f +
+                                                 (static_cast<float>(x) + 0.5f) * step * 0.25f +
+                                                 (static_cast<float>(z) + 0.5f) * step * 0.5f;
+                            EXPECT_EQ(
+                                chunk.water_bed_mm[static_cast<std::size_t>(z * resolution + x)],
+                                static_cast<std::int32_t>(std::lround(height * 1000.0f)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, AdmittedPreparationVisitsOnlyParticipatingChunks) {
+    SeedFixture fixture(32);
+    entt::registry registry;
+    const auto& selected = *fixture.chunks().begin();
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> participating{selected};
+    fixture.water().update(registry, participating, true);
+    EXPECT_EQ(fixture.water().grid_candidates_visited_last_update(), 1u);
+    EXPECT_EQ(fixture.water().cells_stepped_last_update(), 256u);
+    for (const auto& [id, chunk] : fixture.chunks()) {
+        EXPECT_EQ(chunk->has_water_sim.load(), id == selected.first);
+    }
+    fixture.water().SetBootPaused(true);
+    fixture.water().update(registry, participating, true);
+    EXPECT_EQ(fixture.water().grid_candidates_visited_last_update(), 0u);
+    EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+    fixture.water().SetBootPaused(false);
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> empty;
+    fixture.water().update(registry, empty, true);
+    EXPECT_EQ(fixture.water().grid_candidates_visited_last_update(), 0u);
+}
+
+TEST(WaterSeedInputs, IncompleteEditedHeightmapsUseOwnedFallbackInputs) {
+    for (const int resolution : {2, 4, 8, 16}) {
+        for (const std::size_t size : {0u, 1u, 288u, 290u}) {
+            SeedFixture fallback, prepared;
+            for (auto* fixture : {&fallback, &prepared}) {
+                fixture->water().SetSimResolution(resolution);
+                auto& chunk = *fixture->chunks().begin()->second;
+                chunk.mark_voxel_data_dirty();
+                chunk.current_lod.store(2);
+                chunk.heightmap_data.assign(size, 10000.0f);
+                if (fixture == &prepared) {
+                    fixture->prepare(chunk);
+                }
+                fixture->tick(true);
+            }
+            ExpectSameWater(fallback, prepared);
+            const auto& chunk = *fallback.chunks().begin()->second;
+            for (const auto bed : chunk.water_bed_mm) {
+                EXPECT_NE(bed, 10000000);
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, GeneratedInitializationMatchesInlineSeedWithoutAdvancingScheduler) {
+    for (const int resolution : {2, 4, 8, 16}) {
+        for (const int supplied_terrain : {0, 1, 2, 3}) {
+            SeedFixture generated, inline_path;
+            generated.water().SetSimResolution(resolution);
+            inline_path.water().SetSimResolution(resolution);
+            generated.water().SetSimWindowCursor(12345);
+            auto& chunk = *generated.chunks().begin()->second;
+            chunk.current_lod.store(3);
+            chunk.mark_voxel_data_dirty();
+            chunk.mark_water_data_dirty();
+            chunk.is_water_sleeping.store(true);
+            chunk.ticks_below_threshold = 119;
+            chunk.max_water_delta_last_tick = 12.0f;
+            const auto stamp = chunk.authority_hash_revision();
+            std::vector<float> terrain;
+            if (supplied_terrain == 1) {
+                const auto coords = chunk.get_coords();
+                for (int z = 0; z < resolution; ++z) {
+                    for (int x = 0; x < resolution; ++x) {
+                        const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                         (static_cast<float>(x) + 0.5f) *
+                                             (CHUNK_SIZE_X / static_cast<float>(resolution));
+                        const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                         (static_cast<float>(z) + 0.5f) *
+                                             (CHUNK_SIZE_Z / static_cast<float>(resolution));
+                        terrain.push_back(generated.world().GetTerrainHeightAt(wx, wz));
+                    }
+                }
+            }
+            if (supplied_terrain >= 2) {
+                const auto cells = static_cast<std::size_t>(resolution * resolution);
+                terrain.assign(supplied_terrain == 2 ? cells - 1 : cells + 1, 10000.0f);
+            }
+            generated.water().InitializeGeneratedWater(chunk, terrain);
+            inline_path.chunks().begin()->second->is_water_sleeping.store(true);
+            inline_path.tick();
+            ExpectInlineSeed(generated, resolution);
+            ExpectSameWater(generated, inline_path);
+            EXPECT_EQ(generated.water().GetSimWindowCursor(), 12345u);
+            EXPECT_EQ(generated.water().cells_stepped_last_update(), 0u);
+            EXPECT_EQ(chunk.authority_hash_revision(), stamp + 1);
+            EXPECT_EQ(chunk.voxel_revision(), 1u);
+            EXPECT_FALSE(chunk.is_water_sleeping.load());
+            EXPECT_EQ(chunk.ticks_below_threshold, 0);
+            EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, 0.0f);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, AdmittedBootSeedsIgnoreWorkerCountAndPayloadReadiness) {
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{3}}) {
+        JobSystem jobs;
+        jobs.startup(workers);
+        {
+            SeedFixture parallel(10, &jobs), inline_path(10);
+            parallel.water().SetBootSettleMode(true);
+            inline_path.water().SetBootSettleMode(true);
+            std::vector<std::weak_ptr<HighWaterSeedInputs>> staged;
+            std::size_t prepared_index = 0;
+            for (const auto& [id, chunk] : parallel.chunks()) {
+                (void)id;
+                parallel.prepare(*chunk, prepared_index++ % 2 == 0);
+                auto inputs = chunk->take_water_seed_inputs();
+                staged.emplace_back(inputs);
+                chunk->stage_water_seed_inputs(std::move(inputs));
+            }
+            for (int tick = 0; tick < 3; ++tick) {
+                parallel.tick(true);
+                inline_path.tick(true);
+                ExpectSameWater(parallel, inline_path);
+                EXPECT_EQ(parallel.water().cells_stepped_last_update(), 10u * 256u);
+                EXPECT_TRUE(parallel.water().dbg_mass_ok());
+                for (const auto& [id, chunk] : parallel.chunks()) {
+                    EXPECT_TRUE(chunk->has_water_authority());
+                    EXPECT_EQ(chunk->voxel_revision(), 0u);
+                    EXPECT_EQ(chunk->authority_stamp(),
+                              inline_path.chunks().at(id)->authority_stamp());
+                }
+            }
+            for (const auto& inputs : staged) {
+                EXPECT_TRUE(inputs.expired());
+            }
+        }
+        jobs.shutdown();
+    }
+}
+
+TEST(WaterSeedInputs, AdmittedSourceRejectsInvalidAnchorsAndUsesNegativeFractionalCells) {
+    SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+    WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    entt::registry registry;
+    auto chunk = std::make_shared<Chunk>(IVec3(-1, 0, -1));
+    water.InitializeGeneratedWater(*chunk, std::vector<float>(64, 100.0f));
+    chunk->is_water_sleeping.store(true);
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> owners{{chunk->get_id(), chunk}};
+    const auto add_source = [&](const Vec3& position) {
+        const auto entity = registry.create();
+        registry.emplace<Components::TransformComponent>(entity).position = position;
+        registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 120.0f;
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const float min_y = static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y;
+    const float max_y = (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y;
+    for (const Vec3& position : {Vec3(nan, 0, -14),
+                                 Vec3(-14, nan, -14),
+                                 Vec3(-14, 0, nan),
+                                 Vec3(inf, 0, -14),
+                                 Vec3(-14, inf, -14),
+                                 Vec3(-14, 0, inf),
+                                 Vec3(16777216.0f, 0, -14),
+                                 Vec3(-16777218.0f, 0, -14),
+                                 Vec3(-14, 0, 16777216.0f),
+                                 Vec3(-14, std::nextafter(min_y, -inf), -14),
+                                 Vec3(-14, max_y, -14)}) {
+        add_source(position);
+    }
+    const auto stamp = chunk->authority_stamp();
+    water.update(registry, owners, true);
+    EXPECT_EQ(water.debug_source_injected_mm(), 0);
+    EXPECT_EQ(chunk->authority_stamp(), stamp);
+    add_source(Vec3(-14.25f, 56, -14.25f));
+    water.update(registry, owners, true);
+    EXPECT_EQ(water.debug_source_injected_mm(), 1000);
+    EXPECT_GT(chunk->water_depth_mm[0], 0);
+    EXPECT_EQ(chunk->water_depth_mm[9], 0);
+    EXPECT_TRUE(chunk->has_water_authority());
+    EXPECT_EQ(chunk->voxel_revision(), 0u);
+}
+
+TEST(WaterSeedInputs, ExplicitEmptyBedOwnersNeverFallBackToPreviouslyBoundChunks) {
+    SeedFixture fixture;
+    fixture.tick();
+    auto& chunk = *fixture.chunks().begin()->second;
+    const Vec3 center = Vec3(chunk.get_coords() * IVec3(16, 0, 16)) + Vec3(8, 0, 8);
+    const auto beds = chunk.water_bed_mm;
+    const auto stamp = chunk.authority_stamp();
+    const auto epoch = fixture.water().water_epoch();
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> empty;
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> null_owner{{chunk.get_id(), nullptr}};
+    for (const auto* owners : {&empty, &null_owner}) {
+        EXPECT_EQ(fixture.water().EditTerrainBed(center, 1, 16.0f, owners), 0);
+        EXPECT_EQ(chunk.water_bed_mm, beds);
+        EXPECT_EQ(chunk.authority_stamp(), stamp);
+        EXPECT_EQ(fixture.water().water_epoch(), epoch);
+    }
+    EXPECT_EQ(fixture.water().EditTerrainBed(center, 1, 16.0f), 256);
+}
+
+TEST(WaterSeedInputs, AdmittedWakeAndStepClaimOnlyWaterOwnership) {
+    for (const bool admitted : {false, true}) {
+        SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+        WaterSystem water(nullptr, &world);
+        water.SetSimResolution(8);
+        entt::registry registry;
+        std::unordered_map<ChunkID, std::shared_ptr<Chunk>> owners;
+        for (int x = 0; x < 2; ++x) {
+            auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+            water.InitializeGeneratedWater(*chunk, std::vector<float>(64, 100.0f));
+            chunk->is_water_sleeping.store(x != 0);
+            EXPECT_FALSE(chunk->has_water_authority());
+            owners.emplace(chunk->get_id(), std::move(chunk));
+        }
+        water.update(registry, owners, admitted);
+        EXPECT_EQ(water.cells_stepped_last_update(), 128u);
+        for (const auto& [id, chunk] : owners) {
+            (void)id;
+            EXPECT_FALSE(chunk->is_water_sleeping.load());
+            EXPECT_EQ(chunk->has_water_authority(), admitted);
+            EXPECT_EQ(chunk->voxel_revision(), 0u);
+            EXPECT_EQ(chunk->water_bed_mm, std::vector<std::int32_t>(64, 100000));
+        }
+    }
+}
+
 } // namespace
