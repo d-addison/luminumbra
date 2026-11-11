@@ -499,6 +499,11 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
                               options.mutate_replay_fixture);
         return 1;
     }
+    if (contents->truncated || !contents->trailer_present) {
+        LUMINUMBRA_CORE_ERROR("mutate: stream '{}' is truncated (no valid trailer)",
+                              options.mutate_replay_fixture);
+        return 1;
+    }
     if (contents->elided_through_tick != 0) {
         LUMINUMBRA_CORE_ERROR("mutate: diagnostic suffix cannot be rewritten as a full replay");
         return 1;

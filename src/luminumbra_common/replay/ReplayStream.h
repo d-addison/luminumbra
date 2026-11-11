@@ -120,7 +120,17 @@ struct InputRecord {
 // entities). Hashes are stored as their hex strings (no float/endianness risk).
 using CheckpointRecord = HashCheckpoint;
 
-struct ReplayContents;
+// Owns the parsed header and ordered records, with an explicit truncation flag.
+struct ReplayContents {
+    ReplayHeader header;
+    std::vector<InputRecord> inputs;           // tick-ordered as recorded
+    std::vector<CheckpointRecord> checkpoints; // tick-ordered as recorded
+    std::uint64_t tick_count = 0;              // from the trailer
+    bool truncated = false;                    // tail did not parse cleanly
+    bool trailer_present = false;              // a valid trailer was found
+    std::uint64_t elided_through_tick = 0;     // nonzero => diagnostic suffix only
+    std::uint64_t elided_prefix_digest = 0;    // FNV-1a over elided record bytes
+};
 
 // --- Writer: append-on-record. ----------------------------------------------
 // Usage: construct with the header (writes it immediately), RecordInput once per
@@ -333,17 +343,6 @@ private:
 };
 
 // --- Reader: sequential read on playback. -----------------------------------
-// Owns the parsed header and ordered records, with an explicit truncation flag.
-struct ReplayContents {
-    ReplayHeader header;
-    std::vector<InputRecord> inputs;           // tick-ordered as recorded
-    std::vector<CheckpointRecord> checkpoints; // tick-ordered as recorded
-    std::uint64_t tick_count = 0;              // from the trailer
-    bool truncated = false;                    // tail did not parse cleanly
-    bool trailer_present = false;              // a valid trailer was found
-    std::uint64_t elided_through_tick = 0;     // nonzero => diagnostic suffix only
-    std::uint64_t elided_prefix_digest = 0;    // FNV-1a over elided record bytes
-};
 
 // Admission limits for the owned result, independent of encoded file size,
 // recorder queues, and opaque input encoding. Defaults support 1 GiB of field
