@@ -29,16 +29,17 @@
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -2271,6 +2272,450 @@ TEST(RegionConsumerGate, NewConsumersKeepFullRateDefaultsAndAdmitBirthsAfterCapt
         EXPECT_EQ(registry.get<C::DecayComponent>(creature).decay_ticks, 2u);
         EXPECT_EQ(registry.get<C::DecayComponent>(creature).nutrient_released_milli, 1000u);
     }
+}
+
+std::array<std::uint32_t, 3> PositionBits(const glm::vec3& position) {
+    return {std::bit_cast<std::uint32_t>(position.x),
+            std::bit_cast<std::uint32_t>(position.y),
+            std::bit_cast<std::uint32_t>(position.z)};
+}
+
+TEST(RegionConsumerGate, SessionPhysicsFreezeResumesWithPlantsAndKeepsInactiveParity) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool active : {false, true}) {
+        SCOPED_TRACE(active);
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(active);
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Frozen physics", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto creature = Creature(registry, 513.0f);
+        auto& transform = registry.get<C::TransformComponent>(creature);
+        transform.position.y = 10000.0f;
+        const auto avatar = physics->create_avatar_character(transform.position);
+        registry.emplace<C::CreaturePhysicsComponent>(creature, avatar);
+        const float dt = static_cast<float>(session.GetSimulationClock().fixed_dt());
+        // Enter the freeze already falling: the stored downward velocity must be discarded.
+        physics->update_avatars(dt);
+        transform.position = physics->get_avatar_position(avatar);
+        const auto frozen_position = transform.position;
+        const auto plant = Plant(registry, 513.0f);
+        registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000u;
+        Luminumbra::Systems::PhysicsSystem reference;
+        reference.startup();
+        const auto reference_avatar = reference.create_avatar_character(
+            active ? frozen_position : glm::vec3(513.0f, 10000.0f, 10.0f));
+        if (!active) {
+            reference.update_avatars(dt);
+        }
+        for (int tick = 0; tick < 7; ++tick) {
+            const bool denied = active && tick < 4;
+            if (tick == 4) {
+                session.PinActiveRegion({1, 0}, true);
+            }
+            const auto steps_before = physics->work_items().characters;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            EXPECT_EQ(physics->work_items().characters - steps_before, denied ? 0u : 1u);
+            EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks,
+                      static_cast<std::uint32_t>(active ? std::max(0, tick - 3) : tick + 1));
+            if (denied) {
+                EXPECT_EQ(PositionBits(transform.position), PositionBits(frozen_position));
+                EXPECT_EQ(PositionBits(physics->get_avatar_position(avatar)),
+                          PositionBits(frozen_position));
+                EXPECT_EQ(physics->get_avatar_velocity(avatar), glm::vec3(0.0f));
+            } else {
+                const auto& cr = registry.get<C::CreatureComponent>(creature);
+                reference.set_avatar_wish_velocity(reference_avatar, {cr.wish_x, cr.wish_z});
+                reference.update_avatars(dt);
+                EXPECT_EQ(PositionBits(transform.position),
+                          PositionBits(reference.get_avatar_position(reference_avatar)));
+                EXPECT_EQ(PositionBits(physics->get_avatar_velocity(avatar)),
+                          PositionBits(reference.get_avatar_velocity(reference_avatar)));
+                EXPECT_LT(transform.position.y, frozen_position.y);
+            }
+        }
+    }
+}
+
+TEST(RegionConsumerGate, SessionMovingCreatureHitsFrozenCapsuleInEitherCreationOrder) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    std::array<std::array<std::uint32_t, 3>, 10> reference{};
+    for (const bool reversed : {false, true}) {
+        SCOPED_TRACE(reversed);
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(true);
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Frozen collision", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        std::array<entt::entity, 2> creatures{};
+        // Permute registry order and avatar order together; the admitted creature
+        // must hit the same static capsule before any frozen character could step.
+        for (int index = 0; index < 2; ++index) {
+            const bool frozen = (index == 0) != reversed;
+            const auto creature = Creature(registry, frozen ? 512.5f : 511.0f);
+            creatures[frozen ? 0u : 1u] = creature;
+            auto& tf = registry.get<C::TransformComponent>(creature);
+            tf.position.y = 10000.0f;
+            registry.get<C::CreatureComponent>(creature).move_speed = 0.0f;
+            registry.get<C::CreatureGenomeComponent>(creature).move_speed = 0.0f;
+            registry.emplace<C::CreaturePhysicsComponent>(creature).avatar_index =
+                physics->create_avatar_character(tf.position);
+        }
+        auto& drift = registry.emplace<C::MigratoryComponent>(creatures[1]);
+        const auto frozen_position = registry.get<C::TransformComponent>(creatures[0]).position;
+        for (std::size_t tick = 0; tick < reference.size(); ++tick) {
+            drift.wish_x = 6.0f;
+            drift.wish_z = 0.0f;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            const auto& position = registry.get<C::TransformComponent>(creatures[1]).position;
+            EXPECT_EQ(PositionBits(registry.get<C::TransformComponent>(creatures[0]).position),
+                      PositionBits(frozen_position));
+            EXPECT_LE(position.x, frozen_position.x - 0.79f);
+            if (reversed) {
+                EXPECT_EQ(PositionBits(position), reference[tick]);
+            } else {
+                reference[tick] = PositionBits(position);
+            }
+        }
+        EXPECT_GT(registry.get<C::TransformComponent>(creatures[1]).position.x, 511.6f);
+        // The frozen capsule is in the world query as a stationary body.
+        const auto hit =
+            physics->audio_raycast({511.5f, 10001.3f, 10.0f}, {513.5f, 10001.3f, 10.0f});
+        ASSERT_TRUE(hit.hit);
+        EXPECT_NEAR(hit.hit_point.x, 512.1f, 0.002f);
+    }
+}
+
+TEST(RegionConsumerGate, FrozenAvatarTeleportsAndRemovalLeaveNoStaleCollision) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession session;
+    session.SetActiveRegionsEnabled(true);
+    session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+    session.SetJobSystem(&jobs);
+    session.SetAetherStateEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Frozen lifecycle", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    session.PinActiveRegion({0, 0}, true);
+    auto& registry = session.GetRegistry();
+    auto* physics = session.GetPhysicsSystem();
+    ASSERT_NE(physics, nullptr);
+    for (const bool destroy_entity : {false, true}) {
+        const auto creature = Creature(registry, 513.0f);
+        auto& tf = registry.get<C::TransformComponent>(creature);
+        tf.position.y = 10000.0f;
+        const auto avatar = physics->create_avatar_character(tf.position);
+        registry.emplace<C::CreaturePhysicsComponent>(creature, avatar);
+        for (const float x : {513.0f, 517.0f}) {
+            tf.position.x = x;
+            const auto before = PositionBits(tf.position);
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+            EXPECT_EQ(PositionBits(tf.position), before);
+            EXPECT_EQ(PositionBits(physics->get_avatar_position(avatar)), before);
+            EXPECT_EQ(physics->get_avatar_velocity(avatar), glm::vec3(0.0f));
+        }
+        EXPECT_FALSE(
+            physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit);
+        EXPECT_TRUE(
+            physics->audio_raycast({516.0f, 10001.3f, 10.0f}, {518.0f, 10001.3f, 10.0f}).hit);
+        if (destroy_entity) {
+            registry.destroy(creature);
+        } else {
+            registry.remove<C::CreaturePhysicsComponent>(creature);
+            registry.destroy(creature);
+        }
+        EXPECT_FALSE(
+            physics->audio_raycast({516.0f, 10001.3f, 10.0f}, {518.0f, 10001.3f, 10.0f}).hit);
+        physics->set_avatar_frozen(avatar, true, {517.0f, 10000.0f, 10.0f});
+        physics->remove_avatar_character(avatar);
+        EXPECT_FALSE(
+            physics->audio_raycast({516.0f, 10001.3f, 10.0f}, {518.0f, 10001.3f, 10.0f}).hit);
+    }
+}
+
+TEST(RegionConsumerGate, AvatarFreezeHandlesInvalidOwnersAndClearRestart) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.set_avatar_frozen(0u, true, {});
+    physics.remove_avatar_character(0u);
+    physics.startup();
+    const glm::vec3 position(513.0f, 10000.0f, 10.0f);
+    const auto avatar = physics.create_avatar_character(position);
+    physics.set_avatar_frozen(std::numeric_limits<std::size_t>::max(), true, position);
+    physics.remove_avatar_character(std::numeric_limits<std::size_t>::max());
+    physics.set_avatar_frozen(avatar, true, {std::numeric_limits<float>::infinity(), 0, 0});
+    physics.set_avatar_frozen(avatar, true, position);
+    physics.set_avatar_frozen(avatar, true, {0, std::numeric_limits<float>::quiet_NaN(), 0});
+    physics.set_avatar_frozen(avatar, true, {0, 0, std::numeric_limits<float>::infinity()});
+    physics.set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(PositionBits(physics.get_avatar_position(avatar)), PositionBits(position));
+    EXPECT_EQ(physics.get_avatar_velocity(avatar), glm::vec3(0.0f));
+    EXPECT_EQ(physics.work_items().characters, 0u);
+    physics.set_avatar_frozen(avatar, false, {std::numeric_limits<float>::infinity(), 0, 0});
+    EXPECT_EQ(PositionBits(physics.get_avatar_position(avatar)), PositionBits(position));
+    physics.set_avatar_frozen(avatar, true, position);
+    const glm::vec3 teleported(517.0f, 10000.0f, 10.0f);
+    physics.set_avatar_frozen(avatar, false, teleported);
+    physics.set_avatar_frozen(avatar, false, {});
+    EXPECT_EQ(PositionBits(physics.get_avatar_position(avatar)), PositionBits(teleported));
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_LT(physics.get_avatar_position(avatar).y, teleported.y);
+    physics.set_avatar_frozen(avatar, true, teleported);
+    physics.clear_avatar_characters();
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_FALSE(physics.audio_raycast({516.0f, 10001.3f, 10.0f}, {518.0f, 10001.3f, 10.0f}).hit);
+    EXPECT_EQ(physics.create_avatar_character(position), 0u);
+    physics.set_avatar_frozen(0u, true, position);
+    physics.shutdown();
+    physics.startup();
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_FALSE(physics.audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit);
+}
+
+TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    // PhysicsSystem's fixed body pool bounds the exhaustion probe to 10240 bodies.
+    constexpr std::size_t body_limit = 10240u;
+    for (std::size_t index = 0; index < body_limit; ++index) {
+        ASSERT_FALSE(
+            physics.create_dynamic_sphere({static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f)
+                .IsInvalid());
+    }
+    const glm::vec3 position(513.0f, 10000.0f, 10.0f);
+    const glm::vec3 teleported(517.0f, 10000.0f, 10.0f);
+    for (int action = 0; action < 3; ++action) {
+        SCOPED_TRACE(action);
+        const auto avatar = physics.create_avatar_character(position);
+        ASSERT_NO_THROW(physics.set_avatar_frozen(avatar, true, position));
+        EXPECT_FALSE(
+            physics.audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit);
+        // Invalid teleports retain the valid position even without a capsule.
+        physics.set_avatar_frozen(avatar, true, {0, std::numeric_limits<float>::quiet_NaN(), 0});
+        EXPECT_EQ(PositionBits(physics.get_avatar_position(avatar)), PositionBits(position));
+        if (action == 0) {
+            physics.set_avatar_frozen(avatar, false, teleported);
+            physics.set_avatar_frozen(avatar, false, {});
+            EXPECT_EQ(PositionBits(physics.get_avatar_position(avatar)), PositionBits(teleported));
+            physics.update_avatars(1.0f / 30.0f);
+            EXPECT_LT(physics.get_avatar_position(avatar).y, teleported.y);
+        } else if (action == 1) {
+            physics.remove_avatar_character(avatar);
+            physics.remove_avatar_character(avatar);
+            physics.set_avatar_frozen(avatar, true, position);
+            EXPECT_EQ(physics.get_avatar_position(avatar), glm::vec3(0.0f));
+        } else {
+            physics.clear_avatar_characters();
+            physics.clear_avatar_characters();
+            EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+        }
+        physics.clear_avatar_characters();
+        physics.update(0.0f);
+        EXPECT_EQ(physics.work_items().bodies, body_limit);
+    }
+}
+
+TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    const glm::vec3 position(513.0f, 10000.0f, 10.0f);
+    const auto removed = physics.create_avatar_character(position);
+    const auto survivor = physics.create_avatar_character(position);
+    ASSERT_EQ(removed, 0u);
+    ASSERT_EQ(survivor, 1u);
+    physics.remove_avatar_character(removed);
+    physics.remove_avatar_character(removed);
+    physics.remove_avatar_character(std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
+    EXPECT_EQ(physics.get_avatar_position(removed), glm::vec3(0.0f));
+    EXPECT_EQ(physics.get_avatar_position(survivor), position);
+    physics.set_avatar_wish_velocity(survivor, {2.0f, 1.0f});
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_GT(physics.get_avatar_position(survivor).x, position.x);
+    EXPECT_EQ(physics.work_items().characters, 1u);
+    EXPECT_EQ(physics.create_avatar_character(position), 2u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.remove_avatar_character(survivor);
+    physics.remove_avatar_character(2u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_EQ(physics.create_avatar_character(position), 0u);
+}
+
+TEST(RegionConsumerGate, TerrainBodyPoolRefusalLeavesChunkUnregisteredForRetry) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    constexpr std::size_t body_limit = 10240u;
+    JPH::BodyID last_body;
+    for (std::size_t index = 0; index < body_limit; ++index) {
+        last_body =
+            physics.create_dynamic_sphere({static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f);
+        ASSERT_FALSE(last_body.IsInvalid());
+    }
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
+                                8.0f);
+    ASSERT_NO_THROW(physics.add_chunk_collision(chunk));
+    EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
+    physics.destroy_body(last_body);
+    physics.add_chunk_collision(chunk);
+    EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.add_chunk_collision(chunk);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
+    physics.remove_chunk_collision(chunk.get_id());
+    physics.remove_chunk_collision(chunk.get_id());
+    EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit - 1u);
+}
+
+TEST(RegionConsumerGate, SessionReleasesResumingCapsulesBeforeFreezingAtBodyPoolLimit) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (bool reversed : {false, true}) {
+        SCOPED_TRACE(reversed);
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(true);
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Capsule exchange", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        std::array<entt::entity, 2> creatures{};
+        std::array<std::size_t, 2> avatars{};
+        for (std::size_t index = 0; index < creatures.size(); ++index) {
+            const bool denied = (index == 0) != reversed;
+            creatures[index] = Creature(registry, denied ? 513.0f : 20.0f);
+            auto& position = registry.get<C::TransformComponent>(creatures[index]).position;
+            position.y = 10000.0f;
+            avatars[index] = physics->create_avatar_character(position);
+            registry.emplace<C::CreaturePhysicsComponent>(creatures[index], avatars[index]);
+            if (!denied) {
+                physics->set_avatar_frozen(avatars[index], true, position);
+            }
+        }
+        // One capsule plus these spheres reaches the capsule admission boundary.
+        constexpr std::size_t body_limit =
+            10240u - Luminumbra::Systems::PhysicsSystem::kTerrainBodyHeadroom;
+        for (std::size_t index = 1; index < body_limit; ++index) {
+            ASSERT_FALSE(physics
+                             ->create_dynamic_sphere(
+                                 {static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f)
+                             .IsInvalid());
+        }
+        physics->update(0.0f);
+        ASSERT_EQ(physics->work_items().bodies, body_limit);
+        ASSERT_NO_THROW(
+            EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u));
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_TRUE(
+            physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit);
+        EXPECT_FALSE(
+            physics->audio_raycast({19.0f, 10001.3f, 10.0f}, {21.0f, 10001.3f, 10.0f}).hit);
+        physics->update(0.0f);
+        EXPECT_EQ(physics->work_items().bodies, body_limit);
+        // Repeating the freeze cannot consume any of the terrain reserve.
+        physics->set_avatar_frozen(avatars[reversed ? 1u : 0u], true, {513, 10000, 10});
+        physics->update(0.0f);
+        EXPECT_EQ(physics->work_items().bodies, body_limit);
+    }
+}
+
+TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesOnLaterTicks) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession session;
+    session.SetActiveRegionsEnabled(true);
+    session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+    session.SetJobSystem(&jobs);
+    session.SetAetherStateEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Capsule refusal", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    session.PinActiveRegion({0, 0}, true);
+    auto& registry = session.GetRegistry();
+    auto* physics = session.GetPhysicsSystem();
+    ASSERT_NE(physics, nullptr);
+    const auto creature = Creature(registry, 513.0f);
+    auto& position = registry.get<C::TransformComponent>(creature).position;
+    position.y = 10000.0f;
+    const auto avatar = physics->create_avatar_character(position);
+    registry.emplace<C::CreaturePhysicsComponent>(creature, avatar);
+    physics->set_avatar_wish_velocity(avatar, {2.0f, 1.0f});
+    physics->update_avatars(static_cast<float>(session.GetSimulationClock().fixed_dt()));
+    ASSERT_NE(physics->get_avatar_velocity(avatar), glm::vec3(0.0f));
+    // The avatar starts with stale motion and a transform newer than its Jolt position.
+    const auto frozen_position = position;
+    constexpr std::size_t body_limit =
+        10240u - Luminumbra::Systems::PhysicsSystem::kTerrainBodyHeadroom;
+    JPH::BodyID last_body;
+    for (std::size_t index = 0; index < body_limit; ++index) {
+        last_body = physics->create_dynamic_sphere(
+            {static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f);
+        ASSERT_FALSE(last_body.IsInvalid());
+    }
+    for (int tick = 0; tick < 4; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick == 3) {
+            physics->destroy_body(last_body);
+        }
+        const auto steps_before = physics->work_items().characters;
+        physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
+        ASSERT_NO_THROW(
+            EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u));
+        ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(physics->work_items().characters, steps_before);
+        EXPECT_EQ(PositionBits(position), PositionBits(frozen_position));
+        EXPECT_EQ(PositionBits(physics->get_avatar_position(avatar)),
+                  PositionBits(frozen_position));
+        EXPECT_EQ(physics->get_avatar_velocity(avatar), glm::vec3(0.0f));
+        EXPECT_EQ(physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit,
+                  tick == 3);
+        if (tick == 0) {
+            // Terrain can still take a reserved slot while the avatar is refused.
+            Luminumbra::Chunk chunk({0, 0, 0});
+            chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                            static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
+                                        8.0f);
+            physics->add_chunk_collision(chunk);
+            EXPECT_TRUE(physics->audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+            physics->remove_chunk_collision(chunk.get_id());
+        }
+        // Integration remains denied even when another caller submits input.
+        physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
+        physics->update_avatars(static_cast<float>(session.GetSimulationClock().fixed_dt()));
+        EXPECT_EQ(physics->work_items().characters, steps_before);
+        EXPECT_EQ(PositionBits(physics->get_avatar_position(avatar)),
+                  PositionBits(frozen_position));
+    }
+    physics->update(0.0f);
+    EXPECT_EQ(physics->work_items().bodies, body_limit);
 }
 
 TEST(RegionConsumerGate, SessionFreezesDeniedMotorWishesAndSuppressesAvatarInputUntilAdmission) {
