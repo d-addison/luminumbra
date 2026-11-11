@@ -694,10 +694,11 @@ struct JsonChunkArrays {
     }
 };
 
-// The encoded writer emits every array. Integer water arrays retain legacy defaults
-// when absent; all other arrays remain required by their accessors.
+// Encoded records require every array. Strict water admission also supports historical
+// integer defaults after validating the remaining water fields.
 struct EncodedChunkArrays {
     const nlohmann::json& value;
+    bool allow_missing_water = false;
     std::vector<float> floats(const char* key) const {
         return EncodedArrayFromJson<float>(value.at(key), key);
     }
@@ -714,7 +715,7 @@ struct EncodedChunkArrays {
         return EncodedArrayFromJson<Vec2>(value.at("water_flow_data"), "water_flow_data");
     }
     bool has(const char* key) const {
-        return value.contains(key);
+        return !allow_missing_water || value.contains(key);
     }
     std::vector<std::int32_t> grid(const char* key) const {
         return EncodedArrayFromJson<std::int32_t>(value.at(key), key);
@@ -740,7 +741,7 @@ void RequireWaterFloat(const nlohmann::json& value) {
         throw std::invalid_argument("Saved water finite float range refused");
 }
 
-void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
+void RequireWaterAuthority(const nlohmann::json& value, bool encoded) try {
     const auto& state = value.contains("water_state") ? value.at("water_state") : value;
     const auto& resolution_json = state.at("current_water_resolution");
     RequireWaterInteger(resolution_json, 0, 32);
@@ -796,15 +797,20 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
             }
         }
     }
-    // Empty arrays retain historical defaults. The resolution stamp does not size retained
-    // grids or render mirrors; only populated integer arrays must agree with one another.
+    // Empty arrays retain historical defaults. Dormant grids and render mirrors are
+    // independent of the resolution stamp; populated active integer grids must fill it.
+    const bool active = state.at("has_water_sim").get<bool>() && resolution != 0;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
     const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
     const bool flux_valid = counts[2] == 0u || counts[2] == 2u * counts[0];
-    const bool complete_integers = counts[0] == counts[1] && flux_valid;
+    const bool complete_integers =
+        counts[0] == counts[1] && flux_valid && (!active || counts[0] == cells);
     const bool initializing =
         !state.at("has_water_sim").get<bool>() && counts[1] == 0u && flux_valid;
     if (!no_integers && !complete_integers && !initializing)
         throw std::invalid_argument("Saved water grid shape refused");
+} catch (const nlohmann::json::exception&) {
+    throw std::invalid_argument("Saved water structure refused");
 }
 
 // A successful array decode has already checked encoded types and finite values. The writer
@@ -1728,7 +1734,10 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)
-                ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
+                ApplyChunkFields(chunk_json,
+                                 EncodedChunkArrays{chunk_json, authority.strict_water},
+                                 *chunk,
+                                 authority);
             else
                 ApplyChunkJson(chunk_json, *chunk, authority);
             if ((authority.strict_water || authority.strict_water_valid) &&

@@ -2771,6 +2771,10 @@ bool DigestRegionRecords(const std::filesystem::path& path,
                          MemberDigest& out,
                          std::string& error);
 
+bool AdmitRegionWater(const std::filesystem::path& path,
+                      const std::vector<RegionRecord>& records,
+                      std::vector<std::string>* errors);
+
 bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
@@ -2816,12 +2820,11 @@ bool WriteRegionFile(const std::filesystem::path& path,
     WrittenRegionDigest written;
     std::string admission_error;
     const auto root = path.parent_path().parent_path().parent_path();
-    const bool admitted = SaveTransaction::active_for(root) &&
-                          DigestRegionRecords(path, records, written.digest, admission_error);
-    if (SaveTransaction::active_for(root) && !admitted) {
-        AddError(errors, admission_error);
+    if (SaveTransaction::active_for(root) && !AdmitRegionWater(path, records, errors)) {
         return false;
     }
+    const bool admitted = SaveTransaction::active_for(root) &&
+                          DigestRegionRecords(path, records, written.digest, admission_error);
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
     ReclaimAbandonedStaging(staging);
@@ -3240,6 +3243,21 @@ bool AdmitChunkRecord(const RegionRecord& record,
         // Cold admission also visits chunks outside the initial retain set. Transfer those
         // decodes to later activation reads, including reads on the adopting owner thread.
         AdmittedChunkRecordCache().remember_decoded(key, chunk);
+    return true;
+}
+
+// Refuse malformed water before publication, while leaving other record validation to
+// commit. Admission facts are cached by exact record bytes for the subsequent digest.
+bool AdmitRegionWater(const std::filesystem::path& path,
+                      const std::vector<RegionRecord>& records,
+                      std::vector<std::string>* errors) {
+    for (const auto& record : records) {
+        if (record.lod_level != 0)
+            continue;
+        ChunkRecordFacts facts;
+        if (!AdmitChunkRecord(record, path, errors, facts, nullptr, false, false, true))
+            return false;
+    }
     return true;
 }
 

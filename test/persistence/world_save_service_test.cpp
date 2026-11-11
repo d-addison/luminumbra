@@ -4987,7 +4987,7 @@ TEST(WorldSaveService, IndexedRegionPublicationRefusesPreservedMalformedWaterBef
 
 TEST(WorldSaveService, InvalidWriterWaterRefusesIndexedPublication) {
     namespace P = Luminumbra::Persistence;
-    for (int variant = 0; variant < 4; ++variant) {
+    for (int variant = 0; variant < 6; ++variant) {
         SCOPED_TRACE(variant);
         const TempSaveDir save("water_writer_refusal");
         std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
@@ -5005,8 +5005,13 @@ TEST(WorldSaveService, InvalidWriterWaterRefusesIndexedPublication) {
             chunk->water_bed_mm.pop_back();
         } else if (variant == 2) {
             chunk->water_edge_flux.pop_back();
-        } else {
+        } else if (variant == 3) {
             chunk->water_flow_data.assign(16, Vec2(std::numeric_limits<float>::infinity(), 0));
+        } else {
+            const auto cells = variant == 4 ? std::size_t{15} : std::size_t{17};
+            chunk->water_depth_mm.resize(cells);
+            chunk->water_bed_mm.resize(cells);
+            chunk->water_edge_flux.resize(2u * cells);
         }
         chunk->mark_water_state_dirty();
         const auto before = Luminumbra::Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
@@ -5319,7 +5324,8 @@ TEST(WorldSaveService, EveryWriterWaterShapeSavesAndReopensThroughIndexedAdmissi
                     chunk->water_edge_flux = {2, 3};
                 }
             } else if (shape >= 2u) {
-                chunk->has_water_sim.store(true);
+                // A retained partial grid belongs to a dormant simulation.
+                chunk->has_water_sim.store(shape != 8u);
                 if (shape == 3u || shape == 9u) {
                     chunk->water_level_data = {2.0f, 2.25f};
                     chunk->water_flow_data = {Vec2(0.25f, -0.125f)};

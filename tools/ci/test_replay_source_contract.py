@@ -736,9 +736,45 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         window_decoder = self.function(service, "DecodeAuthorityRecord", "")
         self.assertIn("DecodeChunkRecord(record, path, &errors, true)", window_decoder)
         writer = self.function(service, "WriteRegionFile", "")
-        self.assertRegex(writer, r"if \(SaveTransaction::active_for\(root\) && !admitted\)\s*\{"
-                         r"\s*AddError\(errors, admission_error\);\s*return false;")
-        self.assertLess(writer.index("&& !admitted"), writer.index("WriteDurableRegionTemp("))
+        self.assertRegex(writer, r"if \(SaveTransaction::active_for\(root\) && "
+                         r"!AdmitRegionWater\(path, records, errors\)\)\s*\{\s*return false;")
+        self.assertLess(writer.index("!AdmitRegionWater("), writer.index("WriteDurableRegionTemp("))
+        self.assertNotIn("&& !admitted", writer)
+        water_admission = self.function(service[service.rindex("bool AdmitRegionWater("):],
+                                        "AdmitRegionWater", "")
+        self.assertIn("record.lod_level != 0", water_admission)
+        self.assertRegex(water_admission, r"AdmitChunkRecord\(record, path, errors, facts, nullptr,"
+                         r" false, false, true\)")
+        self.assertNotIn("lattice_ok", water_admission)
+
+    def test_populated_active_water_requires_resolution_squared_cells(self):
+        source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        admission = self.function(source, "RequireWaterAuthority", "")
+        self.assertIn('state.at("has_water_sim").get<bool>() && resolution != 0', admission)
+        self.assertRegex(admission, r"static_cast<std::size_t>\(resolution\)\s*\*\s*"
+                         r"static_cast<std::size_t>\(resolution\)")
+        self.assertIn("counts[0] == counts[1] && flux_valid && (!active || counts[0] == cells)",
+                      admission)
+        self.assertIn("counts[2] == 0u || counts[2] == 2u * counts[0]", admission)
+        self.assertIn("!no_integers && !complete_integers && !initializing", admission)
+        native = read_source("test/common/RegionalWater_test.cpp")
+        self.assertEqual(native.count("TEST(RegionalWaterPersistence, "
+                                      "StrictWaterRequiresCompletePopulatedActiveGrid)"), 1)
+        for check in ("{2, 4, 8, 16, 32}", "{cells - 1u, cells, cells + 1u}",
+                      "chunk->water_bed_mm.assign(count, -100)",
+                      "chunk->water_edge_flux.assign(empty_flux ? 0u : 2u * count, -10)",
+                      "EXPECT_EQ(writer_valid, expected)", "EXPECT_EQ(observed, expected)"):
+            self.assertIn(check, native)
+
+    def test_encoded_water_defaults_require_explicit_admission(self):
+        source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
+        arrays = source.split("struct EncodedChunkArrays {", 1)[1].split("\n};", 1)[0]
+        self.assertIn("bool allow_missing_water = false", arrays)
+        self.assertIn("return !allow_missing_water || value.contains(key)", arrays)
+        loader = self.function(source, "LoadWorldStreamingStateSnapshotJson", "")
+        self.assertIn("EncodedChunkArrays{chunk_json, authority.strict_water}", loader)
+        self.assertIn('catch (const nlohmann::json::exception&) {\n'
+                      '    throw std::invalid_argument("Saved water structure refused");', source)
 
     @staticmethod
     def function(source, name, prefix="GameSession::"):
