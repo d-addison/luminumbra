@@ -3506,7 +3506,17 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
         return false;
     }
     try {
-        auto candidate = std::make_unique<World::FarWorldAuthorityProducer>(config.source);
+        if (!config.source.memory) {
+            error = "Source capture requires a memory domain.";
+            return false;
+        }
+        World::FarVolumeMemoryLease control(*config.source.memory);
+        if (!control.TryCharge(sizeof(World::FarWorldAuthorityProducer))) {
+            error = "Source capture control admission refused.";
+            return false;
+        }
+        auto candidate =
+            std::make_unique<World::FarWorldAuthorityProducer>(config.source, std::move(control));
         if (!candidate->configure_capture(config.capture)) {
             error = "Source capture requires finite limits.";
             return false;

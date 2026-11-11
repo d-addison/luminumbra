@@ -3,6 +3,7 @@
 #include "SaveTransaction.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
+#include "world/FarVolumeMemory.h"
 #include "world/GroundObjectStore.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
@@ -361,19 +362,31 @@ public:
         AuthorityMembership membership = AuthorityMembership::Unavailable;
     };
     struct AuthorityWindowResult {
+        AuthorityWindowResult() = default;
+        explicit AuthorityWindowResult(const std::shared_ptr<World::FarVolumeMemoryPool>& memory)
+            : members(World::FarVolumePoolAllocator<AuthorityMemberEvidence>(memory))
+            , chunks(World::FarVolumePoolAllocator<std::shared_ptr<const Chunk>>(memory)) {}
+        // Owns admitted parser/output storage through the last result alias.
+        // Declared first so containers are destroyed before their charge.
+        std::shared_ptr<const void> storage;
         AuthorityMembership membership = AuthorityMembership::Unavailable;
         std::uint64_t generation = 0;
         std::uint64_t source_identity = 0;
-        std::vector<AuthorityMemberEvidence> members;
-        std::vector<std::shared_ptr<const Chunk>> chunks;
+        std::vector<AuthorityMemberEvidence, World::FarVolumePoolAllocator<AuthorityMemberEvidence>>
+            members;
+        std::vector<std::shared_ptr<const Chunk>,
+                    World::FarVolumePoolAllocator<std::shared_ptr<const Chunk>>>
+            chunks;
         std::string error;
     };
     // Admit once at a committed owner boundary. Failed admission leaves the previous
     // source intact. Quiesce reads before admission. Legacy admission pins generation zero
     // and a process-local identity without creating an index. No handle survives either call.
+    // A supplied memory domain admits all owned storage before allocation. Parser
+    // scratch uses conservative envelopes; retained capacities follow every output alias.
     class AuthorityWindowReader {
     public:
-        AuthorityWindowReader();
+        explicit AuthorityWindowReader(std::shared_ptr<World::FarVolumeMemoryPool> memory = {});
         ~AuthorityWindowReader();
         AuthorityWindowReader(const AuthorityWindowReader&) = delete;
         AuthorityWindowReader& operator=(const AuthorityWindowReader&) = delete;
@@ -387,7 +400,8 @@ public:
 
     private:
         struct Impl;
-        std::unique_ptr<Impl> m_impl;
+        std::shared_ptr<World::FarVolumeMemoryPool> m_memory;
+        std::shared_ptr<Impl> m_impl;
     };
     enum class ChunkReadStatus {
         Found,

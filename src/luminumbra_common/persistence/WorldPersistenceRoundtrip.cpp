@@ -1598,7 +1598,14 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             out_state.clear();
             return false;
         };
-        for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+        const auto& chunks = snapshot.at("chunks");
+        // A container record owns one chunk control block. Enforce this before
+        // constructing any chunk, including for malformed or partial records.
+        if (authority.validate_record_authority && (!chunks.is_array() || chunks.size() != 1)) {
+            errors.push_back("chunk record must contain exactly one chunk");
+            return reject();
+        }
+        for (const nlohmann::json& chunk_json : chunks) {
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)

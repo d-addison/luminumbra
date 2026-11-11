@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/FarWorldAuthorityProducer.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <gtest/gtest.h>
@@ -16,8 +17,14 @@ using namespace Luminumbra;
 using Producer = World::FarWorldAuthorityProducer;
 using Save = Persistence::WorldSaveService;
 
+std::shared_ptr<World::FarVolumeMemoryPool> SourceMemory() {
+    return std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+}
 Producer::Limits Limits() {
-    return {.index_records = 512, .copy_bytes = 1024u * 1024u, .query_columns = 64};
+    return {.index_records = 512,
+            .copy_bytes = 1024u * 1024u,
+            .query_columns = 64,
+            .memory = SourceMemory()};
 }
 std::shared_ptr<Chunk> Edited(const IVec3& coords, float value = 1.0f) {
     auto chunk = std::make_shared<Chunk>(coords);
@@ -28,10 +35,133 @@ std::shared_ptr<Chunk> Edited(const IVec3& coords, float value = 1.0f) {
     chunk->set_state(ChunkState::Idle);
     return chunk;
 }
-std::vector<Producer::Image> Copy(Producer& producer) {
-    std::vector<Producer::Image> images;
+Producer::Images Copy(Producer& producer) {
+    Producer::Images images;
     EXPECT_EQ(producer.copy_published({0, 0, 0, 0}, images), Producer::Error::None);
     return images;
+}
+
+TEST(FarWorldAuthorityProducer, ControlsRequireAdmissionAndReleaseOnConstructionFailure) {
+    auto limits = Limits();
+    limits.memory.reset();
+    EXPECT_THROW(Producer{limits}, World::FarVolumeMemoryRefused);
+    limits.memory = SourceMemory();
+    { Producer complete(limits); }
+    const auto construction_attempts = limits.memory->attempts();
+    EXPECT_GE(construction_attempts, 4u + Producer::kSlots);
+    EXPECT_EQ(limits.memory->used(), 0u);
+    // Owner, Impl, state, every reserved index node and the change-sink control.
+    for (std::uint64_t attempt = 0; attempt < construction_attempts; ++attempt) {
+        limits.memory = SourceMemory();
+        limits.memory->RefuseAttemptsFrom(attempt);
+        EXPECT_THROW(Producer{limits}, World::FarVolumeMemoryRefused);
+        EXPECT_EQ(limits.memory->used(), 0u);
+    }
+    limits.memory = SourceMemory();
+    std::shared_ptr<World::FarWorldAuthorityChanges> changes;
+    {
+        Producer producer(limits);
+        changes = producer.changes();
+        EXPECT_GT(limits.memory->used(), sizeof(Producer));
+    }
+    EXPECT_GT(limits.memory->used(), 0u);
+    changes.reset();
+    EXPECT_EQ(limits.memory->used(), 0u);
+}
+
+TEST(FarWorldAuthorityProducer, InvalidControlTokensAndAllocationSizesCannotBypassAdmission) {
+    auto limits = Limits();
+    World::FarVolumeMemoryLease short_control(*limits.memory);
+    ASSERT_TRUE(short_control.TryCharge(sizeof(Producer) - 1));
+    EXPECT_THROW((Producer{limits, std::move(short_control)}), World::FarVolumeMemoryRefused);
+    EXPECT_EQ(limits.memory->used(), 0u);
+    const auto other = SourceMemory();
+    World::FarVolumeMemoryLease foreign_control(*other);
+    ASSERT_TRUE(foreign_control.TryCharge(sizeof(Producer)));
+    EXPECT_THROW((Producer{limits, std::move(foreign_control)}), World::FarVolumeMemoryRefused);
+    EXPECT_EQ(other->used(), 0u);
+    EXPECT_EQ(limits.memory->used(), 0u);
+    World::FarVolumePoolAllocator<std::uint64_t> allocator(limits.memory);
+    const auto attempts = limits.memory->attempts();
+    EXPECT_THROW(allocator.allocate(std::numeric_limits<std::size_t>::max()),
+                 World::FarVolumeMemoryRefused);
+    EXPECT_EQ(limits.memory->attempts(), attempts);
+    EXPECT_EQ(limits.memory->used(), 0u);
+}
+
+TEST(FarWorldAuthorityProducer, MembershipCapacityIsAdmittedBeforeAttachmentAndReusedOnClear) {
+    auto limits = Limits();
+    limits.index_records = 1;
+    Producer producer(limits);
+    const auto controls = limits.memory->used();
+    EXPECT_GT(controls, sizeof(Producer));
+    producer.changes()->membership(Edited({0, 0, 0}), false, true);
+    EXPECT_EQ(limits.memory->used(), controls);
+    auto images = Copy(producer);
+    const auto retained = limits.memory->used();
+    limits.memory->RefuseAttemptsFrom(limits.memory->attempts());
+    const auto replacement = Edited({1, 0, 0});
+    producer.changes()->membership(replacement, false, true);
+    EXPECT_EQ(limits.memory->used(), retained);
+    EXPECT_EQ(producer.copy_published({0, 0, 0, 0}, images), Producer::Error::IndexCapacity);
+    ASSERT_EQ(images.size(), 1u);
+    EXPECT_EQ(images[0].coords, (IVec3{0, 0, 0}));
+    producer.changes()->clear();
+    Producer::Images{}.swap(images);
+    EXPECT_EQ(limits.memory->used(), controls);
+    producer.changes()->membership(replacement, false, true);
+    EXPECT_EQ(limits.memory->used(), controls);
+    limits.memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_EQ(producer.copy_published({1, 1, 0, 0}, images), Producer::Error::None);
+    ASSERT_EQ(images.size(), 1u);
+    EXPECT_EQ(images[0].coords, (IVec3{1, 0, 0}));
+    const auto retained_after_clear = limits.memory->used();
+    limits.memory->RefuseAttemptsFrom(limits.memory->attempts());
+    producer.changes()->membership(replacement, false, false);
+    producer.changes()->membership(Edited({0, 0, 0}), false, true);
+    EXPECT_EQ(limits.memory->used(), retained_after_clear);
+    limits.memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_EQ(producer.copy_published({0, 0, 0, 0}, images), Producer::Error::None);
+    ASSERT_EQ(images.size(), 1u);
+    EXPECT_EQ(images[0].coords, (IVec3{0, 0, 0}));
+}
+
+TEST(FarWorldAuthorityProducer, EveryPublishedAllocationRefusesTransactionallyAndOutlivesOwner) {
+    auto limits = Limits();
+    Producer::Images images;
+    std::uint64_t output_bytes = 0;
+    {
+        Producer producer(limits);
+        auto chunk = Edited({0, 0, 0});
+        chunk->material_data.assign(chunk->sdf_data.size(), 1);
+        chunk->set_water_authority();
+        chunk->current_water_resolution.store(4);
+        chunk->water_bed_mm.assign(16, 1);
+        chunk->water_depth_mm.assign(16, 2);
+        producer.changes()->membership(chunk, false, true);
+        images = Copy(producer);
+        const auto retained = limits.memory->used();
+        const auto* accepted = images.data();
+        // Selection scratch, image capacity and all four terrain/water arrays.
+        for (std::uint64_t attempt = 0; attempt < 6; ++attempt) {
+            limits.memory->RefuseAttemptsFrom(limits.memory->attempts() + attempt);
+            EXPECT_EQ(producer.copy_published({0, 0, 0, 0}, images),
+                      Producer::Error::AllocationFailure);
+            EXPECT_EQ(images.data(), accepted);
+            EXPECT_EQ(limits.memory->used(), retained);
+            limits.memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+        }
+        ASSERT_EQ(images.size(), 1u);
+        const auto& image = images[0];
+        output_bytes = images.capacity() * sizeof(Producer::Image) +
+                       image.sdf.capacity() * sizeof(float) + image.material.capacity() +
+                       (image.bed.capacity() + image.depth.capacity()) * sizeof(std::int32_t);
+    }
+    EXPECT_EQ(limits.memory->used(), output_bytes);
+    ASSERT_EQ(images.size(), 1u);
+    EXPECT_EQ(images[0].depth[0], 2);
+    Producer::Images{}.swap(images);
+    EXPECT_EQ(limits.memory->used(), 0u);
 }
 
 TEST(FarWorldAuthorityProducer, FlagOffMembershipAndDirectNotificationsPreserveObservers) {
@@ -163,13 +293,16 @@ TEST(FarWorldAuthorityProducer, IndexAndCopyRefusalsPreserveOutput) {
     producer.changes()->membership(Edited({1, 0, 0}), false, true);
     EXPECT_EQ(producer.copy_published({0, 0, 0, 0}, images), Producer::Error::IndexCapacity);
     EXPECT_EQ(images.size(), 1u);
-    Producer small({.index_records = 1, .copy_bytes = 1, .query_columns = 1});
+    Producer small(
+        {.index_records = 1, .copy_bytes = 1, .query_columns = 1, .memory = SourceMemory()});
     small.changes()->membership(Edited({0, 0, 0}), false, true);
     EXPECT_EQ(small.copy_published({0, 0, 0, 0}, images), Producer::Error::CopyLimit);
     EXPECT_EQ(images.size(), 1u);
     EXPECT_EQ(small.copy_published({1, 0, 0, 0}, images), Producer::Error::InvalidWindow);
     EXPECT_EQ(small.copy_published({0, 1, 0, 0}, images), Producer::Error::InvalidWindow);
-    Producer invalid({});
+    auto invalid_limits = Limits();
+    invalid_limits.index_records = 0;
+    Producer invalid(invalid_limits);
     EXPECT_EQ(invalid.copy_published({0, 0, 0, 0}, images), Producer::Error::InvalidLimits);
 }
 
@@ -179,7 +312,7 @@ TEST(FarWorldAuthorityProducer, PartialAndAmbiguousWaterRefuseWhileDryIsOwned) {
     chunk->set_state(ChunkState::Idle);
     chunk->set_water_authority();
     producer.changes()->membership(chunk, false, true);
-    std::vector<Producer::Image> images;
+    Producer::Images images;
     EXPECT_EQ(producer.copy_published({0, 0, 0, 0}, images), Producer::Error::WaterUnavailable);
     chunk->current_water_resolution.store(4);
     chunk->water_depth_mm.assign(16, 0);
@@ -261,7 +394,10 @@ TEST(FarWorldAuthorityProducer, AttachmentIsBoundedAndClearDetachesOldChunks) {
     ASSERT_TRUE(world.set_far_world_authority_changes(producer.changes()));
     const std::array<Save::AuthorityWindow, 1> wanted{{{0, 0, 0, 0}}};
     ASSERT_TRUE(producer.set_wanted(wanted));
-    Producer small({.index_records = 1, .copy_bytes = 1024u * 1024u, .query_columns = 1});
+    Producer small({.index_records = 1,
+                    .copy_bytes = 1024u * 1024u,
+                    .query_columns = 1,
+                    .memory = SourceMemory()});
     EXPECT_FALSE(world.set_far_world_authority_changes(small.changes()));
     ASSERT_EQ(Copy(producer).size(), 1u);
     world.clear_world(nullptr);
@@ -330,7 +466,8 @@ namespace {
 class FarWorldSourceCaptureTest : public testing::Test {
 protected:
     std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("capture_");
-    Producer producer{Limits()};
+    Producer::Limits source_limits = Limits();
+    Producer producer{source_limits};
     Save::AuthorityReadLimits reads{
         64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072};
     void SetUp() override {
@@ -349,6 +486,183 @@ protected:
         ASSERT_TRUE(producer.request_capture(windows));
     }
 };
+
+TEST_F(FarWorldSourceCaptureTest, CandidateAndReadRefusalsReleaseChargesAndPreserveServing) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* serving = producer.capture();
+    ASSERT_NE(serving, nullptr);
+    const auto& memory = source_limits.memory;
+    const auto accepted_bytes = memory->used();
+    Request();
+    memory->RefuseAttemptsFrom(memory->attempts());
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::AllocationFailure);
+    EXPECT_EQ(producer.capture(), serving);
+    EXPECT_EQ(memory->used(), accepted_bytes);
+    memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    Request();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().active);
+    EXPECT_GT(memory->used(), accepted_bytes);
+    const auto decodes = Save::chunk_record_decode_count_for_testing();
+    // Permit the read's storage control, then refuse its path/parser workspace.
+    memory->RefuseAttemptsFrom(memory->attempts() + 1);
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_EQ(Save::chunk_record_decode_count_for_testing(), decodes);
+    EXPECT_EQ(producer.capture(), serving);
+    EXPECT_FALSE(producer.capture_status().active);
+    EXPECT_EQ(memory->used(), accepted_bytes);
+}
+
+TEST_F(FarWorldSourceCaptureTest, RefusedSourceRefreshRemainsAnAdmissionFailure) {
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* serving = producer.capture();
+    ASSERT_NE(serving, nullptr);
+    const auto& memory = source_limits.memory;
+    const auto accepted_bytes = memory->used();
+    memory->RefuseAttemptsFrom(memory->attempts());
+    std::string error;
+    EXPECT_FALSE(producer.refresh_saved_source(root, error));
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_EQ(producer.capture(), serving);
+    EXPECT_FALSE(producer.capture_status().latest_ready);
+    EXPECT_FALSE(producer.capture_read_error().empty());
+    EXPECT_EQ(memory->used(), accepted_bytes);
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_EQ(producer.capture(), serving);
+    memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(producer.refresh_saved_source(root, error)) << error;
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_TRUE(producer.capture_status().latest_ready);
+}
+
+TEST_F(FarWorldSourceCaptureTest, ReadAdmissionAndEveryReservationUnwindWithoutReplacingSource) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0})));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    std::string error;
+    const auto& memory = source_limits.memory;
+    auto before = memory->attempts();
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    const auto admission_points = memory->attempts() - before;
+    ASSERT_GT(admission_points, 3u);
+    ASSERT_LT(admission_points, 128u);
+    const auto admitted = memory->used();
+    EXPECT_LT(admitted, 1024u * 1024u);
+    for (std::uint64_t point = 0; point < admission_points; ++point) {
+        SCOPED_TRACE(point);
+        memory->RefuseAttemptsFrom(memory->attempts() + point);
+        EXPECT_FALSE(producer.admit_saved_source(root, reads, error));
+        EXPECT_LE(error.size(), 15u);
+        EXPECT_EQ(memory->used(), admitted);
+        memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    }
+    before = memory->attempts();
+    {
+        const auto result = producer.read_committed({}, reads);
+        ASSERT_EQ(result.membership, Save::AuthorityMembership::Present) << result.error;
+        EXPECT_GT(memory->used(), admitted);
+        EXPECT_LT(memory->used() - admitted, 1024u * 1024u);
+    }
+    const auto read_points = memory->attempts() - before;
+    ASSERT_GT(read_points, 3u);
+    ASSERT_LT(read_points, 128u);
+    EXPECT_EQ(memory->used(), admitted);
+    for (std::uint64_t point = 0; point < read_points; ++point) {
+        SCOPED_TRACE(point);
+        memory->RefuseAttemptsFrom(memory->attempts() + point);
+        const auto result = producer.read_committed({}, reads);
+        EXPECT_EQ(result.membership, Save::AuthorityMembership::Unavailable);
+        EXPECT_LE(result.error.size(), 15u);
+        EXPECT_TRUE(result.chunks.empty());
+        EXPECT_EQ(memory->used(), admitted);
+        memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    }
+    EXPECT_EQ(producer.read_committed({}, reads).membership, Save::AuthorityMembership::Present);
+}
+
+TEST_F(FarWorldSourceCaptureTest, CommittedAliasesRetainTheirAdmissionAfterReaderDestruction) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0}, 7)));
+    ASSERT_TRUE(Save{}.save_world(disk, root));
+    const auto memory = SourceMemory();
+    auto configured = Limits();
+    configured.memory = memory;
+    std::shared_ptr<const Chunk> alias;
+    {
+        Producer owner(configured);
+        std::string error;
+        ASSERT_TRUE(owner.admit_saved_source(root, reads, error)) << error;
+        auto result = owner.read_committed({}, reads);
+        ASSERT_EQ(result.membership, Save::AuthorityMembership::Present) << result.error;
+        ASSERT_EQ(result.chunks.size(), 1u);
+        alias = result.chunks[0];
+        result = {};
+        EXPECT_GT(memory->used(), 0u);
+    }
+    EXPECT_GT(memory->used(), 0u);
+    ASSERT_NE(alias, nullptr);
+    EXPECT_EQ(alias->sdf_data[0], 7);
+    alias.reset();
+    EXPECT_EQ(memory->used(), 0u);
+}
+
+TEST_F(FarWorldSourceCaptureTest, PathAndRecordParserRefusalsLeaveNoRetainedStorage) {
+    const auto& memory = source_limits.memory;
+    const auto admitted = memory->used();
+    EXPECT_GT(admitted, 0u);
+    std::string error;
+    EXPECT_FALSE(
+        producer.admit_saved_source(std::filesystem::path(std::string(32769, 'a')), reads, error));
+    EXPECT_EQ(memory->used(), admitted);
+    EXPECT_EQ(producer.read_committed({}, reads).membership,
+              Save::AuthorityMembership::ProvenAbsent);
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0})));
+    ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 0})));
+    const std::array payloads{std::string("{"),
+                              std::string("{}"),
+                              std::string("{\"chunks\":[]}"),
+                              Persistence::SerializeWorldStreamingStateSnapshotJson(disk)};
+    for (const auto& payload : payloads) {
+        const std::vector<Save::ContainerRecord> records{
+            {Chunk::calculate_id({0, 0, 0}), 0, 1, payload}};
+        ASSERT_TRUE(Save::upsert_container_records(Save::region_file_path(root, 0, 0), records));
+        EXPECT_FALSE(producer.admit_saved_source(root, reads, error));
+        EXPECT_EQ(memory->used(), admitted);
+    }
+}
+
+TEST(FarWorldAuthorityProducer, ContainerRecordLimitsChunkControlsBeforePublishing) {
+    for (const bool multiple : {false, true}) {
+        WorldStreamingState disk;
+        if (multiple) {
+            ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0})));
+            ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 0})));
+        }
+        const auto payload = Persistence::SerializeWorldStreamingStateSnapshotJson(disk);
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(payload, loaded, errors));
+        EXPECT_EQ(loaded.size(), multiple ? 2u : 0u);
+        errors.clear();
+        const Persistence::ChunkAuthorityLoadPolicy policy{.terrain_edited = true,
+                                                           .migrate_legacy_water = false,
+                                                           .validate_record_authority = true,
+                                                           .allow_unflagged_water = false};
+        EXPECT_FALSE(
+            Persistence::LoadWorldStreamingStateSnapshotJson(payload, loaded, errors, policy));
+        EXPECT_EQ(loaded.size(), 0u);
+        EXPECT_FALSE(errors.empty());
+    }
+}
 
 TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSuccessorEdits) {
     auto first = Edited({0, 0, 0}, 1.0f);
@@ -586,7 +900,8 @@ TEST_F(FarWorldSourceCaptureTest, MalformedVolatileCaptureRefusesBeforeReadingAn
 class FarWorldFrozenComposeTest : public testing::Test {
 protected:
     std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("frozen_compose_");
-    Producer producer{{512, 4u * 1024u * 1024u, 8192}};
+    std::shared_ptr<World::FarVolumeMemoryPool> source_memory = SourceMemory();
+    Producer producer{{512, 4u * 1024u * 1024u, 8192, source_memory}};
     Save::AuthorityReadLimits reads{
         64, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
     World::FarFrozenCaptureLimits limits{1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
@@ -631,6 +946,43 @@ protected:
         return producer.compose_frozen(*world, Request(x), policy, limits, pool, output);
     }
 };
+
+TEST_F(FarWorldFrozenComposeTest, CompositionScratchAdmissionPreservesAcceptedImage) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    const auto accepted = image;
+    const auto source_bytes = source_memory->used(), frozen_bytes = pool->used();
+    source_memory->RefuseAttemptsFrom(source_memory->attempts());
+    const auto refused = Compose(image);
+    EXPECT_EQ(refused.source, Producer::Error::AllocationFailure);
+    EXPECT_EQ(image, accepted);
+    EXPECT_EQ(source_memory->used(), source_bytes);
+    EXPECT_EQ(pool->used(), frozen_bytes);
+    source_memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    EXPECT_TRUE(Compose(image).ok());
+    EXPECT_EQ(source_memory->used(), source_bytes);
+}
+
+TEST_F(FarWorldFrozenComposeTest, SharedDomainRetainsOnlyTheExistingFrozenImageCharge) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto source_bytes = source_memory->used();
+    EXPECT_GT(source_bytes, 0u);
+    const auto independent_pool = pool;
+    std::shared_ptr<const World::FarFrozenObservation> independent;
+    ASSERT_TRUE(Compose(independent).ok());
+    const auto frozen_bytes = independent_pool->used();
+    EXPECT_GT(frozen_bytes, independent->payload_bytes());
+    pool = source_memory;
+    std::shared_ptr<const World::FarFrozenObservation> shared;
+    ASSERT_TRUE(Compose(shared).ok());
+    EXPECT_EQ(source_memory->used(), source_bytes + frozen_bytes);
+    EXPECT_EQ(shared->content_identity(), independent->content_identity());
+    shared.reset();
+    EXPECT_EQ(source_memory->used(), source_bytes);
+}
 
 TEST_F(FarWorldFrozenComposeTest, ClimateFrequenciesInvalidateOnlyEnabledBiomePolicies) {
     auto dependencies = std::make_shared<World::WorldgenDependencySnapshot>();
