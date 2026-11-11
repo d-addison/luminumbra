@@ -832,10 +832,11 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
     std::shared_ptr<const FarFrozenObservation> image;
     const auto error = CaptureFarVolumeObservation(
         request, source, {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024}, pool, image);
-    if (failure)
+    if (failure) {
         *failure = error;
-    else
+    } else {
         EXPECT_EQ(error, FarFrozenCaptureError::None);
+    }
     if (!image)
         return {};
     wanted.identity.content_hash = image->content_identity();
@@ -1240,8 +1241,11 @@ TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFing
         if (first_observation->target.has_value()) {
             EXPECT_NE(first_observation->target->identity.content_hash, policy.pristine_identity);
             EXPECT_EQ(first_observation->target->identity.bake_generation, 0u);
+            EXPECT_EQ(first_observation->target->water_bound,
+                      (std::optional<FarWorldWaterBound>{{true, 0, 0}}));
         }
-        EXPECT_TRUE(first_observation->target_water_known_dry);
+        EXPECT_FALSE(first_observation->target_water_complete);
+        EXPECT_FALSE(first_observation->target_water_known_dry);
     }
     EXPECT_EQ(owner.State().target_serial, 1u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
@@ -1279,6 +1283,52 @@ TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFing
         }
     }
     owner.CancelAndDrain();
+    jobs.shutdown();
+}
+
+TEST_F(FarSessionPublicationTest, EmptySavedSourceProjectsOceanAndDryLandThroughUpload) {
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const float height : {-1.0f, 0.0f, 16.0f}) {
+        SCOPED_TRACE(height);
+        auto params = world->get_params();
+        params.height_offset = height;
+        world->set_params(params);
+        policy.pristine_identity =
+            WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, policy.water_resolution);
+        EXPECT_EQ(world->GetTerrainHeightAt(0, 0), height);
+        EXPECT_EQ(world->WaterLevelAt(0, 0), SEA_LEVEL);
+        const bool dry = height >= SEA_LEVEL;
+        const float surface = std::max(height, SEA_LEVEL);
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        FarVolumeHandoff owner(jobs, *memory, Limits());
+        std::array tiles{Tile(0), Fallback()};
+        tiles[0].capture.span = {-272, 32};
+        ASSERT_TRUE(
+            owner.StageSessionTarget(producer, *world, 7, tiles, policy, capture_limits, memory));
+        const auto staged = owner.Observe({1, 0, 0});
+        ASSERT_TRUE(staged.has_value());
+        if (staged.has_value()) {
+            ASSERT_TRUE(staged->target.has_value());
+            if (staged->target.has_value()) {
+                EXPECT_EQ(staged->target->water_bound,
+                          (std::optional<FarWorldWaterBound>{{dry, surface, surface}}));
+            }
+            EXPECT_FALSE(staged->target_water_complete);
+            EXPECT_FALSE(staged->target_water_known_dry);
+        }
+        std::size_t uploads = 0;
+        const auto backend = Backend(uploads);
+        ASSERT_TRUE(HandoffWait([&] {
+            owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend);
+            return IsFarTileCovering(HandoffObserve(owner, {1, 0, 0}).target_coverage);
+        }));
+        const auto uploaded = HandoffObserve(owner, {1, 0, 0});
+        EXPECT_TRUE(uploaded.target_water_complete);
+        EXPECT_EQ(uploaded.target_water_known_dry, dry);
+        EXPECT_EQ(uploaded.target_water_indices, dry ? 0u : 98304u);
+        owner.CancelAndDrain();
+    }
     jobs.shutdown();
 }
 
