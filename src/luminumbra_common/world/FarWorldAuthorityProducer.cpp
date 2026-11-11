@@ -302,7 +302,9 @@ FarFrozenOverride<FarFrozenWaterSample> WaterAt(std::span<const FrozenRecord* co
 std::optional<FarFrozenWaterSample> BaseWater(const Systems::SHIELD_WorldSystem& world,
                                               int resolution,
                                               std::int64_t x,
-                                              std::int64_t z) {
+                                              std::int64_t z,
+                                              FarFrozenCaptureWork& work,
+                                              bool& work_failed) {
     const auto center = [resolution](std::int64_t value, int edge) {
         const auto chunk = Floor(value, edge);
         const auto cell = (value - chunk * edge) * resolution / edge;
@@ -311,7 +313,20 @@ std::optional<FarFrozenWaterSample> BaseWater(const Systems::SHIELD_WorldSystem&
                    (static_cast<float>(edge) / static_cast<float>(resolution));
     };
     const auto wx = center(x, CHUNK_SIZE_X), wz = center(z, CHUNK_SIZE_Z);
-    const float terrain = world.GetTerrainHeightAt(wx, wz), rest = world.WaterLevelAt(wx, wz);
+    if (!work.ChargeHeight()) {
+        work_failed = true;
+        return {};
+    }
+    const float terrain = world.GetTerrainHeightAt(wx, wz);
+    if (!work.ChargeWater()) {
+        work_failed = true;
+        return {};
+    }
+    const float rest = world.WaterLevelAt(wx, wz);
+    if (!work.CheckDeadline()) {
+        work_failed = true;
+        return {};
+    }
     if (!std::isfinite(terrain) || !std::isfinite(rest)) {
         return {};
     }
@@ -638,11 +653,12 @@ FarWorldAuthorityProducer::read_committed(const Save::AuthorityWindow& window,
 }
 bool FarWorldAuthorityProducer::configure_capture(const CaptureLimits& limits) {
     const auto& read = limits.read;
-    if (!ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 || read.members == 0 ||
-        read.records == 0 || read.headers == 0 || read.probes == 0 ||
-        read.compressed_member_bytes == 0 || read.compressed_total_bytes == 0 ||
-        read.decoded_member_bytes == 0 || read.decoded_total_bytes == 0 ||
-        read.control_bytes == 0 || read.compressed_member_bytes > read.compressed_total_bytes ||
+    if (!ValidLimits(impl_->state->limits) || limits.deadline_frames == 0 || !limits.clock.now ||
+        limits.clock.max_ticks == 0 || read.members == 0 || read.records == 0 ||
+        read.headers == 0 || read.probes == 0 || read.compressed_member_bytes == 0 ||
+        read.compressed_total_bytes == 0 || read.decoded_member_bytes == 0 ||
+        read.decoded_total_bytes == 0 || read.control_bytes == 0 ||
+        read.compressed_member_bytes > read.compressed_total_bytes ||
         read.decoded_member_bytes > read.decoded_total_bytes || impl_->active) {
         return false;
     }
@@ -697,10 +713,20 @@ void FarWorldAuthorityProducer::pump_capture() {
             return;
         }
         ++impl_->age;
+        if (impl_->active->deadline.expired()) {
+            impl_->active.reset();
+            impl_->error = Error::SourceReadExpired;
+            return;
+        }
         if (impl_->paused) {
             return;
         }
         auto committed = read_committed(impl_->active->window, impl_->capture_limits.read);
+        if (impl_->active->deadline.expired()) {
+            impl_->active.reset();
+            impl_->error = Error::SourceReadExpired;
+            return;
+        }
         if (committed.membership == Save::AuthorityMembership::Unavailable) {
             impl_->active.reset();
             impl_->error = Error::CommittedReadRefused;
@@ -716,6 +742,17 @@ void FarWorldAuthorityProducer::pump_capture() {
         return;
     }
     impl_->queued = false;
+    const auto& clock = impl_->capture_limits.clock;
+    const auto start = clock.now(clock.context);
+    if (clock.max_ticks > std::numeric_limits<std::uint64_t>::max() - start) {
+        impl_->error = Error::InvalidLimits;
+        return;
+    }
+    const FarFrozenCaptureDeadline deadline{clock.now, clock.context, start + clock.max_ticks};
+    if (deadline.expired()) {
+        impl_->error = Error::SourceReadExpired;
+        return;
+    }
     if (impl_->serial == std::numeric_limits<std::uint64_t>::max()) {
         impl_->error = Error::AuthorityUnavailable;
         return;
@@ -724,7 +761,12 @@ void FarWorldAuthorityProducer::pump_capture() {
         auto candidate = std::allocate_shared<SourceCapture>(
             FarVolumePoolAllocator<SourceCapture>(impl_->state->limits.memory));
         candidate->window = impl_->capture_window;
+        candidate->deadline = deadline;
         const auto error = copy_published(candidate->window, candidate->published);
+        if (candidate->deadline.expired()) {
+            impl_->error = Error::SourceReadExpired;
+            return;
+        }
         if (error != Error::None) {
             impl_->error = error;
             return;
@@ -798,6 +840,9 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_froze
     if (!source || !impl_->source_ready || impl_->paused ||
         source->committed.membership == Save::AuthorityMembership::Unavailable) {
         return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+    }
+    if (source->deadline.expired() || limits.deadline.expired()) {
+        return {Error::None, FarFrozenCaptureError::DeadlineExceeded};
     }
     if (policy.water_resolution != 4 && policy.water_resolution != 8 &&
         policy.water_resolution != 16 && policy.water_resolution != 32) {
@@ -894,13 +939,21 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_froze
     const auto live = [&records](std::uint8_t, const FarVolumePosition& p) {
         return TerrainAt(records, 0, p);
     };
-    bool water_failed = false;
+    FarFrozenCaptureWork local_work(
+        {limits.max_height_samples, limits.max_density_samples, limits.max_water_samples},
+        limits.work,
+        limits.deadline,
+        source->deadline);
+    auto bounded = limits;
+    bounded.work = &local_work;
+    bool water_failed = false, work_failed = false;
     const auto water = [&](std::int64_t x, std::int64_t z) -> std::optional<FarFrozenWaterSample> {
         const auto value = WaterAt(water_records, 2, x, z);
-        const auto result = value.presence == FarFrozenPresence::Present
-                                ? std::optional{value.sample}
-                                : BaseWater(world, policy.water_resolution, x, z);
-        water_failed = water_failed || !result;
+        const auto result =
+            value.presence == FarFrozenPresence::Present
+                ? std::optional{value.sample}
+                : BaseWater(world, policy.water_resolution, x, z, *bounded.work, work_failed);
+        water_failed = water_failed || (!result && !work_failed);
         return result;
     };
     const auto parked_water = [&water_records](std::int64_t x, std::int64_t z) {
@@ -923,13 +976,14 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_froze
     frozen.water = std::cref(water);
     frozen.parked_water = std::cref(parked_water);
     frozen.live_water = std::cref(live_water);
-    auto bounded = limits;
-    // In addition to the frozen seam, base water may call both pristine height
-    // and rest-level projection once per column. Admit their worst case too.
-    bounded.max_height_samples /= 2;
-    bounded.max_water_samples /= 3;
     const auto error =
         CaptureWorldFarVolumeObservation(world, request, frozen, bounded, pool, output);
+    if (error == FarFrozenCaptureError::DeadlineExceeded || local_work.deadline_exceeded()) {
+        return {Error::None, FarFrozenCaptureError::DeadlineExceeded};
+    }
+    if (work_failed) {
+        return {Error::None, FarFrozenCaptureError::WorkLimit};
+    }
     return {water_failed ? Error::WaterUnavailable : Error::None, error};
 }
 } // namespace Luminumbra::World

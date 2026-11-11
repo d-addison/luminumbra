@@ -13310,6 +13310,9 @@ TEST(GameSessionHeadlessWorldTest, EnergyRegistersStayTransactionalAcrossSchedul
 }
 
 namespace {
+Luminumbra::World::FarWorldAuthorityProducer::CaptureClock SourceCaptureClock() {
+    return {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+}
 void CheckSourceCaptureAdmissionFailures(GameSession& session,
                                          const Luminumbra::World::FarWorldAuthorityConfig& config) {
     auto* producer = session.GetFarWorldAuthorityProducer();
@@ -13317,6 +13320,10 @@ void CheckSourceCaptureAdmissionFailures(GameSession& session,
     std::string error;
     auto invalid = config;
     invalid.capture.deadline_frames = 0;
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    invalid = config;
+    invalid.capture.clock = {};
     EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
     EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
     invalid = config;
@@ -13356,7 +13363,9 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
          1048576,
          64,
          std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
-        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072},
+         4,
+         SourceCaptureClock()}};
     std::string error;
     GameSession cold;
     EXPECT_FALSE(cold.EnableFarWorldAuthorityProducer(config, error));
@@ -13485,7 +13494,9 @@ TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
          1048576,
          64,
          std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
-        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072},
+         4,
+         SourceCaptureClock()}};
     std::string error;
     ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
     auto* producer = session.GetFarWorldAuthorityProducer();

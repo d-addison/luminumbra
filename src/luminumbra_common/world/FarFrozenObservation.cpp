@@ -23,6 +23,9 @@
 namespace Luminumbra::World {
 namespace {
 using Error = FarFrozenCaptureError;
+Error WorkError(const FarFrozenCaptureWork& work) {
+    return work.deadline_exceeded() ? Error::DeadlineExceeded : Error::WorkLimit;
+}
 
 template<class T>
 class PoolAllocator {
@@ -101,11 +104,18 @@ AxisIndex(std::int64_t p, std::int64_t origin, std::size_t side, std::uint32_t s
     return index < side ? std::optional<std::size_t>{index} : std::nullopt;
 }
 template<class T, class Callback, class... Args>
-Error Resolve(std::initializer_list<const Callback*> layers, T& value, Args... args) {
+Error Resolve(std::initializer_list<const Callback*> layers,
+              FarFrozenCaptureWork& work,
+              T& value,
+              Args... args) {
     for (const auto* callback : layers) {
         if (!*callback)
             continue;
+        if (!work.ChargeDensity())
+            return WorkError(work);
         const auto result = (*callback)(args...);
+        if (!work.CheckDeadline())
+            return Error::DeadlineExceeded;
         switch (result.presence) {
             case FarFrozenPresence::Absent:
                 break;
@@ -144,6 +154,36 @@ bool Before(const FarFrozenRegion& a, const FarFrozenRegion& b) {
                                                 b.support.max.y);
 }
 } // namespace
+
+bool FarFrozenCaptureWork::ChargeHeight() {
+    if (!CheckDeadline() || counts_.height >= limits_.height ||
+        (transaction_ && !transaction_->ChargeHeight())) {
+        return false;
+    }
+    ++counts_.height;
+    return true;
+}
+bool FarFrozenCaptureWork::ChargeDensity() {
+    if (!CheckDeadline() || counts_.density >= limits_.density ||
+        (transaction_ && !transaction_->ChargeDensity())) {
+        return false;
+    }
+    ++counts_.density;
+    return true;
+}
+bool FarFrozenCaptureWork::ChargeWater() {
+    if (!CheckDeadline() || counts_.water >= limits_.water ||
+        (transaction_ && !transaction_->ChargeWater())) {
+        return false;
+    }
+    ++counts_.water;
+    return true;
+}
+bool FarFrozenCaptureWork::CheckDeadline() {
+    deadline_exceeded_ = deadline_exceeded_ || deadline_.expired() || source_deadline_.expired() ||
+                         (transaction_ && !transaction_->CheckDeadline());
+    return !deadline_exceeded_;
+}
 
 FarFrozenCaptureError
 CaptureFarVolumeObservation(const FarVolumeRequest& request,
@@ -246,6 +286,13 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         !Add(density_count, 2 * sizeof(FarVolumeSample), limits.max_bytes, bytes) ||
         bytes > std::numeric_limits<std::size_t>::max())
         return Error::ByteLimit;
+    FarFrozenCaptureWork local_work(
+        {limits.max_height_samples, limits.max_density_samples, limits.max_water_samples},
+        limits.work,
+        limits.deadline);
+    auto& work = local_work;
+    if (!work.CheckDeadline())
+        return Error::DeadlineExceeded;
     try {
         auto image = std::allocate_shared<FarFrozenObservation>(
             PoolAllocator<FarFrozenObservation>{pool, limits.max_bytes - bytes},
@@ -296,7 +343,11 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                 for (std::size_t x = 0; x < grid.side[0]; ++x) {
                     const auto wx = grid.origin.x + std::int64_t(x) * step;
                     const auto wz = grid.origin.z + std::int64_t(z) * step;
+                    if (!work.ChargeHeight())
+                        return WorkError(work);
                     const auto height = source.pristine.height(wx, wz);
+                    if (!work.CheckDeadline())
+                        return Error::DeadlineExceeded;
                     if (!height)
                         return Error::Unavailable;
                     if (!std::isfinite(*height))
@@ -308,7 +359,11 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                         for (const auto* callback : {&source.live_water, &source.parked_water}) {
                             if (!*callback)
                                 continue;
+                            if (!work.ChargeWater())
+                                return WorkError(work);
                             const auto value = (*callback)(wx, wz);
+                            if (!work.CheckDeadline())
+                                return Error::DeadlineExceeded;
                             if (value.presence == FarFrozenPresence::Unavailable)
                                 return Error::Unavailable;
                             if (value.presence == FarFrozenPresence::Present) {
@@ -321,7 +376,11 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                         }
                     }
                     if (!selected) {
+                        if (!work.ChargeWater())
+                            return WorkError(work);
                         const auto value = source.water(wx, wz);
+                        if (!work.CheckDeadline())
+                            return Error::DeadlineExceeded;
                         if (!value)
                             return Error::Unavailable;
                         observed_water = *value;
@@ -342,24 +401,30 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                         const FarVolumePosition p{grid.origin.x + std::int64_t(x) * step,
                                                   grid.origin.y + std::int64_t(y) * step,
                                                   grid.origin.z + std::int64_t(z) * step};
+                        if (!work.ChargeDensity())
+                            return WorkError(work);
                         auto sample = source.pristine.density(
                             p,
                             image->heights_[grid.column_offset + z * grid.side[0] + x],
                             step,
                             source.pristine.caves);
+                        if (!work.CheckDeadline())
+                            return Error::DeadlineExceeded;
                         if (!sample)
                             return Error::Unavailable;
                         if (!std::isfinite(sample->density))
                             return Error::NonFiniteSample;
                         image->pristine_.push_back(*sample);
                         const auto error =
-                            session_edits ? Resolve<FarVolumeSample>(
-                                                {&source.live, &source.parked, &source.committed},
-                                                *sample,
-                                                grid.region.tier,
-                                                p)
-                                          : Resolve<FarVolumeSample>(
-                                                {&source.committed}, *sample, grid.region.tier, p);
+                            session_edits
+                                ? Resolve<FarVolumeSample>(
+                                      {&source.live, &source.parked, &source.committed},
+                                      work,
+                                      *sample,
+                                      grid.region.tier,
+                                      p)
+                                : Resolve<FarVolumeSample>(
+                                      {&source.committed}, work, *sample, grid.region.tier, p);
                         if (error != Error::None)
                             return error;
                         if (!std::isfinite(sample->density))
@@ -395,6 +460,8 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
             Fingerprint(fingerprint, std::bit_cast<std::uint32_t>(water.surface_height));
         }
         image->identity_ = fingerprint;
+        if (!work.CheckDeadline())
+            return Error::DeadlineExceeded;
         output = std::move(image);
         return Error::None;
     } catch (const FarVolumeMemoryRefused&) {

@@ -44,6 +44,10 @@
 #include <vector>
 
 namespace {
+Luminumbra::World::FarWorldAuthorityProducer::CaptureClock SourceCaptureClock() {
+    return {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+}
+
 using namespace Luminumbra;
 using namespace Luminumbra::World;
 using namespace Luminumbra::Rendering;
@@ -1122,6 +1126,7 @@ protected:
     std::unique_ptr<Systems::SHIELD_WorldSystem> world;
     Producer::FrozenPolicy policy;
     FarFrozenCaptureLimits capture_limits{1, 100'000, 20'000'000, 200'000, 64u * 1024u * 1024u};
+    const FarFrozenCaptureWork::Counts transaction_samples{200'000, 20'000'000, 240'000};
     void SetUp() override {
         auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.caves_enabled = false;
@@ -1139,7 +1144,7 @@ protected:
             512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
         std::string error;
         ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
-        ASSERT_TRUE(producer.configure_capture({reads, 4}));
+        ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
         const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
         ASSERT_TRUE(producer.request_capture(windows));
         producer.pump_capture();
@@ -1224,8 +1229,8 @@ TEST_F(FarSessionPublicationTest, ElevatedShorelineKeepsDryBedsThroughAdmissionA
     const std::array tiles{FarSessionHandoffTile{wanted, request}, fallback};
     JobSystem jobs;
     FarVolumeHandoff owner(jobs, *memory, Limits());
-    ASSERT_TRUE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
 }
 
@@ -1235,8 +1240,8 @@ TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFing
     auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
     FarVolumeHandoff owner(jobs, *memory, Limits());
     const std::array first{Tile(0), Fallback()};
-    ASSERT_TRUE(
-        owner.StageSessionTarget(producer, *world, 7, first, policy, capture_limits, memory));
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, first, policy, capture_limits, transaction_samples, memory));
     const auto first_observation = owner.Observe({1, 0, 0});
     ASSERT_TRUE(first_observation.has_value());
     if (first_observation.has_value()) {
@@ -1253,8 +1258,8 @@ TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFing
     EXPECT_EQ(owner.State().target_serial, 1u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
     // Repeating the same owned source is idempotent despite fresh composition.
-    EXPECT_TRUE(
-        owner.StageSessionTarget(producer, *world, 7, first, policy, capture_limits, memory));
+    EXPECT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, first, policy, capture_limits, transaction_samples, memory));
     const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
     ASSERT_TRUE(producer.request_capture(windows));
     producer.pump_capture();
@@ -1262,16 +1267,16 @@ TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFing
     ASSERT_EQ(producer.capture()->serial, 2u);
     const auto bytes = memory->Pool(1)->used();
     const std::array invalid{Tile(0), Tile(17), Fallback()};
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 7, invalid, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 7, invalid, policy, capture_limits, transaction_samples, memory));
     EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
     EXPECT_EQ(owner.State().target_serial, 1u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
     EXPECT_EQ(memory->Pool(1)->used(), bytes);
     EXPECT_FALSE(owner.Observe({1, 1, 0}));
     const std::array replacement{Tile(0), Tile(1), Fallback()};
-    ASSERT_TRUE(
-        owner.StageSessionTarget(producer, *world, 7, replacement, policy, capture_limits, memory));
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, replacement, policy, capture_limits, transaction_samples, memory));
     EXPECT_EQ(owner.State().target_serial, 2u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
     EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
@@ -1308,8 +1313,8 @@ TEST_F(FarSessionPublicationTest, EmptySavedSourceProjectsOceanAndDryLandThrough
         std::array tiles{Tile(0), Fallback()};
         tiles[0].capture.span = {-272, 32};
         tiles[1].capture.span = {-512, 768};
-        const bool staged_target =
-            owner.StageSessionTarget(producer, *world, 7, tiles, policy, capture_limits, memory);
+        const bool staged_target = owner.StageSessionTarget(
+            producer, *world, 7, tiles, policy, capture_limits, transaction_samples, memory);
         EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
         ASSERT_TRUE(staged_target);
         const auto staged = owner.Observe({1, 0, 0});
@@ -1343,8 +1348,8 @@ TEST_F(FarSessionPublicationTest, RefusalMatrixPreservesTargetAndClassifiesResou
     auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
     FarVolumeHandoff owner(jobs, *memory, Limits());
     const std::array tiles{Tile(0), Fallback()};
-    ASSERT_TRUE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     const auto bytes = memory->Pool(1)->used();
     const auto check = [&](FarWorldRefusal reason) {
         EXPECT_EQ(owner.AdmissionRefusal(), reason);
@@ -1354,77 +1359,81 @@ TEST_F(FarSessionPublicationTest, RefusalMatrixPreservesTargetAndClassifiesResou
     auto invalid_policy = policy;
     invalid_policy.caves = static_cast<FarCaveMode>(255);
     EXPECT_FALSE(owner.StageSessionTarget(
-        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+        producer, *world, 1, tiles, invalid_policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::InvalidCavePolicy);
-    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, tiles, policy, {}, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, {}, transaction_samples, memory));
     check(FarWorldRefusal::MissingLimits);
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 0, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 0, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::InvalidRequests);
-    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, {}, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, {}, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::InvalidRequests);
     invalid_policy = policy;
     invalid_policy.numeric = static_cast<FarVolumeNumericProfile>(255);
     EXPECT_FALSE(owner.StageSessionTarget(
-        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+        producer, *world, 1, tiles, invalid_policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::InvalidRequests);
     Producer cold({512,
                    4u * 1024u * 1024u,
                    300'000,
                    std::make_shared<FarVolumeMemoryPool>(64u * 1024u * 1024u)});
-    EXPECT_FALSE(owner.StageSessionTarget(cold, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        cold, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::ImmutableAuthorityUnavailable);
     auto other = std::make_shared<FarVolumeTierMemory>(Budgets());
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, other));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, other));
     check(FarWorldRefusal::AdmissionFailed);
     auto invalid_tile = tiles;
     invalid_tile[0].capture.key.x = 1;
     EXPECT_FALSE(owner.StageSessionTarget(
-        producer, *world, 1, invalid_tile, policy, capture_limits, memory));
+        producer, *world, 1, invalid_tile, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::InvalidRequests);
     invalid_policy = policy;
     invalid_policy.water_resolution = 0;
     EXPECT_FALSE(owner.StageSessionTarget(
-        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+        producer, *world, 1, tiles, invalid_policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::WaterUnavailable);
     world->set_seed(19);
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::ImmutableAuthorityUnavailable);
     world->set_seed(1337);
     auto small = capture_limits;
     small.max_bytes = 1;
-    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, tiles, policy, small, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, small, transaction_samples, memory));
     check(FarWorldRefusal::AdmissionFailed);
     memory->Pool(1)->RefuseAttemptsFrom(memory->Pool(1)->attempts());
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::AdmissionFailed);
     Save::AuthorityReadLimits reads{
         512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
     const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
-    ASSERT_TRUE(producer.configure_capture({reads, 1}));
+    ASSERT_TRUE(producer.configure_capture({reads, 1, SourceCaptureClock()}));
     ASSERT_TRUE(producer.request_capture(windows));
     producer.pump_capture();
     producer.pump_capture();
     ASSERT_EQ(producer.capture_status().error, Producer::Error::DeadlineExceeded);
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::AdmissionFailed);
     reads.members = 1;
-    ASSERT_TRUE(producer.configure_capture({reads, 4}));
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
     ASSERT_TRUE(producer.request_capture(windows));
     producer.pump_capture();
     producer.pump_capture();
     ASSERT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
     EXPECT_FALSE(producer.capture_read_error().empty());
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::AdmissionFailed);
     producer.invalidate_source();
-    EXPECT_FALSE(
-        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, policy, capture_limits, transaction_samples, memory));
     check(FarWorldRefusal::ImmutableAuthorityUnavailable);
 }
 
@@ -1451,7 +1460,7 @@ TEST_F(FarSessionPublicationTest, ServingSerialBridgesSuccessfulTargetAndSurvive
         512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
     std::string error;
     ASSERT_TRUE(wide.admit_saved_source(root, reads, error)) << error;
-    ASSERT_TRUE(wide.configure_capture({reads, 4}));
+    ASSERT_TRUE(wide.configure_capture({reads, 4, SourceCaptureClock()}));
     const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
     for (unsigned serial = 0; serial < 2; ++serial) {
         ASSERT_TRUE(wide.request_capture(windows));
@@ -1464,15 +1473,16 @@ TEST_F(FarSessionPublicationTest, ServingSerialBridgesSuccessfulTargetAndSurvive
     wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 512};
     const std::array next{
         FarSessionHandoffTile{wanted, {{5, 0, 0}, {-256, 768}, policy.pristine_identity}}};
-    ASSERT_TRUE(owner.StageSessionTarget(wide, *world, 7, next, policy, capture_limits, memory));
+    ASSERT_TRUE(owner.StageSessionTarget(
+        wide, *world, 7, next, policy, capture_limits, transaction_samples, memory));
     EXPECT_EQ(owner.State().serving_serial, 1u);
     EXPECT_EQ(owner.State().target_serial, 2u);
     EXPECT_TRUE(owner.State().awaiting_replacement_fallback);
     const auto bytes = memory->Pool(5)->used();
     auto invalid = next;
     invalid[0].capture.span.min_y = -255;
-    EXPECT_FALSE(
-        owner.StageSessionTarget(wide, *world, 7, invalid, policy, capture_limits, memory));
+    EXPECT_FALSE(owner.StageSessionTarget(
+        wide, *world, 7, invalid, policy, capture_limits, transaction_samples, memory));
     EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
     EXPECT_EQ(owner.State().serving_serial, 1u);
     EXPECT_EQ(owner.State().target_serial, 2u);
@@ -3129,4 +3139,163 @@ TEST(FarVolumeHandoff, AdmissionScaleLateDuplicatesAndInvalidSupportLeavePublish
         EXPECT_EQ(owner.Memory()[4].bytes_total, used);
         ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
     }
+}
+
+TEST_F(FarSessionPublicationTest, AggregateSamplingCapsRefuseWithoutReplacingCohorts) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array accepted{Tile(0), Fallback()};
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, accepted, policy, capture_limits, transaction_samples, memory));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture()->serial, 2u);
+    const auto before = owner.Memory();
+    const auto tier = FarTierAt(5);
+    ASSERT_TRUE(tier.has_value());
+    if (!tier.has_value()) {
+        return;
+    }
+    const std::uint64_t side = tier->tile_edge_meters / tier->sample_spacing_meters + 3;
+    const auto columns = side * side;
+    const std::uint64_t vertical = 1024 / tier->sample_spacing_meters + 3;
+    const FarFrozenCaptureWork::Counts first_tile{2 * columns, 4 * columns * vertical, 4 * columns};
+    const std::array replacement{Fallback(), Tile(1)};
+    for (unsigned cap = 0; cap < 3; ++cap) {
+        auto aggregate = transaction_samples;
+        if (cap == 0) {
+            aggregate.height = first_tile.height;
+        } else if (cap == 1) {
+            aggregate.density = first_tile.density;
+        } else {
+            aggregate.water = first_tile.water;
+        }
+        EXPECT_FALSE(owner.StageSessionTarget(
+            producer, *world, 7, replacement, policy, capture_limits, aggregate, memory));
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+        EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+        EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::WorkLimit);
+        EXPECT_EQ(owner.State().target_serial, 1u);
+        EXPECT_EQ(owner.State().serving_serial, 0u);
+        EXPECT_FALSE(owner.Observe({1, 1, 0}).has_value());
+        const auto after = owner.Memory();
+        for (std::size_t tier_index = 0; tier_index < before.size(); ++tier_index) {
+            EXPECT_EQ(after[tier_index].bytes_cpu, before[tier_index].bytes_cpu);
+            EXPECT_EQ(after[tier_index].bytes_gpu, before[tier_index].bytes_gpu);
+        }
+    }
+    for (unsigned missing = 0; missing < 3; ++missing) {
+        auto aggregate = transaction_samples;
+        if (missing == 0) {
+            aggregate.height = 0;
+        } else if (missing == 1) {
+            aggregate.density = 0;
+        } else {
+            aggregate.water = 0;
+        }
+        EXPECT_FALSE(owner.StageSessionTarget(
+            producer, *world, 7, replacement, policy, capture_limits, aggregate, memory));
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::MissingLimits);
+        EXPECT_TRUE(owner.SessionCaptureFailure().ok());
+        EXPECT_EQ(owner.State().target_serial, 1u);
+    }
+    EXPECT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, replacement, policy, capture_limits, transaction_samples, memory));
+    EXPECT_TRUE(owner.SessionCaptureFailure().ok());
+    EXPECT_EQ(owner.State().target_serial, 2u);
+}
+
+TEST_F(FarSessionPublicationTest, SamplingExpiryRemainsAdmissionFailureWithPreciseDetail) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array tiles{Tile(0), Fallback()};
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, tiles, policy, capture_limits, transaction_samples, memory));
+    const auto before = owner.Memory();
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            return static_cast<const Clock*>(context)->ticks++;
+        }
+    } clock;
+    auto bounded = capture_limits;
+    bounded.deadline = {Clock::Now, &clock, 100};
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 7, tiles, policy, bounded, transaction_samples, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+    EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(owner.State().target_serial, 1u);
+    const auto after = owner.Memory();
+    for (std::size_t tier_index = 0; tier_index < before.size(); ++tier_index) {
+        EXPECT_EQ(after[tier_index].bytes_cpu, before[tier_index].bytes_cpu);
+        EXPECT_EQ(after[tier_index].bytes_gpu, before[tier_index].bytes_gpu);
+    }
+    const Save::AuthorityReadLimits reads{
+        512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {Clock::Now, &clock, 1}}));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 7, tiles, policy, capture_limits, transaction_samples, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::SourceReadExpired);
+    EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::None);
+    owner.CancelAndDrain();
+    EXPECT_TRUE(owner.SessionCaptureFailure().ok());
+}
+
+TEST_F(FarSessionPublicationTest, DiscoveryUsesRemainingTransactionAllowance) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array tiles{Tile(0), Fallback()};
+    auto bounded = transaction_samples;
+    // Both captures consume two heights for each 131 by 131 halo. Discovery
+    // must then refuse before its first immutable-image height callback.
+    bounded.height = 4u * 131u * 131u;
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 7, tiles, policy, capture_limits, bounded, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+    EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::WorkLimit);
+    EXPECT_EQ(owner.State().target_serial, 0u);
+    EXPECT_EQ(owner.State().serving_serial, 0u);
+    EXPECT_FALSE(owner.Observe({1, 0, 0}).has_value());
+}
+
+TEST_F(FarSessionPublicationTest, DeadlineExpiresBeforeManifestCommitAfterSamplingCompletes) {
+    JobSystem jobs;
+    const std::array tiles{Fallback()};
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            return static_cast<const Clock*>(context)->ticks++;
+        }
+    } clock;
+    auto bounded = capture_limits;
+    bounded.deadline = {Clock::Now, &clock, std::numeric_limits<std::uint64_t>::max()};
+    {
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        FarVolumeHandoff owner(jobs, *memory, Limits());
+        ASSERT_TRUE(owner.StageSessionTarget(
+            producer, *world, 7, tiles, policy, bounded, transaction_samples, memory));
+    }
+    ASSERT_GT(clock.ticks, 1u);
+    bounded.deadline.expires_at = clock.ticks - 1;
+    clock.ticks = 0;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 7, tiles, policy, bounded, transaction_samples, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+    EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(owner.State().target_serial, 0u);
+    EXPECT_FALSE(owner.Observe({5, 0, 0}).has_value());
 }

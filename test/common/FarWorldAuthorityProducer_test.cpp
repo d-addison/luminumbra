@@ -13,6 +13,10 @@
 #include <vector>
 
 namespace {
+Luminumbra::World::FarWorldAuthorityProducer::CaptureClock SourceCaptureClock() {
+    return {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+}
+
 using namespace Luminumbra;
 using Producer = World::FarWorldAuthorityProducer;
 using Save = Persistence::WorldSaveService;
@@ -475,7 +479,7 @@ protected:
         ASSERT_TRUE(Save{}.save_world(empty, root));
         std::string error;
         ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
-        ASSERT_TRUE(producer.configure_capture({reads, 3}));
+        ASSERT_TRUE(producer.configure_capture({reads, 3, SourceCaptureClock()}));
     }
     void TearDown() override {
         std::error_code error;
@@ -676,7 +680,7 @@ TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSucce
     Request();
     producer.pump_capture();
     EXPECT_EQ(producer.counters().copied_records, 2u);
-    EXPECT_FALSE(producer.configure_capture({reads, 3}));
+    EXPECT_FALSE(producer.configure_capture({reads, 3, SourceCaptureClock()}));
     first->sdf_data[0] = 3.0f;
     second->sdf_data[0] = 4.0f;
     first->water_depth_mm[0] = 8;
@@ -752,7 +756,7 @@ TEST_F(FarWorldSourceCaptureTest, DeadlineRefusesAndPreservesServingCapture) {
     producer.pump_capture();
     const auto* serving = producer.capture();
     ASSERT_NE(serving, nullptr);
-    ASSERT_TRUE(producer.configure_capture({reads, 1}));
+    ASSERT_TRUE(producer.configure_capture({reads, 1, SourceCaptureClock()}));
     Request();
     producer.pump_capture();
     producer.pump_capture();
@@ -863,14 +867,16 @@ TEST_F(FarWorldSourceCaptureTest, InvalidRequestsAndMissingSourcesNeverReplaceAc
     Producer cold(Limits());
     const std::array<Save::AuthorityWindow, 1> single{{{0, 0, 0, 0}}};
     EXPECT_FALSE(cold.request_capture(single));
-    ASSERT_TRUE(cold.configure_capture({reads, 3}));
+    ASSERT_TRUE(cold.configure_capture({reads, 3, SourceCaptureClock()}));
     EXPECT_FALSE(cold.request_capture(single));
     const std::array<Save::AuthorityWindow, 2> wide{{{0, 0, 0, 0}, {100, 100, 0, 0}}};
     EXPECT_FALSE(producer.request_capture(wide));
     auto invalid = reads;
     invalid.decoded_total_bytes = 0;
-    EXPECT_FALSE(producer.configure_capture({invalid, 3}));
-    EXPECT_FALSE(producer.configure_capture({reads, 0}));
+    EXPECT_FALSE(producer.configure_capture({invalid, 3, SourceCaptureClock()}));
+    EXPECT_FALSE(producer.configure_capture({reads, 0, SourceCaptureClock()}));
+    EXPECT_FALSE(producer.configure_capture({reads, 3}));
+    EXPECT_EQ(producer.capture(), serving);
     Request();
     producer.pump_capture();
     std::filesystem::remove_all(root);
@@ -931,7 +937,7 @@ protected:
         ASSERT_TRUE(Save{}.save_world(disk, root));
         std::string error;
         ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
-        ASSERT_TRUE(producer.configure_capture({reads, 4}));
+        ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
         const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
         ASSERT_TRUE(producer.request_capture(windows));
         producer.pump_capture();
@@ -1210,3 +1216,169 @@ TEST_F(FarWorldFrozenComposeTest, HaloIdentityWorkAndMemoryRefusalsPreserveAccep
     EXPECT_EQ(image, accepted);
 }
 } // namespace
+
+TEST_F(FarWorldSourceCaptureTest, InjectedSourceExpiryBeforeAndAfterReadPreservesServing) {
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            return static_cast<const Clock*>(context)->ticks++;
+        }
+    } clock;
+    for (std::uint64_t expiry = 0; expiry < 4; ++expiry) {
+        clock.ticks = 0;
+        ASSERT_TRUE(producer.configure_capture({reads, 4, {Clock::Now, &clock, expiry + 1}}));
+        ASSERT_NO_FATAL_FAILURE(Request());
+        producer.pump_capture();
+        producer.pump_capture();
+        EXPECT_EQ(producer.capture_status().error, Producer::Error::SourceReadExpired);
+        EXPECT_EQ(producer.capture(), accepted);
+        EXPECT_FALSE(producer.capture_status().active);
+        EXPECT_FALSE(producer.capture_status().latest_ready);
+    }
+    // Remove the borrowed clock before its owner leaves scope.
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    EXPECT_NE(producer.capture(), accepted);
+}
+
+TEST_F(FarWorldFrozenComposeTest, BaseWaterAndSharedTransactionsChargeExactSamplingWork) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto tier = World::FarTierAt(1);
+    ASSERT_TRUE(tier.has_value());
+    if (!tier.has_value()) {
+        return;
+    }
+    const std::uint64_t side = tier->tile_edge_meters / tier->sample_spacing_meters + 3;
+    const auto columns = side * side;
+    const std::uint64_t vertical = 32 / tier->sample_spacing_meters + 3;
+    const World::FarFrozenCaptureWork::Counts exact{
+        2 * columns, 4 * columns * vertical, 4 * columns};
+    for (unsigned cap = 0; cap < 3; ++cap) {
+        World::FarFrozenCaptureWork::Counts aggregate{
+            2 * exact.height, 2 * exact.density, 2 * exact.water};
+        if (cap == 0) {
+            --aggregate.height;
+        } else if (cap == 1) {
+            --aggregate.density;
+        } else {
+            --aggregate.water;
+        }
+        World::FarFrozenCaptureWork work(aggregate);
+        auto bounded = limits;
+        bounded.work = &work;
+        std::shared_ptr<const World::FarFrozenObservation> image;
+        const auto compose = [&] {
+            return producer.compose_frozen(*world, Request(), policy, bounded, pool, image);
+        };
+        ASSERT_TRUE(compose().ok());
+        EXPECT_EQ(work.counts().height, exact.height);
+        EXPECT_EQ(work.counts().density, exact.density);
+        EXPECT_EQ(work.counts().water, exact.water);
+        const auto accepted = image;
+        const auto held = pool->used();
+        const auto refusal = compose();
+        EXPECT_EQ(refusal.source, Producer::Error::None);
+        EXPECT_EQ(refusal.capture, World::FarFrozenCaptureError::WorkLimit);
+        EXPECT_EQ(image, accepted);
+        EXPECT_EQ(pool->used(), held);
+        const auto charged = work.counts();
+        EXPECT_EQ(cap == 0   ? charged.height
+                  : cap == 1 ? charged.density
+                             : charged.water,
+                  cap == 0   ? aggregate.height
+                  : cap == 1 ? aggregate.density
+                             : aggregate.water);
+    }
+}
+
+TEST_F(FarWorldFrozenComposeTest, SourceDeadlineContinuesThroughFrozenSampling) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    const auto accepted = image;
+    const auto held = pool->used();
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        std::uint64_t step = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            const auto& value = *static_cast<const Clock*>(context);
+            const auto result = value.ticks;
+            value.ticks += value.step;
+            return result;
+        }
+    } clock;
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {Clock::Now, &clock, 100}}));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture_status().error, Producer::Error::None);
+    const auto source_serial = producer.capture()->serial;
+    clock.step = 1;
+    const auto result = Compose(image);
+    EXPECT_EQ(result.source, Producer::Error::None);
+    EXPECT_EQ(result.capture, World::FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(image, accepted);
+    EXPECT_EQ(pool->used(), held);
+    EXPECT_EQ(producer.capture()->serial, source_serial);
+    // The source is already accepted: this is capture expiry, not a read failure.
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    clock.step = 0;
+    const auto attempts = pool->attempts();
+    EXPECT_EQ(Compose(image).capture, World::FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(pool->attempts(), attempts);
+    EXPECT_EQ(image, accepted);
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_TRUE(Compose(image).ok());
+}
+
+TEST_F(FarWorldSourceCaptureTest,
+       EachTransactionGetsFreshDeadlineAndOverflowRefusesBeforeAllocation) {
+    std::uint64_t ticks = 0;
+    const auto now = [](const void* context) noexcept {
+        return *static_cast<const std::uint64_t*>(context);
+    };
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {now, &ticks, 4}}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->deadline.expires_at, 4u);
+    const auto first_serial = producer.capture()->serial;
+    ticks = 5;
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    EXPECT_EQ(producer.capture()->serial, first_serial + 1);
+    EXPECT_EQ(producer.capture()->deadline.expires_at, 9u);
+    const auto* accepted = producer.capture();
+    ticks = std::numeric_limits<std::uint64_t>::max() - 2;
+    ASSERT_NO_FATAL_FAILURE(Request());
+    const auto attempts = source_limits.memory->attempts();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::InvalidLimits);
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(source_limits.memory->attempts(), attempts);
+    auto invalid = SourceCaptureClock();
+    invalid.max_ticks = 0;
+    EXPECT_FALSE(producer.configure_capture({reads, 4, invalid}));
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+}

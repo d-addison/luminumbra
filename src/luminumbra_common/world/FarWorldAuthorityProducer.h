@@ -36,7 +36,8 @@ public:
         WaterUnavailable,
         AllocationFailure,
         DeadlineExceeded,
-        CommittedReadRefused
+        CommittedReadRefused,
+        SourceReadExpired
     };
     struct Image {
         IVec3 coords{};
@@ -56,9 +57,17 @@ public:
         std::uint64_t tick_items = 0, query_items = 0;
         std::uint64_t copied_records = 0, copied_bytes = 0, dirty_overflows = 0;
     };
+    struct CaptureClock {
+        std::uint64_t (*now)(const void*) noexcept = nullptr;
+        const void* context = nullptr;
+        std::uint64_t max_ticks = 0;
+    };
     struct CaptureLimits {
         Persistence::WorldSaveService::AuthorityReadLimits read;
         std::uint32_t deadline_frames = 0;
+        // Required monotone clock and finite allowance for each transaction,
+        // spanning source assembly and all sampling. Its context outlives us.
+        CaptureClock clock{};
     };
     // Source assembly only. These owned inputs have no frozen-use eligibility.
     // The pointer returned by capture() lasts until replacement or destruction.
@@ -67,6 +76,7 @@ public:
         Persistence::WorldSaveService::AuthorityWindow window;
         Images published;
         Persistence::WorldSaveService::AuthorityWindowResult committed;
+        FarFrozenCaptureDeadline deadline{};
     };
     struct CaptureStatus {
         Error error = Error::None;

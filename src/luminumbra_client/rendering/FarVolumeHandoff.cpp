@@ -121,6 +121,7 @@ FarWorldRefusal SourceRefusal(World::FarWorldAuthorityProducer::Error error) {
         case SourceError::CopyLimit:
         case SourceError::AllocationFailure:
         case SourceError::DeadlineExceeded:
+        case SourceError::SourceReadExpired:
         // The committed reader has no typed failure category. Preserve its
         // admission refusal rather than claiming resource exhaustion is absence.
         case SourceError::CommittedReadRefused:
@@ -304,7 +305,9 @@ FarWorldRefusal FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manife
                                                 const Tier& tier,
                                                 World::FarVolumeRequest& resolved,
                                                 bool duplicate,
-                                                const Entry* old) const {
+                                                const Entry* old,
+                                                World::FarFrozenCaptureWork* sampling,
+                                                bool& sampling_refused) const {
     if (!input.observation)
         return FarWorldRefusal::ImmutableAuthorityUnavailable;
     const auto& wanted = input.wanted;
@@ -351,6 +354,24 @@ FarWorldRefusal FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manife
     } catch (...) {
         return FarWorldRefusal::ImmutableAuthorityUnavailable;
     }
+    // Replace the existing height adapter without adding another callback
+    // dispatch. Coverage discovery consumes the same transaction as capture.
+    const auto height = [&image, tier_number = key.tier, sampling, &sampling_refused](
+                            std::int64_t x, std::int64_t z) -> std::optional<float> {
+        if (!sampling->ChargeHeight()) {
+            sampling_refused = true;
+            return {};
+        }
+        const auto value = image.Height(tier_number, x, z);
+        if (!sampling->CheckDeadline()) {
+            sampling_refused = true;
+            return {};
+        }
+        return value;
+    };
+    if (sampling) {
+        authority.height = std::cref(height);
+    }
     World::FarVolumeFacadeFailure failure;
     if (!World::ResolveFarVolumeCoverageCharged(wanted.intent,
                                                 authority,
@@ -358,6 +379,9 @@ FarWorldRefusal FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manife
                                                 {memory_.Pool(key.tier), nullptr, nullptr},
                                                 resolved,
                                                 &failure)) {
+        if (sampling_refused) {
+            return FarWorldRefusal::AdmissionFailed;
+        }
         switch (failure.code) {
             case World::FarVolumeFacadeError::AllocationFailure:
             case World::FarVolumeFacadeError::InvalidMemory:
@@ -411,15 +435,23 @@ bool FarVolumeHandoff::StageSessionTarget(
     std::span<const FarSessionHandoffTile> requests,
     const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
     const World::FarFrozenCaptureLimits& limits,
+    const World::FarFrozenCaptureWork::Counts& transaction_samples,
     const std::shared_ptr<World::FarVolumeTierMemory>& memory) {
+    CheckOwner();
     // One fixed manifest, never a partially installed prefix. Water bridges and
     // frozen allocations are released automatically if a later tile refuses.
     std::array<FarHandoffTileInput, World::FarWorldAuthorityProducer::kSlots> inputs{};
     FarHandoffManifest manifest;
+    const auto* source = producer.capture();
+    World::FarFrozenCaptureWork work(transaction_samples,
+                                     nullptr,
+                                     limits.deadline,
+                                     source ? source->deadline : World::FarFrozenCaptureDeadline{});
     {
         Guard const guard(*this);
         admission_work_ = {};
         admission_refusal_ = FarWorldRefusal::None;
+        session_capture_failure_ = {};
         const auto refuse = [this](FarWorldRefusal reason) {
             admission_refusal_ = reason;
             return false;
@@ -430,7 +462,8 @@ bool FarVolumeHandoff::StageSessionTarget(
         }
         if (limits.max_regions == 0 || limits.max_height_samples == 0 ||
             limits.max_density_samples == 0 || limits.max_water_samples == 0 ||
-            limits.max_bytes == 0) {
+            limits.max_bytes == 0 || transaction_samples.height == 0 ||
+            transaction_samples.density == 0 || transaction_samples.water == 0) {
             return refuse(FarWorldRefusal::MissingLimits);
         }
         if (!world_epoch || requests.empty() || requests.size() > inputs.size() ||
@@ -443,9 +476,9 @@ bool FarVolumeHandoff::StageSessionTarget(
         }
         const auto source_refusal = SourceRefusal(producer.capture_status().error);
         if (source_refusal != FarWorldRefusal::None) {
+            session_capture_failure_.source = producer.capture_status().error;
             return refuse(source_refusal);
         }
-        const auto* source = producer.capture();
         if (!source) {
             return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
         }
@@ -455,6 +488,8 @@ bool FarVolumeHandoff::StageSessionTarget(
                     policy.caves,
                     policy.numeric,
                     {inputs.data(), requests.size()}};
+        auto transaction_limits = limits;
+        transaction_limits.work = &work;
         for (std::size_t i = 0; i < requests.size(); ++i) {
             const auto& item = requests[i];
             const auto& key = item.wanted.identity.key;
@@ -465,9 +500,10 @@ bool FarVolumeHandoff::StageSessionTarget(
             const auto pool =
                 std::shared_ptr<World::FarVolumeMemoryPool>(memory, memory->Pool(key.tier));
             std::shared_ptr<const World::FarFrozenObservation> image;
-            const auto result =
-                producer.compose_frozen(world, item.capture, policy, limits, pool, image);
+            const auto result = producer.compose_frozen(
+                world, item.capture, policy, transaction_limits, pool, image);
             if (!result.ok()) {
+                session_capture_failure_ = result;
                 if (result.source != World::FarWorldAuthorityProducer::Error::None) {
                     return refuse(SourceRefusal(result.source));
                 }
@@ -475,6 +511,7 @@ bool FarVolumeHandoff::StageSessionTarget(
                     case World::FarFrozenCaptureError::WorkLimit:
                     case World::FarFrozenCaptureError::ByteLimit:
                     case World::FarFrozenCaptureError::AllocationFailure:
+                    case World::FarFrozenCaptureError::DeadlineExceeded:
                         return refuse(FarWorldRefusal::AdmissionFailed);
                     case World::FarFrozenCaptureError::InvalidRegion:
                     case World::FarFrozenCaptureError::CoordinateRange:
@@ -502,12 +539,18 @@ bool FarVolumeHandoff::StageSessionTarget(
             inputs[i] = std::move(*input);
         }
     }
-    return StageTarget(manifest);
+    return StageTarget(manifest, &work);
 }
 
 bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
+    return StageTarget(manifest, nullptr);
+}
+
+bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest,
+                                   World::FarFrozenCaptureWork* sampling) {
     Guard const guard(*this);
     admission_work_ = {};
+    session_capture_failure_ = {};
     auto& work = admission_work_;
     admission_refusal_ = FarWorldRefusal::None;
     const auto refuse = [this](FarWorldRefusal reason) {
@@ -589,8 +632,20 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             tier.order[static_cast<std::size_t>(existing - tier.entries.data())] = 1;
         else
             ++new_keys[key.tier - 1];
-        const auto refusal = ValidateInput(
-            manifest, input, tier, tier.validation[validated[key.tier - 1]++], duplicate, existing);
+        bool sampling_refused = false;
+        const auto refusal = ValidateInput(manifest,
+                                           input,
+                                           tier,
+                                           tier.validation[validated[key.tier - 1]++],
+                                           duplicate,
+                                           existing,
+                                           sampling,
+                                           sampling_refused);
+        if (sampling_refused) {
+            session_capture_failure_.capture = sampling && sampling->deadline_exceeded()
+                                                   ? World::FarFrozenCaptureError::DeadlineExceeded
+                                                   : World::FarFrozenCaptureError::WorkLimit;
+        }
         if (refusal != FarWorldRefusal::None)
             return refuse(refusal);
     }
@@ -606,6 +661,10 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         }
         if (new_keys[i] > free)
             return refuse(FarWorldRefusal::AdmissionFailed);
+    }
+    if (sampling && !sampling->CheckDeadline()) {
+        session_capture_failure_.capture = World::FarFrozenCaptureError::DeadlineExceeded;
+        return refuse(FarWorldRefusal::AdmissionFailed);
     }
     if (duplicate)
         return true;
@@ -1121,6 +1180,11 @@ void FarVolumeHandoff::CancelAndDrain() {
     }
     state_ = {};
     admission_refusal_ = FarWorldRefusal::None;
+    session_capture_failure_ = {};
+}
+World::FarWorldAuthorityProducer::FrozenResult FarVolumeHandoff::SessionCaptureFailure() const {
+    CheckOwner();
+    return session_capture_failure_;
 }
 FarWorldRefusal FarVolumeHandoff::AdmissionRefusal() const {
     CheckOwner();
