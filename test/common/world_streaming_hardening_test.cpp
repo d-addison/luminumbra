@@ -47,6 +47,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <set>
@@ -789,51 +790,143 @@ TEST(StreamingHardening, DurableLoaderRunsOffOwnerForEveryRestorationEntry) {
 
 TEST(StreamingHardening, DurableWorkerRefusalsPublishFailStopOnOwner) {
     const auto owner = std::this_thread::get_id();
-    for (const int failure : {0, 1, 2, 3, 4}) {
-        SCOPED_TRACE(failure);
-        Luminumbra::JobSystem jobs;
-        jobs.startup(1);
-        SHIELD_WorldSystem world(&jobs, nullptr, FixtureParams(), kSeed);
-        world.set_durable_residency(true);
-        const IVec3 coords(0, 0, 0);
-        world.remember_durable_chunks({coords});
-        int reads = 0;
-        int owner_reads = 0;
-        int faults = 0;
-        std::thread::id fault_thread;
-        world.set_durable_chunk_loader(
-            [&](const IVec3& requested) -> std::shared_ptr<Chunk> {
-                ++reads;
-                owner_reads += std::this_thread::get_id() == owner ? 1 : 0;
-                if (failure == 0) {
-                    throw std::runtime_error("unreadable or partial region");
-                }
-                if (failure == 1) {
-                    return nullptr;
-                }
-                auto chunk = std::make_shared<Chunk>(failure == 2 ? IVec3(1, 0, 0) : requested);
-                if (failure != 3) {
-                    chunk->heightmap_data = {1.0f};
-                }
-                return chunk;
-            },
-            [&](const std::string&) {
-                ++faults;
-                fault_thread = std::this_thread::get_id();
-            });
-        if (failure == 4) {
-            jobs.shutdown();
+    for (const bool update_entry : {false, true}) {
+        SCOPED_TRACE(update_entry);
+        for (const int failure : {0, 1, 2, 3, 4, 5}) {
+            SCOPED_TRACE(failure);
+            Luminumbra::JobSystem jobs;
+            jobs.startup(1);
+            auto params = FixtureParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+            world.debug_set_streaming_radius_cap(1);
+            world.set_durable_residency(true);
+            const IVec3 coords(0, 0, 0);
+            world.remember_durable_chunks({coords});
+            int reads = 0;
+            int owner_reads = 0;
+            int faults = 0;
+            std::thread::id fault_thread;
+            world.set_durable_chunk_loader(
+                [&](const IVec3& requested) -> std::shared_ptr<Chunk> {
+                    ++reads;
+                    owner_reads += std::this_thread::get_id() == owner ? 1 : 0;
+                    if (failure == 0) {
+                        throw std::runtime_error("unreadable or partial region");
+                    }
+                    if (failure == 1) {
+                        return nullptr;
+                    }
+                    auto chunk = std::make_shared<Chunk>(failure == 2 ? IVec3(1, 0, 0) : requested);
+                    if (failure != 3) {
+                        chunk->heightmap_data = {1.0f};
+                    }
+                    return chunk;
+                },
+                [&](const std::string&) {
+                    ++faults;
+                    fault_thread = std::this_thread::get_id();
+                });
+            if (failure == 4) {
+                jobs.shutdown();
+            }
+            if (failure == 5) {
+                world.set_durable_chunk_loader({}, [&](const std::string&) {
+                    ++faults;
+                    fault_thread = std::this_thread::get_id();
+                });
+            }
+            if (update_entry) {
+                entt::registry registry;
+                world.update(registry, Vec3(8.0f), nullptr);
+                EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
+                EXPECT_EQ(faults, 1);
+                EXPECT_EQ(fault_thread, owner);
+            }
+            EXPECT_TRUE(world.restore_authoritative_chunk(coords));
+            EXPECT_FALSE(world.find_streamed_chunk(coords));
+            EXPECT_FALSE(world.find_authoritative_chunk(coords));
+            world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+            EXPECT_FALSE(world.find_streamed_chunk(coords));
+            EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
+            EXPECT_EQ(owner_reads, 0);
+            EXPECT_EQ(faults, 1);
+            EXPECT_EQ(fault_thread, owner);
         }
-        EXPECT_TRUE(world.restore_authoritative_chunk(coords));
-        EXPECT_FALSE(world.find_streamed_chunk(coords));
-        EXPECT_FALSE(world.find_authoritative_chunk(coords));
-        world.dispatch_generation_jobs(std::vector<IVec3>{coords});
-        EXPECT_FALSE(world.find_streamed_chunk(coords));
-        EXPECT_EQ(reads, failure == 4 ? 0 : 1);
-        EXPECT_EQ(owner_reads, 0);
-        EXPECT_EQ(faults, 1);
-        EXPECT_EQ(fault_thread, owner);
     }
+}
+
+TEST(StreamingHardening, DurableInitialActivationHandlesEmptyAnchorsAndRetainsCadence) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+    world.set_durable_residency(true);
+    world.debug_set_streaming_radius_cap(1);
+    world.remember_durable_chunks({{0, 0, 0}, {10, 0, 10}});
+    int reads = 0;
+    world.set_durable_chunk_loader(
+        [&](const IVec3& coords) {
+            ++reads;
+            auto chunk = std::make_shared<Chunk>(coords);
+            chunk->sdf_data.assign(17u * 17u * 17u, -4.0f);
+            chunk->mark_voxel_data_dirty();
+            return chunk;
+        },
+        {});
+    entt::registry registry;
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    EXPECT_EQ(reads, 0);
+    world.update(registry, Vec3(8.0f), nullptr);
+    EXPECT_EQ(reads, 1);
+    for (int step = 1; step <= 4; ++step) {
+        SCOPED_TRACE(step);
+        world.update(registry, Vec3(168.0f, 8.0f, 168.0f), nullptr);
+        EXPECT_EQ(reads, step == 4 ? 2 : 1);
+    }
+}
+
+TEST(StreamingHardening, WorkerBoundaryRunsInlineInsideSingleWorkerBatch) {
+    Luminumbra::JobSystem jobs;
+    Luminumbra::JobSystem other;
+    Luminumbra::JobSystem stopped;
+    jobs.startup(1);
+    other.startup(1);
+    EXPECT_FALSE(jobs.is_current_worker());
+    std::packaged_task<std::thread::id()> task([&] {
+        const auto worker = std::this_thread::get_id();
+        EXPECT_TRUE(jobs.is_current_worker());
+        EXPECT_FALSE(other.is_current_worker());
+        std::thread::id nested;
+        Luminumbra::RunWorkerBoundary(&jobs, [&] {
+            EXPECT_EQ(std::this_thread::get_id(), worker);
+            Luminumbra::RunWorkerBoundary(&jobs, [&] { nested = std::this_thread::get_id(); });
+        });
+        EXPECT_EQ(nested, worker);
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+                     std::runtime_error);
+        Luminumbra::RunWorkerBoundary(&other, [&] {
+            EXPECT_TRUE(other.is_current_worker());
+            EXPECT_FALSE(jobs.is_current_worker());
+            EXPECT_NE(std::this_thread::get_id(), worker);
+        });
+        bool ran = false;
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&stopped, [&] { ran = true; }),
+                     Luminumbra::WorkerBoundaryUnavailable);
+        EXPECT_FALSE(ran);
+        return worker;
+    });
+    auto completed = task.get_future();
+    const auto batch = jobs.dispatch_batch({[&] {
+        task();
+    }});
+    jobs.wait(batch);
+    EXPECT_NE(completed.get(), std::this_thread::get_id());
+    jobs.shutdown();
+    EXPECT_FALSE(jobs.is_current_worker());
 }
 
 TEST(StreamingHardening, WorkerBoundaryPreservesCompletionExceptionsAndStandaloneExecution) {

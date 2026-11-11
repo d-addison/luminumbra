@@ -3393,7 +3393,10 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     bool activation_ran_this_tick = false;
     m_update_tick_counter++;
-    if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
+    // Durable truth must be restored before the first simulation update, too.
+    // Later activations retain the bounded, four-update streaming cadence.
+    if ((m_durable_residency && !m_activation_has_run) ||
+        m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
         // activation may elide itself (return false) when the residency set is provably unchanged;
         // only count it as "ran" when it actually did work, so the meshing gate stays accurate.
         activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);

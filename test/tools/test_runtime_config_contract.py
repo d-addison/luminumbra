@@ -917,9 +917,18 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("jobs->try_dispatch(&Task::Execute,task,", helper)
         self.assertIn("completed.get();", helper)
         self.assertIn("if(!jobs||Persistence::detail::CurrentThreadOwnsSaveTransaction())", helper)
+        inline = cpp_block(helper, "if(jobs->is_current_worker())")
+        self.assertIn("work();return;", inline)
+        self.assertLess(helper.index("if(jobs->is_current_worker())"),
+                        helper.index("std::make_shared<Task>"))
         refusal = cpp_block(helper, "if(!jobs->try_dispatch(")
+        # The compacted form has no whitespace, including after throw.
         self.assertIn("throwWorkerBoundaryUnavailable();", refusal)
         self.assertNotIn("work();", refusal)
+        update = cpp_block(world, "SHIELD_WorldSystem::update(entt::registry&registry,"
+                           "conststd::vector<Vec3>&anchor_positions,")
+        self.assertIn("if((m_durable_residency&&!m_activation_has_run)||"
+                      "m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES)", update)
 
     def test_session_digests_and_active_source_reads_use_worker_boundaries(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")

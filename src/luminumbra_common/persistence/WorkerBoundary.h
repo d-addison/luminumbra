@@ -32,6 +32,11 @@ void RunWorkerBoundary(JobSystem* jobs, const Work& work) {
         work();
         return;
     }
+    // Already off the owner; queuing and waiting here can exhaust this pool.
+    if (jobs->is_current_worker()) {
+        work();
+        return;
+    }
     struct Task {
         const Work& work;
         std::promise<void> completion;
