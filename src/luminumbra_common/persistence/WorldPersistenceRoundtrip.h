@@ -96,6 +96,9 @@ struct ChunkAuthorityLoadPolicy {
     // With validation on: an unflagged header may still carry owned water (the loader's flag
     // repair keeps it), but it may not carry terrain ownership.
     bool allow_unflagged_water = false;
+    // Optional admission fact from this same parse/decode, even for permissive legacy loads.
+    // False on load failure; does not change whether the load is accepted.
+    bool* strict_water_valid = nullptr;
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.

@@ -399,4 +399,148 @@ TEST(RegionalWaterPersistence, StrictWaterPreservesWriterShapesAndContinuationVa
         }
     }
 }
+TEST(RegionalWaterPersistence, StrictWaterAcceptsDormantActiveSleepingOffAndPromotedWriters) {
+    namespace P = Luminumbra::Persistence;
+    for (const int resolution : {0, 2, 4, 8, 16, 32}) {
+        for (int shape = 0; shape < 8; ++shape) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(shape);
+            WorldStreamingState original;
+            const auto chunk = original.get_or_create_chunk({0, 0, 0});
+            chunk->current_water_resolution.store(resolution);
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            if (shape == 1) {
+                // Dormant authority can precede bed, flux, and mirror initialization.
+                chunk->water_depth_mm = {123};
+                chunk->mark_water_data_dirty();
+            } else if (shape == 2) {
+                chunk->water_depth_mm.assign(cells, 123);
+                chunk->water_bed_mm.assign(cells, -100);
+                chunk->water_level_data = {0.023f};
+                chunk->water_flow_data.assign(2, Vec2(0.1f, -0.2f));
+                chunk->water_sim_terrain_height.assign(3, -0.1f);
+            } else if (shape >= 3) {
+                FillWater(*chunk, resolution);
+                chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+                chunk->water_sim_terrain_height.assign(cells, -0.1f);
+                if (shape == 3) {
+                    chunk->water_depth_mm.clear();
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux.clear();
+                } else if (shape == 5) {
+                    chunk->is_water_sleeping.store(true);
+                } else if (shape == 6) {
+                    chunk->mark_water_data_dirty();
+                    chunk->water_level_data.clear();
+                    chunk->water_flow_data.clear();
+                    chunk->water_sim_terrain_height.clear();
+                } else if (shape == 7) {
+                    WaterSystem water(nullptr, nullptr);
+                    ASSERT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::Off));
+                }
+            }
+            bool valid = false;
+            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk, &valid);
+            ASSERT_TRUE(valid);
+            for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                                      P::SerializeChunkAuthoritySnapshotJson(*chunk),
+                                      encoded}) {
+                WorldStreamingState restored;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                    bytes, restored, errors, {.strict_water = true}))
+                    << (errors.empty() ? "" : errors.front());
+                const auto actual = restored.find_chunk({0, 0, 0});
+                ASSERT_NE(actual, nullptr);
+                EXPECT_TRUE(actual->same_water_state(*chunk));
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, WaterObservationKeepsLegacyLoadsPermissiveAndStrictLoadsRefusing) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool active : {false, true}) {
+        for (int fault = 0; fault < 7; ++fault) {
+            SCOPED_TRACE(active);
+            SCOPED_TRACE(fault);
+            WorldStreamingState original;
+            const auto chunk = original.get_or_create_chunk({0, 0, 0});
+            FillWater(*chunk, 4);
+            chunk->has_water_sim.store(active);
+            auto json =
+                nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(original));
+            auto& water = json["chunks"][0];
+            if (fault == 1) {
+                water["water_depth_mm"][0] = -1;
+            } else if (fault == 2) {
+                water["water_edge_flux"].erase(water["water_edge_flux"].begin());
+            } else if (fault == 3) {
+                water.erase("water_depth_mm");
+                water.erase("water_bed_mm");
+                water.erase("water_edge_flux");
+            } else if (fault == 4) {
+                water.erase("water_edge_flux");
+            } else if (fault == 5) {
+                water["water_depth_mm"].push_back(0);
+                water["chunk_id"] = Chunk::calculate_id({1, 0, 0});
+            }
+            const auto bytes = fault == 6 ? std::string("{") : json.dump();
+            const bool loadable = fault < 5;
+            const bool valid = loadable && fault != 1 && (fault != 2 || !active);
+            bool observed = true;
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                          bytes, restored, errors, {.strict_water_valid = &observed}),
+                      loadable);
+            EXPECT_EQ(observed, valid);
+            errors.clear();
+            EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                          bytes, restored, errors, {.strict_water = true}),
+                      valid);
+            if (!valid) {
+                EXPECT_TRUE(restored.empty());
+                EXPECT_FALSE(errors.empty());
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterPreservesMissingIntegerDefaultsForBothArrayEncodings) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool encoded : {false, true}) {
+        for (const bool missing_pair : {false, true}) {
+            SCOPED_TRACE(encoded);
+            SCOPED_TRACE(missing_pair);
+            WorldStreamingState original;
+            const auto chunk = original.get_or_create_chunk({0, 0, 0});
+            FillWater(*chunk, 4);
+            auto json = nlohmann::json::parse(
+                encoded ? P::SerializeChunkRecordPayloadJson(*chunk)
+                        : P::SerializeWorldStreamingStateSnapshotJson(original));
+            auto& water = json["chunks"][0];
+            water.erase("water_edge_flux");
+            if (missing_pair) {
+                water.erase("water_depth_mm");
+                water.erase("water_bed_mm");
+            }
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                json.dump(), restored, errors, {.strict_water = true}))
+                << (errors.empty() ? "" : errors.front());
+            const auto actual = restored.find_chunk({0, 0, 0});
+            ASSERT_NE(actual, nullptr);
+            EXPECT_EQ(actual->water_depth_mm,
+                      missing_pair ? std::vector<std::int32_t>{} : chunk->water_depth_mm);
+            EXPECT_EQ(actual->water_bed_mm,
+                      missing_pair ? std::vector<std::int32_t>{} : chunk->water_bed_mm);
+            EXPECT_EQ(actual->water_edge_flux,
+                      std::vector<std::int32_t>(missing_pair ? 0u : 32u, 0));
+        }
+    }
+}
+
 } // namespace

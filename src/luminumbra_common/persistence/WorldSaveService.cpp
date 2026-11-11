@@ -2500,6 +2500,13 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
             const std::string payload =
                 SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
+            if (!item.strict_water_valid) {
+                AddError(&item.errors, "Saved water authority refused");
+                in_flight.release(admitted);
+                admitted = 0;
+                note_failure(index);
+                return;
+            }
             if (!CompressPayload(payload, item.record, &item.errors)) {
                 in_flight.release(admitted);
                 admitted = 0;
@@ -2818,6 +2825,10 @@ bool WriteRegionFile(const std::filesystem::path& path,
     const auto root = path.parent_path().parent_path().parent_path();
     const bool admitted = SaveTransaction::active_for(root) &&
                           DigestRegionRecords(path, records, written.digest, admission_error);
+    if (SaveTransaction::active_for(root) && !admitted) {
+        AddError(errors, admission_error);
+        return false;
+    }
     std::filesystem::path temp_path;
     const auto staging = WorldSaveService::region_staging_path(path);
     ReclaimAbandonedStaging(staging);
@@ -2858,7 +2869,8 @@ std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors,
-                                         bool strict_water = false) {
+                                         bool strict_water = false,
+                                         bool* strict_water_valid = nullptr) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
@@ -2874,7 +2886,8 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                                  .terrain_edited =
                                                      (record.flags & kRecordFlagEdited) != 0u,
                                                  .validate_record_authority = true,
-                                                 .allow_unflagged_water = true};
+                                                 .allow_unflagged_water = true,
+                                                 .strict_water_valid = strict_water_valid};
     if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors, record_policy)) {
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
@@ -3190,8 +3203,11 @@ bool AdmitChunkRecord(const RegionRecord& record,
     const ChunkRecordKey key = ChunkRecordKeyOf(record);
     auto& pending = PendingChunkAdmissions();
     if (pending) {
-        if (const auto* found = pending->find(key);
-            found && (!strict_water || found->facts.strict_water)) {
+        if (const auto* found = pending->find(key)) {
+            if (strict_water && !found->facts.strict_water) {
+                AddError(errors, "Saved water authority refused");
+                return false;
+            }
             facts = found->facts;
             if (decoded)
                 *decoded = pending->take(record.id);
@@ -3199,7 +3215,11 @@ bool AdmitChunkRecord(const RegionRecord& record,
         }
     }
     const auto cached_facts = AdmittedChunkRecordCache().find(key);
-    if (cached_facts && (!strict_water || cached_facts->strict_water)) {
+    if (cached_facts) {
+        if (strict_water && !cached_facts->strict_water) {
+            AddError(errors, "Saved water authority refused");
+            return false;
+        }
         if (!decoded) {
             facts = *cached_facts;
             return true;
@@ -3210,11 +3230,12 @@ bool AdmitChunkRecord(const RegionRecord& record,
             return true;
         }
     }
-    auto chunk = DecodeChunkRecord(record, path, errors, strict_water);
+    bool water_valid = false;
+    auto chunk = DecodeChunkRecord(record, path, errors, strict_water, &water_valid);
     if (!chunk)
         return false;
     facts = DecodedChunkRecordFacts(*chunk);
-    facts.strict_water = strict_water;
+    facts.strict_water = water_valid;
     // The decode is a pure function of these bytes, so a chunk whose canonical inputs still
     // equal the decoded ones is already stored by this record and needs no new encoding.
     AdmittedChunkRecordCache().remember(key, facts, ChunkSnapshotInputBytes(*chunk));
@@ -3704,7 +3725,7 @@ bool DigestRegionRecords(const std::filesystem::path& path,
     for (const RegionRecord& record : records) {
         if (record.lod_level == 0) {
             ChunkRecordFacts facts;
-            if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr)) {
+            if (!AdmitChunkRecord(record, path, &diagnostics, facts, nullptr, false, false, true)) {
                 error = first_error("corrupt chunk record");
                 return false;
             }
@@ -6177,7 +6198,8 @@ bool WorldSaveService::audit_admitted_chunk_records_for_testing(
             continue;
         ++audit.records;
         const auto admitted = AdmittedChunkRecordCache().find(ChunkRecordKeyOf(record));
-        const auto chunk = DecodeChunkRecord(record, region_file, &errors);
+        bool water_valid = false;
+        const auto chunk = DecodeChunkRecord(record, region_file, &errors, false, &water_valid);
         if (!admitted)
             continue;
         ++audit.admitted;
@@ -6187,7 +6209,8 @@ bool WorldSaveService::audit_admitted_chunk_records_for_testing(
         }
         const ChunkRecordFacts decoded = DecodedChunkRecordFacts(*chunk);
         if (admitted->coords != decoded.coords || admitted->lattice_ok != decoded.lattice_ok ||
-            admitted->loaded_or_edited != decoded.loaded_or_edited)
+            admitted->loaded_or_edited != decoded.loaded_or_edited ||
+            admitted->strict_water != water_valid)
             ++audit.mismatched;
     }
     return true;
@@ -7888,7 +7911,8 @@ bool AuthorityWaterValid(const Chunk& chunk) {
     const bool complete =
         chunk.water_depth_mm.size() == cells && chunk.water_bed_mm.size() == cells &&
         (chunk.water_edge_flux.empty() || chunk.water_edge_flux.size() == 2u * cells);
-    return (resolution == 0 || empty || complete) &&
+    return (!chunk.has_water_sim.load(std::memory_order_acquire) || resolution == 0 || empty ||
+            complete) &&
            std::all_of(chunk.water_depth_mm.begin(),
                        chunk.water_depth_mm.end(),
                        [](std::int32_t depth) { return depth >= 0; });

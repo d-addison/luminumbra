@@ -709,17 +709,33 @@ class SessionUsabilitySourceContract(unittest.TestCase):
     def test_strict_saved_water_has_no_success_with_invalid_flag(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         loader = self.function(source, "LoadWorldStreamingStateSnapshotJson", "")
-        self.assertNotIn("strict_water_valid", loader)
+        self.assertIn("*authority.strict_water_valid = false", loader)
+        self.assertIn("*authority.strict_water_valid = water_valid", loader)
         self.assertLess(loader.index("RequireWaterAuthority(chunk_json, encoded_arrays)"),
                         loader.index("ApplyChunkFields(chunk_json"))
-        self.assertRegex(loader, r"if \(authority.strict_water && !WaterValuesValid\(\*chunk\)\)\s*"
+        self.assertRegex(loader, r"if \(authority.strict_water\)\s*"
                          r'throw std::invalid_argument\("Saved water decoded values refused"\);')
         self.assertLess(loader.index("!WaterValuesValid(*chunk)"),
                         loader.index("out_state.insert_chunk(chunk)"))
         service = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
         decoder = self.function(service, "DecodeChunkRecord", "")
-        self.assertNotIn("strict_water_valid", decoder)
+        self.assertIn(".strict_water_valid = strict_water_valid", decoder)
         self.assertIn("if (!LoadWorldStreamingStateSnapshotJson(", decoder)
+        admission = self.function(service, "AdmitChunkRecord", "")
+        self.assertIn("strict_water, &water_valid", admission)
+        self.assertIn("facts.strict_water = water_valid", admission)
+        digest_start = service.index("bool DigestRegionRecords(",
+                                     service.index("MemberDigest RegionLod0Fingerprint"))
+        digest = self.function(service[digest_start:], "DigestRegionRecords", "")
+        self.assertRegex(digest, r"AdmitChunkRecord\(\s*record, path, &diagnostics, facts, nullptr,"
+                         r" false, false, true\)")
+        encoder = self.function(service, "EncodeChunkRecords", "")
+        self.assertLess(encoder.index("if (!item.strict_water_valid)"),
+                        encoder.index("CompressPayload(payload"))
+        writer = self.function(service, "WriteRegionFile", "")
+        self.assertRegex(writer, r"if \(SaveTransaction::active_for\(root\) && !admitted\)\s*\{"
+                         r"\s*AddError\(errors, admission_error\);\s*return false;")
+        self.assertLess(writer.index("&& !admitted"), writer.index("WriteDurableRegionTemp("))
 
     @staticmethod
     def function(source, name, prefix="GameSession::"):

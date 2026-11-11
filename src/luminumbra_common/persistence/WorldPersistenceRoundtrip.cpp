@@ -694,7 +694,8 @@ struct JsonChunkArrays {
     }
 };
 
-// The encoded format always writes every array, so every array is required.
+// The encoded writer emits every array. Integer water arrays retain legacy defaults
+// when absent; all other arrays remain required by their accessors.
 struct EncodedChunkArrays {
     const nlohmann::json& value;
     std::vector<float> floats(const char* key) const {
@@ -712,8 +713,8 @@ struct EncodedChunkArrays {
     std::vector<Vec2> flow() const {
         return EncodedArrayFromJson<Vec2>(value.at("water_flow_data"), "water_flow_data");
     }
-    bool has(const char*) const {
-        return true;
+    bool has(const char* key) const {
+        return value.contains(key);
     }
     std::vector<std::int32_t> grid(const char* key) const {
         return EncodedArrayFromJson<std::int32_t>(value.at(key), key);
@@ -759,8 +760,8 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
     std::array<std::size_t, fields.size()> counts{};
     for (std::size_t index = 0; index < fields.size(); ++index) {
         const char* field = fields[index];
-        if (!encoded && !value.contains(field)) {
-            // Plain records predating integer grids restore empty depth/bed and zero flux.
+        if (!value.contains(field)) {
+            // Records predating integer grids restore empty depth/bed and zero flux.
             if (index < 2u)
                 continue;
             if (index == 2u) {
@@ -770,8 +771,8 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
         }
         const auto& array = value.at(field);
         const std::string_view name(field);
-        // Off retains integer arrays without a resolution stamp for their old grid.
-        // Dormant legacy arrays need no active-grid shape, but stay bounded to 32^2 cells.
+        // Dormant and Off arrays retain their contents without an active-grid shape,
+        // but stay bounded to 32^2 cells.
         const std::size_t limit = name == "water_edge_flux" ? 2048u : 1024u;
         if (encoded) {
             const auto& count = array.at("count");
@@ -797,18 +798,16 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
             }
         }
     }
-    // An absent or empty pair is the historical float-only form. With no active
-    // resolution, dormant integer arrays retain the writer's bounded contents verbatim.
+    // An absent or empty pair is the historical float-only form. Dormant chunks
+    // retain bounded arrays independently of the default resolution stamp.
     const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
     const bool complete_integers =
         counts[0] == cells && counts[1] == cells && counts[2] == 2u * cells;
-    const bool dormant_integers = !state.at("has_water_sim").get<bool>() && counts[0] == cells &&
-                                  counts[1] == cells && counts[2] == 0u;
     const bool mirrors_valid = std::all_of(counts.begin() + 3, counts.end(), [cells](auto count) {
         return count == 0u || count == cells;
     });
-    if ((resolution != 0 && !no_integers && !complete_integers && !dormant_integers) ||
-        (resolution != 0 && !mirrors_valid))
+    if (state.at("has_water_sim").get<bool>() && resolution != 0 &&
+        ((!no_integers && !complete_integers) || !mirrors_valid))
         throw std::invalid_argument("Saved water grid shape refused");
 }
 
@@ -1682,6 +1681,9 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          std::vector<std::string>& errors,
                                          const ChunkAuthorityLoadPolicy& authority) {
     out_state.clear();
+    if (authority.strict_water_valid)
+        *authority.strict_water_valid = false;
+    bool water_valid = true;
     if (!SavedInputLimits::JsonDepthAllowed(json_text)) {
         errors.push_back(
             "Saved-input admission refused: JSON nesting depth exceeds compatibility limit.");
@@ -1724,14 +1726,21 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
             if (authority.strict_water)
                 RequireWaterAuthority(chunk_json, encoded_arrays);
+            else if (authority.strict_water_valid &&
+                     !WaterAuthorityValid(chunk_json, encoded_arrays))
+                water_valid = false;
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)
                 ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
             else
                 ApplyChunkJson(chunk_json, *chunk, authority);
-            if (authority.strict_water && !WaterValuesValid(*chunk))
-                throw std::invalid_argument("Saved water decoded values refused");
+            if ((authority.strict_water || authority.strict_water_valid) &&
+                !WaterValuesValid(*chunk)) {
+                if (authority.strict_water)
+                    throw std::invalid_argument("Saved water decoded values refused");
+                water_valid = false;
+            }
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
@@ -1746,6 +1755,8 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
             return reject();
         }
+        if (authority.strict_water_valid)
+            *authority.strict_water_valid = water_valid;
         return true;
     } catch (const std::exception& e) {
         errors.push_back(std::string("failed to load world snapshot: ") + e.what());
