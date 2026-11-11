@@ -1148,8 +1148,8 @@ protected:
     }
     FarSessionHandoffTile Tile(std::int64_t x) const {
         auto wanted = Wanted({1, x, 0});
-        wanted.intent.extra_span = FarVolumeCoverageSpan{0, 256};
-        return {wanted, {{1, x, 0}, {0, 272}, policy.pristine_identity}};
+        wanted.intent.extra_span = FarVolumeCoverageSpan{SEA_LEVEL, SEA_LEVEL};
+        return {wanted, {{1, x, 0}, {-256, 16}, policy.pristine_identity}};
     }
     FarSessionHandoffTile Fallback() const {
         auto wanted = Wanted({5, 0, 0});
@@ -1157,6 +1157,73 @@ protected:
         return {wanted, {{5, 0, 0}, {-256, 768}, policy.pristine_identity}};
     }
 };
+
+TEST_F(FarSessionPublicationTest, ElevatedShorelineKeepsDryBedsThroughAdmissionAndMesh) {
+    auto params = world->get_params();
+    params.height_offset = 512;
+    world->set_params(params);
+    policy.pristine_identity =
+        WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, policy.water_resolution);
+    auto chunk = std::make_shared<Chunk>(IVec3{0, 32, 0});
+    chunk->set_water_authority();
+    chunk->set_state(ChunkState::Idle);
+    chunk->current_water_resolution.store(4);
+    chunk->water_bed_mm.assign(16, 512'000);
+    chunk->water_depth_mm.assign(16, 0);
+    chunk->water_depth_mm[0] = 1000;
+    producer.changes()->membership(chunk, false, true);
+    producer.pump_capture();
+    producer.pump_capture();
+    auto wanted = Wanted({1, 0, 0});
+    const FarVolumeRequest request{{1, 0, 0}, {256, 528}, policy.pristine_identity};
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    const auto pool = std::shared_ptr<FarVolumeMemoryPool>(memory, memory->Pool(1));
+    std::shared_ptr<const FarFrozenObservation> image;
+    ASSERT_TRUE(producer.compose_frozen(*world, request, policy, capture_limits, pool, image).ok());
+    ASSERT_TRUE(image);
+    EXPECT_EQ(image->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, 513}}));
+    EXPECT_EQ(image->WaterSample(0, 4, 0), (std::optional<FarFrozenWaterSample>{{false, 512}}));
+    EXPECT_EQ(image->WaterSample(0, 100, 100), (std::optional<FarFrozenWaterSample>{{false, 512}}));
+    const FarWorldFrozenWaterObservation water(image, {1, 0, 0});
+    const auto bound = water.WaterBound({1, 0, 0});
+    ASSERT_TRUE(bound.has_value());
+    if (!bound) {
+        return;
+    }
+    EXPECT_EQ(bound->min_y, 512);
+    EXPECT_EQ(bound->max_y, 513);
+    FarVolumeRenderMesh terrain;
+    terrain.request = request;
+    terrain.request.field_identity = image->content_identity();
+    terrain.origin_meters = {0, 256, 0};
+    terrain.sampled_max_meters = {512, 528, 512};
+    FarVolumeMemoryLease retained(*pool);
+    FarVolumeRenderMesh mesh;
+    ASSERT_TRUE(BuildFarWorldWaterMesh(terrain,
+                                       water,
+                                       *bound,
+                                       {16641, 16384, 100000, 200000, 4 * 1024 * 1024},
+                                       {pool.get(), &retained, nullptr},
+                                       mesh));
+    ASSERT_FALSE(mesh.vertices.empty());
+    bool dry_corner = false, wet_corner = false;
+    for (const auto& vertex : mesh.vertices) {
+        const auto height = vertex.position.y + float(mesh.origin_meters.y);
+        EXPECT_TRUE(height == 512 || height == 513);
+        dry_corner |= height == 512;
+        wet_corner |= height == 513;
+    }
+    EXPECT_TRUE(dry_corner);
+    EXPECT_TRUE(wet_corner);
+    auto fallback = Fallback();
+    fallback.capture.span = {-256, 768};
+    const std::array tiles{FarSessionHandoffTile{wanted, request}, fallback};
+    JobSystem jobs;
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    ASSERT_TRUE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+}
 
 TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFingerprints) {
     JobSystem jobs;

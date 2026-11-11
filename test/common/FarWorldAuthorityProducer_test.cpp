@@ -632,6 +632,52 @@ protected:
     }
 };
 
+TEST_F(FarWorldFrozenComposeTest, ClimateFrequenciesInvalidateOnlyEnabledBiomePolicies) {
+    auto dependencies = std::make_shared<World::WorldgenDependencySnapshot>();
+    dependencies->biome_table = World::BiomeTable::Load(
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+        "data/common/biomes.json");
+    ASSERT_TRUE(dependencies->biome_table.ok());
+    ASSERT_FALSE(dependencies->biome_table.empty());
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    for (const bool enabled : {false, true}) {
+        auto params = world->get_params();
+        params.biomes_enabled = enabled;
+        params.worldgen_dependencies = dependencies;
+        world->set_params(params);
+        policy.pristine_identity =
+            World::WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, 4);
+        ASSERT_NE(policy.pristine_identity, 0u);
+        std::shared_ptr<const World::FarFrozenObservation> image;
+        ASSERT_TRUE(Compose(image).ok());
+        const auto accepted = image;
+        for (const bool temperature : {true, false}) {
+            auto changed = params;
+            if (temperature) {
+                changed.temperature_frequency *= 2;
+            } else {
+                changed.humidity_frequency *= 2;
+            }
+            world->set_params(changed);
+            const auto identity =
+                World::WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, 4);
+            const auto result = Compose(image);
+            if (enabled) {
+                EXPECT_NE(identity, policy.pristine_identity);
+                EXPECT_EQ(result.capture, World::FarFrozenCaptureError::IdentityMismatch);
+                EXPECT_EQ(image, accepted);
+            } else {
+                EXPECT_EQ(identity, policy.pristine_identity);
+                EXPECT_TRUE(result.ok());
+                ASSERT_TRUE(image);
+                EXPECT_EQ(image->content_identity(), accepted->content_identity());
+            }
+            world->set_params(params);
+        }
+    }
+}
+
 TEST_F(FarWorldFrozenComposeTest, OwnedSessionLayersComposeTerrainWaterAndDryWithoutRereading) {
     WorldStreamingState disk;
     ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0}, 3)));
@@ -701,15 +747,23 @@ TEST_F(FarWorldFrozenComposeTest, IntegerWaterLayersUseDryOverridesHalfOpenEdges
     };
     WorldStreamingState disk;
     ASSERT_TRUE(disk.insert_chunk(water_chunk({0, 0, 0}, 5000, 1000)));
-    ASSERT_TRUE(disk.insert_chunk(water_chunk({2, 0, 0}, 6000, 1000)));
+    auto committed = water_chunk({2, 0, 0}, 6000, 1000);
+    committed->water_depth_mm[0] = 0;
+    ASSERT_TRUE(disk.insert_chunk(committed));
     producer.changes()->membership(water_chunk({0, 0, 0}, 9000, 0), false, true);
-    producer.changes()->membership(water_chunk({1, 0, 0}, 7000, 1000), true, true);
+    auto parked = water_chunk({1, 0, 0}, 7000, 1000);
+    parked->water_depth_mm[0] = 0;
+    producer.changes()->membership(parked, true, true);
     producer.changes()->membership(water_chunk({-1, 0, 0}, -3000, 1000), false, true);
     ASSERT_NO_FATAL_FAILURE(Capture(disk));
     std::shared_ptr<const World::FarFrozenObservation> image;
     ASSERT_TRUE(Compose(image).ok());
     EXPECT_EQ(image->WaterSample(0, 4, 4),
-              (std::optional<World::FarFrozenWaterSample>{{false, 0}}));
+              (std::optional<World::FarFrozenWaterSample>{{false, 9}}));
+    EXPECT_EQ(image->WaterSample(0, 16, 0),
+              (std::optional<World::FarFrozenWaterSample>{{false, 7}}));
+    EXPECT_EQ(image->WaterSample(0, 32, 0),
+              (std::optional<World::FarFrozenWaterSample>{{false, 6}}));
     EXPECT_EQ(image->WaterSample(0, 16, 4),
               (std::optional<World::FarFrozenWaterSample>{{true, 8}}));
     EXPECT_EQ(image->WaterSample(0, 36, 4),
@@ -724,7 +778,7 @@ TEST_F(FarWorldFrozenComposeTest, IntegerWaterLayersUseDryOverridesHalfOpenEdges
     ASSERT_NO_FATAL_FAILURE(Capture(disk));
     ASSERT_TRUE(Compose(image).ok());
     EXPECT_EQ(image->WaterSample(0, 100, 100),
-              (std::optional<World::FarFrozenWaterSample>{{true, 256}}));
+              (std::optional<World::FarFrozenWaterSample>{{true, SEA_LEVEL}}));
 }
 
 TEST_F(FarWorldFrozenComposeTest, PartialAndAmbiguousExpectedWaterRefusesInsteadOfBecomingBase) {

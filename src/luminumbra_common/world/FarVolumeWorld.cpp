@@ -9,6 +9,7 @@
 #include "world/FarVolumeMesher.h"
 #include "world/FarVolumeTile.h"
 
+#include <bit>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -38,6 +39,10 @@ std::uint64_t ScopedIdentity(const Systems::SHIELD_WorldSystem& world,
     };
     mix(static_cast<std::uint64_t>(params.surface_sampling_revision));
     mix(params.biomes_enabled ? 1u : 0u);
+    if (params.biomes_enabled) {
+        mix(std::bit_cast<std::uint32_t>(params.temperature_frequency));
+        mix(std::bit_cast<std::uint32_t>(params.humidity_frequency));
+    }
     mix(params.structures_enabled ? 1u : 0u);
     mix(static_cast<std::uint8_t>(caves));
     mix(static_cast<std::uint8_t>(numeric));

@@ -269,10 +269,9 @@ FarFrozenOverride<FarFrozenWaterSample> WaterAt(std::span<const FrozenRecord* co
     const auto iz = (z - cz * CHUNK_SIZE_Z) * record.resolution / CHUNK_SIZE_Z;
     const auto cell = static_cast<std::size_t>(ix + iz * record.resolution);
     const bool wet = record.depth[cell] > 0;
-    return {FarFrozenPresence::Present,
-            {wet,
-             wet ? static_cast<float>(std::int64_t(record.bed[cell]) + record.depth[cell]) / 1000.0f
-                 : 0.0f}};
+    return {
+        FarFrozenPresence::Present,
+        {wet, static_cast<float>(std::int64_t(record.bed[cell]) + record.depth[cell]) / 1000.0f}};
 }
 std::optional<FarFrozenWaterSample> BaseWater(const Systems::SHIELD_WorldSystem& world,
                                               int resolution,
@@ -299,8 +298,7 @@ std::optional<FarFrozenWaterSample> BaseWater(const Systems::SHIELD_WorldSystem&
     const auto bed = quantize(std::round(terrain * 1000.0f));
     const auto depth =
         std::max(0, quantize(std::round(static_cast<double>(rest - terrain) * 1000)));
-    return FarFrozenWaterSample{
-        depth > 0, depth > 0 ? static_cast<float>(std::int64_t(bed) + depth) / 1000.0f : 0.0f};
+    return FarFrozenWaterSample{depth > 0, static_cast<float>(std::int64_t(bed) + depth) / 1000.0f};
 }
 } // namespace
 
