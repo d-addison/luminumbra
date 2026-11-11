@@ -519,11 +519,10 @@ BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
                                        key, std::max(prior, record.frozen_at), clock, 36000)
                                        .elapsed_ticks
                                  : std::min<std::uint64_t>(clock.tick() - prior, 65536);
-        result.elapsed[key] = static_cast<std::uint32_t>(elapsed == 0 && old == previous.end() &&
-                                                                 record.frozen_at == 0 &&
-                                                                 record.first_active == clock.tick()
-                                                             ? 1
-                                                             : elapsed);
+        // Scheduling stamps last_ticked before foliage sees a new owner.
+        // Its first due tick still runs once; known edit ticks remain consumed.
+        result.elapsed[key] = static_cast<std::uint32_t>(
+            elapsed == 0 && old == previous.end() && record.frozen_at == 0 ? 1 : elapsed);
         if (record.frozen_at != 0) {
             result.resumes[key] = record.frozen_at;
         }
@@ -631,13 +630,27 @@ FoliageBorderEdges(const FieldPageState& pages,
     edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
     return edges;
 }
-inline std::map<RegionKey, std::uint64_t> ExchangeFoliageBorders(FieldPageState& pages,
-                                                                 const FieldPageState& previous,
-                                                                 const FoliageEdges& edges) {
-    std::map<RegionKey, std::uint64_t> work;
+inline std::vector<std::int32_t> FoliageBorderFluxes(const FoliageFieldPages& irrigation,
+                                                     const FoliageEdges& edges) {
+    std::vector<std::int32_t> fluxes;
+    // One prior-value difference per admitted edge, bounded by two positive
+    // edges per initialized irrigation cell (kMaxPages * 256 cells).
+    fluxes.reserve(edges.size());
     for (const auto& [cell, next] : edges) {
-        const auto flux =
-            previous.irrigation().sample(cell, 0) / 8 - previous.irrigation().sample(next, 0) / 8;
+        fluxes.push_back(irrigation.sample(cell, 0) / kMoistureDiffuseShareDen -
+                         irrigation.sample(next, 0) / kMoistureDiffuseShareDen);
+    }
+    return fluxes;
+}
+inline std::map<RegionKey, std::uint64_t> ExchangeFoliageBorders(
+    FieldPageState& pages, std::span<const std::int32_t> fluxes, const FoliageEdges& edges) {
+    if (fluxes.size() != edges.size()) {
+        throw std::invalid_argument("Incomplete irrigation border snapshot");
+    }
+    std::map<RegionKey, std::uint64_t> work;
+    std::size_t index = 0;
+    for (const auto& [cell, next] : edges) {
+        const auto flux = fluxes[index++];
         const auto donor = flux >= 0 ? cell : next, recipient = flux >= 0 ? next : cell;
         const auto available = pages.irrigation().sample(donor, 0);
         const auto balance = pages.irrigation().sample(recipient, 0);

@@ -569,7 +569,10 @@ TEST(FoliageFieldPages, BordersUsePriorHostValuesCommonPhaseAndBothOwners) {
     ASSERT_EQ(edges.size(), 1u);
     auto next = prior;
     ASSERT_TRUE(next.set_irrigation({511, 0}, 794));
-    const auto work = ExchangeFoliageBorders(next, prior, edges);
+    const auto fluxes = FoliageBorderFluxes(prior.irrigation(), edges);
+    ASSERT_EQ(fluxes.size(), edges.size());
+    EXPECT_EQ(fluxes.front(), 100);
+    const auto work = ExchangeFoliageBorders(next, fluxes, edges);
     EXPECT_EQ(next.irrigation().sample({511, 0}, -1), 694);
     EXPECT_EQ(next.irrigation().sample({512, 0}, -1), 100);
     EXPECT_EQ(work.at({0, 0}), 1u);
@@ -580,6 +583,49 @@ TEST(FoliageFieldPages, BordersUsePriorHostValuesCommonPhaseAndBothOwners) {
     EXPECT_TRUE(FoliageBorderEdges(prior, records, owners, 33).empty());
     records.at({1, 0}).state = RegionState::Frozen;
     EXPECT_TRUE(FoliageBorderEdges(prior, records, owners, 32).empty());
+}
+TEST(FoliageFieldPages, BorderSnapshotContainsOnlyEdgesAndRefusesIncompleteInput) {
+    FieldPageState pages;
+    for (int index = 0; index < 128; ++index) {
+        ASSERT_TRUE(ActivateFoliagePage(pages, {index * 16, 32}, true));
+        ASSERT_TRUE(ActivateFoliagePage(pages, {index * 16, 32}, false));
+    }
+    ASSERT_TRUE(pages.set_irrigation({511, 0}, 800));
+    ASSERT_TRUE(pages.set_irrigation({512, 0}, 0));
+    const FoliageEdges edges{{{511, 0}, {512, 0}}};
+    const auto fluxes = FoliageBorderFluxes(pages.irrigation(), edges);
+    ASSERT_EQ(fluxes.size(), 1u);
+    EXPECT_EQ(fluxes.front(), 100);
+    EXPECT_TRUE(FoliageBorderFluxes(pages.irrigation(), {}).empty());
+    const auto before = pages.serialize();
+    EXPECT_THROW(ExchangeFoliageBorders(pages, {}, edges), std::invalid_argument);
+    EXPECT_THROW(ExchangeFoliageBorders(pages, fluxes, {}), std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+    EXPECT_TRUE(ExchangeFoliageBorders(pages, {}, {}).empty());
+    EXPECT_EQ(ExchangeFoliageBorders(pages, fluxes, edges).size(), 2u);
+    EXPECT_EQ(pages.irrigation().sample({511, 0}, -1), 700);
+    EXPECT_EQ(pages.irrigation().sample({512, 0}, -1), 100);
+}
+TEST(FoliageFieldPages, FirstDueWindowsDistinguishNewOwnersFromConsumedTicks) {
+    ActiveRegionLedger ledger;
+    ledger.pin({0, 0}, true, WorldClock(1));
+    const WorldClock clock(32);
+    const auto schedule = ledger.schedule(clock, std::span<const Luminumbra::Vec3>{}, {}, {});
+    ASSERT_EQ(schedule.due.size(), 1u);
+    EXPECT_EQ(BuildRegionalFoliageWindows(ledger, schedule.due, {}, {}, clock).elapsed.at({0, 0}),
+              1u);
+    for (const std::uint64_t previous : {20u, 31u, 32u}) {
+        const std::map<RegionKey, std::uint64_t> history{{{0, 0}, previous}};
+        EXPECT_EQ(BuildRegionalFoliageWindows(ledger, schedule.due, history, {}, clock)
+                      .elapsed.at({0, 0}),
+                  32u - previous);
+    }
+    const std::map<RegionKey, std::uint64_t> future{{{0, 0}, 33}};
+    EXPECT_THROW(BuildRegionalFoliageWindows(ledger, schedule.due, future, {}, clock),
+                 std::invalid_argument);
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, {}, {}, clock).elapsed.empty());
+    const std::array<RegionKey, 1> missing{{{1, 0}}};
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, missing, {}, {}, clock).elapsed.empty());
 }
 TEST(FoliageFieldPages, ZeroResumeAndStaleOrRepeatedTokensCannotReplayAWindow) {
     ActiveRegionLedger ledger;

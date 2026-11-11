@@ -228,7 +228,8 @@ struct GameSession::LoadedWorldState {
 struct GameSession::FoliageStep {
     luminumbra::foliage::FoliageRegistryStage registry;
     luminumbra::foliage::RegionalFoliageWindows windows;
-    FieldPageState pages, previous;
+    FieldPageState pages;
+    std::vector<std::int32_t> border_fluxes;
     std::map<RegionKey, std::uint32_t> field_windows;
     luminumbra::foliage::FoliageEdges borders;
     std::map<RegionKey, std::uint64_t> last_ticks;
@@ -313,6 +314,12 @@ struct GameSession::FoliageStep {
                                                              step.last_ticks,
                                                              step.pending,
                                                              session.m_worldClock);
+        // Reserve history for every scheduled owner, even while it is empty.
+        // Window construction must see a missing first tick before insertion;
+        // successful publication advances all entries without allocation.
+        for (const auto& [key, elapsed] : step.windows.elapsed) {
+            step.last_ticks.try_emplace(key, session.m_worldClock.tick());
+        }
         const auto index_borders = [&]<typename T>() {
             for (const auto entity :
                  session.m_registry.view<const T, const Components::TransformComponent>()) {
@@ -393,7 +400,6 @@ struct GameSession::FoliageStep {
                 step.StageOwner(session, owner);
             }
             const auto& record = ledger.records().at(owner);
-            step.last_ticks.try_emplace(owner, luminumbra::foliage::FoliagePriorTick(record));
             step.field_owners.insert(owner);
             if (activate && !luminumbra::foliage::ActivateFoliagePage(step.pages, cell, soil)) {
                 throw std::runtime_error("Foliage page admission refused");
@@ -426,7 +432,8 @@ struct GameSession::FoliageStep {
             step.pages.empty()) {
             return nullptr;
         }
-        step.previous = step.pages;
+        step.border_fluxes =
+            luminumbra::foliage::FoliageBorderFluxes(step.pages.irrigation(), step.borders);
         step.registry.Begin(selected, ledger.next_persistent_id());
         step.active = true;
         return &step;
@@ -458,7 +465,7 @@ struct GameSession::FoliageStep {
             session.m_regionCompletedWork.push_back({key, 0, 0, 0, work});
         }
         for (const auto& [key, work] : luminumbra::foliage::ExchangeFoliageBorders(
-                 step->pages, step->previous, step->borders)) {
+                 step->pages, step->border_fluxes, step->borders)) {
             session.m_regionCompletedWork.push_back({key, 0, 0, 0, work});
         }
     }
@@ -520,14 +527,14 @@ struct GameSession::FoliageStep {
             session.m_activeRegionLedger.acknowledge_resume(key, token);
             pending.erase(key);
         }
-        for (const auto& [key, elapsed] : windows.elapsed) {
-            const auto found = last_ticks.find(key);
-            if (found != last_ticks.end()) {
-                found->second = session.m_worldClock.tick();
-            }
-        }
+        CommitTicks(session);
         published_tick = session.m_worldClock.tick();
         active = false;
+    }
+    void CommitTicks(const GameSession& session) noexcept {
+        for (const auto& [key, elapsed] : windows.elapsed) {
+            last_ticks.find(key)->second = session.m_worldClock.tick();
+        }
     }
     struct Guard {
         GameSession& session;
@@ -587,6 +594,7 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
         return false;
     }
     ledger.mark_materialized_edit(owner, m_worldClock);
+    const auto& edited_record = ledger.records().at(owner);
     registry.PreparePublication(m_registry);
     // Reserve runtime index nodes before publishing the edited state. The edit
     // tick is persisted by matching edit/work stamps; resume clips to it.
@@ -595,9 +603,8 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
     if (frozen) {
         m_foliageStep->pending.insert(owner);
     }
-    if (pages.irrigation().owns_region(owner) && record != ledger.records().end() &&
-        record->second.state != RegionState::Frozen) {
-        m_foliageStep->border_owners[record->second.cadence_shift].insert(owner);
+    if (pages.irrigation().owns_region(owner) && edited_record.state != RegionState::Frozen) {
+        m_foliageStep->border_owners[edited_record.cadence_shift].insert(owner);
     }
     ReplaceActiveRegionLedger(std::move(ledger));
     registry.Commit(m_registry);
@@ -1751,6 +1758,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault) {
                     return i + 1;
                 }
+            } else if (m_activeRegionsEnabled) {
+                m_foliageStep->CommitTicks(*this);
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)

@@ -13741,8 +13741,17 @@ void CheckFoliageCallbacks(bool birth, int failure) {
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetRegionSchedule().work, 9u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
+        if (birth) {
+            const auto feeders = session.GetRegistry().view<C::SoilFeederComponent>();
+            ASSERT_EQ(feeders.size(), 1u);
+            EXPECT_GT(feeders.get<C::SoilFeederComponent>(feeders.front()).absorbed, 0u);
+            EXPECT_EQ(session.GetFieldPages().soil().pages().size(), 1u);
+            EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 257u);
+        } else {
+            EXPECT_TRUE(session.GetFieldPages().soil().empty());
+        }
         TickOnce(session);
-        EXPECT_EQ(session.GetRegionSchedule().work, 1u);
+        EXPECT_EQ(session.GetRegionSchedule().work, birth ? 257u : 1u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 0u);
         EXPECT_EQ(callbacks, 1);
     }
@@ -14718,6 +14727,83 @@ TEST(GameSessionHeadlessWorldTest, OrdinaryEditsRetainFrozenFieldHistoryAcrossRe
 } // namespace
 
 namespace {
+TEST(GameSessionHeadlessWorldTest, LaterScheduledOwnersAgePlantsAfterEmptyFoliageTicks) {
+    for (const int empty_ticks : {0, 3}) {
+        for (const bool other_participant : {false, true}) {
+            for (const bool feeder : {false, true}) {
+                SCOPED_TRACE(empty_ticks);
+                SCOPED_TRACE(other_participant);
+                SCOPED_TRACE(feeder);
+                GameSession session;
+                session.SetActiveRegionsEnabled(true);
+                session.SetReplicatedSimulationAnchors({});
+                session.PinActiveRegion({0, 0}, true);
+                if (other_participant) {
+                    StagedMortal(session.GetRegistry());
+                }
+                TickOnce(session); // Initialize foliage before the new owner exists.
+                session.PinActiveRegion({1, 0}, true);
+                for (int tick = 0; tick < empty_ticks; ++tick) {
+                    TickOnce(session);
+                    ASSERT_FALSE(session.GetRegionSchedulerFault());
+                }
+                auto& registry = session.GetRegistry();
+                const auto plant = ClockTestPlant(registry, {520, 0, 8});
+                registry.emplace<C::MortalComponent>(plant).lifespan_ticks = 10000;
+                if (feeder) {
+                    registry.emplace<C::SoilFeederComponent>(plant);
+                }
+                for (std::uint32_t age = 1; age <= 3; ++age) {
+                    TickOnce(session);
+                    ASSERT_FALSE(session.GetRegionSchedulerFault());
+                    EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, age);
+                    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(plant).last_tick,
+                              session.GetWorldClock().tick());
+                    EXPECT_EQ(session.GetFieldPages().soil().initialized({520, 8}), feeder);
+                }
+            }
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, IrrigationEditsRegisterNewAdjacentOwnersAcrossReopen) {
+    for (const bool negative : {false, true}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session, reopened;
+        EnableSnapshotSession(session, root, jobs);
+        ASSERT_TRUE(session.CreateTransientWorld("Irrigation edits", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        TickOnce(session); // Empty scheduler and foliage are initialized first.
+        const int boundary = negative ? -512 : 512;
+        const Luminumbra::Vec3 left{static_cast<float>(boundary - 1), 0, 8};
+        const Luminumbra::Vec3 right{static_cast<float>(boundary), 0, 8};
+        const auto left_owner = ActiveRegionLedger::region_at(left);
+        const auto right_owner = ActiveRegionLedger::region_at(right);
+        ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(left_owner));
+        ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(right_owner));
+        ASSERT_TRUE(session.SetFoliageCell(left, false, 800));
+        ASSERT_TRUE(session.SetFoliageCell(right, false, 0));
+        const auto save = root.path() / "irrigation-edit-continuation";
+        ASSERT_TRUE(session.SaveWorldStateTo(save));
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.CreateTransientWorld("Irrigation continuation", "1337", "default"));
+        ASSERT_TRUE(reopened.LoadWorldStateFrom(save)) << reopened.GetWorldOpenError();
+        reopened.SetReplicatedSimulationAnchors({});
+        for (int tick = 0; tick < 3; ++tick) {
+            TickOnce(session);
+            TickOnce(reopened);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+            EXPECT_GT(session.GetFieldPages().irrigation().sample({boundary, 8}, -1), 0);
+            EXPECT_EQ(session.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+            EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+                      reopened.GetActiveRegionLedger().canonical_bytes());
+        }
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, FoliageAdmissionCapacityFailurePublishesNeitherChannel) {
     const HeadlessRoot root;
     JobSystem jobs;
