@@ -64,7 +64,8 @@ public:
     // Streaming admits up to 8192 chunks, with at most one terrain body each.
     // Frozen capsules must leave this many body slots free after allocation.
     static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
-    void add_chunk_collision(Chunk& chunk);
+    // False only when the body pool refuses creation; callers may retry later.
+    bool add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---

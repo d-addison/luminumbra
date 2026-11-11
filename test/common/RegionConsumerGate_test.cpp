@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
@@ -31,6 +32,7 @@
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/MarchingCubes.h"
 
 #include <gtest/gtest.h>
 
@@ -2561,6 +2563,24 @@ TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
     EXPECT_EQ(physics.create_avatar_character(position), 0u);
 }
 
+TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    EXPECT_TRUE(physics.add_chunk_collision(chunk));
+    physics.startup();
+    constexpr std::size_t side = Luminumbra::CHUNK_SIZE_X + 1;
+    for (const auto count : {std::size_t{0}, std::size_t{1}, side * side - 1, side * side + 1}) {
+        chunk.heightmap_data.assign(count, 8.0f);
+        EXPECT_TRUE(physics.add_chunk_collision(chunk));
+    }
+    for (const float height : {-1.0f, static_cast<float>(Luminumbra::CHUNK_SIZE_Y)}) {
+        chunk.heightmap_data.assign(side * side, height);
+        EXPECT_TRUE(physics.add_chunk_collision(chunk));
+    }
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, 0u);
+}
+
 TEST(RegionConsumerGate, TerrainBodyPoolRefusalLeavesChunkUnregisteredForRetry) {
     Luminumbra::Systems::PhysicsSystem physics;
     physics.startup();
@@ -2575,14 +2595,14 @@ TEST(RegionConsumerGate, TerrainBodyPoolRefusalLeavesChunkUnregisteredForRetry) 
     chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                     static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
                                 8.0f);
-    ASSERT_NO_THROW(physics.add_chunk_collision(chunk));
+    ASSERT_NO_THROW(EXPECT_FALSE(physics.add_chunk_collision(chunk)));
     EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
     physics.destroy_body(last_body);
-    physics.add_chunk_collision(chunk);
+    EXPECT_TRUE(physics.add_chunk_collision(chunk));
     EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
-    physics.add_chunk_collision(chunk);
+    EXPECT_TRUE(physics.add_chunk_collision(chunk));
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
     physics.remove_chunk_collision(chunk.get_id());
@@ -2590,6 +2610,56 @@ TEST(RegionConsumerGate, TerrainBodyPoolRefusalLeavesChunkUnregisteredForRetry) 
     EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit - 1u);
+}
+
+TEST(RegionConsumerGate, StreamingRetriesTerrainCollisionAfterBodyPoolRefusal) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    constexpr std::size_t body_limit = 10240u;
+    JPH::BodyID last_body;
+    for (std::size_t index = 0; index < body_limit; ++index) {
+        last_body =
+            physics.create_dynamic_sphere({static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f);
+        ASSERT_FALSE(last_body.IsInvalid());
+    }
+
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.peaks_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.continental_spline.clear();
+    params.caves_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    const Luminumbra::Vec3 anchor{8.0f, 10.0f, 8.0f};
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    world.GenerateChunkData(*chunk);
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+    ASSERT_FALSE(chunk->mesh_vertices.empty());
+    ASSERT_FALSE(chunk->mesh_indices.empty());
+    chunk->current_lod.store(0);
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+
+    // A single eligible chunk cannot hit the frame cap: only refusal keeps the pass dirty.
+    for (int tick = 1; tick <= 2; ++tick) {
+        world.begin_tick(tick);
+        world.update(registry, anchor, &physics, false);
+        EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Ready);
+        EXPECT_EQ(chunk->current_lod.load(), 0);
+        EXPECT_FALSE(chunk->has_collision.load());
+        EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+        physics.update(0.0f);
+        EXPECT_EQ(physics.work_items().bodies, body_limit);
+    }
+
+    physics.destroy_body(last_body);
+    world.begin_tick(3);
+    world.update(registry, anchor, &physics, false);
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
 }
 
 TEST(RegionConsumerGate, SessionReleasesResumingCapsulesBeforeFreezingAtBodyPoolLimit) {
@@ -2703,7 +2773,7 @@ TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesO
             chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                             static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
                                         8.0f);
-            physics->add_chunk_collision(chunk);
+            EXPECT_TRUE(physics->add_chunk_collision(chunk));
             EXPECT_TRUE(physics->audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
             physics->remove_chunk_collision(chunk.get_id());
         }

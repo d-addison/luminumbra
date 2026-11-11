@@ -546,11 +546,14 @@ bool HasRenderableGeometry(const Chunk& chunk) {
            (!chunk.water_mesh_vertices.empty() && !chunk.water_mesh_indices.empty());
 }
 
-void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
+bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
     const ChunkID id = chunk.get_id();
     physics_system.remove_chunk_collision(id);
-    physics_system.add_chunk_collision(chunk);
+    if (!physics_system.add_chunk_collision(chunk)) {
+        return false;
+    }
     chunk.has_collision.store(true, std::memory_order_release);
+    return true;
 }
 
 } // namespace
@@ -3771,15 +3774,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     _dbg_split(
         m_dbg_stream.meshing_pass); // runtime telemetry: Step 3 meshing-candidate pass + dispatch
 
-    // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
-    //  the eligibility scan is O(N) over every streamed chunk. Gate it on
-    // m_collision_pass_dirty so a SETTLED world skips it entirely. The flag is set at the two
-    // has_collision=false reset sites (remesh/LOD0 promotion + synchronous rebuild) and cleared
-    // here once a scan drains all eligible chunks without hitting the per-frame cap. The scan body
-    // is unchanged, so the set of colliders created (and has_collision, which feeds world_hash) is
-    // identical to before — only redundant settled-tick walks are removed.
+    // Step 4. Time-slice expensive physics collider creation on the main thread.
+    // Gate the O(N) eligibility scan on m_collision_pass_dirty so a settled world skips it.
+    // Remesh/LOD0 promotion and synchronous rebuilds set the flag. Keep it set while
+    // eligible work hits the attempt cap or the body pool refuses creation, so later ticks retry.
     if (physics_system && m_collision_pass_dirty) {
-        int collision_meshes_created_this_frame = 0;
+        int collision_meshes_attempted_this_frame = 0;
+        bool collision_refused = false;
         bool hit_frame_cap = false;
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
@@ -3788,20 +3789,19 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 // built from the HEIGHTMAP; sim_available_lod0 is the single
                 // place the availability definition lives).
                 if (sim_available_lod0(*chunk_ptr)) {
-                    replace_chunk_collision(*physics_system, *chunk_ptr);
+                    collision_refused |= !replace_chunk_collision(*physics_system, *chunk_ptr);
 
-                    collision_meshes_created_this_frame++;
-                    if (collision_meshes_created_this_frame >= MAX_COLLISION_MESHES_PER_FRAME) {
+                    collision_meshes_attempted_this_frame++;
+                    if (collision_meshes_attempted_this_frame >= MAX_COLLISION_MESHES_PER_FRAME) {
                         hit_frame_cap = true;
                         break;
                     }
                 }
             }
         }
-        // Hitting the cap means eligible chunks may remain past the break, so stay dirty for the
-        // next tick. Otherwise the loop visited every chunk and created colliders for all eligible
-        // ones, so there is no collision work left until something resets has_collision again.
-        m_collision_pass_dirty = hit_frame_cap;
+        // Both refused attempts and successful creations consume the frame budget.
+        // Only a complete scan without refusals drains all eligible collision work.
+        m_collision_pass_dirty = hit_frame_cap || collision_refused;
     }
     _dbg_split(m_dbg_stream.collision); // runtime telemetry
 
@@ -4738,8 +4738,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         if (surface_chunk.lod == 0 && surface_chunk.vertical_rank == 0 &&
             std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
             !chunk->has_collision.load()) {
-            replace_chunk_collision(*physics_system, *chunk);
-            ++collision_count;
+            if (replace_chunk_collision(*physics_system, *chunk)) {
+                ++collision_count;
+            }
         }
     }
 
@@ -4759,7 +4760,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     ++m_dirty_generation;
     //  the rebuild reset has_collision=false on its remeshed chunks (some on worker
     // threads, now joined) and synchronously collided only the in-range subset, so re-open the
-    // gated collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread
+    // gated collision scan to retry refusals and backfill out-of-range LOD0 chunks. Main-thread
     // store.
     m_collision_pass_dirty = true;
     return true;

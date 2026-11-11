@@ -358,11 +358,11 @@ void PhysicsSystem::update(float delta_time) {
     m_batched_queries.ProcessBatch(this);
 }
 
-void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (!m_body_interface)
-        return;
+        return true;
     if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
-        return;
+        return true;
 
     constexpr std::size_t kHeightmapSide = CHUNK_SIZE_X + 1;
     if (chunk.heightmap_data.size() != kHeightmapSide * kHeightmapSide) {
@@ -371,7 +371,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                              chunk.get_coords().x,
                              chunk.get_coords().y,
                              chunk.get_coords().z);
-        return;
+        return true;
     }
 
     // 1. Copy the cached heightmap data into a Jolt-compatible array.
@@ -398,7 +398,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
     const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
-        return;
+        return true;
     }
 
     // 2. Create the HeightFieldShape.
@@ -416,14 +416,14 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (result.HasError()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape error for chunk ({},{},{}): {}", cc.x, cc.y, cc.z, result.GetError());
-        return;
+        return true;
     }
 
     // Additional safety check
     if (!result.Get()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
-        return;
+        return true;
     }
 
     // The position is baked into the shape, so the body itself can be created at the world origin.
@@ -436,10 +436,11 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (body == nullptr) {
         LUMINUMBRA_CORE_WARN(
             "Body pool refused chunk collision for chunk ({},{},{})", cc.x, cc.y, cc.z);
-        return;
+        return false;
     }
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
     m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
+    return true;
 }
 
 void PhysicsSystem::remove_chunk_collision(ChunkID id) {

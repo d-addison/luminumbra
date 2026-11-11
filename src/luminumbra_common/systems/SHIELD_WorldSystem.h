@@ -1253,16 +1253,10 @@ private:
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
-    // Gate the O(N) per-tick collision-creation scan so
-    // a SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely
-    // instead of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic
-    // work signal: set true at exactly the two sites that reset has_collision=false (remesh / LOD0
-    // promotion in process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) —
-    // NOT job-activity state (cf. the attempt-#1 trap above). Cleared only when a scan visits every
-    // chunk without hitting the per-frame cap (i.e. it drained all eligible work). Starts true so
-    // the first tick scans. The scan body itself is byte-identical to before, so collision
-    // eligibility/order — and thus has_collision, which feeds world_hash — is unchanged; only
-    // redundant settled-tick scans go.
+    // Gate the O(N) collision eligibility scan so settled worlds skip it.
+    // Remesh/LOD0 promotion and synchronous surface-horizon rebuilds set this main-thread
+    // work signal. Frame-capped scans and body-pool refusals keep it set for later ticks;
+    // only a complete scan without refusals clears it. Starts true for the first scan.
     bool m_collision_pass_dirty = true;
 
     const std::vector<ChunkLOD> m_lod_levels = {
