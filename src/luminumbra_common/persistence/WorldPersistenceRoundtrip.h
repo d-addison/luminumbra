@@ -88,12 +88,17 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
+    // Indexed admission checks present legacy JSON water arrays before insertion.
+    bool strict_water = false;
     bool terrain_edited = true;
     bool migrate_legacy_water = false;
     bool validate_record_authority = false;
     // With validation on: an unflagged header may still carry owned water (the loader's flag
     // repair keeps it), but it may not carry terrain ownership.
     bool allow_unflagged_water = false;
+    // Proof from this same decode; encoded records retain their existing array contract.
+    // False on failure, observational only when strict_water is false.
+    bool* strict_water_valid = nullptr;
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
