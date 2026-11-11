@@ -876,9 +876,8 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
         JPH::Vec3 hit_pos = ray_start + ray_direction * result.distance;
         result.hit_point = {hit_pos.GetX(), hit_pos.GetY(), hit_pos.GetZ()};
 
-        // Query the hit body for the real surface normal and its object layer.
-        // Terrain heightfields live on NON_MOVING; dynamic spheres are the only
-        // other bodies (MOVING), so the layer identifies terrain hits.
+        // Query the hit body for the real surface normal and terrain shape identity.
+        // Chunk terrain uses heightfields; frozen capsules share its object layer.
         bool terrain_hit = false;
         JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), closest_hit.mBodyID);
         if (lock.Succeeded()) {
@@ -891,7 +890,7 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
                 normal = -normal;
             }
             result.surface_normal = {normal.GetX(), normal.GetY(), normal.GetZ()};
-            terrain_hit = body.GetObjectLayer() == Layers::NON_MOVING;
+            terrain_hit = body.GetShape()->GetSubType() == JPH::EShapeSubType::HeightField;
         }
 
         if (terrain_hit && m_world_system) {
@@ -903,7 +902,7 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
             result.material_type = static_cast<int>(material);
             result.material_absorption = get_material_audio_absorption(result.material_type);
         } else if (m_world_system) {
-            // Non-terrain (dynamic body): no worldgen material applies; classify
+            // Non-terrain body: no worldgen material applies; classify
             // as stone.
             result.material_type = static_cast<int>(MaterialType::Stone);
             result.material_absorption = get_material_audio_absorption(result.material_type);

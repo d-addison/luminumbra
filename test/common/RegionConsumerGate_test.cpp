@@ -2581,6 +2581,48 @@ TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
     EXPECT_EQ(physics.work_items().bodies, 0u);
 }
 
+TEST(RegionConsumerGate, AudioClassifiesFrozenCapsulesSeparatelyFromTerrain) {
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(&world);
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
+                                8.0f);
+    ASSERT_TRUE(physics.add_chunk_collision(chunk));
+    const glm::vec3 feet{8.0f, 8.0f, 8.0f};
+    const auto avatar = physics.create_avatar_character(feet);
+    physics.set_avatar_frozen(avatar, true, feet);
+
+    const auto capsule_hit = physics.audio_raycast({6.0f, 9.3f, 8.0f}, {10.0f, 9.3f, 8.0f});
+    ASSERT_TRUE(capsule_hit.hit);
+    EXPECT_NEAR(capsule_hit.hit_point.x, 7.6f, 0.002f);
+    // Guard the oracle: treating this capsule as terrain would produce sand.
+    ASSERT_EQ(world.SurfaceVertexMaterial(
+                  capsule_hit.hit_point.x, capsule_hit.hit_point.z, capsule_hit.hit_point.y),
+              Luminumbra::MaterialType::Sand);
+    EXPECT_EQ(capsule_hit.material_type, static_cast<int>(Luminumbra::MaterialType::Stone));
+    EXPECT_FLOAT_EQ(
+        capsule_hit.material_absorption,
+        physics.get_material_audio_absorption(static_cast<int>(Luminumbra::MaterialType::Stone)));
+
+    const auto terrain_hit = physics.audio_raycast({12.0f, 12.0f, 8.0f}, {12.0f, 6.0f, 8.0f});
+    ASSERT_TRUE(terrain_hit.hit);
+    EXPECT_NEAR(terrain_hit.hit_point.y, 8.0f, 0.002f);
+    EXPECT_EQ(terrain_hit.material_type, static_cast<int>(Luminumbra::MaterialType::Sand));
+    EXPECT_FLOAT_EQ(
+        terrain_hit.material_absorption,
+        physics.get_material_audio_absorption(static_cast<int>(Luminumbra::MaterialType::Sand)));
+
+    physics.set_world_system(nullptr);
+    const auto legacy_hit = physics.audio_raycast({6.0f, 9.3f, 8.0f}, {10.0f, 9.3f, 8.0f});
+    ASSERT_TRUE(legacy_hit.hit);
+    EXPECT_EQ(legacy_hit.material_type, 0);
+    EXPECT_FLOAT_EQ(legacy_hit.material_absorption, 0.15f);
+}
+
 TEST(RegionConsumerGate, TerrainBodyPoolRefusalLeavesChunkUnregisteredForRetry) {
     Luminumbra::Systems::PhysicsSystem physics;
     physics.startup();
@@ -2658,6 +2700,59 @@ TEST(RegionConsumerGate, StreamingRetriesTerrainCollisionAfterBodyPoolRefusal) {
     world.update(registry, anchor, &physics, false);
     EXPECT_TRUE(chunk->has_collision.load());
     EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
+}
+
+TEST(RegionConsumerGate, ReadinessRetriesTerrainCollisionAfterBodyPoolRefusal) {
+    Luminumbra::Systems::PhysicsSystem physics;
+    physics.startup();
+    constexpr std::size_t body_limit = 10240u;
+    JPH::BodyID last_body;
+    for (std::size_t index = 0; index < body_limit; ++index) {
+        last_body =
+            physics.create_dynamic_sphere({static_cast<float>(index) * 3.0f, 0.0f, 0.0f}, {}, 0.1f);
+        ASSERT_FALSE(last_body.IsInvalid());
+    }
+
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.peaks_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.continental_spline.clear();
+    params.caves_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const Luminumbra::Vec3 anchor{8.0f, 10.0f, 8.0f};
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    world.GenerateChunkData(*chunk);
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+    ASSERT_FALSE(chunk->mesh_vertices.empty());
+    ASSERT_FALSE(chunk->mesh_indices.empty());
+    chunk->current_lod.store(0);
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+        EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+        EXPECT_FALSE(chunk->has_collision.load());
+        EXPECT_FALSE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+        physics.update(0.0f);
+        EXPECT_EQ(physics.work_items().bodies, body_limit);
+    }
+
+    // Retry each readiness entry point with an available slot and no existing collider.
+    physics.destroy_body(last_body);
+    EXPECT_TRUE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    physics.remove_chunk_collision(chunk->get_id());
+    chunk->has_collision.store(false);
+    EXPECT_TRUE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_TRUE(physics.audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
+    EXPECT_TRUE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+    EXPECT_TRUE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
 }

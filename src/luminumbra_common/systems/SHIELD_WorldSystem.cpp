@@ -4786,6 +4786,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     }
 
     std::size_t collision_count = 0;
+    bool collision_refused = false;
     for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
         const auto& chunk = surface_chunk.chunk;
         const IVec2& offset = surface_chunk.offset;
@@ -4794,6 +4795,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             !chunk->has_collision.load()) {
             if (replace_chunk_collision(*physics_system, *chunk)) {
                 ++collision_count;
+            } else {
+                collision_refused = true;
             }
         }
     }
@@ -4817,7 +4820,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // gated collision scan to retry refusals and backfill out-of-range LOD0 chunks. Main-thread
     // store.
     m_collision_pass_dirty = true;
-    return true;
+    return !collision_refused;
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
