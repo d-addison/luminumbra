@@ -927,6 +927,7 @@ class UploadBudgetWiring(unittest.TestCase):
         migration = compact(body(source, "std::size_t WaterSystem::MigrateChunksToSimResolution("))
         self.assertIn("== m_sim_resolution && HasCompleteIntegerWaterGrid(*cp, m_sim_resolution)",
                       migration)
+        self.assertIn("ResizeSimulationGrid(*cp, target_level); continue;", migration)
         resize = compact(body(source, "bool WaterSystem::ResizeSimulationGrid("))
         self.assertIn("new_resolution == current_resolution && "
                       "!(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())", resize)
@@ -935,7 +936,10 @@ class UploadBudgetWiring(unittest.TestCase):
                       update)
         native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
         for regression in ("SameResolutionLegacyFloatsMigrateAtLoadAndDirectResize",
-                           "SameResolutionLegacyFloatsMigrateDuringLiveUpdate"):
+                           "SameResolutionLegacyFloatsMigrateDuringLiveUpdate",
+                           "SameResolutionIntegerAdoptionRebuildsMirrorsForQueriesAndSprings",
+                           "IntegerMirrorRepairPreservesSizedMirrorsAndWellFormedSavedBytes",
+                           "IntegerMirrorRepairRefusesPartialAuthorityAndChunksWithoutSimulation"):
             self.assertIn(regression, native)
 
     def test_legacy_surface_migration_does_not_require_flow(self):
