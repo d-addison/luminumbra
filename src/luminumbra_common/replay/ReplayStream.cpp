@@ -177,6 +177,23 @@ struct Cursor {
 //   engine_version, system_config_identity, preset_content_hash (v3).
 constexpr std::size_t kTickCountOffset = 10;
 
+std::unique_ptr<const Persistence::ReplayPairReadGuard>
+AcquireReplayPublication(const fs::path& destination) {
+    // The directory must exist before the shared publication guard opens it.
+    if (destination.has_parent_path()) {
+        std::error_code error;
+        fs::create_directories(destination.parent_path(), error);
+        if (error) {
+            return {};
+        }
+    }
+    auto ownership = std::make_unique<const Persistence::ReplayPairReadGuard>(destination);
+    if (!ownership->is_open()) {
+        return {};
+    }
+    return ownership;
+}
+
 void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     out.insert(out.end(), kLrec1Magic, kLrec1Magic + sizeof(kLrec1Magic));
     PutU8(out, 0); // reserved
@@ -272,9 +289,13 @@ std::string Fnv1a64Hex(const std::string& text) {
 
 // --- ReplayWriter ------------------------------------------------------------
 
+ReplayWriter::ReplayWriter() = default;
+ReplayWriter::~ReplayWriter() = default;
+
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
     if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return false;
+    m_replacement_guard.reset();
     m_path = path;
     m_buffer.clear();
     m_input_count = 0;
@@ -282,6 +303,27 @@ bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
     AppendHeader(m_buffer, header);
     m_open = true;
     return true;
+}
+
+std::optional<ReplayContents> ReplayWriter::OpenForReplacement(const std::string& path) {
+    m_open = false;
+    m_buffer.clear();
+    m_replacement_guard.reset();
+    try {
+        auto ownership = AcquireReplayPublication(path);
+        if (!ownership) {
+            return std::nullopt;
+        }
+        auto contents = ReadReplay(path);
+        if (!contents.has_value() || !Open(path, contents->header)) {
+            return std::nullopt;
+        }
+        m_replacement_guard = std::move(ownership);
+        return contents;
+    } catch (const std::exception&) {
+        m_open = false;
+        return std::nullopt;
+    }
 }
 
 void ReplayWriter::RecordInput(std::uint64_t tick, const std::vector<std::uint8_t>& inputs) {
@@ -316,7 +358,18 @@ bool ReplayWriter::Finish(std::uint64_t tick_count, const std::string* trace_byt
         return false;
     m_open = false;
     auto buffer = std::move(m_buffer);
+    auto ownership = std::move(m_replacement_guard);
     try {
+        // Paired Finalize refuses replacement mode and commit owns its guard
+        // internally. Standalone replacement retains ownership from its read.
+        if (!paired) {
+            if (!ownership) {
+                ownership = AcquireReplayPublication(m_path);
+            }
+            if (!ownership) {
+                return false;
+            }
+        }
         // Patch the fixed header slot and append exactly one trailer per attempt.
         for (std::size_t i = 0; i < 8; ++i) {
             buffer[kTickCountOffset + i] =
@@ -587,6 +640,11 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
     try {
         if (m_directory.empty() || divergence_tick <= m_elided_tick)
             return false;
+        // Own recovery and publication before reading any retained segment.
+        const auto ownership = AcquireReplayPublication(destination);
+        if (!ownership) {
+            return false;
+        }
         if (m_output.is_open()) {
             m_output.close();
             if (m_output.fail())

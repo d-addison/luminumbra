@@ -413,6 +413,10 @@ protected:
         EXPECT_TRUE(file.identity(identity));
         return identity;
     }
+    static std::string ReadFile(const fs::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    }
     nlohmann::json
     PrepareInterruption(bool committed, bool old_trace, bool new_trace, bool publish_trace = true) {
         Write(m_path, "old replay");
@@ -595,6 +599,142 @@ TEST_F(ReplayPairRecoveryTest, StandaloneTraceWriteWaitsForThePairGuard) {
     ASSERT_TRUE(replay::WriteRegionScheduleTrace(m_path, next, error)) << error;
     ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error)) << error;
     EXPECT_EQ(actual, next);
+}
+
+TEST_F(ReplayPairRecoveryTest, StandaloneFinalizationRefusesDuringPairedPublication) {
+    for (const bool bounded : {false, true}) {
+        for (const bool committed : {false, true}) {
+            SCOPED_TRACE(testing::Message() << bounded << committed);
+            fs::remove_all(m_directory);
+            fs::create_directory(m_directory);
+            {
+                const Luminumbra::Persistence::ReplayPairReadGuard publisher(m_path);
+                ASSERT_TRUE(publisher.is_open());
+                // Install the exact intermediate namespace while its publisher
+                // still owns the directory, on either side of the commit point.
+                PrepareInterruption(committed, true, true);
+                const auto journal = ReadFile(m_directory / ".replay-pair.undo");
+                const auto previous = ReadBytes();
+                if (bounded) {
+                    replay::BoundedReplayRecorder recorder;
+                    ASSERT_TRUE(recorder.Configure(256, 4));
+                    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+                    ASSERT_TRUE(recorder.RecordTick(1, {7}, nullptr, 1));
+                    EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+                    EXPECT_EQ(recorder.SegmentCount(), 0u);
+                } else {
+                    replay::ReplayWriter writer;
+                    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+                    writer.RecordInput(1, {7});
+                    EXPECT_FALSE(writer.Finalize(1));
+                    EXPECT_FALSE(writer.Finalize(1));
+                }
+                EXPECT_EQ(ReadBytes(), previous);
+                EXPECT_EQ(ReadFile(m_path + ".regions.json"), "new trace");
+                EXPECT_EQ(ReadFile(m_directory / ".replay-pair.undo"), journal);
+            }
+            const Luminumbra::Persistence::ReplayPairReadGuard recovered(m_path);
+            ASSERT_TRUE(recovered.is_open());
+            EXPECT_EQ(ReadBytes(), committed ? "new replay" : "old replay");
+            EXPECT_EQ(ReadFile(m_path + ".regions.json"), committed ? "new trace" : "old trace");
+            EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+        }
+    }
+}
+
+TEST_F(ReplayPairRecoveryTest, StandaloneFinalizationRecoversBeforeReplacingReplay) {
+    for (const bool bounded : {false, true}) {
+        for (const bool committed : {false, true}) {
+            SCOPED_TRACE(testing::Message() << bounded << committed);
+            fs::remove_all(m_directory);
+            fs::create_directory(m_directory);
+            PrepareInterruption(committed, true, true);
+            if (bounded) {
+                replay::BoundedReplayRecorder recorder;
+                ASSERT_TRUE(recorder.Configure(256, 4));
+                ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+                ASSERT_TRUE(recorder.RecordTick(1, {7}, nullptr, 1));
+                ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+            } else {
+                replay::ReplayWriter writer;
+                ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+                writer.RecordInput(1, {7});
+                ASSERT_TRUE(writer.Finalize(1));
+            }
+            EXPECT_FALSE(fs::exists(m_directory / ".replay-pair.undo"));
+            const Luminumbra::Persistence::ReplayPairReadGuard playback(m_path);
+            ASSERT_TRUE(playback.is_open());
+            EXPECT_EQ(ReadFile(m_path + ".regions.json"), committed ? "new trace" : "old trace");
+            const auto contents = replay::ReadReplay(m_path);
+            ASSERT_TRUE(contents.has_value());
+            if (!contents.has_value()) {
+                return;
+            }
+            EXPECT_FALSE(contents->truncated);
+            ASSERT_EQ(contents->inputs.size(), 1u);
+            EXPECT_EQ(contents->inputs.front().inputs, (std::vector<std::uint8_t>{7}));
+        }
+    }
+
+    for (const bool bounded : {false, true}) {
+        const auto destination = m_directory / (bounded ? "bounded/new.lrec" : "buffered/new.lrec");
+        if (bounded) {
+            replay::BoundedReplayRecorder recorder;
+            ASSERT_TRUE(recorder.Configure(256, 4));
+            ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+            ASSERT_TRUE(recorder.RecordTick(1, {}, nullptr, 1));
+            EXPECT_TRUE(recorder.Finalize(destination.string(), 1, 1));
+        } else {
+            replay::ReplayWriter writer;
+            ASSERT_TRUE(writer.Open(destination.string(), MakeHeader()));
+            EXPECT_TRUE(writer.Finalize(0));
+        }
+        EXPECT_TRUE(replay::ReadReplay(destination.string()).has_value());
+    }
+    Write(m_directory / "blocked", "not a directory");
+    const auto blocked = (m_directory / "blocked/new.lrec").string();
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(blocked, MakeHeader()));
+    EXPECT_FALSE(writer.Finalize(0));
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(256, 4));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+    ASSERT_TRUE(recorder.RecordTick(1, {}, nullptr, 1));
+    EXPECT_FALSE(recorder.Finalize(blocked, 1, 1));
+    EXPECT_EQ(ReadFile(m_directory / "blocked"), "not a directory");
+}
+
+TEST_F(ReplayPairRecoveryTest, StandaloneFinalizationPreservesUnrecoverableArtifacts) {
+    for (const bool bounded : {false, true}) {
+        for (const bool foreign_replay : {false, true}) {
+            SCOPED_TRACE(testing::Message() << bounded << foreign_replay);
+            fs::remove_all(m_directory);
+            fs::create_directory(m_directory);
+            PrepareInterruption(false, true, true);
+            if (foreign_replay) {
+                fs::rename(m_path, m_directory / "retained");
+                Write(m_path, "unrelated replay");
+            } else {
+                Write(m_directory / ".replay-pair.undo", "{\"schema\":");
+            }
+            const auto journal = ReadFile(m_directory / ".replay-pair.undo");
+            const auto previous = ReadBytes();
+            if (bounded) {
+                replay::BoundedReplayRecorder recorder;
+                ASSERT_TRUE(recorder.Configure(256, 4));
+                ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+                ASSERT_TRUE(recorder.RecordTick(1, {}, nullptr, 1));
+                EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+            } else {
+                replay::ReplayWriter writer;
+                ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+                EXPECT_FALSE(writer.Finalize(0));
+            }
+            EXPECT_EQ(ReadBytes(), previous);
+            EXPECT_EQ(ReadFile(m_path + ".regions.json"), "new trace");
+            EXPECT_EQ(ReadFile(m_directory / ".replay-pair.undo"), journal);
+        }
+    }
 }
 
 TEST_F(ReplayPairRecoveryTest, PublicationRefusesUnrecoverableFilenamesBeforeChangingThePair) {
@@ -1033,6 +1173,20 @@ TEST_F(ReplayStreamTest, InvalidPairTraceRefusesBeforeEitherDestinationChanges) 
         std::string error;
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(m_path, 1, actual, error));
         EXPECT_EQ(actual, original);
+    }
+    // A read/replace owner may only finalize the standalone replay, without
+    // re-entering the pair publisher's directory guard. Every refusal releases it.
+    for (const auto* trace :
+         std::array<const replay::RegionScheduleTrace*, 3>{nullptr, &original, &invalid.back()}) {
+        ASSERT_TRUE(writer.OpenForReplacement(m_path).has_value());
+        {
+            const Luminumbra::Persistence::ReplayPairReadGuard contended(m_path);
+            EXPECT_FALSE(contended.is_open());
+        }
+        EXPECT_FALSE(writer.Finalize(1, trace));
+        EXPECT_EQ(ReadBytes(), old);
+        const Luminumbra::Persistence::ReplayPairReadGuard released(m_path);
+        EXPECT_TRUE(released.is_open());
     }
     ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
     const replay::RegionScheduleTrace empty;

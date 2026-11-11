@@ -45,6 +45,10 @@
 #include "../HashCheckpoint.h"
 #include "RegionScheduleTrace.h"
 
+namespace Luminumbra::Persistence {
+class ReplayPairReadGuard;
+}
+
 namespace Luminumbra::Replay {
 
 // On-wire constants. Bump kLrec1Version on ANY incompatible layout change and
@@ -116,6 +120,8 @@ struct InputRecord {
 // entities). Hashes are stored as their hex strings (no float/endianness risk).
 using CheckpointRecord = HashCheckpoint;
 
+struct ReplayContents;
+
 // --- Writer: append-on-record. ----------------------------------------------
 // Usage: construct with the header (writes it immediately), RecordInput once per
 // tick, RecordCheckpoint at checkpoint ticks, then Finalize to patch the tick
@@ -123,11 +129,21 @@ using CheckpointRecord = HashCheckpoint;
 // to disk by Finalize/Close so it never sits on the simulation hot path.
 class ReplayWriter {
 public:
-    ReplayWriter() = default;
+    ReplayWriter();
+    ~ReplayWriter();
+    ReplayWriter(const ReplayWriter&) = delete;
+    ReplayWriter& operator=(const ReplayWriter&) = delete;
 
     // Begins a new stream into `path`, writing the header. Returns false on IO
     // failure. The path's parent directory is created if needed.
     bool Open(const std::string& path, const ReplayHeader& header);
+
+    // Recovers and reads an existing replay under the directory guard, then
+    // opens an empty writer with its header. Keeps ownership through standalone
+    // Finalize; successful Open or destruction also releases it. Paired Finalize
+    // refuses this mode and releases ownership.
+    // Refusal returns nullopt and leaves the writer closed.
+    std::optional<ReplayContents> OpenForReplacement(const std::string& path);
 
     // Appends a per-tick input record. `inputs` empty is valid.
     void RecordInput(std::uint64_t tick, const std::vector<std::uint8_t>& inputs);
@@ -156,6 +172,7 @@ private:
     std::uint64_t m_input_count = 0;
     std::uint64_t m_checkpoint_count = 0;
     bool m_open = false;
+    std::unique_ptr<const Persistence::ReplayPairReadGuard> m_replacement_guard;
 };
 
 // Automatic lockstep diagnostics. Buffered disk segments retain all unconfirmed
