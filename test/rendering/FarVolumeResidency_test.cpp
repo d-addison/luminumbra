@@ -1304,8 +1304,11 @@ TEST_F(FarSessionPublicationTest, EmptySavedSourceProjectsOceanAndDryLandThrough
         FarVolumeHandoff owner(jobs, *memory, Limits());
         std::array tiles{Tile(0), Fallback()};
         tiles[0].capture.span = {-272, 32};
-        ASSERT_TRUE(
-            owner.StageSessionTarget(producer, *world, 7, tiles, policy, capture_limits, memory));
+        tiles[1].capture.span = {-512, 768};
+        const bool staged_target =
+            owner.StageSessionTarget(producer, *world, 7, tiles, policy, capture_limits, memory);
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+        ASSERT_TRUE(staged_target);
         const auto staged = owner.Observe({1, 0, 0});
         ASSERT_TRUE(staged.has_value());
         if (staged.has_value()) {
