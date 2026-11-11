@@ -34,6 +34,7 @@
 #include "../components/CreatureComponents.h"
 #include "../components/ThirstComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -82,7 +83,10 @@ struct ThirstTuning {
 // let them drink when in range. id-ordered. `dt` scales the rise/drink rates so the behaviour
 // is frame-rate independent (the sim runs a fixed dt; the parameter keeps the signature honest
 // and lets tests exercise multiple ticks).
-inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTuning& tuning = {}) {
+inline ThirstStats RunThirstOnTick(entt::registry& reg,
+                                   float dt,
+                                   const ThirstTuning& tuning = {},
+                                   const CreatureTickAdmission* admission = nullptr) {
     ThirstStats stats;
 
     // Snapshot every water hole once (deterministic, read-only this tick). id-ordered for a
@@ -100,6 +104,9 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
         });
         holes.reserve(hents.size());
         for (auto e : hents) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& wh = hview.get<Comp::WaterHoleComponent>(e);
             const auto& tf = hview.get<Comp::TransformComponent>(e);
             holes.push_back({tf.position.x, tf.position.z, wh.radius});
@@ -121,6 +128,9 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
     const float drink = tuning.drink_rate * dt;
 
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& th = view.get<Comp::ThirstComponent>(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);
 
