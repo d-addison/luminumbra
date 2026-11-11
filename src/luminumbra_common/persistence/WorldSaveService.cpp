@@ -2673,6 +2673,26 @@ struct AuthorityReadBudget {
     }
 };
 
+// Declare before the buffers it admits. Nested scopes return only their new
+// scratch; capacities retained by an admitted output remain in the shared lease.
+struct AuthorityReadScratch {
+    explicit AuthorityReadScratch(AuthorityReadBudget& read_budget)
+        : budget(read_budget)
+        , initial_bytes(budget.storage ? budget.storage->lease.bytes() : 0)
+        , initial_retained(budget.retained_bytes) {}
+    AuthorityReadScratch(const AuthorityReadScratch&) = delete;
+    AuthorityReadScratch& operator=(const AuthorityReadScratch&) = delete;
+    ~AuthorityReadScratch() {
+        if (budget.storage) {
+            budget.storage->lease.Uncharge(budget.storage->lease.bytes() - initial_bytes -
+                                           (budget.retained_bytes - initial_retained));
+        }
+    }
+    AuthorityReadBudget& budget;
+    const std::uint64_t initial_bytes;
+    const std::uint64_t initial_retained;
+};
+
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
                     std::vector<std::string>* errors,
@@ -2921,13 +2941,48 @@ std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
     return counter;
 }
 
+constexpr std::size_t kAuthorityRecordStructureUnits = 4096;
+constexpr std::uint64_t kAuthorityRecordByteFactor = 16;
+
+bool ChunkRecordHasBoundedStructure(std::string_view payload) {
+    // Each DOM node/key and plain-array element consumes at least one unit.
+    // Encoded array strings consume one, irrespective of their base64 length.
+    // Cap structural storage at 4096 * 256 bytes, including vector growth and
+    // decoded small arrays. Count outside-string whitespace too: parser error
+    // diagnostics expand control characters. No parser allocation.
+    std::size_t units = 0;
+    bool quoted = false;
+    bool escaped = false;
+    for (const char character : payload) {
+        if (quoted) {
+            if (escaped)
+                escaped = false;
+            else if (character == '\\')
+                escaped = true;
+            else if (character == '"')
+                quoted = false;
+        } else {
+            if (character == '"')
+                quoted = true;
+            if (++units > kAuthorityRecordStructureUnits)
+                return false;
+        }
+    }
+    return true;
+}
+
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
-                                         std::vector<std::string>* errors) {
+                                         std::vector<std::string>* errors,
+                                         AuthorityReadBudget* budget = nullptr) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
+    }
+    if (budget && !ChunkRecordHasBoundedStructure(payload)) {
+        // General compatibility JSON needs the full DOM envelope (16 + 240).
+        budget->charge_storage(record.uncompressed_size, 256 - kAuthorityRecordByteFactor);
     }
 
     WorldStreamingState single;
@@ -7951,10 +8006,18 @@ std::shared_ptr<Chunk> DecodeAuthorityRecord(const RegionRecord& record,
                                              int rz,
                                              bool legacy,
                                              AuthorityReadBudget& budget) {
-    budget.charge_storage(record.uncompressed_size, 256);
-    budget.charge_storage(1, sizeof(Chunk) + 4096);
+    // For N decompressed bytes: <= 2N for the payload capacity, <= 8N for
+    // DOM strings/keys and lexer buffers including growth overlap, <= 4N for
+    // base64 scratch and decoded vectors (including padded vertex elements).
+    // 16N covers these peaks together. At most 4096 structural units use the
+    // separate 1 MiB allowance; larger JSON DOMs are admitted before parsing
+    // in DecodeChunkRecord. One chunk/control and single-world bookkeeping
+    // need sizeof(Chunk) + 4096. All byte products pass charge_storage checks.
+    static_assert(sizeof(VoxelVertex) <= 2 * 28 && sizeof(Vec2) <= 2 * 8);
+    budget.charge_storage(record.uncompressed_size, kAuthorityRecordByteFactor);
+    budget.charge_storage(1, sizeof(Chunk) + 4096 + kAuthorityRecordStructureUnits * 256);
     std::vector<std::string> errors;
-    auto chunk = DecodeChunkRecord(record, path, &errors);
+    auto chunk = DecodeChunkRecord(record, path, &errors, &budget);
     if (!chunk)
         throw std::runtime_error(errors.empty() ? "malformed authority record" : errors.front());
     int actual_rx = 0, actual_rz = 0;
@@ -8123,7 +8186,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             throw std::runtime_error("unknown authority index status or envelope limit exceeded");
         const auto index = AuthorityEnvelopeIndex(envelope, budget);
         candidate->generation = index.generation;
-        const auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
+        auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
+        // Scratch peaks include the retained member prefix. Fix that prefix
+        // order independently of filesystem directory enumeration.
+        std::sort(inventory.region_files.begin(), inventory.region_files.end());
         if (index.generation != 0) {
             for (const auto& member : index.members) {
                 int rx = 0, rz = 0;
@@ -8139,6 +8205,7 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             }
         } else {
             for (const auto& path : inventory.region_files) {
+                const AuthorityReadScratch member_scratch(budget);
                 int rx = 0, rz = 0;
                 ParseRegionFileName(path, rx, rz);
                 std::vector<RegionRecord> records;
@@ -8150,8 +8217,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                                                             : errors.front());
                 const auto digest = Lod0Fingerprint(records);
                 for (const auto& record : records) {
-                    if (record.lod_level == 0)
+                    if (record.lod_level == 0) {
+                        const AuthorityReadScratch record_scratch(budget);
                         DecodeAuthorityRecord(record, path, rx, rz, true, budget);
+                    }
                 }
                 candidate->members.emplace(std::pair{rx, rz},
                                            Impl::Member{SnapshotMember{RelativeRegionMember(rx, rz),
@@ -8217,6 +8286,7 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
         result.members.reserve(static_cast<std::size_t>(width * depth));
         for (int rx = min_rx; rx <= max_rx; ++rx) {
             for (int rz = min_rz; rz <= max_rz; ++rz) {
+                const AuthorityReadScratch member_scratch(budget);
                 const auto found = m_impl->members.find({rx, rz});
                 result.members.push_back(AuthorityMemberEvidence{
                     rx,
@@ -8233,6 +8303,7 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
                 for (const auto& record : records) {
                     if (record.lod_level != 0)
                         continue;
+                    const AuthorityReadScratch record_scratch(budget);
                     // Validate all lod-0 records, including those outside the window.
                     auto chunk = DecodeAuthorityRecord(record,
                                                        region_file_path(m_impl->root, rx, rz),

@@ -618,6 +618,208 @@ TEST_F(FarWorldSourceCaptureTest, CommittedAliasesRetainTheirAdmissionAfterReade
     EXPECT_EQ(memory->used(), 0u);
 }
 
+TEST_F(FarWorldSourceCaptureTest, ManyOrdinaryRecordsReuseScratchWithinSixtyFourMiB) {
+    WorldStreamingState disk;
+    std::uint64_t payload_bytes = 0;
+    for (int x = 1; x <= 8; ++x) {
+        for (int z = 1; z <= 8; ++z) {
+            auto chunk = Edited({x, 0, z}, static_cast<float>(x * 8 + z));
+            payload_bytes += Persistence::SerializeChunkRecordPayloadJson(*chunk).size();
+            ASSERT_TRUE(disk.insert_chunk(chunk));
+        }
+    }
+    constexpr std::uint64_t pool_bytes = 64u * 1024u * 1024u;
+    ASSERT_GT(payload_bytes * 256, pool_bytes);
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        if (indexed) {
+            Persistence::SaveTransaction transaction(root, 0, {}, Save::member_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(Save{}.save_world(disk, root));
+            ASSERT_TRUE(Save::finalize_indexed_envelope(root, nullptr));
+            ASSERT_TRUE(transaction.commit(nullptr));
+        } else {
+            ASSERT_TRUE(Save{}.save_world(disk, root));
+        }
+        const auto memory = std::make_shared<World::FarVolumeMemoryPool>(pool_bytes);
+        {
+            Save::AuthorityWindowReader reader(memory);
+            std::string error;
+            ASSERT_TRUE(reader.admit(root, reads, error)) << error;
+            const auto admitted = memory->used();
+            for (int repeat = 0; repeat < 3; ++repeat) {
+                {
+                    const auto result = reader.read({1, 8, 1, 8}, reads);
+                    ASSERT_EQ(result.membership, Save::AuthorityMembership::Present)
+                        << result.error;
+                    ASSERT_EQ(result.chunks.size(), 64u);
+                    for (const auto& chunk : result.chunks) {
+                        const auto coords = chunk->get_coords();
+                        EXPECT_EQ(chunk->sdf_data.front(),
+                                  static_cast<float>(coords.x * 8 + coords.z));
+                    }
+                    EXPECT_GT(memory->used(), admitted);
+                }
+                EXPECT_EQ(memory->used(), admitted);
+                // The same member must validate and discard every out-of-window chunk.
+                const auto absent = reader.read({20, 20, 20, 20}, reads);
+                EXPECT_EQ(absent.membership, Save::AuthorityMembership::ProvenAbsent)
+                    << absent.error;
+                EXPECT_TRUE(absent.chunks.empty());
+            }
+            EXPECT_EQ(memory->used(), admitted);
+            EXPECT_LT(memory->peak(), pool_bytes);
+            EXPECT_EQ(memory->refusals(), 0u);
+        }
+        EXPECT_EQ(memory->used(), 0u);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, OversizedRecordRefusesBeforeDecodeWithoutLeakingScratch) {
+    const auto chunk = Edited({1, 0, 1});
+    auto payload = Persistence::SerializeChunkRecordPayloadJson(*chunk);
+    payload.insert(payload.size() - 1,
+                   ",\"extension\":\"" + std::string(4u * 1024u * 1024u - 65536u, 'x') + "\"");
+    ASSERT_LT(payload.size(), reads.decoded_member_bytes);
+    const std::vector<Save::ContainerRecord> records{{chunk->get_id(), 0, 1, payload}};
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        if (indexed) {
+            Persistence::SaveTransaction transaction(root, 0, {}, Save::member_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(
+                Save::upsert_container_records(Save::region_file_path(root, 0, 0), records));
+            ASSERT_TRUE(Save::finalize_indexed_envelope(root, nullptr));
+            ASSERT_TRUE(transaction.commit(nullptr));
+        } else {
+            ASSERT_TRUE(
+                Save::upsert_container_records(Save::region_file_path(root, 0, 0), records));
+        }
+        std::string error;
+        Save::AuthorityWindowReader unbound;
+        ASSERT_TRUE(unbound.admit(root, reads, error)) << error;
+        ASSERT_EQ(unbound.read({1, 1, 1, 1}, reads).membership, Save::AuthorityMembership::Present);
+        const auto memory = SourceMemory();
+        {
+            Save::AuthorityWindowReader bounded(memory);
+            const auto decodes = Save::chunk_record_decode_count_for_testing();
+            if (indexed) {
+                ASSERT_TRUE(bounded.admit(root, reads, error)) << error;
+                const auto admitted = memory->used();
+                const auto result = bounded.read({1, 1, 1, 1}, reads);
+                EXPECT_EQ(result.membership, Save::AuthorityMembership::Unavailable);
+                EXPECT_TRUE(result.chunks.empty());
+                EXPECT_EQ(memory->used(), admitted);
+            } else {
+                EXPECT_FALSE(bounded.admit(root, reads, error));
+                EXPECT_EQ(memory->used(), 0u);
+            }
+            EXPECT_EQ(Save::chunk_record_decode_count_for_testing(), decodes);
+            EXPECT_GT(memory->refusals(), 0u);
+        }
+        EXPECT_EQ(memory->used(), 0u);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, MemberScratchPeaksIgnoreDirectoryCreationOrder) {
+    std::uint64_t admission_peak = 0;
+    std::uint64_t read_peak = 0;
+    std::string extension(464u * 1024u, 'x');
+    std::uint32_t sequence = 0x12345678u;
+    for (char& character : extension) {
+        sequence = sequence * 1664525u + 1013904223u;
+        character = static_cast<char>('a' + sequence % 26u);
+    }
+    for (const bool reverse : {false, true}) {
+        SCOPED_TRACE(reverse);
+        const auto save_root = root / (reverse ? "reverse" : "forward");
+        WorldStreamingState empty;
+        ASSERT_TRUE(Save{}.save_world(empty, save_root));
+        for (int index = 0; index < 16; ++index) {
+            const int rx = reverse ? 15 - index : index;
+            const auto chunk = Edited({rx * 32 + 1, 0, 1});
+            auto payload = Persistence::SerializeChunkRecordPayloadJson(*chunk);
+            payload.insert(payload.size() - 1,
+                           ",\"extension\":\"" +
+                               extension.substr(0, (448u + static_cast<std::size_t>(rx)) * 1024u) +
+                               "\"");
+            const std::vector<Save::ContainerRecord> records{{chunk->get_id(), 0, 1, payload}};
+            ASSERT_TRUE(
+                Save::upsert_container_records(Save::region_file_path(save_root, rx, 0), records));
+        }
+        const auto memory = SourceMemory();
+        {
+            Save::AuthorityWindowReader reader(memory);
+            std::string error;
+            ASSERT_TRUE(reader.admit(save_root, reads, error)) << error;
+            if (reverse) {
+                EXPECT_EQ(memory->peak(), admission_peak);
+            } else {
+                admission_peak = memory->peak();
+            }
+            const auto result = reader.read({1, 481, 1, 1}, reads);
+            ASSERT_EQ(result.membership, Save::AuthorityMembership::Present) << result.error;
+            EXPECT_EQ(result.chunks.size(), 16u);
+            EXPECT_LT(memory->peak(), 24u * 1024u * 1024u);
+            if (reverse) {
+                EXPECT_EQ(memory->peak(), read_peak);
+            } else {
+                read_peak = memory->peak();
+            }
+        }
+        EXPECT_EQ(memory->used(), 0u);
+    }
+}
+
+TEST_F(FarWorldSourceCaptureTest, PlainArraysAndEscapedStringsUseBoundedParserEnvelopes) {
+    WorldStreamingState disk;
+    const auto chunk = Edited({1, 0, 1});
+    ASSERT_TRUE(disk.insert_chunk(chunk));
+    for (const bool plain : {false, true}) {
+        SCOPED_TRACE(plain);
+        auto payload = plain ? Persistence::SerializeWorldStreamingStateSnapshotJson(disk)
+                             : Persistence::SerializeChunkRecordPayloadJson(*chunk);
+        if (!plain) {
+            payload.insert(payload.size() - 1,
+                           R"(,"extension":"\"\\)" + std::string(300u * 1024u, '{') + R"(")");
+        }
+        const std::vector<Save::ContainerRecord> records{{chunk->get_id(), 0, 1, payload}};
+        ASSERT_TRUE(Save::upsert_container_records(Save::region_file_path(root, 0, 0), records));
+        const auto memory = SourceMemory();
+        {
+            Save::AuthorityWindowReader reader(memory);
+            std::string error;
+            ASSERT_TRUE(reader.admit(root, reads, error)) << error;
+            const auto before = memory->attempts();
+            const auto result = reader.read({1, 1, 1, 1}, reads);
+            ASSERT_EQ(result.membership, Save::AuthorityMembership::Present) << result.error;
+            ASSERT_EQ(result.chunks.size(), 1u);
+            EXPECT_EQ(result.chunks[0]->sdf_data, chunk->sdf_data);
+            if (plain) {
+                EXPECT_GE(memory->peak(), payload.size() * 256);
+            } else {
+                EXPECT_GT(payload.size() * 256, memory->limit());
+                EXPECT_LT(memory->peak(), memory->limit());
+            }
+            const auto read_points = memory->attempts() - before;
+            ASSERT_GT(read_points, 0u);
+            ASSERT_LT(read_points, 128u);
+            const auto accepted = memory->used();
+            for (std::uint64_t point = 0; point < read_points; ++point) {
+                SCOPED_TRACE(point);
+                memory->RefuseAttemptsFrom(memory->attempts() + point);
+                const auto refused = reader.read({1, 1, 1, 1}, reads);
+                EXPECT_EQ(refused.membership, Save::AuthorityMembership::Unavailable);
+                EXPECT_TRUE(refused.chunks.empty());
+                EXPECT_EQ(memory->used(), accepted);
+                EXPECT_EQ(result.chunks[0]->sdf_data, chunk->sdf_data);
+                memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+            }
+        }
+        EXPECT_EQ(memory->used(), 0u);
+    }
+}
+
 TEST_F(FarWorldSourceCaptureTest, PathAndRecordParserRefusalsLeaveNoRetainedStorage) {
     const auto& memory = source_limits.memory;
     const auto admitted = memory->used();
@@ -633,14 +835,21 @@ TEST_F(FarWorldSourceCaptureTest, PathAndRecordParserRefusalsLeaveNoRetainedStor
     ASSERT_TRUE(disk.insert_chunk(Edited({1, 0, 0})));
     const std::array payloads{std::string("{"),
                               std::string("{}"),
+                              std::string(R"({"extension":"\"\\)"),
+                              std::string(5000, '['),
+                              std::string(300u * 1024u, '\n') + "?",
                               std::string("{\"chunks\":[]}"),
                               Persistence::SerializeWorldStreamingStateSnapshotJson(disk)};
     for (const auto& payload : payloads) {
         const std::vector<Save::ContainerRecord> records{
             {Chunk::calculate_id({0, 0, 0}), 0, 1, payload}};
         ASSERT_TRUE(Save::upsert_container_records(Save::region_file_path(root, 0, 0), records));
+        const auto refusals = memory->refusals();
         EXPECT_FALSE(producer.admit_saved_source(root, reads, error));
         EXPECT_EQ(memory->used(), admitted);
+        if (payload.front() == '\n') {
+            EXPECT_GT(memory->refusals(), refusals);
+        }
     }
 }
 
