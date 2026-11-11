@@ -1912,6 +1912,167 @@ TEST(WaterSeedInputs, SameResolutionLegacyFloatsMigrateDuringLiveUpdate) {
     EXPECT_EQ(fixture.water().cells_stepped_last_update(), cells);
 }
 
+TEST(WaterSeedInputs, SameResolutionIntegerAdoptionRebuildsMirrorsForQueriesAndSprings) {
+    for (const int resolution : {8, 16}) {
+        for (const bool direct : {false, true}) {
+            SeedFixture fixture;
+            fixture.water().SetSimResolution(resolution);
+            fixture.water().SetHydrology(true, 0, 0);
+            fixture.water().SetBootPaused(true);
+            fixture.tick(); // Bind the query's resident set without advancing loaded water.
+            auto& chunk = *fixture.chunks().begin()->second;
+            const auto cells = static_cast<std::size_t>(resolution * resolution);
+            chunk.has_water_sim.store(true);
+            chunk.current_water_resolution.store(resolution);
+            chunk.water_bed_mm.assign(cells, 100000);
+            chunk.water_depth_mm.assign(cells, 1250);
+            chunk.water_edge_flux.assign(2 * cells, 0);
+            chunk.is_water_sleeping.store(true);
+            chunk.water_mesh_generated.store(true);
+            chunk.water_mesh_dirty_ticks = 9;
+            const auto stamp = chunk.authority_stamp();
+            const auto revision = chunk.water_revision();
+            const auto hash = fixture.world().debug_water_state_hash().hash;
+            if (direct) {
+                ASSERT_TRUE(fixture.water().ResizeSimulationGrid(
+                    chunk, static_cast<Systems::WaterDetailLevel>(resolution)));
+            } else {
+                // Mirror-only repair does not count as a resolution migration.
+                EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+            }
+            EXPECT_EQ(chunk.water_level_data, std::vector<float>(cells, 101.25f));
+            EXPECT_EQ(chunk.water_sim_terrain_height, std::vector<float>(cells, 100.0f));
+            EXPECT_EQ(chunk.water_flow_data, std::vector<Vec2>(cells, Vec2(0.0f)));
+            EXPECT_FALSE(chunk.water_mesh_generated.load());
+            EXPECT_EQ(chunk.water_mesh_dirty_ticks, 0);
+            EXPECT_TRUE(fixture.water().mesh_invalidations().contains(chunk.get_id()));
+            EXPECT_EQ(chunk.authority_stamp(), stamp);
+            EXPECT_EQ(chunk.water_revision(), revision);
+            EXPECT_FALSE(chunk.is_water_state_dirty());
+            EXPECT_FALSE(chunk.is_voxel_data_dirty());
+            EXPECT_FALSE(chunk.has_water_authority());
+            EXPECT_TRUE(chunk.is_water_sleeping.load());
+            EXPECT_EQ(fixture.world().debug_water_state_hash().hash, hash);
+            EXPECT_EQ(chunk.water_bed_mm, std::vector<std::int32_t>(cells, 100000));
+            EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(cells, 1250));
+            EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(2 * cells, 0));
+
+            const auto base = Vec3(chunk.get_coords() * IVec3(16, 0, 16));
+            const auto position = base + Vec3(7.0f, 0.0f, 7.0f);
+            EXPECT_FLOAT_EQ(fixture.water().get_water_level_at(position.x, position.z) - 100.0f,
+                            1.25f);
+            entt::registry sources;
+            const auto spring = sources.create();
+            sources.emplace<Components::TransformComponent>(spring).position = position;
+            sources.emplace<Components::FlowingWaterSourceComponent>(spring).flow_rate = 1000.0f;
+            fixture.water().SetBootPaused(false);
+            fixture.water().update(sources, fixture.chunks());
+            const auto spring_axis = 7 * resolution / CHUNK_SIZE_X;
+            const auto spring_cell =
+                static_cast<std::size_t>(spring_axis * resolution + spring_axis);
+            EXPECT_GT(fixture.water().debug_source_injected_mm(), 0);
+            EXPECT_GT(chunk.water_depth_mm[spring_cell], 1250);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, IntegerMirrorRepairPreservesSizedMirrorsAndWellFormedSavedBytes) {
+    for (const bool direct : {false, true}) {
+        for (const int field : {0, 1, 2}) {
+            for (const std::size_t length : {0u, 63u, 64u, 65u}) {
+                SeedFixture fixture;
+                fixture.water().SetSimResolution(8);
+                fixture.tick();
+                auto& chunk = *fixture.chunks().begin()->second;
+                chunk.water_bed_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+                chunk.water_depth_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+                chunk.water_level_data.assign(field == 0 ? length : 64u, 12.0f);
+                chunk.water_sim_terrain_height.assign(field == 1 ? length : 64u, 34.0f);
+                chunk.water_flow_data.assign(field == 2 ? length : 64u, Vec2(2.0f, -3.0f));
+                chunk.mark_water_data_dirty();
+                const auto stamp = chunk.authority_stamp();
+                const auto revision = chunk.water_revision();
+                const auto hash = fixture.world().debug_water_state_hash().hash;
+                chunk.water_mesh_generated.store(true);
+                chunk.water_mesh_dirty_ticks = 9;
+                fixture.water().acknowledge_mesh_invalidation(chunk.get_id());
+                WorldStreamingState saved;
+                ASSERT_TRUE(saved.insert_chunk(fixture.chunks().begin()->second));
+                const auto bytes = Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
+                if (direct) {
+                    ASSERT_TRUE(fixture.water().ResizeSimulationGrid(
+                        chunk, Systems::WaterDetailLevel::Medium));
+                } else {
+                    EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()), 0u);
+                }
+                const bool repaired = length != 64u;
+                const float surface =
+                    static_cast<float>(std::int64_t{2} * std::numeric_limits<std::int32_t>::max()) /
+                    1000.0f;
+                const float bed =
+                    static_cast<float>(std::numeric_limits<std::int32_t>::max()) / 1000.0f;
+                EXPECT_EQ(chunk.water_level_data,
+                          std::vector<float>(64, repaired && field == 0 ? surface : 12.0f));
+                EXPECT_EQ(chunk.water_sim_terrain_height,
+                          std::vector<float>(64, repaired && field == 1 ? bed : 34.0f));
+                EXPECT_EQ(
+                    chunk.water_flow_data,
+                    std::vector<Vec2>(64, repaired && field == 2 ? Vec2(0.0f) : Vec2(2.0f, -3.0f)));
+                EXPECT_EQ(chunk.authority_stamp(), stamp);
+                EXPECT_EQ(chunk.water_revision(), revision);
+                EXPECT_EQ(fixture.world().debug_water_state_hash().hash, hash);
+                EXPECT_EQ(chunk.water_mesh_generated.load(), !repaired);
+                EXPECT_EQ(chunk.water_mesh_dirty_ticks, repaired ? 0 : 9);
+                EXPECT_EQ(fixture.water().mesh_invalidations().contains(chunk.get_id()), repaired);
+                if (!repaired) {
+                    EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(saved), bytes);
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, IntegerMirrorRepairRefusesPartialAuthorityAndChunksWithoutSimulation) {
+    for (const bool direct : {false, true}) {
+        for (const bool has_sim : {false, true}) {
+            for (const bool partial_bed : {false, true}) {
+                for (const std::size_t length : {0u, 63u, 64u, 65u}) {
+                    if (has_sim && length == 64u) {
+                        continue;
+                    }
+                    SeedFixture fixture;
+                    fixture.water().SetSimResolution(8);
+                    auto& chunk = *fixture.chunks().begin()->second;
+                    chunk.current_water_resolution.store(8);
+                    chunk.has_water_sim.store(has_sim);
+                    chunk.water_bed_mm.assign(partial_bed ? length : 64u, 100000);
+                    chunk.water_depth_mm.assign(partial_bed ? 64u : length, 1250);
+                    chunk.water_mesh_generated.store(true);
+                    const auto beds = chunk.water_bed_mm;
+                    const auto depths = chunk.water_depth_mm;
+                    const auto stamp = chunk.authority_stamp();
+                    if (direct) {
+                        EXPECT_FALSE(fixture.water().ResizeSimulationGrid(
+                            chunk, Systems::WaterDetailLevel::Medium));
+                    } else {
+                        EXPECT_EQ(fixture.water().MigrateChunksToSimResolution(fixture.chunks()),
+                                  0u);
+                    }
+                    EXPECT_TRUE(chunk.water_level_data.empty());
+                    EXPECT_TRUE(chunk.water_sim_terrain_height.empty());
+                    EXPECT_TRUE(chunk.water_flow_data.empty());
+                    EXPECT_TRUE(chunk.water_mesh_generated.load());
+                    EXPECT_TRUE(fixture.water().mesh_invalidations().empty());
+                    EXPECT_EQ(chunk.water_bed_mm, beds);
+                    EXPECT_EQ(chunk.water_depth_mm, depths);
+                    EXPECT_EQ(chunk.authority_stamp(), stamp);
+                    EXPECT_EQ(chunk.has_water_sim.load(), has_sim);
+                }
+            }
+        }
+    }
+}
+
 TEST(WaterSeedInputs, LegacyMissingOrShortSurfaceKeepsAvailableFlow) {
     for (const std::size_t surface_cells : {0u, 3u}) {
         for (const std::size_t flow_cells : {0u, 4u}) {
