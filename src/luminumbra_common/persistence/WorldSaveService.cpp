@@ -2420,6 +2420,7 @@ struct ChunkEncodeWork {
     RegionRecord record;
     std::string inputs;
     bool water_authority = false;
+    bool strict_water_valid = false;
     bool has_null = false;
     bool success = false;
     std::vector<std::string> errors{};
@@ -2497,7 +2498,8 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             if (hook)
                 hook(index);
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
-            const std::string payload = SerializeChunkRecordPayloadJson(*item.chunk);
+            const std::string payload =
+                SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
             if (!CompressPayload(payload, item.record, &item.errors)) {
                 in_flight.release(admitted);
                 admitted = 0;
@@ -8790,7 +8792,7 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                                           SdfLatticeAdmissible(*chunk),
                                           water_authority ||
                                               (record.flags & kRecordFlagEdited) != 0u,
-                                          true}, // Encoded records satisfy the JSON-only proof.
+                                          item.strict_water_valid},
                          std::move(cached)});
                 }
                 std::string().swap(inputs);

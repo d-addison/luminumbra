@@ -4784,7 +4784,7 @@ TEST(WorldSaveService, AbandonedPlantPublicationRestoresBothMembers) {
 namespace {
 WorldSaveService::AuthorityReadLimits WindowLimits();
 
-std::string SavedWaterFixture(const IVec3& coords) {
+std::string SavedWaterFixture(const IVec3& coords, bool encoded = false) {
     WorldStreamingState state;
     auto chunk = state.get_or_create_chunk(coords);
     chunk->set_state(ChunkState::Idle);
@@ -4797,7 +4797,49 @@ std::string SavedWaterFixture(const IVec3& coords) {
     chunk->water_flow_data.assign(16, Vec2(0.1f, -0.2f));
     chunk->water_sim_terrain_height.assign(16, -0.1f);
     chunk->mark_water_data_dirty();
-    return Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state, true);
+    return encoded ? Luminumbra::Persistence::SerializeChunkRecordPayloadJson(*chunk)
+                   : Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state, true);
+}
+
+std::string MalformedEncodedSavedWaterFixture(const IVec3& coords, int variant) {
+    namespace P = Luminumbra::Persistence;
+    auto payload = nlohmann::json::parse(SavedWaterFixture(coords, true));
+    Chunk chunk(coords);
+    chunk.water_depth_mm.assign(16, 1000);
+    chunk.water_bed_mm.assign(16, -100);
+    chunk.water_edge_flux.assign(32, -10);
+    if (variant == 0) {
+        chunk.water_depth_mm[0] = -1;
+    } else if (variant == 1) {
+        chunk.water_bed_mm.clear();
+    } else if (variant == 2) {
+        chunk.water_edge_flux.pop_back();
+    } else if (variant == 3) {
+        chunk.water_depth_mm.push_back(0);
+    } else if (variant == 5) {
+        chunk.water_depth_mm.clear();
+    } else if (variant == 6) {
+        chunk.water_bed_mm.pop_back();
+    } else if (variant == 7) {
+        chunk.water_depth_mm.resize(15);
+        chunk.water_bed_mm.resize(15);
+        chunk.water_edge_flux.resize(30);
+    } else if (variant == 8) {
+        chunk.water_depth_mm.resize(17);
+        chunk.water_bed_mm.resize(17);
+        chunk.water_edge_flux.resize(34);
+    } else if (variant == 9) {
+        chunk.water_depth_mm.clear();
+        chunk.water_bed_mm.clear();
+    }
+    const auto arrays = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    for (const char* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
+        payload["chunks"][0][field] = arrays["chunks"][0][field];
+    }
+    if (variant == 4) {
+        payload["chunks"][0].erase("water_bed_mm");
+    }
+    return payload.dump();
 }
 
 std::string MalformedSavedWaterFixture(const IVec3& coords, int variant) {
@@ -4901,50 +4943,151 @@ TEST(WorldSaveService, IndexedWaterRefusalCoversEveryReaderAndCachedLegacyAdmiss
     }
 }
 
+TEST(WorldSaveService, IndexedEncodedWaterRefusesEveryReaderWithColdAndCachedProofs) {
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    for (const bool warm : {false, true}) {
+        for (int variant = 0; variant < 10; ++variant) {
+            SCOPED_TRACE(warm);
+            SCOPED_TRACE(variant);
+            const TempSaveDir save("encoded_water_refusal");
+            ASSERT_NO_FATAL_FAILURE(
+                WriteWaterRecord(save.path(), good, SavedWaterFixture(good, true)));
+            auto malformed = nlohmann::json::parse(MalformedEncodedSavedWaterFixture(bad, variant));
+            // Distinct payloads keep cold admission independent of earlier cached records.
+            malformed["chunks"][0]["water_state"]["water_mesh_dirty_ticks"] =
+                200 + variant + (warm ? 10 : 0);
+            ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(
+                save.path(), bad, malformed.dump(), static_cast<Luminumbra::u8>(variant % 2)));
+            const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+            const auto before = ReadFileBytes(region);
+            const WorldSaveService::WorldReadScope reads;
+            std::vector<std::string> errors;
+            WorldStreamingState loaded;
+            // Encoded records always require every array, including in compatibility mode.
+            const bool legacy_loadable = variant != 4;
+            if (warm) {
+                EXPECT_EQ(WorldSaveService::validate_save(save.path(), &errors), legacy_loadable);
+                EXPECT_EQ(WorldSaveService{}.load_world(loaded, save.path(), errors),
+                          legacy_loadable);
+                EXPECT_EQ(loaded.size(), legacy_loadable ? 2u : 0u);
+            }
+            ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+            errors.clear();
+            EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+            // Both cached-fact admissions reject exact bytes without another decode.
+            if (warm && legacy_loadable) {
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+            }
+            const auto exact = WorldSaveService::read_chunk(save.path(), bad);
+            EXPECT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Error);
+            EXPECT_EQ(exact.chunk, nullptr);
+            EXPECT_NE(exact.error.find("Saved water"), std::string::npos);
+            std::vector<std::shared_ptr<Chunk>> chunks;
+            EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks, &errors));
+            EXPECT_TRUE(chunks.empty());
+            EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(
+                region, 32, 32, 0, 0, chunks, &errors));
+            EXPECT_TRUE(chunks.empty());
+            WorldSaveService::AuthorityWindowReader reader;
+            std::string error;
+            ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+            const auto window = reader.read({32, 32, 0, 0}, WindowLimits());
+            EXPECT_EQ(window.membership, WorldSaveService::AuthorityMembership::Unavailable);
+            EXPECT_TRUE(window.chunks.empty());
+            EXPECT_NE(window.error.find("Saved water"), std::string::npos) << window.error;
+            EXPECT_EQ(ReadFileBytes(region), before);
+        }
+    }
+}
+
+TEST(WorldSaveService, EncodedWriterCachesTheIntegerWaterProofWithoutDecoding) {
+    namespace P = Luminumbra::Persistence;
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    for (int variant = 0; variant < 4; ++variant) {
+        SCOPED_TRACE(variant);
+        const TempSaveDir save("encoded_writer_proof");
+        WorldStreamingState source;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            MalformedEncodedSavedWaterFixture(bad, variant), source, errors));
+        source.get_or_create_chunk(good)->set_state(ChunkState::Idle);
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path(), &errors))
+            << JoinErrors(errors);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+        const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+        const auto before = ReadFileBytes(region);
+        WorldStreamingState loaded;
+        loaded.get_or_create_chunk(good);
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        EXPECT_EQ(ReadFileBytes(region), before);
+        WorldSaveService::AdmittedChunkRecordAudit audit;
+        ASSERT_TRUE(WorldSaveService::audit_admitted_chunk_records_for_testing(region, audit));
+        EXPECT_EQ(audit.admitted, 1u);
+        EXPECT_EQ(audit.mismatched, 0u);
+    }
+}
+
 TEST(WorldSaveService, IndexedUpgradeRefusesUnloadedMalformedWaterWithoutChangingSavedBytes) {
     namespace P = Luminumbra::Persistence;
     const IVec3 bad{32, 0, 0};
-    for (const bool warm : {false, true}) {
-        for (int variant = 0; variant < 5; ++variant) {
-            SCOPED_TRACE(warm);
-            SCOPED_TRACE(variant);
-            const TempSaveDir save("water_upgrade_refusal");
-            auto malformed = nlohmann::json::parse(MalformedSavedWaterFixture(bad, variant));
-            // Distinct bytes keep the cold/warm decode oracle independent of other cases.
-            malformed["chunks"][0]["water_mesh_dirty_ticks"] = 100 + variant + (warm ? 5 : 0);
-            malformed["chunks"][0]["water_state"]["water_mesh_dirty_ticks"] =
-                100 + variant + (warm ? 5 : 0);
-            ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), bad, malformed.dump()));
-            const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
-            const auto before = ReadFileBytes(region);
-            std::vector<std::string> errors;
-            const WorldSaveService::WorldReadScope reads;
-            if (warm) {
-                ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
-            }
-            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
-            {
-                P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
-                ASSERT_TRUE(transaction.begin(&errors));
-                WorldStreamingState resident;
-                resident.get_or_create_chunk({0, 0, 0})->set_state(ChunkState::Idle);
-                ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path(), &errors))
-                    << JoinErrors(errors);
-                EXPECT_EQ(resident.find_chunk(bad), nullptr);
-                ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
-                EXPECT_FALSE(transaction.commit(&errors));
-                EXPECT_FALSE(std::filesystem::exists(P::snapshot_index_path(save.path())));
-            }
-            EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos)
-                << JoinErrors(errors);
-            EXPECT_EQ(ReadFileBytes(region), before);
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(save.path())) {
-                if (entry.is_regular_file()) {
-                    EXPECT_EQ(entry.path(), region);
+    for (const bool encoded : {false, true}) {
+        SCOPED_TRACE(encoded);
+        for (const bool warm : {false, true}) {
+            for (int variant = 0; variant < (encoded ? 4 : 5); ++variant) {
+                SCOPED_TRACE(warm);
+                SCOPED_TRACE(variant);
+                const TempSaveDir save("water_upgrade_refusal");
+                auto malformed =
+                    nlohmann::json::parse(encoded ? MalformedEncodedSavedWaterFixture(bad, variant)
+                                                  : MalformedSavedWaterFixture(bad, variant));
+                // Distinct bytes keep the cold/warm decode oracle independent of other cases.
+                malformed["chunks"][0]["water_mesh_dirty_ticks"] = 100 + variant + (warm ? 5 : 0);
+                malformed["chunks"][0]["water_state"]["water_mesh_dirty_ticks"] =
+                    100 + variant + (warm ? 5 : 0);
+                ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), bad, malformed.dump()));
+                const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+                const auto before = ReadFileBytes(region);
+                std::vector<std::string> errors;
+                const WorldSaveService::WorldReadScope reads;
+                if (warm) {
+                    ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
                 }
+                const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+                {
+                    P::SaveTransaction transaction(
+                        save.path(), 0, {}, WorldSaveService::member_digest);
+                    ASSERT_TRUE(transaction.begin(&errors));
+                    WorldStreamingState resident;
+                    resident.get_or_create_chunk({0, 0, 0})->set_state(ChunkState::Idle);
+                    ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path(), &errors))
+                        << JoinErrors(errors);
+                    EXPECT_EQ(resident.find_chunk(bad), nullptr);
+                    ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
+                    EXPECT_FALSE(transaction.commit(&errors));
+                    EXPECT_FALSE(std::filesystem::exists(P::snapshot_index_path(save.path())));
+                }
+                EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos)
+                    << JoinErrors(errors);
+                EXPECT_EQ(ReadFileBytes(region), before);
+                for (const auto& entry :
+                     std::filesystem::recursive_directory_iterator(save.path())) {
+                    if (entry.is_regular_file()) {
+                        EXPECT_EQ(entry.path(), region);
+                    }
+                }
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
+                          decodes + (warm ? 0u : 1u));
             }
-            EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
-                      decodes + (warm ? 0u : 1u));
         }
     }
 }
@@ -5199,7 +5342,9 @@ TEST(WorldSaveService, EveryWriterWaterShapeSavesAndReopensThroughIndexedAdmissi
                 chunk->set_water_authority();
                 chunk->mark_water_state_dirty();
             }
-            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk);
+            bool valid = false;
+            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk, &valid);
+            EXPECT_TRUE(valid) << shapes[shape];
             for (const auto& bytes : {encoded, P::SerializeChunkAuthoritySnapshotJson(*chunk)}) {
                 WorldStreamingState decoded;
                 std::vector<std::string> errors;
