@@ -79,15 +79,6 @@ std::string ObjectText(const GroundObject& object) {
            std::to_string(object.payload) + ',' + std::to_string(object.flags) + ';';
 }
 
-std::size_t ReservedBytes(GroundObject object) {
-    object.active_age = std::numeric_limits<std::uint32_t>::max();
-    object.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
-    object.flags = GroundObject::kSettled;
-    // ObjectText has ten punctuation bytes; JSON has 104 (keys, quotes, braces,
-    // colons and separators). Reserve the per-object array comma as well.
-    return ObjectText(object).size() + 95;
-}
-
 void AppendField(std::string& out, const char* name, const std::string& value) {
     out += '"';
     out += name;
@@ -104,16 +95,6 @@ void Detach(RegionIndex& index, RegionKey key, std::uint64_t id) {
     if (it->second.empty()) {
         index.erase(it);
     }
-}
-
-// True when `after` differs from `before` only in y_mm and the kSettled bit, and is still valid.
-bool OnlySettleChanged(const GroundObject& before, const GroundObject& after) {
-    constexpr std::uint16_t kOtherFlags = static_cast<std::uint16_t>(~GroundObject::kSettled);
-    return after.id == before.id && after.type == before.type && after.x_mm == before.x_mm &&
-           after.z_mm == before.z_mm && after.spawn_tick == before.spawn_tick &&
-           after.active_age == before.active_age && after.despawn_after == before.despawn_after &&
-           after.payload == before.payload && ((after.flags ^ before.flags) & kOtherFlags) == 0 &&
-           GroundObjectStore::valid(after);
 }
 
 // Reads an unsigned JSON integer no larger than `max`. Negative, fractional and oversized values
@@ -146,6 +127,25 @@ bool ReadSigned(const Json& object, const char* key, std::int64_t& value) {
 }
 
 } // namespace
+
+std::size_t GroundObjectStore::ReservedBytes(GroundObject object) {
+    object.active_age = std::numeric_limits<std::uint32_t>::max();
+    object.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
+    object.flags = GroundObject::kSettled;
+    // ObjectText has ten punctuation bytes; JSON has 104 (keys, quotes, braces,
+    // colons and separators). Reserve the per-object array comma as well.
+    return ObjectText(object).size() + 95;
+}
+
+// True when `after` differs from `before` only in y_mm and the kSettled bit, and is still valid.
+bool GroundObjectStore::OnlySettleChanged(const GroundObject& before, const GroundObject& after) {
+    constexpr std::uint16_t kOtherFlags = static_cast<std::uint16_t>(~GroundObject::kSettled);
+    return after.id == before.id && after.type == before.type && after.x_mm == before.x_mm &&
+           after.z_mm == before.z_mm && after.spawn_tick == before.spawn_tick &&
+           after.active_age == before.active_age && after.despawn_after == before.despawn_after &&
+           after.payload == before.payload && ((after.flags ^ before.flags) & kOtherFlags) == 0 &&
+           GroundObjectStore::valid(after);
+}
 
 bool GroundObjectStore::valid(const GroundObject& object) {
     constexpr std::int64_t kMax = kMaxCoordinateMm;
@@ -246,48 +246,10 @@ std::vector<RegionKey> GroundObjectStore::regions() const {
 }
 
 GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const SettleFn& settle) {
-    AgeResult result;
-    const auto regionIt = m_byRegion.find(key);
-    if (regionIt == m_byRegion.end()) {
-        return result;
+    if (settle) {
+        return age_region(key, [&settle](GroundObject& object) { return settle(object); });
     }
-    // Retain the region entry until iteration ends, including when its last object despawns.
-    auto& ids = regionIt->second;
-    for (auto idIt = ids.begin(); idIt != ids.end();) {
-        const auto current = idIt++;
-        const std::uint64_t id = *current;
-        const auto objectIt = m_objects.find(id);
-        if (objectIt == m_objects.end()) {
-            continue;
-        }
-        GroundObject& live = objectIt->second;
-
-        if (!live.settled() && settle) {
-            const GroundObject before = live;
-            settle(live);
-            if (!OnlySettleChanged(before, live)) {
-                live = before;
-            } else if (live.settled()) {
-                ++result.settled;
-            }
-        }
-
-        if (live.active_age != std::numeric_limits<std::uint32_t>::max()) {
-            ++live.active_age;
-            ++result.aged;
-        }
-
-        if (live.despawn_after != 0 && live.active_age >= live.despawn_after) {
-            result.despawned.push_back(live);
-            ids.erase(current);
-            m_reserved_bytes -= ReservedBytes(live);
-            m_objects.erase(objectIt);
-        }
-    }
-    if (ids.empty()) {
-        m_byRegion.erase(regionIt);
-    }
-    return result;
+    return AgeRegion<false>(key, [](GroundObject&) { return false; });
 }
 
 std::string GroundObjectStore::serialize(const GroundNotifications& notifications,

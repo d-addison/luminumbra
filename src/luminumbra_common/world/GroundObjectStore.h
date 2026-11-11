@@ -6,10 +6,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace Luminumbra::world {
@@ -116,6 +118,15 @@ public:
     // despawn_after != 0 and active_age >= despawn_after is removed and reported.
     AgeResult age_region(RegionKey key, const SettleFn& settle);
 
+    // Concrete callbacks stay visible to the compiler throughout the indexed traversal.
+    // The callback has the same mutation restrictions as SettleFn and must be callable.
+    template<typename Settle>
+        requires(std::is_class_v<Settle> && !std::is_base_of_v<SettleFn, Settle> &&
+                 std::is_invocable_r_v<bool, const Settle&, GroundObject&>)
+    AgeResult age_region(RegionKey key, const Settle& settle) {
+        return AgeRegion<true>(key, settle);
+    }
+
     // Canonical file bytes. Empty string when objects and notification state are empty.
     // Format, exactly (no whitespace other than the single trailing newline):
     //   {"schema":"luminumbra.ground_objects.v1","objects":[{"id":N,"type":N,"x_mm":N,
@@ -154,6 +165,56 @@ public:
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
 
 private:
+    template<bool SettleObjects, typename Settle>
+    AgeResult AgeRegion(RegionKey key, const Settle& settle) {
+        AgeResult result;
+        const auto regionIt = m_byRegion.find(key);
+        if (regionIt == m_byRegion.end()) {
+            return result;
+        }
+        // Retain the region entry until iteration ends, including when its last object despawns.
+        auto& ids = regionIt->second;
+        for (auto idIt = ids.begin(); idIt != ids.end();) {
+            const auto current = idIt++;
+            const std::uint64_t id = *current;
+            const auto objectIt = m_objects.find(id);
+            if (objectIt == m_objects.end()) {
+                continue;
+            }
+            GroundObject& live = objectIt->second;
+
+            if constexpr (SettleObjects) {
+                if (!live.settled()) {
+                    const GroundObject before = live;
+                    settle(live);
+                    if (!OnlySettleChanged(before, live)) {
+                        live = before;
+                    } else if (live.settled()) {
+                        ++result.settled;
+                    }
+                }
+            }
+
+            if (live.active_age != std::numeric_limits<std::uint32_t>::max()) {
+                ++live.active_age;
+                ++result.aged;
+            }
+
+            if (live.despawn_after != 0 && live.active_age >= live.despawn_after) {
+                result.despawned.push_back(live);
+                ids.erase(current);
+                m_reserved_bytes -= ReservedBytes(live);
+                m_objects.erase(objectIt);
+            }
+        }
+        if (ids.empty()) {
+            m_byRegion.erase(regionIt);
+        }
+        return result;
+    }
+
+    static std::size_t ReservedBytes(GroundObject object);
+    static bool OnlySettleChanged(const GroundObject& before, const GroundObject& after);
     std::map<std::uint64_t, GroundObject> m_objects;
     std::map<RegionKey, std::set<std::uint64_t>> m_byRegion;
     std::size_t m_reserved_bytes = 0;

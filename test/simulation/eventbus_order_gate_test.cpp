@@ -164,9 +164,89 @@ bool callback_publications_follow_the_interrupted_batch() {
     return true;
 }
 
+struct DirectContinuation {
+    bool& allowed;
+    bool& throws;
+    std::size_t& calls;
+    DirectContinuation(bool& permit, bool& fault, std::size_t& visits)
+        : allowed(permit)
+        , throws(fault)
+        , calls(visits) {}
+    DirectContinuation(const DirectContinuation&) = delete;
+    DirectContinuation& operator=(const DirectContinuation&) = delete;
+    bool operator()() const {
+        ++calls;
+        if (throws) {
+            throw std::runtime_error("continuation fault");
+        }
+        return allowed;
+    }
+};
+
+bool concrete_continuation_preserves_refusal_fault_and_retry() {
+    luminumbra::simulation::OrderedEventBus bus;
+    bool allowed = false, throws = false;
+    std::size_t calls = 0;
+    const DirectContinuation continuation(allowed, throws, calls);
+    if (!bus.drain(0, continuation).empty() || calls != 0)
+        return false;
+    std::vector<std::string> observed;
+    bus.subscribe([&](const auto& event) {
+        observed.push_back("first:" + event.payload);
+        if (event.payload == "one") {
+            allowed = false;
+        }
+    });
+    bus.subscribe([&](const auto& event) { observed.push_back("second:" + event.payload); });
+    bus.publish(2, "test", "future");
+    bus.publish(1, "test", "two");
+    bus.publish(1, "test", "one", -1);
+    if (!bus.drain(0, continuation).empty() || calls != 0 || !bus.drain(1, continuation).empty() ||
+        calls != 1 || !observed.empty())
+        return false;
+    throws = true;
+    try {
+        bus.drain(1, continuation);
+        return false;
+    } catch (const std::runtime_error&) {}
+    if (calls != 2 || !observed.empty() || bus.pending_count() != 3 || !pending_bytes_match(bus))
+        return false;
+    throws = false;
+    allowed = true;
+    if (!bus.drain(1, continuation).empty() || calls != 4 ||
+        observed != std::vector<std::string>{"first:one"} || !pending_bytes_match(bus))
+        return false;
+    allowed = true;
+    if (bus.drain(1, continuation).size() != 2 || calls != 7 || bus.pending_count() != 1 ||
+        observed !=
+            std::vector<std::string>{"first:one", "second:one", "first:two", "second:two"} ||
+        !pending_bytes_match(bus))
+        return false;
+    if (bus.drain(2, continuation).size() != 1 || calls != 9 || bus.pending_count() != 0 ||
+        !pending_bytes_match(bus))
+        return false;
+    // The nullable compatibility overload still accepts an explicit empty continuation.
+    bus.publish(3, "test", "last");
+    if (bus.drain(3, {}).size() != 1 || bus.pending_count() != 0)
+        return false;
+    bool (*const missing)() = nullptr;
+    bus.publish(4, "test", "pointer");
+    if (bus.drain(4, missing).size() != 1)
+        return false;
+    bus.publish(5, "test", "null");
+    if (bus.drain(5, nullptr).size() != 1)
+        return false;
+    const std::function<bool()> empty;
+    bus.publish(6, "test", "empty");
+    return bus.drain(6, empty).size() == 1 && bus.pending_count() == 0;
+}
+
 } // namespace
 
 int main() {
+    if (!concrete_continuation_preserves_refusal_fault_and_retry())
+        return fail(
+            "concrete continuation copied state or changed refusal, fault or retry behavior");
     if (!sequence_exhaustion_is_atomic())
         return fail("exhausted event sequence mutated pending state or wrapped the cursor");
     if (!subscriptions_during_delivery_start_with_later_events())

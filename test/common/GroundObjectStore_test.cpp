@@ -658,3 +658,91 @@ TEST(GroundObjectStoreTest, InvalidNotificationsRefuseTransactionally) {
     EXPECT_TRUE(
         RefusedUntouched(Replace(bytes, "\"sequence\":1", "\"sequence\":1,\"sequence\":1")));
 }
+
+namespace {
+struct DirectSettlement {
+    std::vector<std::uint64_t>& visited;
+    int mode;
+    DirectSettlement(std::vector<std::uint64_t>& ids, int behavior)
+        : visited(ids)
+        , mode(behavior) {}
+    DirectSettlement(const DirectSettlement&) = delete;
+    DirectSettlement& operator=(const DirectSettlement&) = delete;
+    bool operator()(GroundObject& object) const {
+        visited.push_back(object.id);
+        if (mode == 0) {
+            return false;
+        }
+        object.y_mm = 10;
+        object.flags |= GroundObject::kSettled;
+        if (mode == 2) {
+            ++object.payload;
+        }
+        return true;
+    }
+};
+} // namespace
+
+TEST(GroundObjectStoreTest, ConcreteSettlementNeedsNoCopyAndVisitsOnlyUnsettledOwnedObjects) {
+    for (const int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
+        GroundObjectStore store;
+        auto settled = MakeObject(2);
+        settled.flags = GroundObject::kSettled;
+        auto expiring = MakeObject(3);
+        expiring.despawn_after = 1;
+        ASSERT_TRUE(store.insert(expiring));
+        ASSERT_TRUE(store.insert(settled));
+        ASSERT_TRUE(store.insert(MakeObject(1)));
+        ASSERT_TRUE(store.insert(MakeObject(4, kRegion)));
+        std::vector<std::uint64_t> visited;
+        const DirectSettlement settle(visited, mode);
+        EXPECT_EQ(store.age_region({9, 9}, settle).aged, 0u);
+        EXPECT_TRUE(visited.empty());
+        const auto result = store.age_region({0, 0}, settle);
+        EXPECT_EQ(visited, (std::vector<std::uint64_t>{1, 3}));
+        EXPECT_EQ(result.aged, 3u);
+        EXPECT_EQ(result.settled, mode == 1 ? 2u : 0u);
+        ASSERT_EQ(result.despawned.size(), 1u);
+        EXPECT_EQ(result.despawned.front().id, 3u);
+        const auto* live = store.find(1);
+        ASSERT_NE(live, nullptr);
+        EXPECT_EQ(live->active_age, 1u);
+        EXPECT_EQ(live->y_mm, mode == 1 ? 10 : 0);
+        EXPECT_EQ(live->payload, 0u);
+        EXPECT_EQ(live->settled(), mode == 1);
+        const auto* other = store.find(4);
+        ASSERT_NE(other, nullptr);
+        EXPECT_EQ(other->active_age, 0u);
+        EXPECT_FALSE(other->settled());
+    }
+    GroundObjectStore empty;
+    std::vector<std::uint64_t> visited;
+    const DirectSettlement settle(visited, 1);
+    EXPECT_EQ(empty.age_region({0, 0}, settle).aged, 0u);
+    EXPECT_TRUE(visited.empty());
+}
+
+TEST(GroundObjectStoreTest, NullableSettlementRetainsLegacyAdmission) {
+    for (const int mode : {0, 1, 2, 3}) {
+        GroundObjectStore store;
+        ASSERT_TRUE(store.insert(MakeObject(1)));
+        bool (*const missing)(GroundObject&) = nullptr;
+        GroundObjectStore::AgeResult result;
+        if (mode == 0) {
+            result = store.age_region({0, 0}, missing);
+        } else if (mode == 1) {
+            result = store.age_region({0, 0}, nullptr);
+        } else if (mode == 2) {
+            result = store.age_region({0, 0}, {});
+        } else {
+            const GroundObjectStore::SettleFn empty;
+            result = store.age_region({0, 0}, empty);
+        }
+        EXPECT_EQ(result.aged, 1u);
+        EXPECT_EQ(result.settled, 0u);
+        const auto* live = store.find(1);
+        ASSERT_NE(live, nullptr);
+        EXPECT_FALSE(live->settled());
+    }
+}
