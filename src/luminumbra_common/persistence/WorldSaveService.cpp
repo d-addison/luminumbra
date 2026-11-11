@@ -8509,8 +8509,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                           true,
                                           indexed))
                         return reject("");
-                    if (!chunk && (record.flags & kRecordFlagEdited) == 0u &&
-                        facts.loaded_or_edited &&
+                    // Only inventory loads need a repair chunk outside the retain set.
+                    // Validation can use the cached authority facts without materializing it.
+                    if (authoritative_inventory && !chunk &&
+                        (record.flags & kRecordFlagEdited) == 0u && facts.loaded_or_edited &&
                         !AdmitChunkRecord(
                             record, path, &errors, facts, &chunk, false, false, indexed))
                         return reject("");

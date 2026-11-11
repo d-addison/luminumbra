@@ -764,10 +764,6 @@ void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
                                 "water_sim_terrain_height"};
     std::array<std::size_t, fields.size()> counts{};
     for (std::size_t index = 0; index < fields.size(); ++index) {
-        // Encoded float mirrors already have typed, finite decoding. Only the integer
-        // grids acquire an indexed shape contract here.
-        if (encoded && index >= 3u)
-            break;
         const char* field = fields[index];
         if (!encoded && !value.contains(field)) {
             // Records predating integer grids restore empty depth/bed and zero flux.

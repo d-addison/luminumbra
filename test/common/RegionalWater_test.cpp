@@ -695,6 +695,75 @@ TEST(RegionalWaterPersistence, StrictEncodedWaterRefusesMalformedIntegersAndEnve
     }
 }
 
+TEST(RegionalWaterPersistence, StrictEncodedWaterChecksMirrorCountsBeforeDecodingArrays) {
+    namespace P = Luminumbra::Persistence;
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 4);
+    const auto snapshot = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    for (const char* field : {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+        for (const std::size_t count : {0u, 1u, 1024u}) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(count);
+            chunk.water_level_data.assign(count, 0.1f);
+            chunk.water_flow_data.assign(count, Vec2(0.1f));
+            chunk.water_sim_terrain_height.assign(count, -0.1f);
+            bool valid = false;
+            const auto bytes = P::SerializeChunkRecordPayloadJson(chunk, &valid);
+            EXPECT_TRUE(valid);
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                bytes, restored, errors, {.strict_water = true, .strict_water_valid = &valid}))
+                << (errors.empty() ? "" : errors.front());
+            EXPECT_TRUE(valid);
+            ASSERT_NE(restored.find_chunk({0, 0, 0}), nullptr);
+            EXPECT_TRUE(restored.find_chunk({0, 0, 0})->same_water_state(chunk));
+        }
+        for (int fault = 0; fault < 9; ++fault) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(fault);
+            auto malformed = snapshot;
+            auto& array = malformed["chunks"][0][field];
+            if (fault == 0) {
+                array["count"] = 1025u;
+            } else if (fault == 1) {
+                array["count"] = std::numeric_limits<std::uint64_t>::max();
+            } else if (fault == 2) {
+                array["count"] = -1;
+            } else if (fault == 3) {
+                array["count"] = 1.5;
+            } else if (fault == 4) {
+                array["count"] = "1025";
+            } else if (fault == 5) {
+                array["count"] = nullptr;
+            } else if (fault == 6) {
+                array.erase("count");
+            } else if (fault == 7) {
+                array = nullptr;
+            } else {
+                malformed["chunks"][0].erase(field);
+            }
+            // The earlier SDF array must never be decoded before water counts are checked.
+            malformed["chunks"][0]["sdf_data"] = nullptr;
+            WorldStreamingState restored;
+            restored.get_or_create_chunk({1, 0, 0});
+            std::vector<std::string> errors;
+            bool valid = true;
+            EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                malformed.dump(),
+                restored,
+                errors,
+                {.strict_water = true, .strict_water_valid = &valid}));
+            EXPECT_FALSE(valid);
+            EXPECT_TRUE(restored.empty());
+            ASSERT_FALSE(errors.empty());
+            EXPECT_NE(errors.front().find(fault < 6 ? "Saved water grid shape refused"
+                                                    : "Saved water structure refused"),
+                      std::string::npos);
+        }
+    }
+}
+
 TEST(RegionalWaterPersistence, StrictEncodedWaterRefusesInvalidResolutionAndState) {
     namespace P = Luminumbra::Persistence;
     Chunk chunk({0, 0, 0});

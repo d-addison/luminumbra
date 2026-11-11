@@ -4831,6 +4831,12 @@ std::string MalformedEncodedSavedWaterFixture(const IVec3& coords, int variant) 
     } else if (variant == 9) {
         chunk.water_depth_mm.clear();
         chunk.water_bed_mm.clear();
+    } else if (variant == 10) {
+        chunk.water_level_data.assign(1025, 0.0f);
+    } else if (variant == 11) {
+        chunk.water_flow_data.assign(1025, Vec2(0.0f));
+    } else if (variant == 12) {
+        chunk.water_sim_terrain_height.assign(1025, 0.0f);
     }
     const auto arrays = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
     for (const char* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
@@ -4838,6 +4844,12 @@ std::string MalformedEncodedSavedWaterFixture(const IVec3& coords, int variant) 
     }
     if (variant == 4) {
         payload["chunks"][0].erase("water_bed_mm");
+    }
+    if (variant >= 10) {
+        constexpr std::array mirrors{
+            "water_level_data", "water_flow_data", "water_sim_terrain_height"};
+        const char* field = mirrors[static_cast<std::size_t>(variant - 10)];
+        payload["chunks"][0][field] = arrays["chunks"][0][field];
     }
     return payload.dump();
 }
@@ -4895,6 +4907,55 @@ void IndexWaterFixture(const std::filesystem::path& root) {
     ASSERT_TRUE(WorldSaveService::write_file_durably(P::snapshot_index_path(root),
                                                      P::encode_snapshot_index(index)));
 }
+
+void ExpectIndexedWaterReadersRefuse(const std::filesystem::path& root,
+                                     const IVec3& coords,
+                                     const std::string& before,
+                                     bool cached) {
+    const auto exact_decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    const auto exact = WorldSaveService::read_chunk(root, coords);
+    EXPECT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_EQ(exact.chunk, nullptr);
+    EXPECT_NE(exact.error.find("Saved water"), std::string::npos);
+    if (cached) {
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), exact_decodes);
+    }
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+    const auto region = WorldSaveService::region_file_path(root, rx, rz);
+    std::vector<std::string> errors;
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks, &errors));
+    EXPECT_TRUE(chunks.empty());
+    EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(
+        region, coords.x, coords.x, coords.z, coords.z, chunks, &errors));
+    EXPECT_TRUE(chunks.empty());
+    WorldSaveService::AuthorityWindowReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+    const auto window = reader.read({coords.x, coords.x, coords.z, coords.z}, WindowLimits());
+    EXPECT_EQ(window.membership, WorldSaveService::AuthorityMembership::Unavailable);
+    EXPECT_TRUE(window.chunks.empty());
+    EXPECT_NE(window.error.find("Saved water"), std::string::npos) << window.error;
+    EXPECT_EQ(ReadFileBytes(region), before);
+}
+void ExpectBadWaterRegionRefused(const std::filesystem::path& root,
+                                 const std::filesystem::path& region,
+                                 const std::string& legacy_bytes) {
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks));
+    EXPECT_TRUE(chunks.empty());
+    EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(region, 32, 32, 0, 0, chunks));
+    EXPECT_TRUE(chunks.empty());
+    WorldSaveService::AuthorityWindowReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+    const auto result = reader.read({32, 32, 0, 0}, WindowLimits());
+    EXPECT_EQ(result.membership, WorldSaveService::AuthorityMembership::Unavailable);
+    EXPECT_TRUE(result.chunks.empty());
+    EXPECT_NE(result.error.find("Saved water"), std::string::npos) << result.error;
+    EXPECT_EQ(ReadFileBytes(region), legacy_bytes);
+}
 } // namespace
 
 TEST(WorldSaveService, IndexedWaterRefusalCoversEveryReaderAndCachedLegacyAdmission) {
@@ -4920,33 +4981,22 @@ TEST(WorldSaveService, IndexedWaterRefusalCoversEveryReaderAndCachedLegacyAdmiss
         const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
         errors.clear();
         EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
         EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
         EXPECT_EQ(loaded.size(), 0u);
-        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        // Full loading materializes the valid first chunk before the later cached refusal.
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
         EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
         EXPECT_EQ(WorldSaveService::read_chunk(save.path(), bad).status,
                   WorldSaveService::ChunkReadStatus::Error);
-        std::vector<std::shared_ptr<Chunk>> chunks;
-        EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks));
-        EXPECT_TRUE(chunks.empty());
-        EXPECT_FALSE(
-            WorldSaveService::read_authoritative_region_chunks(region, 32, 32, 0, 0, chunks));
-        EXPECT_TRUE(chunks.empty());
-        WorldSaveService::AuthorityWindowReader reader;
-        std::string error;
-        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
-        const auto result = reader.read({32, 32, 0, 0}, WindowLimits());
-        EXPECT_EQ(result.membership, WorldSaveService::AuthorityMembership::Unavailable);
-        EXPECT_TRUE(result.chunks.empty());
-        EXPECT_NE(result.error.find("Saved water"), std::string::npos) << result.error;
-        EXPECT_EQ(ReadFileBytes(region), legacy_bytes);
+        ASSERT_NO_FATAL_FAILURE(ExpectBadWaterRegionRefused(save.path(), region, legacy_bytes));
     }
 }
 
 TEST(WorldSaveService, IndexedEncodedWaterRefusesEveryReaderWithColdAndCachedProofs) {
     const IVec3 good{0, 0, 0}, bad{32, 0, 0};
     for (const bool warm : {false, true}) {
-        for (int variant = 0; variant < 10; ++variant) {
+        for (int variant = 0; variant < 13; ++variant) {
             SCOPED_TRACE(warm);
             SCOPED_TRACE(variant);
             const TempSaveDir save("encoded_water_refusal");
@@ -4975,31 +5025,18 @@ TEST(WorldSaveService, IndexedEncodedWaterRefusesEveryReaderWithColdAndCachedPro
             const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
             errors.clear();
             EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
-            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
-            EXPECT_TRUE(loaded.empty());
-            EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
-            // Both cached-fact admissions reject exact bytes without another decode.
             if (warm && legacy_loadable) {
                 EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
             }
-            const auto exact = WorldSaveService::read_chunk(save.path(), bad);
-            EXPECT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Error);
-            EXPECT_EQ(exact.chunk, nullptr);
-            EXPECT_NE(exact.error.find("Saved water"), std::string::npos);
-            std::vector<std::shared_ptr<Chunk>> chunks;
-            EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks, &errors));
-            EXPECT_TRUE(chunks.empty());
-            EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(
-                region, 32, 32, 0, 0, chunks, &errors));
-            EXPECT_TRUE(chunks.empty());
-            WorldSaveService::AuthorityWindowReader reader;
-            std::string error;
-            ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
-            const auto window = reader.read({32, 32, 0, 0}, WindowLimits());
-            EXPECT_EQ(window.membership, WorldSaveService::AuthorityMembership::Unavailable);
-            EXPECT_TRUE(window.chunks.empty());
-            EXPECT_NE(window.error.find("Saved water"), std::string::npos) << window.error;
-            EXPECT_EQ(ReadFileBytes(region), before);
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+            // Only the valid first chunk needs materialization during full loading.
+            if (warm && legacy_loadable) {
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
+            }
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectIndexedWaterReadersRefuse(save.path(), bad, before, warm && legacy_loadable));
         }
     }
 }
@@ -5007,7 +5044,7 @@ TEST(WorldSaveService, IndexedEncodedWaterRefusesEveryReaderWithColdAndCachedPro
 TEST(WorldSaveService, EncodedWriterCachesTheIntegerWaterProofWithoutDecoding) {
     namespace P = Luminumbra::Persistence;
     const IVec3 good{0, 0, 0}, bad{32, 0, 0};
-    for (int variant = 0; variant < 4; ++variant) {
+    for (const int variant : {0, 1, 2, 3, 10, 11, 12}) {
         SCOPED_TRACE(variant);
         const TempSaveDir save("encoded_writer_proof");
         WorldStreamingState source;
@@ -5025,10 +5062,11 @@ TEST(WorldSaveService, EncodedWriterCachesTheIntegerWaterProofWithoutDecoding) {
         WorldStreamingState loaded;
         loaded.get_or_create_chunk(good);
         EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
         EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
         EXPECT_TRUE(loaded.empty());
         EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
-        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
         EXPECT_EQ(ReadFileBytes(region), before);
         WorldSaveService::AdmittedChunkRecordAudit audit;
         ASSERT_TRUE(WorldSaveService::audit_admitted_chunk_records_for_testing(region, audit));
