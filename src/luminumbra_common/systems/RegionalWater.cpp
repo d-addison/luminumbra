@@ -519,14 +519,31 @@ std::int64_t CellArea(const Chunk& grid) {
     return 4 * static_cast<std::int64_t>(CHUNK_SIZE_X) * CHUNK_SIZE_Z / (resolution * resolution);
 }
 
+std::int64_t AddVolume(std::int64_t total, std::int64_t change) {
+    if ((change > 0 && total > std::numeric_limits<std::int64_t>::max() - change) ||
+        (change < 0 && total < std::numeric_limits<std::int64_t>::min() - change)) {
+        throw std::invalid_argument("Regional water transaction volume overflow");
+    }
+    return total + change;
+}
+
+std::int64_t ScaleVolume(std::int64_t depth, std::int64_t area) {
+    // Validated resolutions make area positive (1..64).
+    if (depth > std::numeric_limits<std::int64_t>::max() / area ||
+        depth < std::numeric_limits<std::int64_t>::min() / area) {
+        throw std::invalid_argument("Regional water transaction volume overflow");
+    }
+    return depth * area;
+}
+
 std::int64_t Volume(const Chunk& grid) {
     std::int64_t depth = 0;
     for (const auto value : grid.water_depth_mm) {
-        depth += value;
+        depth = AddVolume(depth, value);
     }
-    // At most INT32_MAX * 1024 per chunk and 2^20 participants: totals fit i64,
-    // independent of the admitted resolution. Empty uninitialized grids contribute zero.
-    return depth * CellArea(grid);
+    // Empty uninitialized grids contribute zero. Check participant accumulation
+    // as well as each chunk's scaled volume.
+    return ScaleVolume(depth, CellArea(grid));
 }
 } // namespace
 
@@ -583,7 +600,7 @@ void Transaction::Begin(ActiveRegionLedger& ledger,
         for (auto& entry : m_entries) {
             entry.grid = std::make_shared<Chunk>(entry.live->get_coords());
             CaptureWater(*entry.live, *entry.grid);
-            m_expectedVolume += Volume(*entry.grid);
+            m_expectedVolume = AddVolume(m_expectedVolume, Volume(*entry.grid));
         }
         m_lastTick = tick;
         m_ledger = &ledger;
@@ -613,11 +630,14 @@ Chunk& Transaction::Grid(ChunkID id) {
 }
 
 void Transaction::Account(const WaterKernels::Result& result, const Chunk& grid) {
-    if (!result.applied ||
-        result.depth_before + result.source_mm != result.depth_after + result.sink_mm) {
+    if (!result.applied || AddVolume(result.depth_before, result.source_mm) !=
+                               AddVolume(result.depth_after, result.sink_mm)) {
         Refuse();
     }
-    m_expectedVolume += (result.depth_after - result.depth_before) * CellArea(grid);
+    // Kernel totals are nonnegative and bounded by two 32*32 int32 grids,
+    // so their difference is representable before checked scaling/accumulation.
+    m_expectedVolume = AddVolume(
+        m_expectedVolume, ScaleVolume(result.depth_after - result.depth_before, CellArea(grid)));
 }
 
 WaterKernels::Result Transaction::StepInterior(ChunkID id,
@@ -662,7 +682,7 @@ void Transaction::Publish() {
                 Refuse();
             }
             ValidateStageGrid(*entry.grid);
-            volume += Volume(*entry.grid);
+            volume = AddVolume(volume, Volume(*entry.grid));
             entry.changed = !entry.live->same_water_state(*entry.grid);
         }
         if (volume != m_expectedVolume) {

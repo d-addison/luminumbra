@@ -118,6 +118,7 @@ struct Plan {
 // those chunks and the ledger through Publish/Rollback; mesh workers use copies.
 // Kernel failure/exception discards all pending work. Publication validates every
 // stage before the first live write, then commits without allocating or refusing.
+// Nonrepresentable int64 volume throws invalid_argument and discards pending work.
 // Accepted ticks are consumed even by Rollback; repeated/backward Begin refuses.
 // Begin costs O(P log P + P*1024 + D log N); Publish costs O(P*1024 + D log N).
 // Storage is O(P*1024 + D), never O(world).

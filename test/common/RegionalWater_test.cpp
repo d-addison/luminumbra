@@ -1827,11 +1827,14 @@ TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublis
                                    static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
                                    static_cast<std::size_t>(CHUNK_SIZE_Z + 1),
                                -1.0f);
+    // Adoption preserves Unloaded; explicitly admit this generated terrain for meshing.
+    chunks[0]->set_state(ChunkState::Idle);
     ASSERT_TRUE(shield.adopt_streamed_chunk(chunks[0]));
     entt::registry registry;
     TransactionMeshGate gate(jobs, shield);
     shield.begin_tick(0);
     shield.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_EQ(chunks[0]->get_state(), ChunkState::Meshing);
     ASSERT_EQ(chunks[0]->pending_lod.load(), 0);
     ASSERT_FALSE(chunks[0]->pending_mesh_ready.load());
     const auto live_before = TransactionBytes(*chunks[0]);
@@ -2102,6 +2105,44 @@ TEST(RegionalWaterTransaction, EveryResolutionAccountsRainEvaporationAndConserve
         EXPECT_EQ(Mass(*chunks[0]), before);
         stage.Publish();
         EXPECT_EQ(Mass(*chunks[0]), expected);
+    }
+}
+
+TEST(RegionalWaterTransaction, MaximumLegalDepthsConserveAcrossResolutionsAndAccountingSigns) {
+    constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+    constexpr auto footprint = std::int64_t{4} * CHUNK_SIZE_X * CHUNK_SIZE_Z;
+    constexpr auto max_chunk_volume = maximum * footprint;
+    // Even the participant cap at maximum depths stays representable. Check via
+    // division so this assertion cannot itself overflow if the caps change.
+    EXPECT_LE(
+        Planning::kMaxResidents,
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / max_chunk_volume));
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int resolution : {4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0, maximum, resolution),
+                                 TransactionChunk(1, maximum, resolution)};
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto ledger_before = ledger.encode();
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        const auto evaporated = stage.StepInterior(chunks[0]->get_id(), shield, {.evap_mm = 1});
+        ASSERT_TRUE(evaporated.applied);
+        const auto cells = static_cast<std::int64_t>(resolution) * resolution;
+        EXPECT_EQ(evaporated.depth_before, maximum * cells);
+        EXPECT_EQ(evaporated.depth_after, (maximum - 1) * cells);
+        EXPECT_EQ(evaporated.sink_mm, cells);
+        const auto rained = stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 1});
+        ASSERT_TRUE(rained.applied);
+        EXPECT_EQ(rained.source_mm, cells);
+        EXPECT_EQ(rained.depth_after, maximum * cells);
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), ledger_before);
+        ASSERT_NO_THROW(stage.Publish());
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(Mass(*chunks[0]) + Mass(*chunks[1]), std::int64_t{2} * maximum * cells);
+        EXPECT_EQ(ledger.encode(), ledger_before);
     }
 }
 
