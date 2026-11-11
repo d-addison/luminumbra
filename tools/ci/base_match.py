@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check a pull request's base against injected ci.yml workflow-run JSON."""
+"""Check CI base evidence and require the event to match the live pull request."""
 
 import argparse
 from datetime import datetime
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -15,20 +16,39 @@ from urllib.request import Request, urlopen
 
 CI_EVENTS = frozenset(("opened", "synchronize", "reopened", "ready_for_review",
                        "converted_to_draft", "labeled", "unlabeled"))
+CI_BASES = frozenset(("main", "devel"))
 RECOVERY = ("Re-trigger ci.yml with synchronize (push a new head), reopened, "
             "ready_for_review, converted_to_draft, labeled or unlabeled "
             "(opened also starts CI). Re-running an old run retains its old base.")
 # The filtered Actions endpoint exposes at most 1,000 runs, 100 per page.
 MAX_RUNS = 1000
+# Bound each REST response to 8 MiB before decoding JSON.
 MAX_PAGE_BYTES = 8 * 1024 * 1024
+
+
+def pull_identity(pr):
+    """Validate the binding fields shared by event and live REST pull requests."""
+    if not isinstance(pr, dict):
+        raise ValueError("missing or malformed pull-request response")
+    number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["ref"]
+    if (type(number) is not int or number <= 0 or not isinstance(head, str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", head)
+            or not isinstance(base, str) or not base):
+        raise ValueError("missing or malformed pull-request number, head SHA or base")
+    return number, head, base
+
+
+def require_live(event, live):
+    """Refuse stale reruns even when their original event would have started CI."""
+    if pull_identity(event["pull_request"]) != pull_identity(live):
+        raise ValueError("stale event: live pull-request number, base or head changed; re-trigger CI")
 
 
 def evaluate(event, api):
     """Return a printable verdict; invalid or incomplete evidence raises ValueError."""
-    pr = event["pull_request"]
-    number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["ref"]
-    if type(number) is not int or number <= 0 or not isinstance(head, str) or not head or not isinstance(base, str) or not base:
-        raise ValueError("missing pull-request number, head SHA or current base")
+    number, head, base = pull_identity(event["pull_request"])
+    if base not in CI_BASES:
+        raise ValueError(f"CI does not run for base={base!r}; base is outside ci.yml's pull_request branches filter")
     current = f"base={base!r} head={head!r}"
     if event["action"] in CI_EVENTS:
         return f"BASEMATCH {current}: {event['action']} starts CI against this base."
@@ -64,30 +84,51 @@ def evaluate(event, api):
     raise ValueError(f"no ci.yml pull_request run records a base for this pull request; current {current}")
 
 
+def validate_api_target(repository, token):
+    if (not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
+            or repository.split("/")[-1] in (".", "..")):
+        raise ValueError("invalid repository for API lookup")
+    if not token:
+        raise ValueError("missing workflow token")
+
+
+def fetch_json(url, token, opener):
+    request = Request(url, headers={"Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    with opener(request, timeout=20) as response:
+        payload = response.read(MAX_PAGE_BYTES + 1)
+    if len(payload) > MAX_PAGE_BYTES:
+        raise ValueError("API response exceeds byte limit")
+    return json.loads(payload)
+
+
+def fetch_pull(repository, number, token, opener=None):
+    """Read the single live pull request, bounded like each workflow-run page."""
+    validate_api_target(repository, token)
+    if type(number) is not int or number <= 0:
+        raise ValueError("invalid pull-request number for API lookup")
+    data = fetch_json(f"https://api.github.com/repos/{repository}/pulls/{number}", token,
+                      urlopen if opener is None else opener)
+    if pull_identity(data)[0] != number:
+        raise ValueError("live pull-request response has the wrong number")
+    return data
+
+
 def fetch_runs(repository, head, token, opener=urlopen):
     """Read every filtered API page, refusing truncated or inconsistent listings.
 
     The workflow-runs REST schema records pull_requests[].base.ref:
     https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow
-    This is run evidence; a live pull-request lookup would lose the previous base.
+    Run evidence preserves the previous base; the final live lookup checks freshness.
     """
-    if (not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
-            or repository.split("/")[-1] in (".", "..")
-            or not re.fullmatch(r"[0-9a-fA-F]{40}", head)):
-        raise ValueError("invalid repository or head SHA for API lookup")
-    if not token:
-        raise ValueError("missing workflow token")
+    validate_api_target(repository, token)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+        raise ValueError("invalid head SHA for API lookup")
     runs, total = [], None
     for page in range(1, MAX_RUNS // 100 + 1):
         query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100, "page": page})
-        request = Request(f"https://api.github.com/repos/{repository}/actions/workflows/ci.yml/runs?{query}",
-                          headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                                   "X-GitHub-Api-Version": "2022-11-28"})
-        with opener(request, timeout=20) as response:
-            payload = response.read(MAX_PAGE_BYTES + 1)
-        if len(payload) > MAX_PAGE_BYTES:
-            raise ValueError("workflow-run API page exceeds byte limit")
-        data = json.loads(payload)
+        data = fetch_json(f"https://api.github.com/repos/{repository}/actions/workflows/ci.yml/runs?{query}",
+                          token, opener)
         count, batch = data["total_count"], data["workflow_runs"]
         if type(count) is not int or not 0 <= count <= MAX_RUNS or not isinstance(batch, list) or len(batch) > 100:
             raise ValueError("invalid or truncated workflow-run API page")
@@ -106,6 +147,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--api-json", type=Path, help="inject a complete workflow-run listing for offline checks")
+    parser.add_argument("--pr-json", type=Path, help="inject the live pull-request response for offline checks")
     args = parser.parse_args(argv)
     try:
         if args.event is None:
@@ -118,9 +160,15 @@ def main(argv=None):
             api = (json.loads(args.api_json.read_text(encoding="utf-8")) if args.api_json else
                    fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
                               os.environ.get("GH_TOKEN", "")))
-        print(evaluate(event, api))
+        verdict = evaluate(event, api)
+        # Fetch last: a workflow-run lookup can take multiple pages before this check.
+        live = (json.loads(args.pr_json.read_text(encoding="utf-8")) if args.pr_json else
+                fetch_pull(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["number"],
+                           os.environ.get("GH_TOKEN", "")))
+        require_live(event, live)
+        print(verdict)
         return 0
-    except (OSError, URLError, ValueError, KeyError, TypeError) as error:
+    except (OSError, URLError, HTTPException, ValueError, KeyError, TypeError, RecursionError) as error:
         print(f"Base match check failed closed: {error}. {RECOVERY}")
         return 1
 

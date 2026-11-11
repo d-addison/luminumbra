@@ -383,19 +383,30 @@ branch and path filters still apply. CI also listens for `labeled` and
 strings. The separate Base retarget workflow reports `Base retarget / fresh CI
 required` on every CI pull-request event listed above and on `edited`, including
 drafts. Its job always computes a verdict; title/body edits cannot clear a base
-mismatch. CI-triggering events pass because they start validation against the
-current base. On `edited`, the check compares the current base with the newest
+mismatch. Bases outside `ci.yml`'s pull-request branch filter (`main` and `devel`)
+fail closed; a source-contract test pins the script's allowed bases to that filter.
+CI-triggering events supply evidence that validation starts against the event
+base. On `edited`, the check compares the event base with the newest
 `ci.yml` pull-request run for this head and pull request, using the Actions REST
 workflow-run record's `pull_requests[].base.ref`. Missing runs or base metadata
 (including empty fork-run associations), incomplete API pages and API failures
-fail closed. The verdict records the base and head; the check uses a sparse
-checkout of the base revision and never executes pull-request code.
+fail closed. Immediately before any successful verdict, the check fetches the
+live pull request and requires its number, `base.ref` and `head.sha` to match the
+event payload. A stale rerun after a retarget or new push fails and asks the author
+to re-trigger CI; missing or malformed live responses also fail closed. The verdict
+records the base and head; the check uses a sparse checkout of the base revision
+and never executes pull-request code. A missing base-revision script fails.
 
 After retargeting, start fresh CI with `synchronize` (push a new head), `reopened`,
 `ready_for_review`, `converted_to_draft`, `labeled` or `unlabeled`; `opened` also
 starts CI. Rerunning a previous-base run retains its old event payload and is
-insufficient. Per-pull-request concurrency cancels older base checks. The context
-is not yet required: after this lands, the owner adds
+insufficient. Per-pull-request concurrency uses `cancel-in-progress: false`, so a
+stale rerun cannot cancel a running guard. [GitHub concurrency semantics](https://docs.github.com/en/actions/using-jobs/using-concurrency)
+allow one running and one pending run per group, replacement of pending runs, and
+arbitrary ordering. Consequently, serialization alone does not establish freshness:
+each finishing guard checks live state immediately before reporting success, even
+if an older event runs last. A replaced pending run may require CI to be
+re-triggered. The context is not yet required: after this lands, the owner adds
 `Base retarget / fresh CI required` to the ruleset separately. Landing must use a
 CI run whose base matches the current pull-request base.
 Windows validation separately admits only same-repository PRs labelled
