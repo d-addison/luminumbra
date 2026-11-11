@@ -313,9 +313,9 @@ TEST(RegionalWaterPersistence, StrictWaterRefusesMalformedPresentArraysBeforeIns
         {"/water_depth_mm", std::vector<int>(15, 0)},
         {"/water_bed_mm", std::vector<int>(17, 0)},
         {"/water_edge_flux", std::vector<int>(31, 0)},
-        {"/water_level_data", std::vector<float>(15, 0.0f)},
-        {"/water_flow_data", nlohmann::json::array({{{"x", 0}, {"y", 0}}})},
-        {"/water_sim_terrain_height", std::vector<float>(17, 0.0f)},
+        {"/water_level_data", std::vector<float>(1025, 0.0f)},
+        {"/water_flow_data", nlohmann::json::array({{{"x", 0}, {"y", "invalid"}}})},
+        {"/water_sim_terrain_height", std::vector<float>(1025, 0.0f)},
         {"/water_level_data/0", 1e100},
         {"/water_flow_data/0/x", 1e100},
         {"/water_flow_data/0/y", -1e100},
@@ -488,7 +488,7 @@ TEST(RegionalWaterPersistence, WaterObservationKeepsLegacyLoadsPermissiveAndStri
             }
             const auto bytes = fault == 6 ? std::string("{") : json.dump();
             const bool loadable = fault < 5;
-            const bool valid = loadable && fault != 1 && (fault != 2 || !active);
+            const bool valid = loadable && fault != 1 && fault != 2;
             bool observed = true;
             WorldStreamingState restored;
             std::vector<std::string> errors;
@@ -539,6 +539,61 @@ TEST(RegionalWaterPersistence, StrictWaterPreservesMissingIntegerDefaultsForBoth
                       missing_pair ? std::vector<std::int32_t>{} : chunk->water_bed_mm);
             EXPECT_EQ(actual->water_edge_flux,
                       std::vector<std::int32_t>(missing_pair ? 0u : 32u, 0));
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterAcceptsHistoricalEmptyFluxForBothArrayEncodings) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState original;
+    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+    FillWater(*chunk, 4);
+    chunk->water_edge_flux.clear();
+    for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                              P::SerializeChunkRecordPayloadJson(*chunk)}) {
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(
+            P::LoadWorldStreamingStateSnapshotJson(bytes, restored, errors, {.strict_water = true}))
+            << (errors.empty() ? "" : errors.front());
+        const auto actual = restored.find_chunk({0, 0, 0});
+        ASSERT_NE(actual, nullptr);
+        EXPECT_TRUE(actual->same_water_state(*chunk));
+        EXPECT_TRUE(actual->water_edge_flux.empty());
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterRefusesPartialRetainedPairsRegardlessOfActivity) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool active : {false, true}) {
+        for (const int resolution : {0, 4, 8}) {
+            for (const bool partial_flux : {false, true}) {
+                for (const bool encoded : {false, true}) {
+                    SCOPED_TRACE(active);
+                    SCOPED_TRACE(resolution);
+                    SCOPED_TRACE(partial_flux);
+                    SCOPED_TRACE(encoded);
+                    WorldStreamingState original;
+                    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+                    FillWater(*chunk, 4);
+                    chunk->has_water_sim.store(active);
+                    chunk->current_water_resolution.store(resolution);
+                    chunk->water_depth_mm.pop_back();
+                    if (partial_flux) {
+                        chunk->water_bed_mm.clear();
+                        chunk->water_edge_flux = {2, 3, 4};
+                    }
+                    const auto bytes = encoded
+                                           ? P::SerializeChunkRecordPayloadJson(*chunk)
+                                           : P::SerializeWorldStreamingStateSnapshotJson(original);
+                    WorldStreamingState restored;
+                    std::vector<std::string> errors;
+                    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                        bytes, restored, errors, {.strict_water = true}));
+                    EXPECT_TRUE(restored.empty());
+                    EXPECT_FALSE(errors.empty());
+                }
+            }
         }
     }
 }

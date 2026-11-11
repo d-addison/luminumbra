@@ -747,8 +747,6 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
     const int resolution = resolution_json.get<int>();
     if (resolution != 0 && (resolution < 2 || 32 % resolution != 0))
         throw std::invalid_argument("Saved water resolution refused");
-    const std::size_t cells =
-        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
     if (value.contains("water_depth_mm") != value.contains("water_bed_mm"))
         throw std::invalid_argument("Saved water integer pair required");
     constexpr std::array fields{"water_depth_mm",
@@ -798,16 +796,14 @@ void RequireWaterAuthority(const nlohmann::json& value, bool encoded) {
             }
         }
     }
-    // An absent or empty pair is the historical float-only form. Dormant chunks
-    // retain bounded arrays independently of the default resolution stamp.
+    // Empty arrays retain historical defaults. The resolution stamp does not size retained
+    // grids or render mirrors; only populated integer arrays must agree with one another.
     const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
-    const bool complete_integers =
-        counts[0] == cells && counts[1] == cells && counts[2] == 2u * cells;
-    const bool mirrors_valid = std::all_of(counts.begin() + 3, counts.end(), [cells](auto count) {
-        return count == 0u || count == cells;
-    });
-    if (state.at("has_water_sim").get<bool>() && resolution != 0 &&
-        ((!no_integers && !complete_integers) || !mirrors_valid))
+    const bool flux_valid = counts[2] == 0u || counts[2] == 2u * counts[0];
+    const bool complete_integers = counts[0] == counts[1] && flux_valid;
+    const bool initializing =
+        !state.at("has_water_sim").get<bool>() && counts[1] == 0u && flux_valid;
+    if (!no_integers && !complete_integers && !initializing)
         throw std::invalid_argument("Saved water grid shape refused");
 }
 

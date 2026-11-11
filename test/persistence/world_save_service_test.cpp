@@ -4985,10 +4985,12 @@ TEST(WorldSaveService, IndexedRegionPublicationRefusesPreservedMalformedWaterBef
     }
 }
 
-TEST(WorldSaveService, InvalidWriterWaterRefusesPreparationWithoutPublishing) {
+TEST(WorldSaveService, InvalidWriterWaterRefusesIndexedPublication) {
+    namespace P = Luminumbra::Persistence;
     for (int variant = 0; variant < 4; ++variant) {
         SCOPED_TRACE(variant);
         const TempSaveDir save("water_writer_refusal");
+        std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
         WorldStreamingState state;
         const auto chunk = state.get_or_create_chunk({0, 0, 0});
         chunk->set_state(ChunkState::Idle);
@@ -5009,9 +5011,18 @@ TEST(WorldSaveService, InvalidWriterWaterRefusesPreparationWithoutPublishing) {
         chunk->mark_water_state_dirty();
         const auto before = Luminumbra::Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
         std::vector<std::string> errors;
-        EXPECT_FALSE(WorldSaveService{}.save_world(state, save.path(), &errors));
+        {
+            P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors));
+            EXPECT_FALSE(WorldSaveService{}.save_world(state, save.path(), &errors));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::region_file_path(save.path(), 0, 0)));
+            EXPECT_FALSE(std::filesystem::exists(P::snapshot_index_path(save.path())));
+        }
         EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos) << JoinErrors(errors);
-        EXPECT_TRUE(std::filesystem::is_empty(save.path()));
+        EXPECT_TRUE(std::filesystem::is_empty(WorldSaveService::region_directory(save.path())));
+        EXPECT_FALSE(std::filesystem::exists(P::journal_directory(save.path())));
+        EXPECT_TRUE(FieldSaveBytes(save.path()).empty());
         EXPECT_TRUE(chunk->is_water_state_dirty());
         EXPECT_EQ(Luminumbra::Persistence::SerializeChunkAuthoritySnapshotJson(*chunk), before);
     }
@@ -5153,12 +5164,15 @@ TEST(WorldSaveService, IndexedWaterOffAndPromotedEmptyMirrorsReopenThroughEveryR
 TEST(WorldSaveService, IndexedUpgradeReopensUnloadedHistoricalWaterWithLegacyDefaults) {
     namespace P = Luminumbra::Persistence;
     const IVec3 good{0, 0, 0}, retained{32, 0, 0};
-    for (const int shape : {0, 1, 2, 3}) {
+    for (const int shape : {0, 1, 2, 3, 4}) {
         SCOPED_TRACE(shape);
         const TempSaveDir save("water_missing_flux");
         auto payload = nlohmann::json::parse(SavedWaterFixture(retained));
         auto& water = payload["chunks"][0];
         water.erase("water_edge_flux");
+        if (shape == 4) {
+            water["water_edge_flux"] = nlohmann::json::array();
+        }
         if (shape == 1 || shape == 3) {
             water.erase("water_depth_mm");
             water.erase("water_bed_mm");
@@ -5186,7 +5200,7 @@ TEST(WorldSaveService, IndexedUpgradeReopensUnloadedHistoricalWaterWithLegacyDef
         const auto chunk = expected.find_chunk(retained);
         ASSERT_NE(chunk, nullptr);
         EXPECT_EQ(chunk->water_edge_flux,
-                  std::vector<std::int32_t>(shape == 1 || shape == 3 ? 0u : 32u, 0));
+                  std::vector<std::int32_t>(shape == 1 || shape == 3 || shape == 4 ? 0u : 32u, 0));
         {
             P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
             ASSERT_TRUE(transaction.begin(&errors));
@@ -5275,6 +5289,127 @@ void ExpectWindowUnavailable(const WorldSaveService::AuthorityWindowResult& resu
     EXPECT_FALSE(result.error.empty());
 }
 } // namespace
+
+TEST(WorldSaveService, EveryWriterWaterShapeSavesAndReopensThroughIndexedAdmission) {
+    namespace P = Luminumbra::Persistence;
+    constexpr std::array shapes{"default",
+                                "dormant",
+                                "promoted_empty",
+                                "float_only",
+                                "complete",
+                                "empty_flux",
+                                "sleeping",
+                                "off",
+                                "retained_grid",
+                                "unowned",
+                                "dormant_flux",
+                                "render_mirrors"};
+    for (const int resolution : {0, 2, 4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        const TempSaveDir save("writer_water_shapes");
+        WorldStreamingState state;
+        // Twelve bounded shapes share one region, so each resolution needs one publication.
+        for (std::size_t shape = 0; shape < shapes.size(); ++shape) {
+            const auto chunk = state.get_or_create_chunk({static_cast<int>(shape), 0, 0});
+            chunk->set_state(ChunkState::Idle);
+            chunk->current_water_resolution.store(resolution);
+            if (shape == 1u || shape == 10u) {
+                chunk->water_depth_mm = {123};
+                if (shape == 10u) {
+                    chunk->water_edge_flux = {2, 3};
+                }
+            } else if (shape >= 2u) {
+                chunk->has_water_sim.store(true);
+                if (shape == 3u || shape == 9u) {
+                    chunk->water_level_data = {2.0f, 2.25f};
+                    chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
+                    chunk->water_sim_terrain_height = {1.0f, 1.5f};
+                } else if (shape >= 4u) {
+                    const auto cells = shape == 8u || resolution == 0
+                                           ? std::size_t{2}
+                                           : static_cast<std::size_t>(resolution) *
+                                                 static_cast<std::size_t>(resolution);
+                    chunk->water_depth_mm.assign(cells, 123);
+                    chunk->water_bed_mm.assign(cells, -100);
+                    if (shape != 5u) {
+                        chunk->water_edge_flux.assign(2u * cells, -10);
+                    }
+                    if (shape == 6u || shape == 8u) {
+                        chunk->water_level_data.assign(cells, 0.023f);
+                        chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+                        chunk->water_sim_terrain_height.assign(cells, -0.1f);
+                    }
+                    if (shape == 11u) {
+                        chunk->water_level_data = {2.0f, 2.25f};
+                        chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
+                        chunk->water_sim_terrain_height = {1.0f, 1.5f};
+                    }
+                    if (shape == 6u) {
+                        chunk->is_water_sleeping.store(true);
+                    } else if (shape == 7u) {
+                        chunk->current_water_resolution.store(resolution == 0 ? 2 : resolution);
+                        Luminumbra::Systems::WaterSystem water(nullptr, nullptr);
+                        ASSERT_TRUE(water.ResizeSimulationGrid(
+                            *chunk, Luminumbra::Systems::WaterDetailLevel::Off));
+                    }
+                }
+            }
+            if (shape != 9u) {
+                chunk->set_water_authority();
+                chunk->mark_water_state_dirty();
+            }
+            bool valid = false;
+            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk, &valid);
+            ASSERT_TRUE(valid) << shapes[shape];
+            for (const auto& bytes : {encoded, P::SerializeChunkAuthoritySnapshotJson(*chunk)}) {
+                WorldStreamingState decoded;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                    bytes, decoded, errors, {.strict_water = true}))
+                    << shapes[shape] << JoinErrors(errors);
+                const auto restored = decoded.find_chunk(chunk->get_coords());
+                ASSERT_NE(restored, nullptr);
+                EXPECT_TRUE(restored->same_water_state(*chunk)) << shapes[shape];
+            }
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors)) << JoinErrors(errors);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors))
+            << JoinErrors(errors);
+        ASSERT_EQ(loaded.size(), shapes.size());
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto window = reader.read({0, 11, 0, 0}, WindowLimits());
+        ASSERT_EQ(window.membership, AuthorityMembership::Present) << window.error;
+        ASSERT_EQ(window.chunks.size(), shapes.size() - 1u);
+        for (std::size_t shape = 0; shape < shapes.size(); ++shape) {
+            SCOPED_TRACE(shapes[shape]);
+            const IVec3 coords{static_cast<int>(shape), 0, 0};
+            const auto expected = state.find_chunk(coords);
+            ASSERT_NE(expected, nullptr);
+            const auto restored = loaded.find_chunk(coords);
+            ASSERT_NE(restored, nullptr);
+            EXPECT_TRUE(restored->same_water_state(*expected));
+            const auto exact = WorldSaveService::read_chunk(save.path(), coords, true);
+            ASSERT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Found) << exact.error;
+            ASSERT_NE(exact.chunk, nullptr);
+            EXPECT_TRUE(exact.chunk->same_water_state(*expected));
+            const auto found = std::find_if(
+                window.chunks.begin(), window.chunks.end(), [&coords](const auto& chunk) {
+                    return chunk->get_coords() == coords;
+                });
+            if (shape == 9u) {
+                EXPECT_EQ(found, window.chunks.end());
+            } else {
+                ASSERT_NE(found, window.chunks.end());
+                EXPECT_TRUE((*found)->same_water_state(*expected));
+            }
+        }
+    }
+}
 
 TEST(WorldSaveService, AuthorityWindowOwnsDiskOnlyTerrainWaterAndBoundaryContributors) {
     const TempSaveDir save("authority_window_owned");
@@ -5419,7 +5554,6 @@ TEST(WorldSaveService, AuthorityWindowRefusesPartialLatticeAndWaterBeforeReturni
             chunk->current_water_resolution.store(3, std::memory_order_release);
         else
             chunk->water_depth_mm.front() = -1;
-        // Raw container writing deliberately bypasses the ordinary writer's semantic gate.
         const WorldSaveService::ContainerRecord record{
             chunk->get_id(),
             0,

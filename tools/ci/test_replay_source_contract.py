@@ -730,8 +730,11 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertRegex(digest, r"AdmitChunkRecord\(\s*record, path, &diagnostics, facts, nullptr,"
                          r" false, false, true\)")
         encoder = self.function(service, "EncodeChunkRecords", "")
-        self.assertLess(encoder.index("if (!item.strict_water_valid)"),
-                        encoder.index("CompressPayload(payload"))
+        self.assertIn("SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid)",
+                      encoder)
+        self.assertNotIn("if (!item.strict_water_valid)", encoder)
+        window_decoder = self.function(service, "DecodeAuthorityRecord", "")
+        self.assertIn("DecodeChunkRecord(record, path, &errors, true)", window_decoder)
         writer = self.function(service, "WriteRegionFile", "")
         self.assertRegex(writer, r"if \(SaveTransaction::active_for\(root\) && !admitted\)\s*\{"
                          r"\s*AddError\(errors, admission_error\);\s*return false;")

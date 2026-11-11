@@ -2500,13 +2500,6 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
             const std::string payload =
                 SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
-            if (!item.strict_water_valid) {
-                AddError(&item.errors, "Saved water authority refused");
-                in_flight.release(admitted);
-                admitted = 0;
-                note_failure(index);
-                return;
-            }
             if (!CompressPayload(payload, item.record, &item.errors)) {
                 in_flight.release(admitted);
                 admitted = 0;
@@ -7893,36 +7886,11 @@ std::uint64_t NextAuthoritySourceIdentity() {
     return ++sequence.identity;
 }
 
-// Legacy window reads admit empty historical grids and dormant writer state.
-bool AuthorityWaterValid(const Chunk& chunk) {
-    if (!chunk.has_water_authority())
-        return true;
-    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
-    if (resolution < 0 || resolution > 32 ||
-        (resolution != 0 && (resolution < 2 || 32 % resolution != 0)))
-        return false;
-    // Water grids are bounded to 32^2 cells, with two flux slots per cell.
-    if (chunk.water_depth_mm.size() > 1024u || chunk.water_bed_mm.size() > 1024u ||
-        chunk.water_edge_flux.size() > 2048u)
-        return false;
-    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    const bool empty =
-        chunk.water_depth_mm.empty() && chunk.water_bed_mm.empty() && chunk.water_edge_flux.empty();
-    const bool complete =
-        chunk.water_depth_mm.size() == cells && chunk.water_bed_mm.size() == cells &&
-        (chunk.water_edge_flux.empty() || chunk.water_edge_flux.size() == 2u * cells);
-    return (!chunk.has_water_sim.load(std::memory_order_acquire) || resolution == 0 || empty ||
-            complete) &&
-           std::all_of(chunk.water_depth_mm.begin(),
-                       chunk.water_depth_mm.end(),
-                       [](std::int32_t depth) { return depth >= 0; });
-}
-
 // Decode directly, sharing validation without populating the unrestricted compatibility cache.
 std::shared_ptr<Chunk> DecodeAuthorityRecord(
     const RegionRecord& record, const std::filesystem::path& path, int rx, int rz, bool legacy) {
     std::vector<std::string> errors;
-    auto chunk = DecodeChunkRecord(record, path, &errors, !legacy);
+    auto chunk = DecodeChunkRecord(record, path, &errors, true);
     if (!chunk)
         throw std::runtime_error(errors.empty() ? "malformed authority record" : errors.front());
     int actual_rx = 0, actual_rz = 0;
@@ -7935,8 +7903,6 @@ std::shared_ptr<Chunk> DecodeAuthorityRecord(
         PromoteLegacyWaterRecord(*chunk, record);
     else
         RepairOwnedWaterRecordFlag(*chunk, record);
-    if (!AuthorityWaterValid(*chunk))
-        throw std::runtime_error("unsupported or partial water authority");
     chunk->normalize_for_park();
     return chunk;
 }
