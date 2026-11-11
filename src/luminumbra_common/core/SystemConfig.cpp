@@ -412,7 +412,7 @@ bool ParseGraphicsSection(const nlohmann::json& data,
         // A legacy installation retains Ultra and every explicitly authored
         // graphics value, including an explicit value equal to the default.
         user.graphics.base_preset = GraphicsPreset::Ultra;
-        user.graphics.preset_revision = kGraphicsPresetRevision;
+        user.graphics.preset_revision = 2;
         if (section.contains("graphics")) {
             error = "graphics settings require a settings schema version";
             return false;
@@ -437,7 +437,7 @@ bool ParseGraphicsSection(const nlohmann::json& data,
             !ParseGraphicsPreset(graphics["base_preset"].get<std::string>(), parsed.base_preset) ||
             !graphics.contains("preset_revision") ||
             !graphics["preset_revision"].is_number_integer() ||
-            (graphics["preset_revision"] != 1 &&
+            (graphics["preset_revision"] != 1 && graphics["preset_revision"] != 2 &&
              graphics["preset_revision"] != kGraphicsPresetRevision) ||
             !graphics.contains("overrides") || !graphics["overrides"].is_object()) {
             error = "invalid graphics preset, revision or overrides";
