@@ -373,20 +373,31 @@ runs are pending. For PR events, they can turn green only after a non-draft run
 completes its routed validation. Linux/GCC runs Python contracts or native tests;
 ASan applies the correctness selection when native validation is needed;
 preview-frame runs its existing lane.
-No new required-check configuration is needed.
+The draft guards use the existing required-check configuration.
 
 Marking a pull request ready for review triggers the full checks on its current
 head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
 `synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
 branch and path filters still apply. CI also listens for `labeled` and
 `unlabeled`. CI does not listen for `edited`; its required check names are plain
-strings. The separate Base retarget workflow listens only for `edited`. A base
-change produces a failing `Base retarget / fresh CI required` check that names
-the old and new base refs and asks the author to re-trigger CI on the new base
-(push a new head, toggle ready for review, or change a label). Title/body edits
-skip this static-named, non-required job and leave required check names intact.
-Landing must use a CI run whose base matches the PR's current base; rerunning a
-run made for the previous base reuses its stored event payload and is insufficient.
+strings. The separate Base retarget workflow reports `Base retarget / fresh CI
+required` on every CI pull-request event listed above and on `edited`, including
+drafts. Its job always computes a verdict; title/body edits cannot clear a base
+mismatch. CI-triggering events pass because they start validation against the
+current base. On `edited`, the check compares the current base with the newest
+`ci.yml` pull-request run for this head and pull request, using the Actions REST
+workflow-run record's `pull_requests[].base.ref`. Missing runs or base metadata
+(including empty fork-run associations), incomplete API pages and API failures
+fail closed. The verdict records the base and head; the check uses a sparse
+checkout of the base revision and never executes pull-request code.
+
+After retargeting, start fresh CI with `synchronize` (push a new head), `reopened`,
+`ready_for_review`, `converted_to_draft`, `labeled` or `unlabeled`; `opened` also
+starts CI. Rerunning a previous-base run retains its old event payload and is
+insufficient. Per-pull-request concurrency cancels older base checks. The context
+is not yet required: after this lands, the owner adds
+`Base retarget / fresh CI required` to the ruleset separately. Landing must use a
+CI run whose base matches the current pull-request base.
 Windows validation separately admits only same-repository PRs labelled
 `windows-proof`; admitted proof runs select full MSVC and UCRT64 validation,
 including for confirmed non-C++ changes. Their aggregates require successful
