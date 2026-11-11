@@ -591,8 +591,8 @@ FoliageBorderEdges(const FieldPageState& pages,
                    std::span<const RegionKey> owners,
                    std::uint64_t tick) {
     FoliageEdges edges;
-    // At most 1024 positive boundary cells per selected 512 m owner; storage
-    // admission limits initialized endpoints to kMaxPages * 256 cells.
+    // At most 2048 boundary cells per selected 512 m owner. Either initialized
+    // endpoint can select an edge; storage caps endpoints at kMaxPages * 256.
     for (const auto owner : owners) {
         const auto a = records.find(owner);
         if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
@@ -603,8 +603,10 @@ FoliageBorderEdges(const FieldPageState& pages,
         if (x < -16777216 || x > 16776704 || z < -16777216 || z > 16776704) {
             continue;
         }
-        for (int axis = 0; axis < 2; ++axis) {
-            const RegionKey other{owner.x + (axis == 0 ? 1 : 0), owner.z + (axis == 1 ? 1 : 0)};
+        for (int direction = 0; direction < 4; ++direction) {
+            const bool along_x = direction < 2;
+            const int sign = direction % 2 == 0 ? 1 : -1;
+            const RegionKey other{owner.x + (along_x ? sign : 0), owner.z + (along_x ? 0 : sign)};
             const auto b = records.find(other);
             if (b == records.end() || b->second.state == ::Luminumbra::world::RegionState::Frozen) {
                 continue;
@@ -614,11 +616,14 @@ FoliageBorderEdges(const FieldPageState& pages,
                 continue;
             }
             for (int offset = 0; offset < 512; ++offset) {
-                const ScentCellKey cell{static_cast<std::int32_t>(x) + (axis == 0 ? 511 : offset),
-                                        static_cast<std::int32_t>(z) + (axis == 1 ? 511 : offset)};
-                const ScentCellKey next{cell.x + (axis == 0 ? 1 : 0), cell.z + (axis == 1 ? 1 : 0)};
-                if (pages.irrigation().initialized(cell) && pages.irrigation().initialized(next)) {
-                    edges.emplace_back(cell, next);
+                const ScentCellKey cell{
+                    static_cast<std::int32_t>(x) + (along_x ? (sign > 0 ? 511 : 0) : offset),
+                    static_cast<std::int32_t>(z) + (along_x ? offset : (sign > 0 ? 511 : 0))};
+                const ScentCellKey next{cell.x + (along_x ? sign : 0),
+                                        cell.z + (along_x ? 0 : sign)};
+                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) ||
+                                                            pages.irrigation().initialized(next))) {
+                    edges.emplace_back(sign > 0 ? cell : next, sign > 0 ? next : cell);
                 }
             }
         }
@@ -633,7 +638,7 @@ FoliageBorderEdges(const FieldPageState& pages,
 inline std::vector<std::int32_t> FoliageBorderFluxes(const FoliageFieldPages& irrigation,
                                                      const FoliageEdges& edges) {
     std::vector<std::int32_t> fluxes;
-    // One prior-value difference per admitted edge, bounded by two positive
+    // One prior-value difference per admitted edge, bounded by four boundary
     // edges per initialized irrigation cell (kMaxPages * 256 cells).
     fluxes.reserve(edges.size());
     for (const auto& [cell, next] : edges) {

@@ -305,19 +305,13 @@ struct GameSession::FoliageStep {
                 step.pending.insert(key);
             }
         }
-        // Only full, admitted pages opt into autonomous foliage evolution.
-        // Sparse typed field records retain their prior owners and semantics.
+        // Persisted initialized cells are the participation record, including
+        // sparse pages whose admitting plant or source has since disappeared.
         for (const bool soil : {true, false}) {
             const auto& channel =
                 soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
             for (const auto& [key, page] : channel.pages()) {
-                const bool full = std::all_of(page.mask.begin(), page.mask.end(), [](auto word) {
-                    return word == std::numeric_limits<std::uint64_t>::max();
-                });
                 const auto owner = FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16});
-                if (!full && (soil || !step.field_owners.contains(owner))) {
-                    continue;
-                }
                 const auto found = session.m_activeRegionLedger.records().find(owner);
                 if (found == session.m_activeRegionLedger.records().end()) {
                     continue;
@@ -1541,7 +1535,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
                         // starves itself (monoculture-starves). No grid -> unchanged terrain
                         // quality.
-                        if ((m_activeRegionsEnabled && !m_foliageStep->pages.soil().empty()) ||
+                        if ((m_activeRegionsEnabled && m_foliageStep->pages.soil().initialized(
+                                                           luminumbra::foliage::FoliageCell(p))) ||
                             m_soilGrid) {
                             const int nut = FoliageStep::Sample(*this, p, true);
                             // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so

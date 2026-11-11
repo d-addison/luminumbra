@@ -606,6 +606,53 @@ TEST(FoliageFieldPages, BorderSnapshotContainsOnlyEdgesAndRefusesIncompleteInput
     EXPECT_EQ(pages.irrigation().sample({511, 0}, -1), 700);
     EXPECT_EQ(pages.irrigation().sample({512, 0}, -1), 100);
 }
+TEST(FoliageFieldPages, BorderDiscoveryUsesEitherEndpointAndRejectsUnavailableNeighbors) {
+    const std::array<ScentCellKey, 4> cells{{{511, 8}, {0, 8}, {8, 511}, {8, 0}}};
+    const std::array<ScentCellKey, 4> neighbors{{{512, 8}, {-1, 8}, {8, 512}, {8, -1}}};
+    for (std::size_t direction = 0; direction < cells.size(); ++direction) {
+        for (const bool initialize_source : {false, true}) {
+            SCOPED_TRACE(direction);
+            SCOPED_TRACE(initialize_source);
+            const auto cell = cells[direction], next = neighbors[direction];
+            const auto owner = FieldPageState::region_of_scent_cell(cell);
+            const auto other = FieldPageState::region_of_scent_cell(next);
+            ActiveRegionLedger ledger;
+            ledger.pin(owner, true, WorldClock(32));
+            ledger.pin(other, true, WorldClock(32));
+            const std::array<RegionKey, 1> owners{{owner}};
+            FieldPageState pages;
+            EXPECT_TRUE(FoliageBorderEdges(pages, ledger.records(), owners, 32).empty());
+            ASSERT_TRUE(pages.set_irrigation(initialize_source ? cell : next, 800));
+            const auto edges = FoliageBorderEdges(pages, ledger.records(), owners, 32);
+            ASSERT_EQ(edges.size(), 1u);
+            EXPECT_EQ(edges.front().first, std::min(cell, next));
+            EXPECT_EQ(edges.front().second, std::max(cell, next));
+            const auto fluxes = FoliageBorderFluxes(pages.irrigation(), edges);
+            ASSERT_EQ(fluxes.size(), 1u);
+            EXPECT_EQ(fluxes.front(), (initialize_source == (direction % 2 == 0)) ? 100 : -100);
+            auto records = ledger.records();
+            records.at(other).cadence_shift = 1;
+            EXPECT_TRUE(FoliageBorderEdges(pages, records, owners, 33).empty());
+            records.at(other).cadence_shift = 17;
+            EXPECT_TRUE(FoliageBorderEdges(pages, records, owners, 32).empty());
+            records.at(other).state = RegionState::Frozen;
+            EXPECT_TRUE(FoliageBorderEdges(pages, records, owners, 32).empty());
+            records.erase(other);
+            EXPECT_TRUE(FoliageBorderEdges(pages, records, owners, 32).empty());
+        }
+    }
+    for (const int coordinate : {-16777216, 16777215}) {
+        FieldPageState pages;
+        ASSERT_TRUE(pages.set_irrigation({coordinate, 8}, 800));
+        const auto owner = FieldPageState::region_of_scent_cell({coordinate, 8});
+        const RegionKey other{owner.x + (coordinate < 0 ? -1 : 1), owner.z};
+        ActiveRegionLedger ledger;
+        ledger.pin(owner, true, WorldClock(32));
+        ledger.pin(other, true, WorldClock(32));
+        const std::array<RegionKey, 2> owners{{owner, other}};
+        EXPECT_TRUE(FoliageBorderEdges(pages, ledger.records(), owners, 32).empty());
+    }
+}
 TEST(FoliageFieldPages, FirstDueWindowsDistinguishNewOwnersFromConsumedTicks) {
     ActiveRegionLedger ledger;
     ledger.pin({0, 0}, true, WorldClock(1));
