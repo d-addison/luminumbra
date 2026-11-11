@@ -229,6 +229,9 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g,
 
     // --- 1) deposit (already summed across sources on each cell) ---
     for (std::size_t i = 0; i < N; ++i) {
+        if (!allows_index(i)) {
+            continue;
+        }
         std::int32_t v = g.m_cells[i];
         const std::int32_t d = (i < deposit.size()) ? deposit[i] : 0;
         v += d;
@@ -307,10 +310,9 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g,
 // Advance the soil-moisture field by ONE fixed tick. Pure function of registry
 // state + the grid. Sources (WaterSourceComponent + Transform) are visited in
 // id order, but their deposit is ACCUMULATED per cell (order-independent) then
-// applied with the diffuse + drain passes. Regional deposits use source ownership;
-// diffusion and drain use cell centres. Flux requires both endpoints due. Each due
-// cell advances once, without
-// elapsed-tick catch-up, matching regional soil consumption.
+// applied with the diffuse + drain passes. Regional deposits require source ownership
+// and cell centres due; diffusion and drain use cell centres. Flux requires both endpoints due.
+// Each due cell advances once, without elapsed-tick catch-up, matching regional soil consumption.
 inline IrrigationStats
 RunIrrigationOnTick(entt::registry& reg,
                     IrrigationGrid& grid,
@@ -353,6 +355,12 @@ RunIrrigationOnTick(entt::registry& reg,
         IrrigationWorldToCell(tf.position.x, tf.position.z, origin_x, origin_z, cell_size, cx, cz);
         if (cx < 0 || cz < 0 || cx >= W || cz >= H)
             continue; // outside the grid -> no deposit
+        if (gate.UsesPersistentPlantIdentity() &&
+            !gate.AllowsPosition({origin_x + (static_cast<float>(cx) + 0.5f) * cell_size,
+                                  0.0f,
+                                  origin_z + (static_cast<float>(cz) + 0.5f) * cell_size})) {
+            continue;
+        }
 
         const std::int32_t add = static_cast<std::int32_t>(src.output);
         if (add <= 0)

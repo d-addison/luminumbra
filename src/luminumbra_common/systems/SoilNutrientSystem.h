@@ -212,19 +212,20 @@ ApplyConsumptionAndRegen(SoilGrid& g,
     std::int64_t regenerated = 0;
     for (std::size_t i = 0; i < g.m_cells.size(); ++i) {
         const auto width = static_cast<std::size_t>(g.m_w);
+        if (gate.UsesPersistentPlantIdentity() &&
+            !gate.AllowsPosition({origin_x + (static_cast<float>(i % width) + 0.5f) * cell_size,
+                                  0.0f,
+                                  origin_z + (static_cast<float>(i / width) + 0.5f) * cell_size})) {
+            continue;
+        }
         std::int32_t v = g.m_cells[i];
         const std::int32_t d = (i < demand.size()) ? demand[i] : 0;
         v -= d; // consume (already summed across admitted plants on the cell)
         if (v < 0) {
             v = 0;
         }
-        if (!gate.UsesPersistentPlantIdentity() ||
-            gate.AllowsPosition({origin_x + (static_cast<float>(i % width) + 0.5f) * cell_size,
-                                 0.0f,
-                                 origin_z + (static_cast<float>(i / width) + 0.5f) * cell_size})) {
-            v += kSoilRegenPerTick;
-            regenerated += kSoilRegenPerTick;
-        }
+        v += kSoilRegenPerTick;
+        regenerated += kSoilRegenPerTick;
         if (v > kSoilBaseline)
             v = kSoilBaseline;
         g.m_cells[i] = v;
@@ -283,6 +284,12 @@ RunSoilNutrientOnTick(entt::registry& reg,
         WorldToCell(tf.position.x, tf.position.z, origin_x, origin_z, cell_size, cx, cz);
         if (cx < 0 || cz < 0 || cx >= W || cz >= H)
             continue; // outside the grid -> no draw
+        if (gate.UsesPersistentPlantIdentity() &&
+            !gate.AllowsPosition({origin_x + (static_cast<float>(cx) + 0.5f) * cell_size,
+                                  0.0f,
+                                  origin_z + (static_cast<float>(cz) + 0.5f) * cell_size})) {
+            continue;
+        }
 
         // Per-plant draw (milli-units): stage weight (0..16) * uptake (milli) / scale.
         // Integer throughout (uptake milli * weight / 16 keeps the weight a 1/16 factor).
