@@ -33,7 +33,7 @@ struct Group {
     const world::ActiveRegionRecord* record = nullptr;
     bool ready = true, due = false;
     std::vector<std::size_t> candidates;
-    std::uint64_t reserved = 0;
+    std::vector<const Face*> pairs;
 };
 using Groups = std::map<RegionKey, Group>;
 
@@ -245,61 +245,52 @@ std::vector<Face> Topology(std::vector<Entry>& entries, const Groups& groups) {
     return faces;
 }
 
-std::uint64_t ReserveInteriorPair(const std::vector<Face>& faces,
-                                  std::vector<Entry>& entries,
-                                  Groups& groups,
-                                  const ActiveRegionLedger& ledger,
-                                  std::uint64_t tick,
-                                  std::uint64_t windows) {
-    if (windows < 2) {
-        return 0;
-    }
+void PlanInteriorPairs(const std::vector<Face>& faces,
+                       std::vector<Entry>& entries,
+                       Groups& groups) {
     // At most 2*kMaxResidents faces. Filter before rotation so sealed or
     // ineligible endpoints cannot occupy a service slot.
-    std::vector<const Face*> eligible;
-    std::uint8_t common_shift = 0;
     for (const auto& face : faces) {
         if (face.owner == face.neighbor &&
             Find(entries, Chunk::decode_id(face.positive))->candidate &&
             Find(entries, Chunk::decode_id(face.other))->candidate) {
-            eligible.push_back(&face);
-            common_shift = std::max(common_shift, face.common_shift);
+            groups.at(face.owner).pairs.push_back(&face);
         }
     }
-    const auto opportunity = tick >> common_shift;
-    if (eligible.empty() || opportunity % 2 == 0) {
+}
+
+std::uint64_t SelectInteriorPair(const Group& group,
+                                 std::vector<Entry>& entries,
+                                 std::uint64_t tick,
+                                 std::uint64_t windows) {
+    const auto opportunity = tick >> group.record->cadence_shift;
+    if (windows < 2 || group.pairs.empty() || opportunity % 2 == 0) {
         return 0;
     }
-    const auto& face = *eligible[static_cast<std::size_t>((opportunity / 2) % eligible.size())];
-    const auto debt = ledger.water_debts().find(face.owner);
-    constexpr auto credit = 2 * world::water_share::kQ32;
-    if (debt != ledger.water_debts().end() &&
-        debt->second > world::water_share::kMaxDebt - credit) {
-        Refuse();
-    }
-    // Credit and consume these two interior windows together. Residual demand
-    // alone enters the shared allocator; ordinary opportunities keep cursor service.
+    const auto& face =
+        *group.pairs[static_cast<std::size_t>((opportunity / 2) % group.pairs.size())];
+    // The owner's grant pays for both endpoints; pair selection cannot change
+    // any owner's credit, debt service or granted windows.
     Find(entries, Chunk::decode_id(face.positive))->selected = true;
     Find(entries, Chunk::decode_id(face.other))->selected = true;
-    groups.at(face.owner).reserved = 2;
     return 2;
 }
 
 void Allocate(Groups& groups,
               const ActiveRegionLedger& ledger,
               std::uint64_t windows,
+              std::uint64_t tick,
               std::vector<Entry>& entries,
               Plan& plan) {
     std::vector<world::water_share::Claim> claims;
-    // Only positive residual demand competes for credit and saved debt service.
+    // All positive candidate demand competes for credit and saved debt service.
     ActiveRegionLedger::WaterDebts debts;
     std::uint64_t serviceable_demand = 0;
     for (const auto& [owner, group] : groups) {
-        if (!group.due || group.candidates.size() == group.reserved) {
+        if (!group.due || group.candidates.empty()) {
             continue;
         }
-        claims.push_back(
-            {owner, static_cast<std::uint64_t>(group.candidates.size()) - group.reserved});
+        claims.push_back({owner, static_cast<std::uint64_t>(group.candidates.size())});
         // Each admitted due candidate can use one interior window per plan.
         // Candidate groups partition the snapshot, so the sum is <= kMaxResidents.
         serviceable_demand += claims.back().awake;
@@ -322,13 +313,14 @@ void Allocate(Groups& groups,
         }
         const auto granted = grant != grants.end() && grant->key == owner ? (grant++)->windows : 0;
         const auto count = static_cast<std::uint64_t>(group.candidates.size());
-        const auto awarded = std::min(granted, count - group.reserved);
-        plan.allocated_windows += awarded + group.reserved;
+        const auto awarded = std::min(granted, count);
+        plan.allocated_windows += awarded;
+        const auto reserved = SelectInteriorPair(group, entries, tick, awarded);
         auto cursor = group.record->water_cursor;
-        if (awarded != 0) {
+        if (awarded > reserved) {
             const auto start = cursor % count;
-            std::uint64_t selected = 0, scanned = 0;
-            // At most awarded+reserved <= count entries: only the two funded
+            std::uint64_t selected = reserved, scanned = 0;
+            // At most count entries: only the two funded
             // endpoints may already be selected in this candidate group.
             for (; selected < awarded; ++scanned) {
                 auto& entry =
@@ -341,7 +333,7 @@ void Allocate(Groups& groups,
             }
             cursor = (start + scanned) % count;
         }
-        const auto& carried = count == group.reserved ? ledger.water_debts() : debts;
+        const auto& carried = count == 0 ? ledger.water_debts() : debts;
         const auto debt = carried.find(owner);
         // Grants are budget-bounded. Restoring their unselected Q32 units cannot
         // exceed the allocator's checked post-credit debt (at most kMaxDebt).
@@ -351,7 +343,7 @@ void Allocate(Groups& groups,
                                 group.record->cadence_shift,
                                 group.record->cadence_phase,
                                 count,
-                                awarded + group.reserved,
+                                awarded,
                                 cursor,
                                 carried_debt});
     }
@@ -417,9 +409,8 @@ Plan Build(std::span<const Resident> residents,
         remaining -= 2 * pairs;
     }
     plan.border_windows = plan.global_windows - remaining;
-    const auto reserved =
-        ReserveInteriorPair(faces, entries, groups, ledger, schedule.tick, remaining);
-    Allocate(groups, ledger, remaining - reserved, entries, plan);
+    PlanInteriorPairs(faces, entries, groups);
+    Allocate(groups, ledger, remaining, schedule.tick, entries, plan);
     for (const auto& entry : entries) {
         if (entry.selected) {
             plan.interiors.push_back(entry.resident.id);

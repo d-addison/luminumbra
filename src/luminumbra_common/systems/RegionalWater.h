@@ -77,13 +77,16 @@ struct Plan {
 // Interior credit is capped at serviceable demand: the total admitted due candidate
 // count, with one interior window usable per candidate. Existing debt is retained;
 // excess capacity creates no new debt. Post-credit debt must still fit kMaxDebt.
-// After border reservation, odd common cadence opportunities fund one eligible
-// same-owner pair with two interior windows, crediting and consuming them atomically.
-// Rotate sorted eligible pairs by (opportunity/2) modulo their count F. With fixed
-// eligibility and at least two remaining windows, every pair is served within 2*F
-// common cadence opportunities. Even opportunities retain ordinary cursor service.
-// Residual candidate demand shares the remaining credit. Zero-candidate owners
-// never compete for allocation; their debt and cursor are carried unchanged.
+// After owner credit allocation, an owner granted at least two interior windows
+// spends two of them on an eligible same-owner pair on odd owner cadence
+// opportunities (tick >> cadence_shift). Rotate its sorted eligible pairs by
+// (opportunity/2) modulo its pair count F. With fixed eligibility and at least two
+// awarded windows per due call, every pair is served within 2*F owner cadence
+// opportunities; this includes a sole owner with two remaining windows. Even
+// opportunities retain ordinary cursor service. Pair selection never changes
+// owner credit or grants, preserving the allocator's owner service guarantee.
+// Zero-candidate owners never compete for allocation; their debt and cursor are
+// carried unchanged.
 // Sorted eligible cross-owner faces start at (tick >> coarsest face cadence)
 // modulo their count. With a fixed eligible set and at least one funded pair,
 // all N faces are served within N common cadence opportunities, including skipped
@@ -93,11 +96,12 @@ struct Plan {
 // and allocated_windows count selected interiors only. Unselected grants retain
 // their Q32 debt; unused windows are global_windows-border_windows-allocated_windows.
 // Cursor rollover serves every candidate under fixed eligibility and recurring
-// positive awards. Changing eligibility has no such guarantee.
+// positive awards on even owner cadence opportunities. Changing eligibility or
+// funding only pair opportunities has no such cursor guarantee.
 // Work: O((R+S+D) log(kMaxRegions+R+S+D)). Storage is bounded by the input
 // caps: at most R entries, S sources, D region outputs, 2*R topology faces,
-// 2*R output faces (including eligible borders before budget truncation) and
-// 5*R participant IDs before deduplication. All products fit 32-bit size_t.
+// 2*R pair pointers, 2*R output faces (including eligible borders before budget
+// truncation) and 5*R participant IDs before deduplication. All products fit 32-bit size_t.
 // Callers supply participating snapshots; this API has no production tick caller.
 [[nodiscard]] Plan Build(std::span<const Resident> residents,
                          std::span<const SourceInput> sources,

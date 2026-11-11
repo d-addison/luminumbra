@@ -312,8 +312,9 @@ Planning::SourceInput SourceAt(std::uint64_t id, const Vec3& position, float rat
     return {.id = id, .position = position, .physical = {.flow_rate = rate}};
 }
 
-ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners) {
-    ActiveRegionLedger ledger;
+ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners,
+                                  world::RegionSchedulerConfig config = {}) {
+    ActiveRegionLedger ledger(config);
     for (const auto owner : owners) {
         ledger.mark_edited(owner, WorldClock{});
     }
@@ -782,16 +783,23 @@ TEST(RegionalWaterPlanning, SameOwnerGridServesEveryFaceWithinTwiceItsFaceCountT
     constexpr std::uint64_t face_count = 10, plan_bound = 2 * face_count;
     for (const std::uint64_t windows : {2u, 4u}) {
         for (const std::uint8_t shift : {std::uint8_t{0}, std::uint8_t{1}, std::uint8_t{16}}) {
-            const auto period = std::uint64_t{1} << shift;
             for (const auto first :
                  {std::uint64_t{0}, (WorldClock::kTickLimit >> shift) - plan_bound}) {
-                auto ledger = PlanningLedger({{0, 0}});
+                auto ledger =
+                    PlanningLedger({{0, 0}}, {.reduced_shift = std::max(std::uint8_t{1}, shift)});
                 auto& record =
                     const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
                         .at({0, 0});
                 record.state = shift == 0 ? RegionState::Active : RegionState::Reduced;
                 record.cadence_shift = shift;
-                record.cadence_phase = static_cast<std::uint32_t>(period - 1);
+                record.cadence_phase = ActiveRegionLedger::phase({0, 0}, shift);
+                const auto phase = record.cadence_phase;
+                ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+                ActiveRegionLedger initial_reload;
+                std::string initial_error;
+                ASSERT_TRUE(
+                    ActiveRegionLedger::decode(ledger.encode(), initial_reload, initial_error))
+                    << initial_error;
                 std::vector<Planning::Resident> residents;
                 for (int z = 0; z < 2; ++z) {
                     for (int x = 0; x < 4; ++x) {
@@ -803,7 +811,7 @@ TEST(RegionalWaterPlanning, SameOwnerGridServesEveryFaceWithinTwiceItsFaceCountT
                 schedule.due = {{0, 0}};
                 const Planning::Inputs inputs{.cell_budget = windows * kPlanningCapacity};
                 for (std::uint64_t step = 0; step < plan_bound; ++step) {
-                    schedule.tick = ((first + step) << shift) + period - 1;
+                    schedule.tick = ((first + step) << shift) + phase;
                     SCOPED_TRACE(::testing::Message()
                                  << windows << ',' << static_cast<unsigned int>(shift) << ','
                                  << schedule.tick);
@@ -848,6 +856,126 @@ TEST(RegionalWaterPlanning, SameOwnerGridServesEveryFaceWithinTwiceItsFaceCountT
                           4);
             }
         }
+    }
+}
+
+TEST(RegionalWaterPlanning, ActivePairCannotStarveOddPhaseReducedOwnerThroughReload) {
+    constexpr auto unit = world::water_share::kQ32;
+    constexpr unsigned int due_bound = 2;
+    for (const auto saved :
+         {std::uint64_t{0}, unit / 2, 4 * unit, world::water_share::kMaxDebt - unit}) {
+        for (const auto first : {std::uint64_t{1}, WorldClock::kTickLimit - 5}) {
+            auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+            auto& record =
+                const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
+                    .at({0, 0});
+            record.state = RegionState::Reduced;
+            record.cadence_shift = 1;
+            record.cadence_phase = ActiveRegionLedger::phase({0, 0}, 1);
+            ASSERT_EQ(record.cadence_phase, 1u);
+            if (saved != 0) {
+                ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+            }
+            std::vector residents{ResidentAt(0), ResidentAt(34), ResidentAt(35)};
+            const auto reduced_chunk = residents[0].id;
+            RegionSchedule schedule;
+            schedule.due = {{0, 0}, {1, 0}};
+            unsigned int due_without_service = 0;
+            for (std::uint64_t step = 0; step < 5; ++step) {
+                schedule.tick = first + step;
+                SCOPED_TRACE(::testing::Message() << saved << ',' << schedule.tick);
+                const auto before = ledger.encode();
+                const Planning::Inputs inputs{.cell_budget = 2 * kPlanningCapacity};
+                const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+                EXPECT_EQ(plan.border_windows, 0u);
+                EXPECT_LE(plan.allocated_windows, 2u);
+                EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                const bool served =
+                    std::binary_search(plan.interiors.begin(), plan.interiors.end(), reduced_chunk);
+                if (step % 2 == 0) {
+                    ASSERT_EQ(plan.regions.size(), 2u);
+                    ExpectInteriorCreditConserved(ledger, plan);
+                    due_without_service = served ? 0 : due_without_service + 1;
+                    EXPECT_LT(due_without_service, due_bound);
+                } else {
+                    EXPECT_FALSE(served);
+                    ASSERT_EQ(plan.regions.size(), 1u);
+                    EXPECT_EQ(plan.regions[0].owner, (RegionKey{1, 0}));
+                }
+                std::reverse(residents.begin(), residents.end());
+                std::reverse(schedule.due.begin(), schedule.due.end());
+                EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+                EXPECT_EQ(ledger.encode(), before);
+                auto debts = ledger.water_debts();
+                for (const auto& region : plan.regions) {
+                    if (region.debt == 0) {
+                        debts.erase(region.owner);
+                    } else {
+                        debts.insert_or_assign(region.owner, region.debt);
+                    }
+                    ledger.set_water_cursor(region.owner, region.next_cursor);
+                }
+                ASSERT_TRUE(ledger.set_water_debts(debts));
+                ActiveRegionLedger reloaded;
+                std::string error;
+                ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error)) << error;
+                EXPECT_EQ(Planning::Build(residents, {}, reloaded, schedule, inputs),
+                          Planning::Build(residents, {}, ledger, schedule, inputs));
+                ledger = std::move(reloaded);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, EveryGrantedOwnerRotatesPairsOnItsOwnCadence) {
+    constexpr std::uint64_t face_count = 3, plan_bound = 2 * face_count;
+    for (const auto first : {std::uint64_t{1}, WorldClock::kTickLimit - 11}) {
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+        auto& record = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
+                           .at({0, 0});
+        record.state = RegionState::Reduced;
+        record.cadence_shift = 1;
+        record.cadence_phase = ActiveRegionLedger::phase({0, 0}, 1);
+        ASSERT_EQ(record.cadence_phase, 1u);
+        std::vector residents{ResidentAt(0),
+                              ResidentAt(1),
+                              ResidentAt(2),
+                              ResidentAt(3),
+                              ResidentAt(34),
+                              ResidentAt(35),
+                              ResidentAt(36),
+                              ResidentAt(37)};
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}};
+        std::vector<Planning::Face> served;
+        for (std::uint64_t step = 0; step < plan_bound; ++step) {
+            schedule.tick = first + 2 * step;
+            SCOPED_TRACE(schedule.tick);
+            const Planning::Inputs inputs{.cell_budget = 4 * kPlanningCapacity};
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            ASSERT_EQ(plan.regions.size(), 2u);
+            EXPECT_EQ(plan.border_windows, 0u);
+            EXPECT_EQ(plan.allocated_windows, 4u);
+            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+            ExpectInteriorCreditConserved(ledger, plan);
+            for (const auto& region : plan.regions) {
+                EXPECT_EQ(region.windows, 2u);
+                EXPECT_EQ(region.debt, 0u);
+                ledger.set_water_cursor(region.owner, region.next_cursor);
+            }
+            for (const auto& face : plan.faces) {
+                EXPECT_EQ(face.owner, face.neighbor);
+                served.push_back(face);
+            }
+            std::reverse(residents.begin(), residents.end());
+            ActiveRegionLedger reloaded;
+            std::string error;
+            ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error)) << error;
+            ledger = std::move(reloaded);
+        }
+        std::sort(served.begin(), served.end());
+        served.erase(std::unique(served.begin(), served.end()), served.end());
+        EXPECT_EQ(served.size(), 2 * face_count);
     }
 }
 
@@ -924,7 +1052,7 @@ TEST(RegionalWaterPlanning, ZeroCandidateOwnerCannotSpendSavedDebtAheadOfEligibl
     }
 }
 
-TEST(RegionalWaterPlanning, FundedPairCarriesSavedDebtAndCreditsOnlyResidualDemand) {
+TEST(RegionalWaterPlanning, FundedPairSpendsOwnerGrantAndRetainsUnselectedCredit) {
     auto ledger = PlanningLedger({{0, 0}, {1, 0}});
     constexpr auto saved = world::water_share::kMaxDebt - 2 * world::water_share::kQ32;
     ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
@@ -936,13 +1064,13 @@ TEST(RegionalWaterPlanning, FundedPairCarriesSavedDebtAndCreditsOnlyResidualDema
     const auto plan =
         Planning::Build(residents, {}, ledger, schedule, {.cell_budget = 3 * kPlanningCapacity});
     EXPECT_EQ(plan.border_windows, 0u);
-    EXPECT_EQ(plan.allocated_windows, 3u);
+    EXPECT_EQ(plan.allocated_windows, 2u);
     ASSERT_EQ(plan.faces.size(), 1u);
     ASSERT_EQ(plan.regions.size(), 2u);
     EXPECT_EQ(plan.regions[0].windows, 2u);
-    EXPECT_EQ(plan.regions[0].debt, saved);
-    EXPECT_EQ(plan.regions[1].windows, 1u);
-    EXPECT_EQ(plan.regions[1].debt, 0u);
+    EXPECT_EQ(plan.regions[0].debt, saved - world::water_share::kQ32 / 2);
+    EXPECT_EQ(plan.regions[1].windows, 0u);
+    EXPECT_EQ(plan.regions[1].debt, 3 * world::water_share::kQ32 / 2);
     ExpectInteriorCreditConserved(ledger, plan);
     EXPECT_EQ(ledger.encode(), before);
 }
