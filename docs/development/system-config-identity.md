@@ -53,7 +53,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **339 bytes → `35e233a89e8c87b1`** for revision 5.
+to **339 bytes → `b439df88e7c3623a`** for revision 6.
 The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
@@ -90,12 +90,14 @@ Deliberate exclusions from the setter audit:
   locate content, and required-client-asset lists validate client files; neither is a
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
-The current encoder appends authority-rules revision 5 so admission can distinguish
+The current encoder appends authority-rules revision 6 so admission can distinguish
 compiled authority rules as well as configured values. It retains the resolved
 calendar that the admission identity already folds in. The shipping identity
 changed from `49f694fd70645bcc` to the revision-4 value `2f2a9405252345a8` when the revision
 field was added, and revision 5 (regional scent eligibility, advancement and persistence rules)
-changes it again to `35e233a89e8c87b1`. The revision-4 identity is no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
+changed it to `35e233a89e8c87b1`. Revision 6 (region-gated irrigation, soil regeneration and
+non-creature decomposition) changes it again to `b439df88e7c3623a`. The revision-4 and revision-5
+identities are no longer admitted. No world-state, terrain, water, save-format or replay checkpoint
 encoding changes in this identity step.
 
 The frozen current vectors in `SystemConfig_test.cpp` cover the complete 339-byte

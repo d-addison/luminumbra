@@ -109,7 +109,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                     document.setdefault("sim", {}).setdefault("active_regions", {})[
                         "enabled"] = regions
                     expected.extend(identity(document, authority_rules_revision=revision)
-                                    for revision in (3, 5))
+                                    for revision in (3, 6))
                 self.assertEqual(re.findall(r'"([0-9a-f]{16})"', literals), expected)
 
     def test_cpp_frozen_session_vectors_match_independent_encoding(self):
@@ -123,7 +123,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                             {"region_work_limit": (1 << 64) - 2},
                             {"region_hold_ticks": 31}, {"region_reduced_shift": 2}):
                 expected.extend(identity(document, authority_rules_revision=revision, **options)
-                                for revision in (3, 5))
+                                for revision in (3, 6))
         self.assertEqual(re.findall(r'"([0-9a-f]{16})"', table), expected)
 
     def test_literal_ctest_names_are_unique_in_each_registration_directory(self):
@@ -209,6 +209,8 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertEqual(len(canonical_bytes(SHIPPED)), 339)
         self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "60ab3c242d54ce89")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=5), "35e233a89e8c87b1")
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=6), "b439df88e7c3623a")
+        self.assertEqual(identity(SHIPPED), "b439df88e7c3623a")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
