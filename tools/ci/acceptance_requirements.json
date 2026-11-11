@@ -2295,8 +2295,8 @@
     {
       "id": "ar.file.051",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding).",
-      "text": "All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding)."
+      "quote": "All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding), and the following table shows historical versions 1 and 2 with version 3 using the value 3 in the same version field.",
+      "text": "All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding), and the following table shows historical versions 1 and 2 with version 3 using the value 3 in the same version field."
     },
     {
       "id": "ar.file.052",
@@ -3309,8 +3309,8 @@
     {
       "id": "ar.file.097",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "They retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;",
-      "text": "They retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;"
+      "quote": "Without other extensions they retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;",
+      "text": "Without other extensions they retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;"
     },
     {
       "id": "ar.file.098",
@@ -3339,8 +3339,8 @@
     {
       "id": "ar.file.102",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
-      "text": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
+      "quote": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
+      "text": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
     },
     {
       "id": "ar.file.103",
@@ -3363,8 +3363,8 @@
     {
       "id": "ar.file.106",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The currently supported extension is type 2, `digest_projection`, with a one-byte value of 2.",
-      "text": "The currently supported extension is type 2, `digest_projection`, with a one-byte value of 2."
+      "quote": "The historical v2-only contract declares type 2, `digest_projection`, with a one-byte value of 2.",
+      "text": "The historical v2-only contract declares type 2, `digest_projection`, with a one-byte value of 2."
     },
     {
       "id": "ar.file.107",
@@ -3381,8 +3381,8 @@
     {
       "id": "ar.file.109",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
-      "text": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
+      "quote": "The encoder includes this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
+      "text": "The encoder includes this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
     },
     {
       "id": "ar.file.110",
@@ -3393,8 +3393,8 @@
     {
       "id": "ar.file.111",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Otherwise the extension set is empty and the encoder emits version 1.",
-      "text": "Otherwise the extension set is empty and the encoder emits version 1."
+      "quote": "The encoder emits version 1 when the extension set is empty, version 2 when type 2 is the only extension, and version 3 whenever any of types 1 (persistent id allocator), 4 (energy ages), 5 (water debts) or 6 (completed work) is present, optionally with type 2, while readers retain historical extended-v2 compatibility and refuse envelope versions above 3 as future formats.",
+      "text": "The encoder emits version 1 when the extension set is empty, version 2 when type 2 is the only extension, and version 3 whenever any of types 1 (persistent id allocator), 4 (energy ages), 5 (water debts) or 6 (completed work) is present, optionally with type 2, while readers retain historical extended-v2 compatibility and refuse envelope versions above 3 as future formats."
     },
     {
       "id": "ar.file.112",

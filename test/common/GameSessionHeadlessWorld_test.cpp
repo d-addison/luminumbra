@@ -5508,7 +5508,7 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     for (const bool future : {false, true}) {
         auto bytes = good;
         if (future)
-            bytes[4] = 3;
+            bytes[4] = 4;
         else
             bytes[8] ^= 1;
         std::ofstream(path, std::ios::binary) << bytes;
@@ -13507,7 +13507,7 @@ namespace Foliage = luminumbra::foliage;
 
 void ExhaustPersistentAllocator(ActiveRegionLedger& ledger) {
     auto bytes = ledger.encode();
-    // The first version-2 TLV carries the eight-byte persistent allocator cursor.
+    // The first TLV carries the eight-byte persistent allocator cursor.
     const auto offset = ActiveRegionLedger::kHeaderBytes +
                         ledger.records().size() * ActiveRegionLedger::kRecordBytes + 4 + 6;
     ASSERT_GE(bytes.size(), offset + 16);

@@ -189,14 +189,17 @@ this file as an unknown region file. Decode failure never changes the destinatio
 ledger. Unknown extension types cannot be skipped and are corrupt.
 Version 1 ledgers load with or without frozen history. Their historical digest
 values, freeze stamps and canonical bytes are preserved without recomputation.
-They retain the version 1 envelope until every legacy historical digest has
-been refreshed at a later freeze or its record evicted; waking alone does not
-refresh a digest. This avoids declaring legacy digests as projection 2.
+Without other extensions they retain the version 1 envelope until every legacy
+historical digest has been refreshed at a later freeze or its record evicted;
+waking alone does not refresh a digest. This avoids declaring legacy digests as
+projection 2.
 Flag-off legacy saves without a ledger retain their existing load, save and hash
 behaviour, with no new files, bytes or hash terms.
 
 All integers are little endian, signed integers use two's complement, floats
-are IEEE binary32 (finite, with positive zero as the sole zero encoding).
+are IEEE binary32 (finite, with positive zero as the sole zero encoding),
+and the following table shows historical versions 1 and 2 with version 3
+using the value 3 in the same version field.
 The header is exactly 56 bytes:
 
 | Offset | Bytes | Value |
@@ -232,18 +235,22 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 | 88 | 8 | u64 water cursor |
 | 96 | 8 | u64 frozen simulation content digest |
 
-Version 1 has no extensions. Version 2 uses the same header and records, then
+Version 1 has no extensions. Versions 2 and 3 use the same header and records, then
 a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
 is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
 strictly ascending, with no duplicates; unknown types, truncated values and
-`ext_len == 0` are corrupt. The currently supported extension is type 2,
+`ext_len == 0` are corrupt. The historical v2-only contract declares type 2,
 `digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
 with `Unsupported frozen digest projection.`; a lower value is corrupt.
-The encoder emits version 2 with this declaration whenever a record is frozen
+The encoder includes this declaration whenever a record is frozen
 or retains a nonzero freeze stamp or frozen digest, including after waking,
 provided no legacy historical digest remains. A version 1 reload conservatively
 treats all historical digests as legacy, including any refreshed before saving.
-Otherwise the extension set is empty and the encoder emits version 1.
+The encoder emits version 1 when the extension set is empty, version 2 when
+type 2 is the only extension, and version 3 whenever any of types 1 (persistent
+id allocator), 4 (energy ages), 5 (water debts) or 6 (completed work) is present,
+optionally with type 2, while readers retain historical extended-v2 compatibility
+and refuse envelope versions above 3 as future formats.
 The declaration belongs only to the persistence envelope and adds no canonical
 hash term.
 
