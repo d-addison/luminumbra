@@ -1603,6 +1603,11 @@ void PolygoniseTerrain(const Systems::SHIELD_WorldSystem& world_system,
                        Chunk& chunk,
                        float isolevel,
                        int step) {
+    // Direct remeshing of a Ready chunk can remove its final vertex. Streaming
+    // scratch chunks are Unloaded and become visible only at owner publication.
+    if (chunk.get_state() == ChunkState::Ready) {
+        world_system.notify_renderable_chunks_changed();
+    }
     const auto build_start = std::chrono::steady_clock::now();
     // reset the per-worker meshing arena at job entry. Covers BOTH the
     // coarse heightfield path (remap) and the unit-step path below (edge cache,

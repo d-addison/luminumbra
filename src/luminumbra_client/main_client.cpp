@@ -1098,7 +1098,7 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
             // foliage stays camera-responsive. Gated OFF while any scenario is
             // active so every gate rebuilds byte-exact (mirrors the readback gating
             // above) — zero gate/determinism impact.
-            const auto& fol_renderable = fol_ws->get_renderable_chunks();
+            const auto& fol_renderable = fol_ws->renderable_chunks_view();
             std::uint64_t scatter_sig = fol_renderable.size();
             for (const Luminumbra::Chunk* chunk : fol_renderable) {
                 if (chunk == nullptr) {
@@ -3817,7 +3817,7 @@ int main(int argc, char* argv[]) {
                     gameSession->GetRegistry(), capture_position, nullptr);
             }
             if (gameSession->GetWorldSystem() && g_camera) {
-                if (gameSession->GetWorldSystem()->get_renderable_chunks().empty()) {
+                if (gameSession->GetWorldSystem()->renderable_chunks_view().empty()) {
                     continue;
                 }
                 if (runtime_boot_recorder.complete()) {

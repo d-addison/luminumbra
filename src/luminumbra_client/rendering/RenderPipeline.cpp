@@ -2673,7 +2673,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // Dry caves below sea/lake level retain their air lighting.
     m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
     const auto snapshot_start = std::chrono::steady_clock::now();
-    auto renderable_chunks = world_system.get_renderable_chunks();
+    const auto& renderable_chunks = world_system.renderable_chunks_view();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
     m_last_mesh_upload_stats = {};
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();

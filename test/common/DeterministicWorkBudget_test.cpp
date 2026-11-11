@@ -13,6 +13,7 @@
 #include "luminumbra_server/ServerStreamingBudget.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +54,188 @@ std::uint64_t StreamingBacklog(const Systems::SHIELD_WorldSystem& world) {
            (streaming.meshing_candidates - streaming.submitted_meshing);
 }
 
+std::vector<Chunk*> ReferenceRenderableScan(const Systems::SHIELD_WorldSystem& world) {
+    std::vector<Chunk*> reference;
+    // The snapshot follows the resident unordered_map, including its rehash order.
+    for (const auto& chunk : world.snapshot_streamed_chunks()) {
+        if (chunk->get_state() == ChunkState::Ready && !chunk->mesh_vertices.empty()) {
+            reference.push_back(chunk.get());
+        }
+    }
+    return reference;
+}
+
+TEST(DeterministicWorkBudget, RenderableViewReusesIdleStorageAndMatchesResidentOrder) {
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, FlatWorkBudgetTerrain(), 1337);
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    for (int index = 0; index < 96; ++index) {
+        auto chunk = std::make_shared<Chunk>(IVec3(index, 0, 0));
+        chunk->set_state(index % 3 == 0 ? ChunkState::Idle : ChunkState::Ready);
+        if (index % 5 != 0) {
+            chunk->mesh_vertices.resize(1);
+        }
+        const auto before = world.renderable_view_work();
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        const auto& view = world.renderable_chunks_view();
+        const auto after = world.renderable_view_work();
+        EXPECT_EQ(after.rebuilds - before.rebuilds, 1u);
+        EXPECT_EQ(after.chunk_visits - before.chunk_visits, static_cast<std::uint64_t>(index + 1));
+        EXPECT_EQ(view, ReferenceRenderableScan(world));
+    }
+    const auto& view = world.renderable_chunks_view();
+    ASSERT_FALSE(view.empty());
+    const auto* storage = view.data();
+    const auto before = world.renderable_view_work();
+    const auto copies_before = world.snapshot_copies();
+    for (int frame = 0; frame < 16; ++frame) {
+        EXPECT_EQ(world.renderable_chunks_view().data(), storage);
+    }
+    const auto after = world.renderable_view_work();
+    EXPECT_EQ(after.rebuilds - before.rebuilds, 0u);
+    EXPECT_EQ(after.allocations - before.allocations, 0u);
+    EXPECT_EQ(after.chunk_visits - before.chunk_visits, 0u);
+    EXPECT_EQ(world.snapshot_copies(), copies_before);
+    const auto copied = world.get_renderable_chunks();
+    EXPECT_EQ(copied, view);
+    EXPECT_EQ(world.snapshot_copies() - copies_before, view.size());
+    EXPECT_EQ(world.renderable_view_work().rebuilds, after.rebuilds);
+    EXPECT_EQ(world.renderable_view_work().allocations - after.allocations, 1u);
+
+    // Refused adoption leaves the valid view and its storage alone.
+    EXPECT_FALSE(world.adopt_streamed_chunk(nullptr));
+    EXPECT_FALSE(world.adopt_streamed_chunk(std::make_shared<Chunk>(IVec3(0, 0, 0))));
+    EXPECT_EQ(world.renderable_chunks_view().data(), storage);
+    EXPECT_EQ(world.renderable_view_work().rebuilds, after.rebuilds);
+
+    // A borrowed vector loses all raw pointers before world ownership is released.
+    world.clear_world(nullptr);
+    EXPECT_TRUE(view.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    EXPECT_EQ(world.renderable_view_work().rebuilds, after.rebuilds + 1u);
+}
+
+TEST(DeterministicWorkBudget, RenderableViewRefreshesReadyMeshClearAndParkedResidency) {
+    const auto params = FlatWorkBudgetTerrain();
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    world.debug_set_streaming_radius_cap(1);
+    world.set_durable_residency(true);
+    entt::registry registry;
+    const Vec3 anchor{8, 35, 8};
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 2, 0));
+    world.GenerateChunkData(*chunk);
+    chunk->set_state(ChunkState::Idle);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    const auto initial_work = world.renderable_view_work();
+
+    // Normal scheduling publishes Idle -> Meshing -> Ready at the tick barrier.
+    world.begin_tick(1);
+    world.update(registry, anchor, nullptr);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Meshing);
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    world.quiesce_streaming_jobs_for_save();
+    world.begin_tick(9);
+    world.activate_due(9);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Ready);
+    ASSERT_FALSE(chunk->mesh_vertices.empty());
+    const auto& view = world.renderable_chunks_view();
+    EXPECT_NE(std::find(view.begin(), view.end(), chunk.get()), view.end());
+    EXPECT_EQ(view, ReferenceRenderableScan(world));
+    EXPECT_GT(world.renderable_view_work().rebuilds, initial_work.rebuilds);
+
+    // The direct mesher's empty-SDF result clears a Ready mesh without a state flip.
+    chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
+    chunk->mark_voxel_data_dirty();
+    const auto before_clear = world.renderable_view_work();
+    World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+    ASSERT_TRUE(chunk->mesh_vertices.empty());
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    EXPECT_EQ(world.renderable_view_work().rebuilds, before_clear.rebuilds + 1u);
+    EXPECT_EQ(std::find(view.begin(), view.end(), chunk.get()), view.end());
+
+    // Restore geometry, then park edited authority outside the active radius.
+    world.GenerateChunkData(*chunk);
+    chunk->mark_voxel_data_dirty();
+    World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+    ASSERT_FALSE(chunk->mesh_vertices.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    const auto before_park = world.renderable_view_work();
+    const int activation_interval = world.get_last_streaming_budget_stats().update_interval_frames;
+    ASSERT_GT(activation_interval, 0);
+    for (int frame = 0;
+         frame < 2 * activation_interval && world.find_streamed_chunk(chunk->get_coords());
+         ++frame) {
+        const auto tick = static_cast<std::int64_t>(17 + frame * 9);
+        world.begin_tick(tick);
+        world.update(registry, Vec3{4096, 35, 8}, nullptr);
+        world.activate_due(tick + 8);
+    }
+    EXPECT_EQ(world.find_streamed_chunk(chunk->get_coords()), nullptr);
+    ASSERT_GT(world.parking_status().parked_count, 0u);
+    EXPECT_TRUE(view.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    EXPECT_EQ(world.renderable_view_work().rebuilds, before_park.rebuilds + 1u);
+    EXPECT_EQ(std::find(view.begin(), view.end(), chunk.get()), view.end());
+    ASSERT_TRUE(world.unpark_chunk(chunk->get_id()));
+    EXPECT_EQ(chunk->get_state(), ChunkState::Idle);
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    EXPECT_FALSE(world.unpark_chunk(chunk->get_id()));
+    world.clear_world(nullptr);
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+}
+
+TEST(DeterministicWorkBudget, RenderableViewEvictionClearsPointersBeforeRebuilding) {
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    world.debug_set_streaming_radius_cap(1);
+    entt::registry registry;
+    auto chunk = std::make_shared<Chunk>(IVec3(1024, 2, 0));
+    chunk->set_state(ChunkState::Ready);
+    chunk->mesh_vertices.resize(1);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const auto& view = world.renderable_chunks_view();
+    ASSERT_EQ(view, std::vector<Chunk*>{chunk.get()});
+    const auto before = world.renderable_view_work();
+    // Drive two activation intervals, draining each dispatched batch by its due tick.
+    const Vec3 anchor{8, 35, 8};
+    for (int frame = 0; frame < 8 && world.find_streamed_chunk(chunk->get_coords()); ++frame) {
+        const auto tick = static_cast<std::int64_t>(frame * 9 + 1);
+        world.begin_tick(tick);
+        world.update(registry, anchor, nullptr);
+        world.activate_due(tick + 8);
+    }
+    EXPECT_EQ(world.find_streamed_chunk(chunk->get_coords()), nullptr);
+    EXPECT_TRUE(view.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+    EXPECT_EQ(world.renderable_view_work().rebuilds, before.rebuilds + 1u);
+}
+
+TEST(DeterministicWorkBudget, RenderableViewWorkerSurfacePublicationMatchesReference) {
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    const auto before = world.renderable_view_work();
+    // The flat three-chunk vertical band over radius four exceeds the synchronous
+    // builder's 128-job threshold, exercising its joined worker batches.
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(Vec3{8, 35, 8}, &physics, 4, 0));
+    const auto& view = world.renderable_chunks_view();
+    ASSERT_FALSE(view.empty());
+    EXPECT_EQ(view, ReferenceRenderableScan(world));
+    EXPECT_EQ(world.renderable_view_work().rebuilds, before.rebuilds + 1u);
+    const auto settled = world.renderable_view_work();
+    EXPECT_EQ(world.renderable_chunks_view(), view);
+    EXPECT_EQ(world.renderable_view_work().rebuilds, settled.rebuilds);
+    EXPECT_EQ(world.renderable_view_work().chunk_visits, settled.chunk_visits);
+    EXPECT_EQ(world.renderable_view_work().allocations, settled.allocations);
+}
+
 TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication) {
     for (const bool needs_promotion : {false, true}) {
         SCOPED_TRACE(needs_promotion);
@@ -73,6 +256,9 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
         chunk->set_state(ChunkState::Ready);
         ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
         const auto old_version = chunk->mesh_version.load();
+        const auto& view = world.renderable_chunks_view();
+        ASSERT_EQ(view, std::vector<Chunk*>{chunk.get()});
+        const auto view_before_dispatch = world.renderable_view_work();
 
         world.begin_tick(1);
         world.update(registry, anchor, nullptr);
@@ -80,6 +266,8 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
         ASSERT_EQ(chunk->get_state(), ChunkState::Ready);
         ASSERT_EQ(chunk->pending_lod.load(), 0);
         EXPECT_EQ(StreamingBacklog(world), 1u);
+        EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+        EXPECT_EQ(world.renderable_view_work().rebuilds, view_before_dispatch.rebuilds);
 
         // Worker completion cannot settle an unpublished remesh. The next
         // candidate scan sees no work because pending_lod already owns it.
@@ -116,6 +304,8 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
         EXPECT_EQ(chunk->current_lod.load(), 0);
         EXPECT_EQ(chunk->mesh_version.load(), old_version + 1u);
         EXPECT_EQ(StreamingBacklog(world), 0u);
+        EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
+        EXPECT_EQ(world.renderable_view_work().rebuilds, view_before_dispatch.rebuilds + 1u);
     }
 }
 
@@ -651,9 +841,15 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
             world.update(registry, anchor, nullptr);
         world.activate_due(static_cast<std::int64_t>(step));
         const auto snapshot = world.snapshot_streamed_chunks();
-        const auto renderable = world.get_renderable_chunks();
+        const auto copies_before_view = world.snapshot_copies();
+        const auto view_before = world.renderable_view_work();
+        const auto& renderable = world.renderable_chunks_view();
+        const auto view_after = world.renderable_view_work();
+        const auto rebuilt = view_after.rebuilds - view_before.rebuilds;
+        EXPECT_LE(rebuilt, 1u);
+        EXPECT_EQ(world.snapshot_copies() - copies_before_view, rebuilt * renderable.size());
         const auto snapshot_work = world.snapshot_copies() - snapshot_before;
-        EXPECT_EQ(snapshot_work, snapshot.size() + renderable.size());
+        EXPECT_EQ(snapshot_work, snapshot.size() + rebuilt * renderable.size());
         const auto& streaming = world.get_last_streaming_budget_stats();
         const auto physics_work = physics.work_items();
         const auto backlog = StreamingBacklog(world);
