@@ -90,7 +90,7 @@ struct CloudRenderState {
 //  - strike_ndc       the strike ground point projected to NDC [-1,1] (for a mild
 //    radial brightening centred on the strike).
 //  - bolt_points_ndc  the bolt polyline (main channel + branches, flattened with
-//    NaN-x separators) in NDC; the lighting frag adds bright pixels near any
+//    kLiveBoltPenUp separators) in NDC; the lighting frag adds bright pixels near any
 //    segment so the capture shows a thin high-gradient structure.
 inline constexpr int kMaxBoltSegmentPoints = 96; // GLSL uniform array cap
 struct LightningRenderState {
@@ -113,8 +113,10 @@ struct LightningRenderState {
     // 0 == no cloud overlay (keeps the WeatherVisual strike gate byte-stable).
     glm::vec2 cloud_anchor_ndc = glm::vec2(0.0f, 0.85f);
     float cloud_darkness = 0.0f;
-    // Flattened NDC polyline points. A point with x <= -2.0 is a PEN-UP separator
-    // between disjoint polylines (main channel / each branch). Drawn as connected
+    // Flattened NDC polyline points. kLiveBoltPenUp (-3, -3), declared in
+    // LiveStrikeComposer.h, is the exact PEN-UP separator between disjoint polylines
+    // (main channel / each branch). Real live points are clipped to [-1, 1]; capture
+    // projections also keep real points outside the marker range. Drawn as connected
     // segments between consecutive non-separator points.
     std::vector<glm::vec2> bolt_points_ndc;
 };
