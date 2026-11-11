@@ -108,7 +108,7 @@ public:
         return true;
     }
 
-    bool PlayOneShot2D(const AudioEventID& eventID, BusId = BusId::Sfx) override {
+    bool PlayOneShot2D(const AudioEventID& eventID, BusId = BusId::Sfx, float = 1.0f) override {
         ++m_play_one_shot_2d_calls;
         if (!m_telemetry_path.empty())
             m_event_ids.push_back(eventID);

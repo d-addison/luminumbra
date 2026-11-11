@@ -11,7 +11,7 @@
 namespace Luminumbra::Rendering {
 
 // Marks a break between strokes and a point behind the camera.
-// Uploaded real points are clipped to [-1, 1], outside this marker's range.
+// Expanded clip bounds are clamped to [-2, 2], strictly inside this marker.
 inline constexpr glm::vec2 kLiveBoltPenUp{-3.0f, -3.0f};
 
 // Keep the exact marker predicate in sync with lightning_overlay.frag.
@@ -33,16 +33,32 @@ struct ComposedLiveStrikes {
     float pulse = 0.0f;
 };
 
-// Clips a-b to the [-1, 1] view square (Liang-Barsky); refusal leaves it unchanged.
-inline bool ClipLiveSegmentToView(glm::vec2& a, glm::vec2& b) {
+// Match coreHalf and glowRadius in lightning_overlay.frag. Their sum
+// conservatively covers both; x is divided by the shader's u_aspect scale.
+inline glm::vec2 LiveBoltViewMargin(float width, float glow, float aspect) {
+    const double safe_glow = std::max(0.0, static_cast<double>(glow));
+    const double core =
+        std::clamp(std::min(std::max(0.0, static_cast<double>(width)) * 0.18, safe_glow * 0.10),
+                   0.0010,
+                   0.0024);
+    const double radius = core + std::min(safe_glow, 0.030);
+    const double x = aspect > 0.0f ? radius / aspect : 1.0;
+    return {static_cast<float>(std::min(x, 1.0)), static_cast<float>(std::min(radius, 1.0))};
+}
+
+// Clips a-b to the expanded view (Liang-Barsky); refusal leaves it unchanged.
+// Clamp each margin to [0, 1], so even extreme radii/aspects cannot reach (-3, -3).
+inline bool ClipLiveSegmentToView(glm::vec2& a, glm::vec2& b, glm::vec2 margin = {}) {
     if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y)) {
         return false;
     }
     // Double intermediates keep subtraction safe for all finite projected floats.
+    const double bound_x = 1.0 + std::clamp(margin.x > 0.0f ? margin.x : 0.0f, 0.0f, 1.0f);
+    const double bound_y = 1.0 + std::clamp(margin.y > 0.0f ? margin.y : 0.0f, 0.0f, 1.0f);
     const double dx = static_cast<double>(b.x) - a.x;
     const double dy = static_cast<double>(b.y) - a.y;
     const double p[4] = {-dx, dx, -dy, dy};
-    const double q[4] = {a.x + 1.0, 1.0 - a.x, a.y + 1.0, 1.0 - a.y};
+    const double q[4] = {a.x + bound_x, bound_x - a.x, a.y + bound_y, bound_y - a.y};
     double enter = 0.0;
     double leave = 1.0;
     for (int i = 0; i < 4; ++i) {
@@ -63,28 +79,28 @@ inline bool ClipLiveSegmentToView(glm::vec2& a, glm::vec2& b) {
         }
     }
     const glm::vec2 origin = a;
-    a = {static_cast<float>(std::clamp(origin.x + enter * dx, -1.0, 1.0)),
-         static_cast<float>(std::clamp(origin.y + enter * dy, -1.0, 1.0))};
-    b = {static_cast<float>(std::clamp(origin.x + leave * dx, -1.0, 1.0)),
-         static_cast<float>(std::clamp(origin.y + leave * dy, -1.0, 1.0))};
+    a = {static_cast<float>(std::clamp(origin.x + enter * dx, -bound_x, bound_x)),
+         static_cast<float>(std::clamp(origin.y + enter * dy, -bound_y, bound_y))};
+    b = {static_cast<float>(std::clamp(origin.x + leave * dx, -bound_x, bound_x)),
+         static_cast<float>(std::clamp(origin.y + leave * dy, -bound_y, bound_y))};
     return true;
 }
 
-// True when the segment a-b touches the [-1, 1] view square.
-inline bool LiveSegmentTouchesView(glm::vec2 a, glm::vec2 b) {
-    return ClipLiveSegmentToView(a, b);
+// True when the segment a-b touches the expanded view square.
+inline bool LiveSegmentTouchesView(glm::vec2 a, glm::vec2 b, glm::vec2 margin = {}) {
+    return ClipLiveSegmentToView(a, b, margin);
 }
 
 // True when any drawn segment of the stroke touches the view; segments touching a
 // pen-up point are not drawn.
-inline bool LiveStrokeMayBeVisible(std::span<const glm::vec2> stroke) {
+inline bool LiveStrokeMayBeVisible(std::span<const glm::vec2> stroke, glm::vec2 margin = {}) {
     for (std::size_t i = 1; i < stroke.size(); ++i) {
         const glm::vec2 a = stroke[i - 1];
         const glm::vec2 b = stroke[i];
         if (IsLiveBoltPenUp(a) || IsLiveBoltPenUp(b)) {
             continue;
         }
-        if (LiveSegmentTouchesView(a, b)) {
+        if (LiveSegmentTouchesView(a, b, margin)) {
             return true;
         }
     }
@@ -92,13 +108,21 @@ inline bool LiveStrokeMayBeVisible(std::span<const glm::vec2> stroke) {
 }
 
 // Indices, in ascending order, of the at most max_strikes strikes with the strongest
-// pulse; ties keep the earlier strike. Only these strikes get bolt geometry, so the
-// strongest flash always has its bolt.
+// pulse among visible candidates; ties keep the earlier strike. The visibility
+// predicate runs before the cap, once per candidate (bounded by the live window).
+template<typename Visible>
 inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> pulses,
-                                                         std::size_t max_strikes) {
-    std::vector<std::size_t> order(pulses.size());
-    for (std::size_t i = 0; i < order.size(); ++i) {
-        order[i] = i;
+                                                         std::size_t max_strikes,
+                                                         const Visible& visible) {
+    std::vector<std::size_t> order;
+    if (max_strikes == 0) {
+        return order;
+    }
+    order.reserve(pulses.size());
+    for (std::size_t i = 0; i < pulses.size(); ++i) {
+        if (visible(i)) {
+            order.push_back(i);
+        }
     }
     const std::size_t keep = max_strikes < order.size() ? max_strikes : order.size();
     std::partial_sort(order.begin(),
@@ -110,6 +134,20 @@ inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> 
     order.resize(keep);
     std::sort(order.begin(), order.end());
     return order;
+}
+
+inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> pulses,
+                                                         std::size_t max_strikes) {
+    return SelectLiveStrikeGeometry(pulses, max_strikes, [](std::size_t) { return true; });
+}
+
+inline bool LiveStrikeMayBeVisible(const ProjectedLiveStrike& strike, glm::vec2 margin) {
+    if (LiveStrokeMayBeVisible(strike.main_channel, margin)) {
+        return true;
+    }
+    return std::any_of(strike.branches.begin(), strike.branches.end(), [&](const auto& branch) {
+        return LiveStrokeMayBeVisible(branch, margin);
+    });
 }
 
 // Combines every same-frame strike into one bolt polyline of at most max_points.
@@ -125,7 +163,8 @@ inline std::vector<std::size_t> SelectLiveStrikeGeometry(std::span<const float> 
 // the flash: the strongest supplies the pulse and strike point, and ties keep the
 // earlier strike.
 inline ComposedLiveStrikes ComposeLiveStrikes(std::span<const ProjectedLiveStrike> strikes,
-                                              std::size_t max_points) {
+                                              std::size_t max_points,
+                                              glm::vec2 margin = {}) {
     ComposedLiveStrikes out;
     enum class Placement {
         Placed,
@@ -138,7 +177,7 @@ inline ComposedLiveStrikes ComposeLiveStrikes(std::span<const ProjectedLiveStrik
         for (std::size_t i = 1; i < stroke.size(); ++i) {
             glm::vec2 a = stroke[i - 1];
             glm::vec2 b = stroke[i];
-            if (IsLiveBoltPenUp(a) || IsLiveBoltPenUp(b) || !ClipLiveSegmentToView(a, b)) {
+            if (IsLiveBoltPenUp(a) || IsLiveBoltPenUp(b) || !ClipLiveSegmentToView(a, b, margin)) {
                 connected = false;
                 continue;
             }
