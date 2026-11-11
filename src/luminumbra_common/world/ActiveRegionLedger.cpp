@@ -786,12 +786,13 @@ std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
-    const bool extension = declare_projection || allocator_advanced || !m_energyAges.empty() ||
-                           !m_waterDebts.empty() || !m_completedWork.empty();
+    const bool extended_contract = allocator_advanced || !m_energyAges.empty() ||
+                                   !m_waterDebts.empty() || !m_completedWork.empty();
+    const bool extension = declare_projection || extended_contract;
     if (!encodable_with_counts(m_energyAges.size(), m_waterDebts.size()))
         throw std::length_error("Active-region ledger file capacity reached");
     std::string bytes = "ARL1";
-    Append(bytes, extension ? 2 : 1, 2);
+    Append(bytes, extended_contract ? 3 : declare_projection ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
     if (extension) {
@@ -851,12 +852,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         return false;
     Reader version_reader(bytes.substr(4));
     const auto version = version_reader.read(2);
-    if (version > 2) {
+    if (version > 3) {
         error = kFutureMessage;
         return false;
     }
-    // Version 2 carries a u32 extension length between the records and the checksum.
-    const std::size_t extension_prefix = version == 2 ? 4 : 0;
+    // Versions 2 and 3 share the extension layout and the original file cap.
+    const std::size_t extension_prefix = version >= 2 ? 4 : 0;
     if (version == 0 || bytes.size() < kHeaderBytes + extension_prefix + 8 ||
         bytes.size() > kMaxFileBytes)
         return false;
@@ -888,7 +889,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         const auto count = in.read(4);
         if (count > kMaxRegions)
             return false;
-        // Records end here; a version 2 extension length (checked below) follows them.
+        // Records end here; versions 2 and 3 append an extension length (checked below).
         const std::uint64_t records_end = kHeaderBytes + count * kRecordBytes;
         if (bytes.size() < records_end + extension_prefix + 8 ||
             (version == 1 && bytes.size() != records_end + 8))
@@ -944,7 +945,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             result.m_records.emplace(key, r);
         }
         bool declared_projection = false;
-        if (version == 2) {
+        if (version >= 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
             if (extension_length == 0 || bytes.size() != extension_begin + extension_length + 8)
@@ -1068,10 +1069,19 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     result.m_legacyFrozenDigests.insert(key);
         }
         // An envelope without a projection TLV preserves historical digests verbatim, even
-        // when allocator, completed work, energy ages or water debt require version 2. Do not
+        // when allocator, completed work, energy ages or water debt require version 3. Do not
         // label them projection 2 until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
-        if (result.encode() != bytes)
+        auto canonical = result.encode();
+        if (version == 2 && canonical[4] == 3) {
+            // Historical extended-v2 saves keep the same strict canonical validation.
+            // Only their version and checksum differ from new v3 output; this buffer
+            // remains bounded by kMaxFileBytes, as checked by encode().
+            canonical[4] = 2;
+            canonical.resize(canonical.size() - 8);
+            Append(canonical, Hash(canonical), 8);
+        }
+        if (canonical != bytes)
             return false;
         out = std::move(result);
         error.clear();
