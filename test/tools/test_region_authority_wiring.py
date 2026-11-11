@@ -97,7 +97,8 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertNotIn("water_mesh", terrain)
         self.assertNotIn("continue;", terrain)
         self.assertNotIn("return", terrain)
-        water_guard = "if (water_current && (!job_chunk.terrain_mesh_required || terrain_current))"
+        water_guard = ("if (replaces_water && water_current && "
+                       "(!job_chunk.terrain_mesh_required || terrain_current))")
         water = function(success, water_guard)
         self.assertIn(water, success)
         self.assertIn("const bool water_current = "
