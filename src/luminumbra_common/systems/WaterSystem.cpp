@@ -2044,6 +2044,7 @@ std::size_t WaterSystem::MigrateChunksToSimResolution(
         }
         if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution &&
             HasCompleteIntegerWaterGrid(*cp, m_sim_resolution)) {
+            ResizeSimulationGrid(*cp, target_level);
             continue;
         }
         if (ResizeSimulationGrid(*cp, target_level))
@@ -2058,7 +2059,38 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
 
     if (new_resolution == current_resolution &&
         !(chunk.water_bed_mm.empty() && chunk.water_depth_mm.empty())) {
-        return HasCompleteIntegerWaterGrid(chunk, current_resolution);
+        if (!HasCompleteIntegerWaterGrid(chunk, current_resolution)) {
+            return false;
+        }
+        // Integer validation bounds every mirror to at most 32x32 cells.
+        const auto cells = GetWaterCellCount(current_resolution);
+        const bool rebuild_surface = chunk.water_level_data.size() != cells;
+        const bool rebuild_terrain = chunk.water_sim_terrain_height.size() != cells;
+        const bool rebuild_flow = chunk.water_flow_data.size() != cells;
+        if (rebuild_surface) {
+            chunk.water_level_data.resize(cells);
+            for (std::size_t index = 0; index < cells; ++index) {
+                chunk.water_level_data[index] =
+                    static_cast<float>(static_cast<std::int64_t>(chunk.water_bed_mm[index]) +
+                                       chunk.water_depth_mm[index]) /
+                    static_cast<float>(MM_PER_M);
+            }
+        }
+        if (rebuild_terrain) {
+            chunk.water_sim_terrain_height.resize(cells);
+            for (std::size_t index = 0; index < cells; ++index) {
+                chunk.water_sim_terrain_height[index] =
+                    static_cast<float>(chunk.water_bed_mm[index]) / static_cast<float>(MM_PER_M);
+            }
+        }
+        if (rebuild_flow) {
+            chunk.water_flow_data.assign(cells, Vec2(0.0f));
+        }
+        if (rebuild_surface || rebuild_terrain || rebuild_flow) {
+            // Mirror repair changes render inputs, never integer authority or save ownership.
+            InvalidateWaterMesh(chunk, m_mesh_invalidations);
+        }
+        return true;
     }
 
     if (new_resolution <= 0) { // Disable simulation

@@ -38,7 +38,6 @@ using namespace luminumbra::core;
 ResolvedGraphics Resolve(GraphicsPreset preset, const GraphicsOverrides& overrides = {}) {
     GraphicsSettings settings;
     EXPECT_TRUE(SelectGraphicsPreset(settings, preset));
-    settings.preset_revision = 1; // Exercise the retained visual reductions and resource changes.
     ResolvedGraphics resolved;
     std::string error;
     EXPECT_TRUE(ResolveGraphics(settings, overrides, resolved, error)) << error;
@@ -428,7 +427,7 @@ TEST_F(GraphicsRuntime, EveryPresetReachesPassesAndUnchangedApplicationDoesNotAl
     EXPECT_EQ(state().allocations, 0);
 }
 
-TEST_F(GraphicsRuntime, NewSelectionsRetainUltraPassValuesPendingVisualApproval) {
+TEST_F(GraphicsRuntime, NewSelectionsApplyApprovedPassValues) {
     RenderPipeline pipeline;
     for (const auto preset : {GraphicsPreset::Low,
                               GraphicsPreset::Medium,
@@ -440,7 +439,10 @@ TEST_F(GraphicsRuntime, NewSelectionsRetainUltraPassValuesPendingVisualApproval)
         std::string resolution_error;
         ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, resolution_error));
         ASSERT_TRUE(pipeline.apply_graphics(resolved));
-        EXPECT_EQ(pipeline.graphics_runtime_config(), GraphicsRuntimeConfig{});
+        settings.preset_revision = 1;
+        ResolvedGraphics expected;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, expected, resolution_error));
+        EXPECT_EQ(pipeline.graphics_runtime_config(), GraphicsRuntimeValues(expected));
     }
     EXPECT_EQ(state().allocations, 0);
 }
