@@ -1,13 +1,17 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace luminumbra::simulation {
@@ -41,6 +45,89 @@ public:
     // from callbacks into the next batch.
     std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
                                        const std::function<bool()>& continue_delivery = {});
+    // A concrete continuation is checked before each handler without type erasure.
+    // It must be callable; the nullable overload above retains empty-function semantics.
+    template<typename ContinueDelivery>
+        requires(std::is_class_v<ContinueDelivery> &&
+                 !std::is_base_of_v<std::function<bool()>, ContinueDelivery> &&
+                 std::is_invocable_r_v<bool, const ContinueDelivery&>)
+    std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
+                                       const ContinueDelivery& continue_delivery) {
+        std::vector<SimulationEvent> delivered;
+        for (;;) {
+            const bool resuming = pending_batch_size_ != 0;
+            if (!resuming) {
+                std::stable_sort(pending_events_.begin(),
+                                 pending_events_.end(),
+                                 [](const auto& a, const auto& b) {
+                                     if (a.event.tick != b.event.tick) {
+                                         return a.event.tick < b.event.tick;
+                                     }
+                                     if (a.event.lane != b.event.lane) {
+                                         return a.event.lane < b.event.lane;
+                                     }
+                                     return a.event.sequence < b.event.sequence;
+                                 });
+            }
+
+            std::vector<PendingEvent> due;
+            auto first_future = pending_events_.begin();
+            const auto batch_end = resuming ? pending_events_.begin() +
+                                                  static_cast<std::ptrdiff_t>(pending_batch_size_)
+                                            : pending_events_.end();
+            while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
+                const auto& event = first_future->event;
+                const auto bytes = pending_bytes_.find(event.topic);
+                bytes->second -= event.canonical_size() + 1;
+                if (bytes->second == 0)
+                    pending_bytes_.erase(bytes);
+                due.push_back(std::move(*first_future));
+                ++first_future;
+            }
+            pending_events_.erase(pending_events_.begin(), first_future);
+            if (resuming)
+                pending_batch_size_ -= due.size();
+
+            std::size_t current = 0;
+            const auto requeue = [&] {
+                for (std::size_t i = current; i < due.size(); ++i) {
+                    const auto& event = due[i].event;
+                    pending_bytes_[event.topic] += event.canonical_size() + 1;
+                }
+                // Preserve this batch's order and handler cutoffs before forming the next batch.
+                pending_events_.insert(
+                    pending_events_.begin(),
+                    std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
+                    std::make_move_iterator(due.end()));
+                pending_batch_size_ += due.size() - current;
+            };
+            try {
+                for (; current < due.size(); ++current) {
+                    auto& pending = due[current];
+                    if (!pending.handler_count)
+                        pending.handler_count = handlers_.size();
+                    while (pending.next_handler < pending.handler_count.value_or(0)) {
+                        if (!continue_delivery()) {
+                            requeue();
+                            return delivered;
+                        }
+                        // std::deque appends keep references to existing handler elements valid.
+                        const Handler& handler = handlers_[pending.next_handler];
+                        ++pending.next_handler;
+                        handler(pending.event);
+                    }
+                    delivered.push_back(pending.event);
+                }
+            } catch (...) {
+                requeue();
+                throw;
+            }
+
+            if (!resuming || pending_batch_size_ != 0)
+                return delivered;
+        }
+    }
+
     // A subscription added during delivery starts with the next event, in subscription order.
     void subscribe(Handler handler);
     void clear();
