@@ -115,7 +115,8 @@ TEST(GraphicsPresets, SharedClassifierPresetsPreserveDisplayNamesAndSettingsKeys
         EXPECT_EQ(saved["user"]["graphics"]["detection"]["recommended_preset"], row.key);
         const auto loaded = SystemConfig::LoadLayered("", file.Path().string());
         EXPECT_EQ(loaded.user().graphics.base_preset, row.preset);
-        EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);
+        EXPECT_EQ(loaded.user().graphics.preset_revision,
+                  row.preset == GraphicsPreset::Ultra ? 2u : 3u);
         EXPECT_FALSE(loaded.settings_load_report().needs_first_launch_detection);
         EXPECT_FALSE(loaded.user().vsync);
         EXPECT_EQ(loaded.user().frame_cap, 165);
@@ -173,7 +174,7 @@ TEST(GraphicsPresets, CompleteUltraSnapshotPreservesShippingPresentation) {
     EXPECT_FALSE(resolved.custom);
     EXPECT_TRUE(resolved.session_overrides.empty());
     EXPECT_EQ(resolved.base_preset, GraphicsPreset::Ultra);
-    EXPECT_EQ(resolved.preset_revision, kGraphicsPresetRevision);
+    EXPECT_EQ(resolved.preset_revision, 2u);
 
     // Cross-check shared shipping contracts without constructing GL resources.
     using Luminumbra::Client::ScenarioHarness::FoliageVisualProfile;
@@ -188,7 +189,7 @@ TEST(GraphicsPresets, CompleteUltraSnapshotPreservesShippingPresentation) {
     EXPECT_EQ(v.cave_ao_steps, cave.steps);
 }
 
-TEST(GraphicsPresets, RevisionOneRetainsEverySavedValueIncludingAllUnchangedRows) {
+TEST(GraphicsPresets, RevisionOneAndNewSelectionsResolveTheApprovedTable) {
     struct Row {
         double scale;
         double density;
@@ -226,10 +227,18 @@ TEST(GraphicsPresets, RevisionOneRetainsEverySavedValueIncludingAllUnchangedRows
         expected.ui_blur = row.blur;
         EXPECT_EQ(resolved.values, expected);
         EXPECT_FALSE(resolved.custom);
+        ASSERT_TRUE(SelectGraphicsPreset(settings, row.preset));
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        EXPECT_EQ(settings.preset_revision, row.preset == GraphicsPreset::Ultra ? 2u : 3u);
+        EXPECT_EQ(resolved.values, expected);
+        EXPECT_FALSE(resolved.custom);
+        settings.preset_revision = 3;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        EXPECT_EQ(resolved.values, expected);
     }
 }
 
-TEST(GraphicsPresets, NewSelectionsPreserveUltraAndIndependentFramePacingPendingApproval) {
+TEST(GraphicsPresets, NewSelectionsApplyApprovedVisualsAndPreserveIndependentFramePacing) {
     const ScopedTempFile file("graphics_", ".json");
     for (const auto preset : {GraphicsPreset::Low,
                               GraphicsPreset::Medium,
@@ -242,7 +251,7 @@ TEST(GraphicsPresets, NewSelectionsPreserveUltraAndIndependentFramePacingPending
                 settings.preset_revision = 1;
                 settings.overrides["render_scale"] = 0.5;
                 ASSERT_TRUE(SelectGraphicsPreset(settings, preset));
-                EXPECT_EQ(settings.preset_revision, kGraphicsPresetRevision);
+                EXPECT_EQ(settings.preset_revision, preset == GraphicsPreset::Ultra ? 2u : 3u);
                 EXPECT_TRUE(settings.overrides.empty());
                 config.user().vsync = vsync;
                 config.user().frame_cap = cap;
@@ -250,14 +259,20 @@ TEST(GraphicsPresets, NewSelectionsPreserveUltraAndIndependentFramePacingPending
                 std::string error;
                 ASSERT_TRUE(ResolveGraphics(
                     settings, {}, resolved, error, {.vsync = vsync, .frame_cap = cap}));
-                EXPECT_EQ(resolved.values, GraphicsValues{});
+                GraphicsSettings revision_one;
+                revision_one.base_preset = preset;
+                revision_one.preset_revision = 1;
+                ResolvedGraphics expected;
+                ASSERT_TRUE(ResolveGraphics(revision_one, {}, expected, error));
+                EXPECT_EQ(resolved.values, expected.values);
                 EXPECT_EQ(resolved.frame_pacing.vsync, vsync);
                 EXPECT_EQ(resolved.frame_pacing.frame_cap, cap);
                 EXPECT_FALSE(resolved.custom);
                 ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
                 const auto loaded = SystemConfig::LoadLayered({}, file.Path());
                 EXPECT_EQ(loaded.settings_load_report().state, SettingsLoadState::Loaded);
-                EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);
+                EXPECT_EQ(loaded.user().graphics.preset_revision,
+                          preset == GraphicsPreset::Ultra ? 2u : 3u);
                 EXPECT_EQ(loaded.user().graphics.base_preset, preset);
                 EXPECT_EQ(loaded.user().vsync, vsync);
                 EXPECT_EQ(loaded.user().frame_cap, cap);
@@ -266,26 +281,77 @@ TEST(GraphicsPresets, NewSelectionsPreserveUltraAndIndependentFramePacingPending
     }
 }
 
-TEST(GraphicsPresets, SavedRevisionOneRetainsItsVisualsUntilExplicitReselection) {
+TEST(GraphicsPresets, SavedRevisionsRetainValuesAndBytesUntilExplicitReselection) {
     const ScopedTempFile file("graphics_", ".json");
-    for (const auto preset : {GraphicsPreset::Low, GraphicsPreset::Medium, GraphicsPreset::High}) {
-        auto config = SystemConfig::Defaults();
-        config.user().graphics.base_preset = preset;
-        config.user().graphics.preset_revision = 1;
-        ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
-        auto loaded = SystemConfig::LoadLayered({}, file.Path());
-        EXPECT_EQ(loaded.settings_load_report().state, SettingsLoadState::Loaded);
-        EXPECT_FALSE(loaded.settings_load_report().needs_first_launch_detection);
-        EXPECT_EQ(loaded.user().graphics.preset_revision, 1u);
-        ResolvedGraphics old_values;
-        std::string error;
-        ASSERT_TRUE(ResolveGraphics(loaded.user().graphics, {}, old_values, error));
-        EXPECT_LT(old_values.values.grass_density, GraphicsValues{}.grass_density);
-        ASSERT_TRUE(SelectGraphicsPreset(loaded.user().graphics, preset));
-        ResolvedGraphics new_values;
-        ASSERT_TRUE(ResolveGraphics(loaded.user().graphics, {}, new_values, error));
-        EXPECT_EQ(new_values.values, GraphicsValues{});
+    for (const auto revision : {1u, 2u}) {
+        for (const auto preset : {GraphicsPreset::Low,
+                                  GraphicsPreset::Medium,
+                                  GraphicsPreset::High,
+                                  GraphicsPreset::Ultra}) {
+            SCOPED_TRACE(revision);
+            SCOPED_TRACE(GraphicsPresetName(preset));
+            auto config = SystemConfig::Defaults();
+            auto& saved = config.user().graphics;
+            saved.base_preset = preset;
+            saved.preset_revision = revision;
+            saved.overrides = {{"render_scale", 0.75}};
+            config.user().vsync = false;
+            config.user().frame_cap = 144;
+            ResolvedGraphics original;
+            std::string error;
+            ASSERT_TRUE(ResolveGraphics(saved, {}, original, error));
+            if (revision == 2) {
+                GraphicsValues expected;
+                expected.render_scale = 0.75;
+                EXPECT_EQ(original.values, expected);
+            }
+            ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+            const auto bytes = ReadText(file.Path());
+            auto loaded = SystemConfig::LoadLayered({}, file.Path());
+            ASSERT_EQ(loaded.settings_load_report().state, SettingsLoadState::Loaded);
+            EXPECT_FALSE(loaded.settings_load_report().needs_first_launch_detection);
+            EXPECT_EQ(loaded.user().graphics.preset_revision, revision);
+            EXPECT_EQ(loaded.user().graphics.overrides, saved.overrides);
+            ResolvedGraphics retained;
+            ASSERT_TRUE(ResolveGraphics(loaded.user().graphics, {}, retained, error));
+            EXPECT_EQ(retained.values, original.values);
+            EXPECT_EQ(ReadText(file.Path()), bytes);
+            ASSERT_TRUE(loaded.SaveUserOverlay(file.Path()));
+            EXPECT_EQ(ReadText(file.Path()), bytes);
+
+            ASSERT_TRUE(SelectGraphicsPreset(loaded.user().graphics, preset));
+            EXPECT_EQ(loaded.user().graphics.preset_revision,
+                      preset == GraphicsPreset::Ultra ? 2u : 3u);
+            EXPECT_TRUE(loaded.user().graphics.overrides.empty());
+            EXPECT_FALSE(loaded.user().vsync);
+            EXPECT_EQ(loaded.user().frame_cap, 144);
+            GraphicsSettings revision_one;
+            revision_one.base_preset = preset;
+            revision_one.preset_revision = 1;
+            ResolvedGraphics expected;
+            ASSERT_TRUE(ResolveGraphics(revision_one, {}, expected, error));
+            ResolvedGraphics selected;
+            ASSERT_TRUE(ResolveGraphics(loaded.user().graphics, {}, selected, error));
+            EXPECT_EQ(selected.values, expected.values);
+            ASSERT_TRUE(loaded.SaveUserOverlay(file.Path()));
+            const auto reloaded = SystemConfig::LoadLayered({}, file.Path());
+            EXPECT_EQ(reloaded.user().graphics.preset_revision,
+                      preset == GraphicsPreset::Ultra ? 2u : 3u);
+        }
     }
+
+    auto config = SystemConfig::Defaults();
+    config.user().graphics.preset_revision = 2;
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+    const auto bytes = ReadText(file.Path());
+    ASSERT_TRUE(SelectGraphicsPreset(config.user().graphics, GraphicsPreset::Ultra));
+    ResolvedGraphics resolved;
+    std::string error;
+    ASSERT_TRUE(ResolveGraphics(config.user().graphics, {}, resolved, error));
+    EXPECT_EQ(resolved.values, GraphicsValues{});
+    EXPECT_EQ(resolved.preset_revision, 2u);
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
+    EXPECT_EQ(ReadText(file.Path()), bytes);
 }
 
 TEST(GraphicsPresets, InvalidFramePacingLeavesResolvedResultUnchanged) {
@@ -341,7 +407,7 @@ TEST(GraphicsPresets, OverridesCustomSessionPrecedenceSelectionAndReset) {
     ASSERT_TRUE(SelectGraphicsPreset(settings, GraphicsPreset::High));
     EXPECT_TRUE(settings.overrides.empty());
     ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error));
-    EXPECT_DOUBLE_EQ(resolved.values.grass_density, 1.6);
+    EXPECT_DOUBLE_EQ(resolved.values.grass_density, 1.2);
     EXPECT_FALSE(resolved.custom);
     EXPECT_FALSE(SelectGraphicsPreset(settings, std::bit_cast<GraphicsPreset>(std::uint8_t{255})));
     EXPECT_EQ(settings.base_preset, GraphicsPreset::High);
@@ -538,7 +604,7 @@ TEST(GraphicsPresets, SystemsOverridesPreserveRecoveryAndRefuseSavingOriginal) {
     const std::string documents[]{
         "{broken",
         R"({"settings_schema_version":2,"user":{}})",
-        R"({"settings_schema_version":1,"user":{"graphics":{"base_preset":"ultra","preset_revision":3,"overrides":{}}}})",
+        R"({"settings_schema_version":1,"user":{"graphics":{"base_preset":"ultra","preset_revision":4,"overrides":{}}}})",
     };
     for (const bool reload_existing : {false, true}) {
         SCOPED_TRACE(reload_existing);
@@ -743,7 +809,7 @@ TEST(GraphicsPresets, InvalidVersionedGraphicsPreserveWholeOverlayTransaction) {
         invalid["user"]["graphics"]["base_preset"] = value;
         assert_recovery(invalid);
     }
-    for (const auto& value : nlohmann::json::parse(R"([null,0,3,1.0,4294967297,-1])")) {
+    for (const auto& value : nlohmann::json::parse(R"([null,0,4,1.0,4294967297,-1])")) {
         auto invalid = document;
         invalid["user"]["graphics"]["preset_revision"] = value;
         assert_recovery(invalid);

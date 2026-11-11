@@ -956,20 +956,22 @@ a first launch automatically selects and saves a recommendation. Existing and
 migrated selections remain intact across GPU/driver changes. Recovery continues
 to protect malformed or unsupported overlays from writes, including explicit saves.
 
-New graphics selections use revision 2. Pending owner approval of lower-tier
-visual reductions, Low, Medium and High resolve to the same presentation as Ultra.
+New Low, Medium and High graphics selections use revision 3 with the approved
+visual reductions below. Ultra retains revision 2, identical resolved values and
+identical saved bytes.
 Ultra retains the current grass density, High water and all existing rendering
 features; presets leave active regions and the configured GNS transport unchanged.
 Vsync and frame cap remain independent `user.video` choices, included in resolved
 graphics and preserved by selection, reset and detection. Measurement runs retain
 their temporary uncapped, vsync-off policy.
 
-Existing saved revision-1 selections keep their immutable values until the player
-selects a preset again. The following revision-1 differences from Ultra are all
-**pending owner approval** for future lower-tier selections; revision 2 applies
-none of these reductions:
+Existing saved revision-1 and revision-2 selections keep their immutable values
+and overrides until the player selects a preset again. Reselecting Low, Medium or
+High upgrades to revision 3 and clears overrides. Revision 3 reuses revision 1's
+complete visual table; revision 2 retains Ultra visuals for every tier. The
+following reductions are approved and applied to new revision-3 selections:
 
-| Setting | Ultra / all revision-2 tiers | Revision-1 Low | Revision-1 Medium | Revision-1 High | Visual impact of reduction |
+| Setting | Ultra / all revision-2 tiers | Revision-1/3 Low | Revision-1/3 Medium | Revision-1/3 High | Visual impact of reduction |
 | --- | --- | --- | --- | --- | --- |
 | Render scale | 1.0 | 0.67 | 0.80 | 1.0 | Softer scene at lower internal resolution |
 | Grass density | 1.6 | 0.4 | 0.8 | 1.2 | Sparser grass |
