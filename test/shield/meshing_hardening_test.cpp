@@ -1709,6 +1709,7 @@ TEST(StreamingHardening, MalformedAuthorityCannotEnterGenerationPromotion) {
             const auto authority = chunk->authority_stamp();
             const auto retained_sdf = chunk->sdf_data;
             const auto old_mesh = HashVec(chunk->mesh_vertices);
+            const auto old_version = chunk->mesh_version.load();
             chunk->has_collision.store(true);
             entt::registry registry;
             world.update(registry, std::vector<Vec3>{}, nullptr);
@@ -1717,8 +1718,15 @@ TEST(StreamingHardening, MalformedAuthorityCannotEnterGenerationPromotion) {
             EXPECT_EQ(chunk->pending_lod.load(), -1);
             EXPECT_EQ(chunk->authority_stamp(), authority);
             EXPECT_EQ(chunk->sdf_data, retained_sdf);
-            EXPECT_EQ(HashVec(chunk->mesh_vertices), old_mesh);
-            EXPECT_TRUE(chunk->has_collision.load());
+            if (!malformed_sdf && complete_heightmap) {
+                EXPECT_EQ(chunk->current_lod.load(), 1);
+                EXPECT_EQ(chunk->mesh_version.load(), old_version + 1u);
+                EXPECT_FALSE(chunk->has_collision.load());
+            } else {
+                EXPECT_EQ(HashVec(chunk->mesh_vertices), old_mesh);
+                EXPECT_EQ(chunk->mesh_version.load(), old_version);
+                EXPECT_TRUE(chunk->has_collision.load());
+            }
         }
     }
 }
@@ -1846,4 +1854,456 @@ TEST(StreamingHardening, CoarseTerrainAuthorityRequiresCompleteHeightmapWithoutS
             EXPECT_TRUE(chunk->has_collision.load());
         }
     }
+}
+
+namespace {
+std::shared_ptr<Chunk> AdoptWetHeightmapFallback(SHIELD_WorldSystem& world) {
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    chunk->heightmap_data.assign(289u, 8.0f);
+    chunk->mark_sdf_loaded_or_edited();
+    World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 2);
+    chunk->current_lod.store(1);
+    chunk->set_state(ChunkState::Ready);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(4);
+    chunk->water_level_data.assign(16u, 10.0f);
+    chunk->water_depth_mm.assign(16u, 2000);
+    if (!world.adopt_streamed_chunk(chunk)) {
+        return {};
+    }
+    return chunk;
+}
+} // namespace
+
+TEST(StreamingHardening, WaterOnlyPublicationUsesWaterFreshnessWhileTerrainNeedsRebuild) {
+    for (const bool workers : {false, true}) {
+        for (const bool stale_water : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << workers << ':' << stale_water);
+            JobSystem jobs;
+            if (workers) {
+                jobs.startup(1);
+            }
+            WaterSystem water(nullptr, nullptr);
+            water.SetBootPaused(true);
+            SHIELD_WorldSystem world(
+                workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+            auto chunk = AdoptWetHeightmapFallback(world);
+            ASSERT_NE(chunk, nullptr);
+            const auto terrain = HashVec(chunk->mesh_vertices);
+            chunk->has_collision.store(true);
+            entt::registry registry;
+            world.begin_tick(0);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), 0);
+            world.quiesce_streaming_jobs_for_save();
+            ASSERT_EQ(chunk->pending_water_mesh_vertices.size(), 64u);
+
+            // Terrain freshness changes after dispatch; water-only work consumes
+            // no terrain snapshot. Remove its indexed wake to test publication's
+            // terrain retry independently of water invalidations and activation.
+            chunk->mark_voxel_data_dirty();
+            chunk->current_lod.store(-1);
+            const auto terrain_version = ++chunk->mesh_version;
+            if (stale_water) {
+                ++chunk->water_mesh_version;
+            }
+            ASSERT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+            world.activate_due(8);
+            EXPECT_EQ(chunk->current_lod.load(), -1);
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+            EXPECT_EQ(HashVec(chunk->mesh_vertices), terrain);
+            EXPECT_TRUE(chunk->has_collision.load());
+            EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->water_mesh_vertices.size(), stale_water ? 0u : 64u);
+            EXPECT_EQ(chunk->water_mesh_indices.size(), stale_water ? 0u : 96u);
+            EXPECT_EQ(chunk->water_mesh_generated.load(), !stale_water);
+
+            // Equal anchors/count, no activation or invalidation: publication
+            // itself must reopen the invalid terrain LOD before settling.
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            EXPECT_EQ(chunk->pending_lod.load(), 1);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version + 1u);
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            EXPECT_EQ(world.promotion_dispatch_totals().chunks, 0u);
+        }
+    }
+}
+
+TEST(StreamingHardening, HeightmapTransitionRemeshPrecedesDirtyWaterAndSurvivesPendingPublication) {
+    for (const bool workers : {false, true}) {
+        for (const bool pending_water : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << workers << ':' << pending_water);
+            JobSystem jobs;
+            if (workers) {
+                jobs.startup(1);
+            }
+            WaterSystem water(nullptr, nullptr);
+            water.SetBootPaused(true);
+            SHIELD_WorldSystem world(
+                workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+            auto chunk = AdoptWetHeightmapFallback(world);
+            ASSERT_NE(chunk, nullptr);
+            chunk->water_mesh_generated.store(!pending_water);
+            entt::registry registry;
+            world.begin_tick(0);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), pending_water ? 0 : -1);
+            auto neighbor = AdoptFlatMesh(world, 0, IVec3(1, 0, 0));
+            ASSERT_NE(neighbor, nullptr);
+            ASSERT_FALSE(neighbor->mesh_vertices.empty());
+            chunk->water_mesh_generated.store(false);
+            water.retain_mesh_invalidation(chunk->get_id());
+
+            // Anchors remain stationary through the finer neighbor's arrival.
+            // In the pending case the full pass must remain open until the
+            // terrain obligation can be admitted after water publication.
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), pending_water ? 0 : 1);
+            if (pending_water) {
+                ASSERT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+                world.activate_due(8);
+                ASSERT_EQ(chunk->mesh_version.load(), 0u);
+                world.update(registry, std::vector<Vec3>{}, nullptr, false);
+                EXPECT_EQ(chunk->pending_lod.load(), 1);
+            }
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            EXPECT_EQ(chunk->applied_transition_faces.load(),
+                      World::MarchingCubes::TransitionFaceMaxX);
+            Chunk expected(IVec3(0));
+            expected.heightmap_data = chunk->heightmap_data;
+            World::MarchingCubes::PolygoniseTerrain(world, expected, 0.0f, 2);
+            World::MarchingCubes::AddBoundaryTransitionSkirts(
+                expected, 2, World::MarchingCubes::TransitionFaceMaxX);
+            EXPECT_EQ(HashVec(chunk->mesh_vertices), HashVec(expected.mesh_vertices));
+            EXPECT_EQ(chunk->mesh_indices, expected.mesh_indices);
+            EXPECT_EQ(world.promotion_dispatch_totals().chunks, 0u);
+        }
+    }
+}
+
+TEST(StreamingHardening, HeightmapTransitionRemeshPreservesPublishedWater) {
+    for (const bool workers : {false, true}) {
+        for (const int water_case : {0, 1, 2, 3}) {
+            SCOPED_TRACE(::testing::Message() << workers << ':' << water_case);
+            JobSystem jobs;
+            if (workers) {
+                jobs.startup(1);
+            }
+            WaterSystem water(nullptr, nullptr);
+            water.SetBootPaused(true);
+            SHIELD_WorldSystem world(
+                workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+            auto chunk = AdoptWetHeightmapFallback(world);
+            ASSERT_NE(chunk, nullptr);
+            if (water_case == 2) {
+                chunk->water_depth_mm.assign(16u, 0);
+            }
+            World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+            ++chunk->water_mesh_version;
+            ASSERT_TRUE(chunk->water_mesh_generated.load());
+            ASSERT_EQ(chunk->water_mesh_indices.empty(), water_case == 2);
+            if (water_case == 1 || water_case == 3) {
+                chunk->water_mesh_generated.store(false);
+                water.retain_mesh_invalidation(chunk->get_id());
+            }
+            if (water_case == 3) {
+                chunk->current_water_resolution.store(0);
+                chunk->water_level_data.resize(1u);
+            }
+            chunk->water_mesh_dirty_ticks = 5;
+            const auto water_vertices = HashVec(chunk->water_mesh_vertices);
+            const auto water_indices = chunk->water_mesh_indices;
+            const auto water_version = chunk->water_mesh_version.load();
+            const bool water_generated = chunk->water_mesh_generated.load();
+            auto neighbor = AdoptFlatMesh(world, 0, IVec3(1, 0, 0));
+            ASSERT_NE(neighbor, nullptr);
+            ASSERT_FALSE(neighbor->mesh_vertices.empty());
+            entt::registry registry;
+            world.begin_tick(0);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), 1);
+            world.quiesce_streaming_jobs_for_save();
+            ASSERT_TRUE(chunk->pending_mesh_ready.load());
+            ASSERT_TRUE(chunk->pending_water_mesh_vertices.empty());
+            ASSERT_TRUE(chunk->pending_water_mesh_indices.empty());
+            world.activate_due(7);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            world.begin_tick(8);
+            world.activate_due(8);
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            EXPECT_EQ(chunk->applied_transition_faces.load(),
+                      World::MarchingCubes::TransitionFaceMaxX);
+            EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+            EXPECT_EQ(HashVec(chunk->water_mesh_vertices), water_vertices);
+            EXPECT_EQ(chunk->water_mesh_indices, water_indices);
+            EXPECT_EQ(chunk->water_mesh_generated.load(), water_generated);
+            EXPECT_EQ(chunk->water_mesh_dirty_ticks, 5);
+            EXPECT_EQ(world.promotion_dispatch_totals().chunks, 0u);
+        }
+    }
+}
+
+TEST(StreamingHardening, PendingWaterPublicationRetainsLodChangeAndLateVoxelEdit) {
+    for (const bool workers : {false, true}) {
+        for (const bool voxel_edit : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << workers << ':' << voxel_edit);
+            JobSystem jobs;
+            if (workers) {
+                jobs.startup(1);
+            }
+            WaterSystem water(nullptr, nullptr);
+            water.SetBootPaused(true);
+            SHIELD_WorldSystem world(
+                workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+            auto chunk = AdoptWetHeightmapFallback(world);
+            ASSERT_NE(chunk, nullptr);
+            entt::registry registry;
+            world.begin_tick(0);
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            ASSERT_EQ(chunk->pending_lod.load(), 0);
+            world.quiesce_streaming_jobs_for_save();
+            std::vector<Vec3> anchors;
+            if (voxel_edit) {
+                // Voxel preparation supplies a full lattice before a late edit.
+                Chunk prepared(IVec3(0));
+                world.GenerateChunkData(prepared);
+                chunk->sdf_data = prepared.sdf_data;
+                ASSERT_EQ(world.EditTerrainVoxel(Vec3(8), 2.0f, false, nullptr), 1);
+                ASSERT_EQ(chunk->current_lod.load(), -1);
+            } else {
+                anchors.emplace_back(600.0f, 8.0f, 8.0f);
+            }
+            world.update(registry, anchors, nullptr, false);
+            EXPECT_EQ(chunk->pending_lod.load(), 0);
+            ASSERT_TRUE(AcknowledgeWaterMeshInvalidations(water));
+            world.activate_due(8);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->current_lod.load(), voxel_edit ? -1 : 1);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+
+            // The anchors and residency now stay unchanged. A pending terrain
+            // obligation must prevent the preceding pass from settling.
+            world.update(registry, anchors, nullptr, false);
+            EXPECT_EQ(chunk->pending_lod.load(), voxel_edit ? 0 : 2);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->current_lod.load(), voxel_edit ? 0 : 2);
+            if (voxel_edit) {
+                ExpectEditedMesh(world, *chunk);
+            }
+        }
+    }
+}
+
+TEST(StreamingHardening, HeightmapWaterInvalidationWakesOnlyInsideWaterBand) {
+    for (const bool workers : {false, true}) {
+        JobSystem jobs;
+        if (workers) {
+            jobs.startup(1);
+        }
+        WaterSystem water(nullptr, nullptr);
+        water.SetBootPaused(true);
+        SHIELD_WorldSystem world(workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+        auto chunk = AdoptWetHeightmapFallback(world);
+        ASSERT_NE(chunk, nullptr);
+        entt::registry registry;
+        // No anchors means no activation work; the default LOD origin is near.
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        world.wait_for_streaming_jobs();
+        ASSERT_TRUE(chunk->water_mesh_generated.load());
+        const auto water_version = chunk->water_mesh_version.load();
+        chunk->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunk->get_id());
+        // LOD1 terrain is unchanged at this distance, but water is out of range.
+        const std::vector<Vec3> anchors{Vec3(300.0f, 8.0f, 8.0f)};
+        world.update(registry, anchors, nullptr, false);
+        EXPECT_EQ(chunk->current_lod.load(), 1);
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 1u);
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+        EXPECT_FALSE(chunk->water_mesh_generated.load());
+        EXPECT_TRUE(water.mesh_invalidations().empty());
+        const auto hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, anchors, nullptr, false);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().meshing_budget, 0);
+        EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
+        // An anchor change brings the same owner back into the water band.
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(chunk->current_lod.load(), 1);
+        EXPECT_EQ(chunk->mesh_version.load(), 0u);
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 2u);
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        ASSERT_TRUE(water.mesh_invalidations().empty());
+        chunk->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunk->get_id());
+        const auto retry_hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+        EXPECT_LE(world.activation_index_counters().span_cache_hits - retry_hits, 2u);
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(chunk->mesh_version.load(), 0u);
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 3u);
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+    }
+}
+
+namespace {
+void CheckHeightmapWaterDepartureCase(bool workers,
+                                      int water_case,
+                                      bool pending_water,
+                                      bool early_reentry) {
+    SCOPED_TRACE(::testing::Message() << workers << ':' << water_case);
+    const bool dirty_water = water_case == 1;
+    const bool empty_water = water_case == 2;
+    JobSystem jobs;
+    if (workers) {
+        jobs.startup(1);
+    }
+    WaterSystem water(nullptr, nullptr);
+    water.SetBootPaused(true);
+    SHIELD_WorldSystem world(workers ? &jobs : nullptr, &water, MakeFlatSurfaceParams(), 1337);
+    auto chunk = AdoptWetHeightmapFallback(world);
+    ASSERT_NE(chunk, nullptr);
+    entt::registry registry;
+    const std::vector<Vec3> near_anchors;
+    const std::vector<Vec3> far_anchors{Vec3(300.0f, 8.0f, 8.0f)};
+    if (empty_water) {
+        chunk->water_depth_mm.assign(16u, 0);
+    }
+    World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+    ++chunk->water_mesh_version;
+    ASSERT_TRUE(chunk->water_mesh_generated.load());
+    EXPECT_EQ(chunk->water_mesh_vertices.empty(), empty_water);
+    EXPECT_EQ(chunk->water_mesh_indices.empty(), empty_water);
+    const auto terrain = HashVec(chunk->mesh_vertices);
+    const auto terrain_indices = chunk->mesh_indices;
+    const auto terrain_version = chunk->mesh_version.load();
+    const auto water_version = chunk->water_mesh_version.load();
+    chunk->has_collision.store(true);
+    std::unique_ptr<PausedMeshWorker> paused;
+    if (pending_water) {
+        if (workers) {
+            paused = std::make_unique<PausedMeshWorker>(jobs);
+        }
+        world.begin_tick(10);
+        chunk->water_depth_mm.assign(16u, 2000);
+        chunk->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunk->get_id());
+        world.update(registry, near_anchors, nullptr, false);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        EXPECT_EQ(chunk->pending_mesh_ready.load(), !workers);
+    } else {
+        world.update(registry, near_anchors, nullptr, false);
+        ASSERT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 0u);
+        if (dirty_water) {
+            chunk->water_mesh_generated.store(false);
+            water.retain_mesh_invalidation(chunk->get_id());
+        }
+    }
+    // Unknown and partial water metadata cannot prevent departure. No
+    // grid is needed to replace published water with an empty mesh.
+    if (dirty_water) {
+        chunk->current_water_resolution.store(0);
+        chunk->water_level_data.resize(1u);
+    }
+    world.update(registry, far_anchors, nullptr, false);
+    EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 1u);
+    EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+    EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+    EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+    EXPECT_EQ(HashVec(chunk->mesh_vertices), terrain);
+    EXPECT_EQ(chunk->mesh_indices, terrain_indices);
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 0u);
+
+    // Re-entry must use today's grid, even if an old result still owns
+    // pending_lod. In the other case the scheduler settles out of band.
+    chunk->current_water_resolution.store(4);
+    chunk->water_level_data.assign(16u, 12.0f);
+    chunk->water_depth_mm.assign(16u, 4000);
+    if (early_reentry) {
+        world.update(registry, near_anchors, nullptr, false);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 0u);
+    }
+    if (paused) {
+        paused->release();
+    }
+    world.quiesce_streaming_jobs_for_save();
+    if (pending_water) {
+        ASSERT_TRUE(chunk->pending_mesh_ready.load());
+        ASSERT_FALSE(chunk->pending_water_mesh_indices.empty());
+        world.activate_due(17);
+        EXPECT_EQ(chunk->pending_lod.load(), 0);
+        world.begin_tick(18);
+        world.activate_due(18);
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 1u);
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+        EXPECT_FALSE(chunk->pending_water_mesh_generated.load());
+        EXPECT_TRUE(chunk->pending_water_mesh_indices.empty());
+    }
+    ASSERT_EQ(chunk->pending_lod.load(), -1);
+    if (!early_reentry) {
+        // Acknowledgement drains in one indexed pass without terrain
+        // work, including when the live grid is still wet.
+        const auto hits = world.activation_index_counters().span_cache_hits;
+        world.update(registry, far_anchors, nullptr, false);
+        EXPECT_TRUE(water.mesh_invalidations().empty());
+        EXPECT_LE(world.activation_index_counters().span_cache_hits - hits,
+                  pending_water ? 1u : 0u);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().meshing_candidates, 0u);
+        EXPECT_TRUE(world.get_streaming_telemetry_stats().quiescent());
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 1u);
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    }
+    world.update(registry, near_anchors, nullptr, false);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(chunk->water_mesh_version.load(), water_version + 2u);
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+    Chunk expected(IVec3(0));
+    expected.current_water_resolution.store(4);
+    expected.has_water_sim.store(true);
+    expected.water_level_data = chunk->water_level_data;
+    expected.water_depth_mm = chunk->water_depth_mm;
+    World::MarchingCubes::GenerateWaterMesh(water, world, expected);
+    ASSERT_FALSE(expected.water_mesh_indices.empty());
+    EXPECT_EQ(HashVec(chunk->water_mesh_vertices), HashVec(expected.water_mesh_vertices));
+    EXPECT_EQ(chunk->water_mesh_indices, expected.water_mesh_indices);
+    EXPECT_EQ(chunk->current_lod.load(), 1);
+    EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+    EXPECT_EQ(HashVec(chunk->mesh_vertices), terrain);
+    EXPECT_EQ(chunk->mesh_indices, terrain_indices);
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_EQ(world.promotion_dispatch_totals().chunks, 0u);
+}
+
+void CheckHeightmapWaterDeparture(bool pending_water, bool early_reentry) {
+    for (const bool workers : {false, true}) {
+        for (const int water_case : {0, 1, 2}) {
+            CheckHeightmapWaterDepartureCase(workers, water_case, pending_water, early_reentry);
+        }
+    }
+}
+} // namespace
+
+TEST(StreamingHardening, HeightmapWaterDeparturePublishesEmptyWithoutTerrainRemesh) {
+    CheckHeightmapWaterDeparture(false, false);
+}
+
+TEST(StreamingHardening, HeightmapWaterDepartureDiscardsLateWaterPublication) {
+    CheckHeightmapWaterDeparture(true, false);
+}
+
+TEST(StreamingHardening, HeightmapWaterReentryBeforeLatePublicationUsesCurrentGrid) {
+    CheckHeightmapWaterDeparture(true, true);
 }
