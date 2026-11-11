@@ -61,7 +61,11 @@ public:
     }
 
     // --- World Geometry ---
-    void add_chunk_collision(Chunk& chunk);
+    // Streaming admits up to 8192 chunks, with at most one terrain body each.
+    // Frozen capsules must leave this many body slots free after allocation.
+    static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
+    // False only when the body pool refuses creation; callers may retry later.
+    bool add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
@@ -103,6 +107,16 @@ public:
     void clear_avatar_characters();
     // Positions use the feet, matching creature transforms and the local player.
     std::size_t create_avatar_character(const glm::vec3& initial_position);
+    // Leaves other avatar indices stable. Repeated removal is harmless.
+    void remove_avatar_character(std::size_t index);
+    // Frozen avatars keep zero velocity and are excluded from integration, even
+    // if the body pool refuses their static capsule. Repeated freezes retry it.
+    // Release every resuming avatar before staging frozen capsules, then call
+    // update_avatars so movers see all available capsules regardless of order.
+    // Finite feet positions also synchronize teleports while frozen or resuming;
+    // invalid positions retain the last valid avatar position. Unfrozen avatars
+    // that were never frozen retain the legacy movement path byte-for-byte.
+    void set_avatar_frozen(std::size_t index, bool frozen, const glm::vec3& position);
     // Set an avatar's horizontal wish velocity (world XZ m/s) for the
     // next step -- the server applies the network usercmd's movement here. Persists
     // until changed (0 by default -> the avatar stands, the without movement input behaviour).
@@ -110,8 +124,9 @@ public:
     // Steps every avatar character by dt: the per-avatar horizontal wish velocity
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
-    std::size_t avatar_character_count() const {
-        return m_avatar_characters.size();
+    // Removal holes count as slots; surviving indices stay stable until clear.
+    std::size_t avatar_character_slot_count() const {
+        return m_avatars.size();
     }
     glm::vec3 get_avatar_position(std::size_t index) const;
     glm::vec3 get_avatar_velocity(std::size_t index) const;
@@ -224,8 +239,15 @@ private:
 
     // Server-authoritative avatar characters (one per connected player)
     // + the shared avatar capsule shape. Stepped in index order for determinism.
-    std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
-    std::vector<glm::vec2> m_avatar_wish; // per-avatar horizontal wish velocity (m/s)
+    // A single, nonthrowing-movable element keeps ownership and movement state
+    // together if vector growth refuses an allocation.
+    struct AvatarState {
+        std::unique_ptr<JPH::CharacterVirtual> character;
+        glm::vec2 wish{0.0f};
+        JPH::BodyID frozen_body;
+        bool frozen = false;
+    };
+    std::vector<AvatarState> m_avatars;
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
