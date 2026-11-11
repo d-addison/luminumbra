@@ -469,6 +469,23 @@ public:
                 PhysicsSystem* physics_system,
                 bool advance_simulation = true);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
+    // Owner-thread view, valid until the next renderability/residency mutation.
+    // Publishes completed generation then meshing jobs, just like the snapshot API.
+    const std::vector<::Luminumbra::Chunk*>& renderable_chunks_view();
+    // External mesh/state writers notify when changing resident renderability.
+    // May be called by workers; mesh bytes still require the existing publication fence.
+    void notify_renderable_chunks_changed() const {
+        m_renderable_chunks_dirty.store(true, std::memory_order_release);
+    }
+    struct RenderableViewWork {
+        std::uint64_t rebuilds = 0;
+        std::uint64_t chunk_visits = 0;
+        std::uint64_t allocations = 0;
+    };
+    // Owner-thread lifetime work counters for the cache and compatibility copies.
+    RenderableViewWork renderable_view_work() const {
+        return m_renderable_view_work;
+    }
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
 
@@ -976,7 +993,7 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
-    // Lifetime count of pointer entries copied by streamed/renderable snapshots.
+    // Lifetime pointer entries written by snapshots and renderable-view rebuilds.
     // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
     [[nodiscard]] std::uint64_t snapshot_copies() const {
         return m_snapshot_copies.load(std::memory_order_relaxed);
@@ -1175,6 +1192,12 @@ private:
     std::size_t m_last_meshing_snapshot_bytes = 0;
     bool m_meshing_snapshot_pass_active = false;
     mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
+    std::vector<Chunk*> m_renderable_chunks;
+    // Surface construction can publish Ready from workers; only the owner rebuilds.
+    mutable std::atomic<bool> m_renderable_chunks_dirty{true};
+    RenderableViewWork m_renderable_view_work;
+    void invalidate_renderable_chunks();
+    void set_renderable_chunk_state(Chunk& chunk, ChunkState state);
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
