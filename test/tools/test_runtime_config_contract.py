@@ -889,6 +889,76 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
+    def test_far_snapshot_owner_paths_never_reload_durable_regions(self):
+        world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                            .read_text(encoding="utf-8"))
+        for name in ("capture_far_lod_sdf_snapshot", "is_far_lod_sdf_snapshot_current"):
+            owner = cpp_block(world, "SHIELD_WorldSystem::" + name + "(")
+            for disk_lookup in ("read_committed_chunk(", "find_authoritative_chunk(",
+                                "m_durable_chunk_loader(", "m_durable_chunks"):
+                self.assertNotIn(disk_lookup, owner)
+        worker = compact_cpp((ROOT / "src/luminumbra_client/rendering/FarLodSystem.cpp")
+                             .read_text(encoding="utf-8"))
+        build = cpp_block(worker, "FarLodWorkerBuildOutcomeBuildFarLodWorkerTile(")
+        self.assertIn("read_authoritative_region_chunks(", build)
+        self.assertIn("neighbor_z=rz-1;neighbor_z<=rz+1;", build)
+        self.assertIn("neighbor_x=rx-1;neighbor_x<=rx+1;", build)
+
+    def test_durable_chunk_loader_is_fenced_on_the_existing_worker_pool(self):
+        world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                            .read_text(encoding="utf-8"))
+        read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
+        self.assertIn("RunWorkerBoundary(m_job_system,[&]{"
+                      "chunk=m_durable_chunk_loader(coords);});", read)
+        self.assertLess(read.index("RunWorkerBoundary("),
+                        read.index("m_durable_chunk_fault(error.what())"))
+        helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("jobs->try_dispatch(&Task::Execute,task,", helper)
+        self.assertIn("completed.get();", helper)
+        self.assertIn("if(!jobs||Persistence::detail::CurrentThreadOwnsSaveTransaction())", helper)
+        refusal = cpp_block(helper, "if(!jobs->try_dispatch(")
+        self.assertIn("throwWorkerBoundaryUnavailable();", refusal)
+        self.assertNotIn("work();", refusal)
+
+    def test_session_digests_and_active_source_reads_use_worker_boundaries(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        schedule = cpp_block(session, "GameSession::RunRegionScheduler(")
+        digest = cpp_block(schedule, "RunWorkerBoundary(m_jobSystem,")
+        self.assertIn("digest_operation.emplace(directory,m_regionRequiresIndex)", digest)
+        self.assertIn("digest_operation->digest(key,inputs)", digest)
+        state_hash = cpp_block(session, "GameSession::ComputeChunkStateHash(")
+        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
+                      "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
+        self.assertIn("digest=operation->digest(key,inputs)",
+                      cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,[&]{if(operation)"))
+        attach = cpp_block(session, "GameSession::EnableFarWorldAuthorityProducer(")
+        self.assertIn("candidate->admit_saved_source(",
+                      cpp_block(attach, "RunWorkerBoundary(m_jobSystem,"))
+        pump = cpp_block(session, "GameSession::PumpFarWorldAuthorityCapture(")
+        self.assertIn("refresh_saved_source(",
+                      cpp_block(pump, "RunWorkerBoundary(m_jobSystem,"))
+        active = cpp_block(pump, "if(m_farWorldAuthorityProducer->capture_status().active)")
+        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
+                      "pump_started=true;m_farWorldAuthorityProducer->pump_capture();});", active)
+        refused = cpp_block(active, "if(!pump_started)")
+        self.assertIn("FenceFarWorldAuthorityReads(true);", refused)
+        self.assertIn("m_farWorldAuthorityProducer->pump_capture();", refused)
+        self.assertIn("producer.fence_source_reads(false);", refused)
+
+    def test_client_saves_fence_streaming_before_worker_io_and_preserve_joined_transactions(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        save = cpp_block(session, "GameSession::SaveWorldStateToImpl(")
+        self.assertIn("constautosave=", save)
+        self.assertLess(save.index("quiesce_streaming_jobs_for_save();"),
+                        save.index("constautosave="))
+        self.assertIn("ClockConfigurationCompatible(save_dir)", cpp_block(save, "constautosave="))
+        self.assertIn("return save();".replace(" ", ""),
+                      cpp_block(save, "if(Persistence::SaveTransaction::active_for(save_dir))"))
+        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{saved=save();});", save)
+
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
                               .read_text(encoding="utf-8"))
@@ -897,8 +967,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         guard = "constPersistence::WorldSaveService::SaveOwnershipsave_ownership;"
         self.assertIn(guard, sequence)
         ownership = sequence.index(guard)
-        # Function scope keeps ownership across all phases and every early return.
-        self.assertEqual(sequence[:ownership].count("{") - sequence[:ownership].count("}"), 1)
+        # The worker callback keeps ownership across all phases and early returns.
+        self.assertEqual(sequence[:ownership].count("{") - sequence[:ownership].count("}"), 2)
         for capture in ("quiesce_streaming_jobs_for_save();", "BuildPlantEntitySnapshot(m_registry)",
                         "state.dirty_chunk_ids()"):
             self.assertLess(sequence.index(capture), ownership)

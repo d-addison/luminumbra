@@ -3,6 +3,7 @@
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../core/WaterSeedInputs.h"
+#include "../persistence/WorkerBoundary.h"
 #include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
@@ -6915,7 +6916,10 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
     try {
         if (!m_durable_chunk_loader)
             throw std::runtime_error("durable chunk loader unavailable");
-        const auto chunk = m_durable_chunk_loader(coords);
+        std::shared_ptr<Chunk> chunk;
+        // Admission and fault publication stay on the owner. Only the loader
+        // runs on a worker; waiting keeps restoration ahead of simulation edits.
+        RunWorkerBoundary(m_job_system, [&] { chunk = m_durable_chunk_loader(coords); });
         if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
             chunk->get_coords() != coords ||
             (chunk->sdf_data.empty() && chunk->heightmap_data.empty()))

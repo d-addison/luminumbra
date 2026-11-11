@@ -6,6 +6,7 @@
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
+#include "WorkerBoundary.h"
 #include "WorldSaveService.h"
 #include "fields/EnergyFieldState.h"
 
@@ -1459,6 +1460,10 @@ void SaveTransaction::release_registration() noexcept {
     if (m_registered && ActiveTransaction() == this)
         ActiveTransaction() = nullptr;
     m_registered = false;
+}
+
+bool detail::CurrentThreadOwnsSaveTransaction() {
+    return ActiveTransaction() != nullptr;
 }
 
 SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
