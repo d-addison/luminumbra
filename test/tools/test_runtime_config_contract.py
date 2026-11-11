@@ -927,8 +927,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("work();", refusal)
         update = cpp_block(world, "SHIELD_WorldSystem::update(entt::registry&registry,"
                            "conststd::vector<Vec3>&anchor_positions,")
-        self.assertIn("if((m_durable_residency&&!m_activation_has_run)||"
+        self.assertIn("m_update_tick_counter++;if("
                       "m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES)", update)
+        activation = cpp_block(update,
+                               "if(m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES)")
+        self.assertIn("activation_ran_this_tick=update_chunk_activation("
+                      "anchor_positions,physics_system);m_update_tick_counter=0;", activation)
 
     def test_session_digests_and_active_source_reads_use_worker_boundaries(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")

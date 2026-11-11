@@ -774,7 +774,15 @@ TEST(StreamingHardening, DurableLoaderRunsOffOwnerForEveryRestorationEntry) {
                 EXPECT_EQ(world.EditTerrainVoxel(Vec3(8.0f), 1.0f, false, nullptr), 1);
             } else {
                 entt::registry registry;
-                world.update(registry, Vec3(8.0f), nullptr);
+                for (int step = 1; step <= 4; ++step) {
+                    SCOPED_TRACE(step);
+                    world.update(registry, Vec3(8.0f), nullptr);
+                    EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+                    EXPECT_EQ(reads, step == 4 ? 1 : 0);
+                    if (step < 4) {
+                        EXPECT_FALSE(world.find_streamed_chunk(coords));
+                    }
+                }
             }
             EXPECT_EQ(reads, 1);
             EXPECT_EQ(owner_reads, 0);
@@ -839,7 +847,15 @@ TEST(StreamingHardening, DurableWorkerRefusalsPublishFailStopOnOwner) {
             }
             if (update_entry) {
                 entt::registry registry;
-                world.update(registry, Vec3(8.0f), nullptr);
+                for (int step = 1; step <= 4; ++step) {
+                    SCOPED_TRACE(step);
+                    world.update(registry, Vec3(8.0f), nullptr);
+                    EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+                    if (step < 4) {
+                        EXPECT_EQ(reads, 0);
+                        EXPECT_EQ(faults, 0);
+                    }
+                }
                 EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
                 EXPECT_EQ(faults, 1);
                 EXPECT_EQ(fault_thread, owner);
@@ -857,7 +873,7 @@ TEST(StreamingHardening, DurableWorkerRefusalsPublishFailStopOnOwner) {
     }
 }
 
-TEST(StreamingHardening, DurableInitialActivationHandlesEmptyAnchorsAndRetainsCadence) {
+TEST(StreamingHardening, DurableActivationRetainsFourUpdateCadenceFromStartup) {
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
     auto params = FixtureParams();
@@ -880,12 +896,19 @@ TEST(StreamingHardening, DurableInitialActivationHandlesEmptyAnchorsAndRetainsCa
     entt::registry registry;
     world.update(registry, std::vector<Vec3>{}, nullptr);
     EXPECT_EQ(reads, 0);
-    world.update(registry, Vec3(8.0f), nullptr);
-    EXPECT_EQ(reads, 1);
+    EXPECT_FALSE(world.find_streamed_chunk({0, 0, 0}));
+    for (int step = 2; step <= 4; ++step) {
+        SCOPED_TRACE(step);
+        world.update(registry, Vec3(8.0f), nullptr);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+        EXPECT_EQ(reads, step == 4 ? 1 : 0);
+        EXPECT_EQ(static_cast<bool>(world.find_streamed_chunk({0, 0, 0})), step == 4);
+    }
     for (int step = 1; step <= 4; ++step) {
         SCOPED_TRACE(step);
         world.update(registry, Vec3(168.0f, 8.0f, 168.0f), nullptr);
         EXPECT_EQ(reads, step == 4 ? 2 : 1);
+        EXPECT_EQ(static_cast<bool>(world.find_streamed_chunk({10, 0, 10})), step == 4);
     }
 }
 
