@@ -1,21 +1,38 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+// Exercise the public solver header with function-like min/max macros.
+#pragma push_macro("min")
+#pragma push_macro("max")
+#undef min
+#undef max
+#define min(a, b) min_macro_must_not_expand
+#define max(a, b) max_macro_must_not_expand
+#include "luminumbra_common/fields/ScalarFieldDiffusion.h"
+#pragma pop_macro("max")
+#pragma pop_macro("min")
+
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/ForagingSystem.h"
 #include "luminumbra_common/ai/ScentDepositSystem.h"
 #include "luminumbra_common/ai/ScentFieldGates.h"
 #include "luminumbra_common/ai/ScentSteeringSystem.h"
 #include "luminumbra_common/fields/FieldPageState.h"
-
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
-#include <map>
-#include <set>
-#include <utility>
-#include <vector>
 
 namespace {
 using luminumbra::ai::ScentField;
@@ -850,4 +867,357 @@ TEST(ScentFieldGates, OpenGradientMatchesUngatedBitsAtEdgesAndForInvalidInputs) 
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 3));
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(3, 1));
     ASSERT_NO_FATAL_FAILURE(CheckOpenGradientBits(1, 1));
+}
+
+namespace {
+template<typename Callback>
+class NoncopyableScentCallback {
+public:
+    explicit NoncopyableScentCallback(const Callback& callback)
+        : m_callback(callback) {}
+    NoncopyableScentCallback(const NoncopyableScentCallback&) = delete;
+    NoncopyableScentCallback& operator=(const NoncopyableScentCallback&) = delete;
+    template<typename... Args>
+        requires std::is_invocable_v<const Callback&, Args...>
+    bool operator()(Args... args) const {
+        return m_callback(args...);
+    }
+
+private:
+    const Callback& m_callback;
+};
+
+void ExpectScentBits(const ScentField& actual, const ScentField& expected) {
+    ASSERT_EQ(actual.channels(), expected.channels());
+    ASSERT_EQ(actual.width(), expected.width());
+    ASSERT_EQ(actual.height(), expected.height());
+    for (int channel = 0; channel < actual.channels(); ++channel) {
+        for (int z = 0; z < actual.height(); ++z) {
+            for (int x = 0; x < actual.width(); ++x) {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(actual.Sample(channel, x, z)),
+                          std::bit_cast<std::uint64_t>(expected.Sample(channel, x, z)));
+            }
+        }
+    }
+}
+} // namespace
+
+TEST(ScentFieldGates, NoncopyableStepAndClampPreserveAdmissionOrderAndBits) {
+    for (const auto& wind : {std::pair{0.0, 0.0}, std::pair{0.375, -1.25}}) {
+        for (const std::size_t iterations : {0u, 2u}) {
+            ScentField concrete(3, 2, 2);
+            for (int channel = 0; channel < 2; ++channel) {
+                for (int z = 0; z < 2; ++z) {
+                    for (int x = 0; x < 3; ++x) {
+                        concrete.RestoreCell(
+                            channel, x, z, static_cast<double>(x + 3 * z + channel));
+                    }
+                }
+            }
+            auto erased = concrete;
+            const auto prior = concrete;
+            std::vector<std::array<int, 2>> concrete_cells, erased_cells;
+            std::vector<std::array<int, 4>> concrete_edges, erased_edges;
+            const auto cell_callback = [&](int x, int z) {
+                concrete_cells.push_back({x, z});
+                return x < 2;
+            };
+            const auto edge_callback = [&](int x, int z, int nx, int nz) {
+                concrete_edges.push_back({x, z, nx, nz});
+                return x < 2 && nx < 2;
+            };
+            const NoncopyableScentCallback participants(cell_callback);
+            const NoncopyableScentCallback exchange(edge_callback);
+            const ScentField::CellGate erased_participants = [&](int x, int z) {
+                erased_cells.push_back({x, z});
+                return x < 2;
+            };
+            const ScentField::EdgeGate erased_exchange = [&](int x, int z, int nx, int nz) {
+                erased_edges.push_back({x, z, nx, nz});
+                return x < 2 && nx < 2;
+            };
+            concrete.Step(0.25, iterations, 0.125, wind.first, wind.second, participants, exchange);
+            erased.Step(0.25,
+                        iterations,
+                        0.125,
+                        wind.first,
+                        wind.second,
+                        erased_participants,
+                        erased_exchange);
+            concrete.Clamp(0.25, 3.0, participants);
+            erased.Clamp(0.25, 3.0, erased_participants);
+            ExpectScentBits(concrete, erased);
+            EXPECT_EQ(concrete_cells, erased_cells);
+            EXPECT_EQ(concrete_edges, erased_edges);
+            for (int channel = 0; channel < 2; ++channel) {
+                for (int z = 0; z < 2; ++z) {
+                    EXPECT_EQ(concrete.Sample(channel, 2, z), prior.Sample(channel, 2, z));
+                }
+            }
+        }
+    }
+}
+
+TEST(ScentFieldGates, NullEmptyAndMixedConcreteGatesUseTheUngatedPath) {
+    const auto allow_cell = [](int, int) {
+        return true;
+    };
+    const auto allow_edge = [](int, int, int, int) {
+        return true;
+    };
+    const NoncopyableScentCallback participants(allow_cell);
+    const NoncopyableScentCallback exchange(allow_edge);
+    for (int mode = 0; mode < 10; ++mode) {
+        ScentField actual(3, 2);
+        actual.Deposit(0, 1, 1, 8.0);
+        auto expected = actual;
+        expected.Step(0.25, 2, 0.125, 0.375, -1.25);
+        expected.Clamp(0.25, 3.0);
+        switch (mode) {
+            case 0:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, {}, {});
+                break;
+            case 1:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, nullptr, nullptr);
+                break;
+            case 2:
+                actual.Step(
+                    0.25, 2, 0.125, 0.375, -1.25, ScentField::CellGate{}, ScentField::EdgeGate{});
+                break;
+            case 3:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, participants, {});
+                break;
+            case 4:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, {}, exchange);
+                break;
+            case 5:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, participants, nullptr);
+                break;
+            case 6:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, nullptr, exchange);
+                break;
+            case 7:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, participants, ScentField::EdgeGate{});
+                break;
+            case 8:
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, ScentField::CellGate{}, exchange);
+                break;
+            case 9: {
+                bool (*cell_pointer)(int, int) = nullptr;
+                bool (*edge_pointer)(int, int, int, int) = nullptr;
+                actual.Step(0.25, 2, 0.125, 0.375, -1.25, cell_pointer, edge_pointer);
+                break;
+            }
+        }
+        switch (mode % 5) {
+            case 0:
+                actual.Clamp(0.25, 3.0, {});
+                break;
+            case 1:
+                actual.Clamp(0.25, 3.0, nullptr);
+                break;
+            case 2:
+                actual.Clamp(0.25, 3.0, ScentField::CellGate{});
+                break;
+            case 3:
+                actual.Clamp(0.25, 3.0, participants);
+                break;
+            case 4: {
+                bool (*gate)(int, int) = nullptr;
+                actual.Clamp(0.25, 3.0, gate);
+                break;
+            }
+        }
+        ExpectScentBits(actual, expected);
+    }
+}
+
+TEST(ScentFieldGates, NoncopyableDiffusionGatesKeepEdgeOrderAndRefusals) {
+    using luminumbra::fields::ScalarFieldDiffusion;
+    const std::vector<std::pair<std::size_t, std::size_t>> expected{{0, 1}, {3, 4}, {0, 3}, {1, 4}};
+    for (const bool coordinates : {false, true}) {
+        ScalarFieldDiffusion field(3, 2);
+        field.add_impulse(0, 0, 8.0);
+        field.seal(2, 0);
+        field.set_permeability(2, 1, 0.0);
+        auto erased = field;
+        std::vector<std::pair<std::size_t, std::size_t>> visits;
+        const auto index_callback = [&](std::size_t lhs, std::size_t rhs) {
+            visits.emplace_back(lhs, rhs);
+            return lhs != 0 || rhs != 3;
+        };
+        const auto coordinate_callback =
+            [&](std::size_t x, std::size_t z, std::size_t nx, std::size_t nz) {
+                return index_callback(z * 3 + x, nz * 3 + nx);
+            };
+        const NoncopyableScentCallback index_gate(index_callback);
+        const NoncopyableScentCallback coordinate_gate(coordinate_callback);
+        if (coordinates) {
+            (void)field.diffuse(1, 0.25, coordinate_gate);
+        } else {
+            (void)field.diffuse(1, 0.25, index_gate);
+        }
+        EXPECT_EQ(visits, expected);
+        EXPECT_EQ(field.values(), (std::vector<double>{6.0, 2.0, 0.0, 0.0, 0.0, 0.0}));
+        visits.clear();
+        if (coordinates) {
+            const ScalarFieldDiffusion::EdgeGate erased_gate = coordinate_callback;
+            (void)erased.diffuse(1, 0.25, erased_gate);
+        } else {
+            const ScalarFieldDiffusion::EdgeFilter erased_gate = index_callback;
+            (void)erased.diffuse(1, 0.25, erased_gate);
+        }
+        EXPECT_EQ(erased.values(), field.values());
+        EXPECT_EQ(visits, expected);
+        visits.clear();
+        const auto prior = field.values();
+        for (const double rate : {0.0,
+                                  -0.25,
+                                  0.5,
+                                  std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::quiet_NaN()}) {
+            if (coordinates) {
+                EXPECT_THROW((void)field.diffuse(1, rate, coordinate_gate), std::invalid_argument);
+            } else {
+                EXPECT_THROW((void)field.diffuse(1, rate, index_gate), std::invalid_argument);
+            }
+            EXPECT_EQ(field.values(), prior);
+            EXPECT_TRUE(visits.empty());
+        }
+        if (coordinates) {
+            (void)field.diffuse(0, 0.25, coordinate_gate);
+        } else {
+            (void)field.diffuse(0, 0.25, index_gate);
+        }
+        EXPECT_EQ(field.values(), prior);
+        EXPECT_TRUE(visits.empty());
+    }
+}
+
+TEST(ScentFieldGates, DiffusionEmptyCompatibilityAndSingleCellNeverCallAGate) {
+    using luminumbra::fields::ScalarFieldDiffusion;
+    ScalarFieldDiffusion initial(3, 2);
+    initial.add_impulse(1, 1, 8.0);
+    auto expected = initial;
+    (void)expected.diffuse(2, 0.25);
+    for (int mode = 0; mode < 6; ++mode) {
+        auto actual = initial;
+        switch (mode) {
+            case 0:
+                (void)actual.diffuse(2, 0.25, {});
+                break;
+            case 1:
+                (void)actual.diffuse(2, 0.25, nullptr);
+                break;
+            case 2:
+                (void)actual.diffuse(2, 0.25, ScalarFieldDiffusion::EdgeFilter{});
+                break;
+            case 3:
+                (void)actual.diffuse(2, 0.25, ScalarFieldDiffusion::EdgeGate{});
+                break;
+            case 4: {
+                bool (*gate)(std::size_t, std::size_t) = nullptr;
+                (void)actual.diffuse(2, 0.25, gate);
+                break;
+            }
+            case 5: {
+                bool (*gate)(std::size_t, std::size_t, std::size_t, std::size_t) = nullptr;
+                (void)actual.diffuse(2, 0.25, gate);
+                break;
+            }
+        }
+        EXPECT_EQ(actual.values(), expected.values());
+    }
+    ScalarFieldDiffusion single(1, 1, 8.0);
+    int visits = 0;
+    const auto callback = [&](std::size_t, std::size_t) {
+        ++visits;
+        return false;
+    };
+    const NoncopyableScentCallback gate(callback);
+    (void)single.diffuse(2, 0.25, gate);
+    EXPECT_EQ(visits, 0);
+    EXPECT_EQ(single.at(0, 0), 8.0);
+}
+
+TEST(ScentFieldGates, CachedGatesOwnConcreteDecisionsAcrossCopiesAndClears) {
+    static_assert(!std::is_same_v<decltype(ScentStepGates{}.participants), ScentField::CellGate>);
+    static_assert(!std::is_same_v<decltype(ScentStepGates{}.exchange), ScentField::EdgeGate>);
+    const auto create_gates = [] {
+        LiveSchedule schedule({480, 500});
+        schedule.Set(schedule.Owner(kCells - 1, kCells - 1), RegionState::Frozen, std::uint8_t{0});
+        schedule.Reschedule(4);
+        return schedule.CachedGates();
+    };
+    auto original = create_gates();
+    auto copied = original;
+    original = {};
+    auto moved = std::move(copied);
+    ASSERT_TRUE(moved.participants);
+    ASSERT_TRUE(moved.exchange);
+    EXPECT_TRUE(moved.participants(0, 0));
+    EXPECT_FALSE(moved.participants(kCells - 1, kCells - 1));
+    EXPECT_TRUE(moved.exchange(0, 0, 1, 0));
+    EXPECT_FALSE(moved.exchange(0, 0, kCells - 1, kCells - 1));
+    moved.participants = nullptr;
+    moved.exchange = nullptr;
+    EXPECT_FALSE(moved.participants);
+    EXPECT_FALSE(moved.exchange);
+    EXPECT_THROW((void)moved.participants(0, 0), std::bad_function_call);
+    EXPECT_THROW((void)moved.exchange(0, 0, 1, 0), std::bad_function_call);
+}
+
+namespace {
+class CopyFailureScentGate {
+public:
+    explicit CopyFailureScentGate(const bool& fail)
+        : m_fail(fail) {}
+    CopyFailureScentGate(const CopyFailureScentGate& other)
+        : m_fail(other.m_fail) {
+        if (m_fail) {
+            throw std::runtime_error("scent gate copy failed");
+        }
+    }
+    bool operator()(int, int) const {
+        return false;
+    }
+    bool operator()(int, int, int, int) const {
+        return false;
+    }
+
+private:
+    const bool& m_fail;
+};
+} // namespace
+
+TEST(ScentFieldGates, FailedCompatibilityCopiesRetainCachedDecisions) {
+    using luminumbra::ai::detail::ScentExchange;
+    using luminumbra::ai::detail::ScentParticipants;
+    bool fail = false;
+    const CopyFailureScentGate callback(fail);
+    const ScentStepGates source{callback, callback};
+    ScentStepGates destination{ScentParticipants(2, 2, {true, false, false, false}),
+                               ScentExchange(2, 2, 1)};
+    fail = true;
+    EXPECT_THROW(destination.participants = source.participants, std::runtime_error);
+    EXPECT_THROW(destination.exchange = source.exchange, std::runtime_error);
+    ASSERT_TRUE(destination.participants);
+    ASSERT_TRUE(destination.exchange);
+    EXPECT_TRUE(destination.participants(0, 0));
+    EXPECT_FALSE(destination.participants(2, 2));
+    EXPECT_TRUE(destination.exchange(0, 0, 1, 0));
+    EXPECT_FALSE(destination.exchange(0, 0, 2, 2));
+    fail = false;
+    destination = source;
+    EXPECT_FALSE(destination.participants(0, 0));
+    EXPECT_FALSE(destination.exchange(0, 0, 1, 0));
+
+    ScentField::CellGate participants = callback;
+    ScentField::EdgeGate exchange = callback;
+    fail = true;
+    const ScentStepGates moved{std::move(participants), std::move(exchange)};
+    ASSERT_TRUE(moved.participants);
+    ASSERT_TRUE(moved.exchange);
+    EXPECT_FALSE(moved.participants(0, 0));
+    EXPECT_FALSE(moved.exchange(0, 0, 1, 0));
 }

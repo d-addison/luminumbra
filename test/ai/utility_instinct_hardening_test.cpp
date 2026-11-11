@@ -259,7 +259,8 @@ TEST(UtilityHardening, BrainPredatorNeverSelectsPreyActions) {
 TEST(UtilityHardening, BrainPreyNeverHunts) {
     for (int hi = 0; hi <= 10; ++hi)
         for (int fi = 0; fi <= 10; ++fi) {
-            const float h = hi / 10.0f, f = fi / 10.0f;
+            const float h = static_cast<float>(hi) / 10.0f;
+            const float f = static_cast<float>(fi) / 10.0f;
             EXPECT_NE(DecideCreatureAction(prey(h, 0.0f, f, 1.0f)), CreatureAction::Hunt);
         }
 }
@@ -280,7 +281,8 @@ TEST(UtilityHardening, BrainExhaustedPredatorDoesNotHunt) {
 TEST(UtilityHardening, BrainDecisionPureOverGrid) {
     for (int i = 0; i <= 6; ++i)
         for (int j = 0; j <= 6; ++j) {
-            const CreatureSenses s = prey(i / 6.0f, j / 6.0f, 0.5f, 0.5f);
+            const CreatureSenses s =
+                prey(static_cast<float>(i) / 6.0f, static_cast<float>(j) / 6.0f, 0.5f, 0.5f);
             EXPECT_EQ(DecideCreatureAction(s), DecideCreatureAction(s));
         }
 }
