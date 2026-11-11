@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/FarWorldAuthorityProducer.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <gtest/gtest.h>
@@ -349,6 +350,44 @@ protected:
         ASSERT_TRUE(producer.request_capture(windows));
     }
 };
+
+TEST_F(FarWorldSourceCaptureTest, IndexedSourceWithDerivedOnlyRegionAdmitsCommittedAuthority) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0}, 7.0f)));
+    {
+        Persistence::SaveTransaction transaction(root, 0, {}, Save::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        ASSERT_TRUE(Save::finalize_indexed_envelope(root, nullptr));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    World::FarLodTile tile;
+    tile.tier = World::FarLodTier::F2;
+    tile.rx = 10;
+    tile.rz = 10;
+    tile.samples_per_side = World::FarLodSamplesPerSide(tile.tier);
+    tile.height_q.assign(tile.sample_count(), 0);
+    tile.material.assign(tile.sample_count(), 0);
+    tile.flags.assign(tile.sample_count(), 0);
+    ASSERT_TRUE(World::FarLodStore(root).save_tile(tile));
+    ASSERT_TRUE(Save::validate_save(root));
+    std::string error;
+    ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+    const auto committed = producer.read_committed({}, reads);
+    ASSERT_EQ(committed.membership, Save::AuthorityMembership::Present) << committed.error;
+    ASSERT_EQ(committed.chunks.size(), 1u);
+    EXPECT_GT(committed.generation, 0u);
+    EXPECT_EQ(committed.chunks.front()->sdf_data.front(), 7.0f);
+    EXPECT_EQ(producer.read_committed({320, 320, 320, 320}, reads).membership,
+              Save::AuthorityMembership::ProvenAbsent);
+    Request();
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    ASSERT_EQ(producer.capture()->committed.chunks.size(), 1u);
+    EXPECT_EQ(producer.capture()->committed.generation, committed.generation);
+    EXPECT_EQ(producer.capture()->committed.chunks.front()->sdf_data.front(), 7.0f);
+}
 
 TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSuccessorEdits) {
     auto first = Edited({0, 0, 0}, 1.0f);

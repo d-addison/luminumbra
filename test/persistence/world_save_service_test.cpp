@@ -21,6 +21,7 @@
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
+#include "world/FarLodStore.h"
 #include "world/GameSession.h"
 #include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
@@ -4839,6 +4840,24 @@ void ReplaceWindowBytes(const std::filesystem::path& path, const std::string& by
     ASSERT_TRUE(output.good());
 }
 
+void WriteWindowFarTile(const std::filesystem::path& root,
+                        Luminumbra::World::FarLodTier tier,
+                        int rx,
+                        int rz,
+                        Luminumbra::u16 height = 0) {
+    namespace W = Luminumbra::World;
+    W::FarLodTile tile;
+    tile.tier = tier;
+    tile.rx = rx;
+    tile.rz = rz;
+    tile.samples_per_side = W::FarLodSamplesPerSide(tier);
+    tile.height_q.assign(tile.sample_count(), height);
+    tile.material.assign(tile.sample_count(), 0);
+    tile.flags.assign(tile.sample_count(), 0);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(W::FarLodStore(root).save_tile(tile, &errors)) << JoinErrors(errors);
+}
+
 void ExpectWindowUnavailable(const WorldSaveService::AuthorityWindowResult& result) {
     EXPECT_EQ(result.membership, AuthorityMembership::Unavailable);
     EXPECT_TRUE(result.chunks.empty());
@@ -4918,7 +4937,7 @@ TEST(WorldSaveService, AuthorityWindowRefusesMissingExpectedMemberAndRecord) {
 
 TEST(WorldSaveService, AuthorityWindowAdmissionRefusesMissingMemberOutsideWindow) {
     namespace P = Luminumbra::Persistence;
-    for (const int replacement : {0, 1, 2}) {
+    for (const int replacement : {0, 1, 2, 3}) {
         SCOPED_TRACE(replacement);
         const TempSaveDir save("authority_window_missing_outside");
         WorldStreamingState state;
@@ -4950,7 +4969,8 @@ TEST(WorldSaveService, AuthorityWindowAdmissionRefusesMissingMemberOutsideWindow
         if (replacement != 0) {
             // Keep the inventory size unchanged, but replace the indexed path.
             ASSERT_NO_FATAL_FAILURE(
-                ReplaceWindowBytes(WorldSaveService::region_file_path(save.path(), 11, 10), bytes));
+                ReplaceWindowBytes(WorldSaveService::region_file_path(save.path(), 11, 10),
+                                   replacement == 3 ? std::string("LMR1\2\0\0\0", 8) : bytes));
         }
         AuthorityReader unadmitted;
         auto refusal = AuthorityReader::AdmissionRefusal::None;
@@ -4969,13 +4989,17 @@ TEST(WorldSaveService, AuthorityWindowAdmissionRefusesExtraRegionOutsideWindow) 
     ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state));
     const auto bytes =
         ReadFileBytes(WorldSaveService::region_file_path(original_save.path(), 10, 10));
+    auto unknown_lod = bytes;
+    ASSERT_GT(unknown_lod.size(), 16u);
+    unknown_lod[16] = 3;
     AuthorityReader reader;
     std::string error;
     ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
     const auto original = reader.read({320, 320, 320, 320}, WindowLimits());
     ASSERT_EQ(original.membership, AuthorityMembership::Present) << original.error;
     for (const bool listed_absent : {false, true}) {
-        for (const auto& payload : {bytes, std::string{}, std::string{"LMR1"}}) {
+        for (const auto& payload :
+             {bytes, std::string{}, std::string{"LMR1"}, bytes.substr(0, 25), unknown_lod}) {
             SCOPED_TRACE(::testing::Message() << listed_absent << ":" << payload.size());
             const TempSaveDir save("authority_window_extra_outside");
             ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
@@ -5016,6 +5040,106 @@ TEST(WorldSaveService, AuthorityWindowAdmissionRefusesExtraRegionOutsideWindow) 
             EXPECT_FALSE(refused.admit(save.path(), {}, error, &refusal));
             EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InvalidSource);
         }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmitsDerivedOnlyContainersAndTheirCacheRewrites) {
+    namespace P = Luminumbra::Persistence;
+    namespace W = Luminumbra::World;
+    for (const int index_mode : {0, 1, 2}) {
+        SCOPED_TRACE(index_mode);
+        const TempSaveDir save("authority_window_derived_inventory");
+        WorldStreamingState state;
+        AddWindowChunk(state, {0, 0, 0});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, index_mode != 0));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 0, 0));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F2, 10, 10));
+        if (index_mode == 2) {
+            P::SnapshotIndex index;
+            ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+            index.members.push_back({"chunks/region/r.10.10.lmr",
+                                     P::MemberClass::Authoritative,
+                                     false,
+                                     0,
+                                     0,
+                                     index.generation});
+            std::sort(index.members.begin(),
+                      index.members.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                       P::encode_snapshot_index(index)));
+        }
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path()));
+        AuthorityReader reader;
+        std::string error;
+        auto refusal = AuthorityReader::AdmissionRefusal::InventoryMismatch;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error, &refusal)) << error;
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::None);
+        EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::Present);
+        const WorldSaveService::AuthorityWindow far_window{320, 320, 320, 320};
+        const auto absent = reader.read(far_window, WindowLimits());
+        ASSERT_EQ(absent.membership, AuthorityMembership::ProvenAbsent) << absent.error;
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10, 1));
+        const auto rewritten = reader.read(far_window, WindowLimits());
+        EXPECT_EQ(rewritten.membership, AuthorityMembership::ProvenAbsent) << rewritten.error;
+        EXPECT_EQ(rewritten.source_identity, absent.source_identity);
+        const auto path = WorldSaveService::region_file_path(save.path(), 10, 10);
+        const auto bytes = ReadFileBytes(path);
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, bytes.substr(0, bytes.size() - 1)));
+        ExpectWindowUnavailable(reader.read(far_window, WindowLimits()));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        ASSERT_TRUE(std::filesystem::remove(path));
+        EXPECT_EQ(reader.read(far_window, WindowLimits()).membership,
+                  AuthorityMembership::ProvenAbsent);
+        // An empty, well-formed container also has no LOD-0 membership.
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, std::string("LMR1\2\0\0\0", 8)));
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        EXPECT_EQ(reader.read(far_window, WindowLimits()).membership,
+                  AuthorityMembership::ProvenAbsent);
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
+            path, ReadFileBytes(WorldSaveService::region_file_path(save.path(), 0, 0))));
+        ExpectWindowUnavailable(reader.read(far_window, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowDerivedInventoryVerificationChargesReadBudgets) {
+    namespace W = Luminumbra::World;
+    const TempSaveDir save("authority_window_derived_budgets");
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+    ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10));
+    ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F2, 10, 10));
+    const auto bytes = ReadFileBytes(WorldSaveService::region_file_path(save.path(), 10, 10));
+    const auto envelope_bytes =
+        ReadFileBytes(WorldSaveService::world_manifest_path(save.path())).size() +
+        ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save.path())).size();
+    const auto decoded_bytes = 2u * 72u + 4u * (W::FarLodSamplesPerSide(W::FarLodTier::F1) *
+                                                    W::FarLodSamplesPerSide(W::FarLodTier::F1) +
+                                                W::FarLodSamplesPerSide(W::FarLodTier::F2) *
+                                                    W::FarLodSamplesPerSide(W::FarLodTier::F2));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    for (const int limit_kind : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(limit_kind);
+        auto limits = WindowLimits();
+        if (limit_kind == 0)
+            limits.records = 1;
+        else if (limit_kind == 1)
+            limits.headers = 5;
+        else if (limit_kind == 2)
+            limits.compressed_total_bytes = envelope_bytes + bytes.size() - 1;
+        else if (limit_kind == 3)
+            limits.decoded_member_bytes = decoded_bytes - 1;
+        else
+            limits.decoded_total_bytes = envelope_bytes + decoded_bytes - 1;
+        auto refusal = AuthorityReader::AdmissionRefusal::None;
+        EXPECT_FALSE(reader.admit(save.path(), limits, error, &refusal));
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch) << error;
+        const auto retained = reader.read({}, WindowLimits());
+        EXPECT_EQ(retained.membership, original.membership) << retained.error;
+        EXPECT_EQ(retained.source_identity, original.source_identity);
     }
 }
 
@@ -5599,6 +5723,8 @@ TEST(WorldSaveService, AuthorityWindowRefusesWrongTypeAndUnexpectedAuthority) {
             EXPECT_TRUE(chunk->has_terrain_authority());
         }
         ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
     }
 }
 
