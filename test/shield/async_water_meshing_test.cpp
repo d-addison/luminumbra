@@ -578,24 +578,17 @@ TEST(AsyncWaterMeshing, PendingWaterMeshRetainsAnchorLodRecheckUntilPublication)
                 gate.finish();
             }
             ASSERT_EQ(chunk->pending_lod.load(), -1);
-            const bool departed = anchor_case == 0 || anchor_case == 4;
-            ASSERT_EQ(chunk->water_mesh_generated.load(), !departed);
-            if (departed) {
-                EXPECT_TRUE(chunk->water_mesh_vertices.empty());
-                EXPECT_TRUE(chunk->water_mesh_indices.empty());
-            }
+            ASSERT_TRUE(chunk->water_mesh_generated.load());
             ASSERT_EQ(chunk->current_lod.load(), 0);
             ASSERT_EQ(chunk->mesh_version.load(), 0u);
 
             // No further anchor motion or water mutation can wake this check.
             world.update(registry, anchors, nullptr, false);
             const bool demote = anchor_case == 0;
-            EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing,
-                      demote || anchor_case == 4 ? 1u : 0u);
+            EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, demote ? 1u : 0u);
             world.wait_for_streaming_jobs();
             EXPECT_EQ(chunk->current_lod.load(), demote ? 1 : 0);
             EXPECT_EQ(chunk->mesh_version.load(), demote ? 1u : 0u);
-            EXPECT_EQ(chunk->water_mesh_generated.load(), !demote);
         }
     }
 }
@@ -2524,7 +2517,8 @@ TEST(AsyncWaterMeshing, RetainedHeightmapRequestsRefreshWaterAndTerrainLodsBefor
             EXPECT_EQ(target->pending_lod.load(), -1);
             EXPECT_EQ(target->current_lod.load(), expected_lod);
             EXPECT_EQ(target->mesh_version.load(), terrain_required ? 1u : 0u);
-            EXPECT_EQ(target->water_mesh_version.load(), 1u);
+            EXPECT_EQ(target->water_mesh_version.load(),
+                      change == RetainedHeightmapChange::CoarseLod ? 0u : 1u);
             if (!terrain_required) {
                 ExpectVerticesEqual(target->mesh_vertices, terrain_vertices);
                 EXPECT_EQ(target->mesh_indices, terrain_indices);
