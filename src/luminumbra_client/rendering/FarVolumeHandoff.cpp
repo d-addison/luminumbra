@@ -110,6 +110,29 @@ World::FarVolumeMemoryLease AdmitControl(World::FarVolumeTierMemory& memory) {
         throw World::FarVolumeMemoryRefused();
     return control;
 }
+FarWorldRefusal SourceRefusal(World::FarWorldAuthorityProducer::Error error) {
+    using SourceError = World::FarWorldAuthorityProducer::Error;
+    switch (error) {
+        case SourceError::None:
+            return FarWorldRefusal::None;
+        case SourceError::InvalidLimits:
+            return FarWorldRefusal::MissingLimits;
+        case SourceError::IndexCapacity:
+        case SourceError::CopyLimit:
+        case SourceError::AllocationFailure:
+        case SourceError::DeadlineExceeded:
+        // The committed reader has no typed failure category. Preserve its
+        // admission refusal rather than claiming resource exhaustion is absence.
+        case SourceError::CommittedReadRefused:
+            return FarWorldRefusal::AdmissionFailed;
+        case SourceError::WaterUnavailable:
+            return FarWorldRefusal::WaterUnavailable;
+        case SourceError::InvalidWindow:
+            return FarWorldRefusal::SpanRejected;
+        default:
+            return FarWorldRefusal::ImmutableAuthorityUnavailable;
+    }
+}
 } // namespace
 std::optional<FarHandoffTileInput>
 MakeFarHandoffTileInput(FarVolumeWantedRequest wanted,
@@ -381,6 +404,107 @@ FarWorldRefusal FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manife
         return FarWorldRefusal::SpanRejected;
     return FarWorldRefusal::None;
 }
+bool FarVolumeHandoff::StageSessionTarget(
+    const World::FarWorldAuthorityProducer& producer,
+    const Systems::SHIELD_WorldSystem& world,
+    std::uint64_t world_epoch,
+    std::span<const FarSessionHandoffTile> requests,
+    const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
+    const World::FarFrozenCaptureLimits& limits,
+    const std::shared_ptr<World::FarVolumeTierMemory>& memory) {
+    // One fixed manifest, never a partially installed prefix. Water bridges and
+    // frozen allocations are released automatically if a later tile refuses.
+    std::array<FarHandoffTileInput, World::FarWorldAuthorityProducer::kSlots> inputs{};
+    FarHandoffManifest manifest;
+    {
+        Guard const guard(*this);
+        admission_work_ = {};
+        admission_refusal_ = FarWorldRefusal::None;
+        const auto refuse = [this](FarWorldRefusal reason) {
+            admission_refusal_ = reason;
+            return false;
+        };
+        if (policy.caves != World::FarCaveMode::BandLimited &&
+            policy.caves != World::FarCaveMode::BoxFiltered) {
+            return refuse(FarWorldRefusal::InvalidCavePolicy);
+        }
+        if (limits.max_regions == 0 || limits.max_height_samples == 0 ||
+            limits.max_density_samples == 0 || limits.max_water_samples == 0 ||
+            limits.max_bytes == 0) {
+            return refuse(FarWorldRefusal::MissingLimits);
+        }
+        if (!world_epoch || requests.empty() || requests.size() > inputs.size() ||
+            (policy.numeric != World::FarVolumeNumericProfile::RawFloat &&
+             policy.numeric != World::FarVolumeNumericProfile::LegacySigned16)) {
+            return refuse(FarWorldRefusal::InvalidRequests);
+        }
+        if (!memory || memory.get() != &memory_) {
+            return refuse(FarWorldRefusal::AdmissionFailed);
+        }
+        const auto source_refusal = SourceRefusal(producer.capture_status().error);
+        if (source_refusal != FarWorldRefusal::None) {
+            return refuse(source_refusal);
+        }
+        const auto* source = producer.capture();
+        if (!source) {
+            return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
+        }
+        manifest = {world_epoch,
+                    source->serial,
+                    source->committed.generation,
+                    policy.caves,
+                    policy.numeric,
+                    {inputs.data(), requests.size()}};
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            const auto& item = requests[i];
+            const auto& key = item.wanted.identity.key;
+            if (key.tier != item.capture.key.tier || key.tx != item.capture.key.x ||
+                key.tz != item.capture.key.z || !memory->Pool(key.tier)) {
+                return refuse(FarWorldRefusal::InvalidRequests);
+            }
+            const auto pool =
+                std::shared_ptr<World::FarVolumeMemoryPool>(memory, memory->Pool(key.tier));
+            std::shared_ptr<const World::FarFrozenObservation> image;
+            const auto result =
+                producer.compose_frozen(world, item.capture, policy, limits, pool, image);
+            if (!result.ok()) {
+                if (result.source != World::FarWorldAuthorityProducer::Error::None) {
+                    return refuse(SourceRefusal(result.source));
+                }
+                switch (result.capture) {
+                    case World::FarFrozenCaptureError::WorkLimit:
+                    case World::FarFrozenCaptureError::ByteLimit:
+                    case World::FarFrozenCaptureError::AllocationFailure:
+                        return refuse(FarWorldRefusal::AdmissionFailed);
+                    case World::FarFrozenCaptureError::InvalidRegion:
+                    case World::FarFrozenCaptureError::CoordinateRange:
+                        return refuse(FarWorldRefusal::SpanRejected);
+                    default:
+                        return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
+                }
+            }
+            auto wanted = item.wanted;
+            wanted.identity.world_epoch = world_epoch;
+            wanted.identity.bake_generation = source->committed.generation;
+            wanted.identity.content_hash = image->content_identity();
+            wanted.identity.cave_policy = static_cast<std::uint8_t>(policy.caves);
+            if (state_.world_epoch == world_epoch && state_.target_serial == source->serial) {
+                const auto* old = Find(key);
+                if (old && old->target &&
+                    old->target->observation->content_identity() == image->content_identity()) {
+                    image = old->target->observation;
+                }
+            }
+            auto input = MakeFarHandoffTileInput(std::move(wanted), std::move(image));
+            if (!input) {
+                return refuse(FarWorldRefusal::AdmissionFailed);
+            }
+            inputs[i] = std::move(*input);
+        }
+    }
+    return StageTarget(manifest);
+}
+
 bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
     Guard const guard(*this);
     admission_work_ = {};

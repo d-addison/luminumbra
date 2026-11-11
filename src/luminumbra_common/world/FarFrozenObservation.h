@@ -59,6 +59,9 @@ struct FarFrozenCaptureSource {
     // separate render fingerprint; it never changes durable.generation.
     std::uint64_t content_identity = 0;
     FarFrozenUse use = FarFrozenUse::Committed;
+    // Required only by the world-backed SessionRender seam. The base-water
+    // projection grid participates in its checked pristine identity.
+    int session_water_resolution = 0;
     // Required committed resolver, including an explicit Absent result for an
     // empty committed layer. A missing resolver cannot prove edits are absent.
     FarFrozenTerrainOverride committed;

@@ -2,6 +2,7 @@
 
 #include "FarVolumeResidency.h"
 #include "FarWorldSelection.h"
+#include "world/FarWorldAuthorityProducer.h"
 
 namespace Luminumbra::Rendering {
 
@@ -20,6 +21,10 @@ struct FarHandoffManifest {
     World::FarCaveMode caves = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric = World::FarVolumeNumericProfile::RawFloat;
     std::span<const FarHandoffTileInput> tiles;
+};
+struct FarSessionHandoffTile {
+    FarVolumeWantedRequest wanted;
+    World::FarVolumeRequest capture;
 };
 enum class FarHandoffCoverageView {
     Serving,
@@ -86,6 +91,17 @@ public:
     FarVolumeHandoff(const FarVolumeHandoff&) = delete;
     FarVolumeHandoff& operator=(const FarVolumeHandoff&) = delete;
     bool StageTarget(const FarHandoffManifest&);
+    // Inactive synchronous publication seam. Compose every tile from one owned
+    // source serial in the handoff's owning pools, then admit the whole manifest.
+    // Any failure preserves both cohorts; AdmissionRefusal describes the attempt.
+    // Capture limits apply per tile; the manifest has at most 512 inputs.
+    bool StageSessionTarget(const World::FarWorldAuthorityProducer&,
+                            const Systems::SHIELD_WorldSystem&,
+                            std::uint64_t world_epoch,
+                            std::span<const FarSessionHandoffTile>,
+                            const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                            const World::FarFrozenCaptureLimits&,
+                            const std::shared_ptr<World::FarVolumeTierMemory>&);
     // Last staging attempt only; None before an attempt or after success/drain.
     // Uses selection refusal names without changing target/serving ownership.
     FarWorldRefusal AdmissionRefusal() const;
