@@ -73,9 +73,11 @@ struct DecompositionStats {
 // participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
 // parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
 // not absolute-tick driven, so re-running from a snapshot reproduces exactly).
-inline DecompositionStats RunDecompositionOnTick(entt::registry& reg,
-                                                 std::uint64_t /*tick*/,
-                                                 const CreatureTickAdmission* admission = nullptr) {
+inline DecompositionStats
+RunDecompositionOnTick(entt::registry& reg,
+                       std::uint64_t /*tick*/,
+                       const CreatureTickAdmission* admission = nullptr,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     DecompositionStats stats;
 
     auto view = reg.view<Comp::DecayComponent>();
@@ -89,7 +91,10 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg,
         return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
-        if (admission && !admission->Allows(e)) {
+        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
+                                 ? admission->Allows(e)
+                                 : gate.Allows(e);
+        if (!allowed) {
             continue;
         }
         auto& dc = view.get<Comp::DecayComponent>(e);

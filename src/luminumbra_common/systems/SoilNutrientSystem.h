@@ -82,6 +82,29 @@ public:
         , m_cells(static_cast<std::size_t>(m_w) * static_cast<std::size_t>(m_h),
                   initial < 0 ? 0 : initial) {}
 
+    SoilGrid(const SoilGrid& other)
+        : m_w(other.m_w)
+        , m_h(other.m_h)
+        , m_cells(other.m_cells)
+        , m_bufferCopies(other.m_bufferCopies + 1) {}
+    SoilGrid& operator=(const SoilGrid& other) {
+        if (this != &other) {
+            m_cells = other.m_cells;
+            m_w = other.m_w;
+            m_h = other.m_h;
+            m_bufferCopies = other.m_bufferCopies + 1;
+        }
+        return *this;
+    }
+    SoilGrid(SoilGrid&&) noexcept = default;
+    SoilGrid& operator=(SoilGrid&&) noexcept = default;
+
+    // Const diagnostic: full cell-buffer copies in this grid's lineage.
+    // Never persisted or hashed.
+    [[nodiscard]] std::uint64_t buffer_copies() const {
+        return m_bufferCopies;
+    }
+
     [[nodiscard]] int width() const {
         return m_w;
     }
@@ -121,7 +144,12 @@ public:
     }
 
 private:
-    friend void ApplyConsumptionAndRegen(SoilGrid&, const std::vector<std::int32_t>&);
+    friend std::int64_t ApplyConsumptionAndRegen(SoilGrid&,
+                                                 const std::vector<std::int32_t>&,
+                                                 const ::Luminumbra::world::RegionConsumerGate&,
+                                                 float,
+                                                 float,
+                                                 float);
     friend std::int32_t SampleSoilCell(const SoilGrid&, int, int);
 
     [[nodiscard]] std::size_t index(int cx, int cz) const {
@@ -139,6 +167,7 @@ private:
     int m_w;
     int m_h;
     std::vector<std::int32_t> m_cells;
+    std::uint64_t m_bufferCopies = 0;
 };
 
 // World coords -> cell index using a floor division anchored at the origin. Pure
@@ -173,18 +202,34 @@ struct SoilNutrientStats {
 // Internal: apply the accumulated per-cell consumption, then regenerate every cell
 // toward the baseline. Two integer passes over the grid — deterministic and
 // order-independent (consumption was summed before this point).
-inline void ApplyConsumptionAndRegen(SoilGrid& g, const std::vector<std::int32_t>& demand) {
+inline std::int64_t
+ApplyConsumptionAndRegen(SoilGrid& g,
+                         const std::vector<std::int32_t>& demand,
+                         const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                         float origin_x = 0.0f,
+                         float origin_z = 0.0f,
+                         float cell_size = 1.0f) {
+    std::int64_t regenerated = 0;
     for (std::size_t i = 0; i < g.m_cells.size(); ++i) {
+        const auto width = static_cast<std::size_t>(g.m_w);
         std::int32_t v = g.m_cells[i];
         const std::int32_t d = (i < demand.size()) ? demand[i] : 0;
-        v -= d; // consume (already summed across plants on the cell)
-        if (v < 0)
+        v -= d; // consume (already summed across admitted plants on the cell)
+        if (v < 0) {
             v = 0;
-        v += kSoilRegenPerTick; // regenerate toward baseline
+        }
+        if (!gate.UsesPersistentPlantIdentity() ||
+            gate.AllowsPosition({origin_x + (static_cast<float>(i % width) + 0.5f) * cell_size,
+                                 0.0f,
+                                 origin_z + (static_cast<float>(i / width) + 0.5f) * cell_size})) {
+            v += kSoilRegenPerTick;
+            regenerated += kSoilRegenPerTick;
+        }
         if (v > kSoilBaseline)
             v = kSoilBaseline;
         g.m_cells[i] = v;
     }
+    return regenerated;
 }
 
 // Advance the soil nutrient field by ONE fixed tick. Pure function of registry
@@ -262,9 +307,8 @@ RunSoilNutrientOnTick(entt::registry& reg,
     }
 
     // Regen total = baseline-bounded +regen per cell (report the nominal add).
-    ApplyConsumptionAndRegen(soil, demand);
-    stats.regenerated = static_cast<std::int64_t>(kSoilRegenPerTick) *
-                        static_cast<std::int64_t>(W) * static_cast<std::int64_t>(H);
+    // Like consumption, due-cell regeneration advances once without catch-up.
+    stats.regenerated = ApplyConsumptionAndRegen(soil, demand, gate, origin_x, origin_z, cell_size);
     return stats;
 }
 

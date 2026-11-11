@@ -48,6 +48,7 @@
 
 #include "../components/CoreComponents.h"       // TransformComponent
 #include "../components/IrrigationComponents.h" // WaterSourceComponent
+#include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
 
@@ -83,6 +84,29 @@ public:
         , m_h(height > 0 ? height : 0)
         , m_cells(static_cast<std::size_t>(m_w) * static_cast<std::size_t>(m_h),
                   clampLevel(initial)) {}
+
+    IrrigationGrid(const IrrigationGrid& other)
+        : m_w(other.m_w)
+        , m_h(other.m_h)
+        , m_cells(other.m_cells)
+        , m_bufferCopies(other.m_bufferCopies + 1) {}
+    IrrigationGrid& operator=(const IrrigationGrid& other) {
+        if (this != &other) {
+            m_cells = other.m_cells;
+            m_w = other.m_w;
+            m_h = other.m_h;
+            m_bufferCopies = other.m_bufferCopies + 1;
+        }
+        return *this;
+    }
+    IrrigationGrid(IrrigationGrid&&) noexcept = default;
+    IrrigationGrid& operator=(IrrigationGrid&&) noexcept = default;
+
+    // Const diagnostic: full cell-buffer copies in this grid's lineage, including
+    // irrigation diffusion snapshots. Never persisted or hashed.
+    [[nodiscard]] std::uint64_t buffer_copies() const {
+        return m_bufferCopies;
+    }
 
     [[nodiscard]] int width() const {
         return m_w;
@@ -123,7 +147,12 @@ public:
     }
 
 private:
-    friend void ApplyDepositDiffuseDrain(IrrigationGrid&, const std::vector<std::int32_t>&);
+    friend void ApplyDepositDiffuseDrain(IrrigationGrid&,
+                                         const std::vector<std::int32_t>&,
+                                         const ::Luminumbra::world::RegionConsumerGate&,
+                                         float,
+                                         float,
+                                         float);
     friend std::int32_t SampleMoistureCell(const IrrigationGrid&, int, int);
 
     [[nodiscard]] std::size_t index(int cx, int cz) const {
@@ -141,6 +170,7 @@ private:
     int m_w;
     int m_h;
     std::vector<std::int32_t> m_cells;
+    std::uint64_t m_bufferCopies = 0;
 };
 
 // World coords -> cell index using a floor division anchored at the origin. Pure
@@ -177,10 +207,25 @@ struct IrrigationStats {
 // diffusion pass (out-of-place), then drain every cell toward the dry baseline.
 // Three integer passes over the grid — deterministic and order-independent (the
 // deposit was summed before this point; diffusion reads a snapshot).
-inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::int32_t>& deposit) {
+inline void ApplyDepositDiffuseDrain(IrrigationGrid& g,
+                                     const std::vector<std::int32_t>& deposit,
+                                     const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                                     float origin_x = 0.0f,
+                                     float origin_z = 0.0f,
+                                     float cell_size = 1.0f) {
     const int W = g.m_w;
     const int H = g.m_h;
     const std::size_t N = g.m_cells.size();
+    const auto allows_cell = [&](int x, int z) {
+        return gate.AllowsPosition({origin_x + (static_cast<float>(x) + 0.5f) * cell_size,
+                                    0.0f,
+                                    origin_z + (static_cast<float>(z) + 0.5f) * cell_size});
+    };
+    const auto allows_index = [&](std::size_t index) {
+        return !gate.UsesPersistentPlantIdentity() ||
+               allows_cell(static_cast<int>(index % static_cast<std::size_t>(W)),
+                           static_cast<int>(index / static_cast<std::size_t>(W)));
+    };
 
     // --- 1) deposit (already summed across sources on each cell) ---
     for (std::size_t i = 0; i < N; ++i) {
@@ -203,9 +248,13 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
     // pre-diffusion snapshot makes the result independent of cell visit order.
     if (W > 0 && H > 0) {
         std::vector<std::int32_t> snapshot = g.m_cells;
+        ++g.m_bufferCopies;
         // Start each cell at its current level; apply only the deltas.
         for (int z = 0; z < H; ++z) {
             for (int x = 0; x < W; ++x) {
+                if (!allows_cell(x, z)) {
+                    continue;
+                }
                 const std::size_t ci = static_cast<std::size_t>(z) * static_cast<std::size_t>(W) +
                                        static_cast<std::size_t>(x);
                 const std::int32_t excess = snapshot[ci] - kMoistureBaseline;
@@ -220,6 +269,9 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
                 for (int k = 0; k < 4; ++k) {
                     if (nx[k] < 0 || nx[k] >= W || nz[k] < 0 || nz[k] >= H)
                         continue;
+                    if (!allows_cell(nx[k], nz[k])) {
+                        continue;
+                    }
                     const std::size_t ni =
                         static_cast<std::size_t>(nz[k]) * static_cast<std::size_t>(W) +
                         static_cast<std::size_t>(nx[k]);
@@ -239,6 +291,9 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
 
     // --- 3) drain toward the dry baseline (evaporation / percolation) ---
     for (std::size_t i = 0; i < N; ++i) {
+        if (!allows_index(i)) {
+            continue;
+        }
         std::int32_t v = g.m_cells[i];
         if (v > kMoistureBaseline) {
             v -= kMoistureDrainPerTick;
@@ -252,9 +307,17 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
 // Advance the soil-moisture field by ONE fixed tick. Pure function of registry
 // state + the grid. Sources (WaterSourceComponent + Transform) are visited in
 // id order, but their deposit is ACCUMULATED per cell (order-independent) then
-// applied with the diffuse + drain passes.
-inline IrrigationStats RunIrrigationOnTick(
-    entt::registry& reg, IrrigationGrid& grid, float origin_x, float origin_z, float cell_size) {
+// applied with the diffuse + drain passes. Regional deposits use source ownership;
+// diffusion and drain use cell centres. Flux requires both endpoints due. Each due
+// cell advances once, without
+// elapsed-tick catch-up, matching regional soil consumption.
+inline IrrigationStats
+RunIrrigationOnTick(entt::registry& reg,
+                    IrrigationGrid& grid,
+                    float origin_x,
+                    float origin_z,
+                    float cell_size,
+                    const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     IrrigationStats stats;
     if (cell_size <= 0.0f || grid.width() <= 0 || grid.height() <= 0) {
         return stats; // degenerate grid: nothing to do
@@ -272,8 +335,11 @@ inline IrrigationStats RunIrrigationOnTick(
     // id-ordered traversal (deterministic; the per-cell sum is order-independent,
     // but we sort to keep telemetry + any future per-source bookkeeping stable).
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (gate.Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -304,7 +370,7 @@ inline IrrigationStats RunIrrigationOnTick(
         for (int x = 0; x < W; ++x)
             before += grid.AtCell(x, z) - kMoistureBaseline;
 
-    ApplyDepositDiffuseDrain(grid, deposit);
+    ApplyDepositDiffuseDrain(grid, deposit, gate, origin_x, origin_z, cell_size);
 
     std::int64_t after = 0;
     for (int z = 0; z < H; ++z)

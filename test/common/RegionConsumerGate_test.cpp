@@ -25,6 +25,7 @@
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
 #include "luminumbra_common/systems/FoliageRegistryStage.h"
+#include "luminumbra_common/systems/IrrigationSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
@@ -43,6 +44,7 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Independent full-rate reference for movement, needs, courtship and seeded births.
@@ -857,12 +859,13 @@ TEST(RegionConsumerGate, SoilConsumptionAndAbsorbedFollowPlantOwnerAdmission) {
             EXPECT_EQ(stats.consumed, admitted ? 750 : 0);
             EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed,
                       7u + (admitted ? 750u * steps : 0u));
-            EXPECT_EQ(soil.AtCell(0, 0),
-                      F::kSoilBaseline -
-                          (admitted ? (750 - F::kSoilRegenPerTick) * (step + 1) : 0));
+            EXPECT_EQ(
+                soil.AtCell(0, 0),
+                F::kSoilBaseline -
+                    (admitted ? (750 - (mode == 2 ? 0 : F::kSoilRegenPerTick)) * (step + 1) : 0));
             EXPECT_EQ(soil.AtCell(1, 0), F::kSoilBaseline);
             EXPECT_EQ(gate.owner_visits(),
-                      mode >= 2 && mode != 5 && mode != 6 ? steps + due.size() : 0u);
+                      mode >= 2 ? steps * (mode == 5 || mode == 6 ? 2u : 3u) + due.size() : 0u);
         }
     }
 }
@@ -884,7 +887,7 @@ TEST(RegionConsumerGate, DeniedSoilDemandCannotStealFromAdmittedPlantAndFieldSti
     EXPECT_EQ(registry.get<C::SoilFeederComponent>(admitted).absorbed, 100u);
     EXPECT_EQ(soil.AtCell(0, 0), F::kSoilRegenPerTick);
     EXPECT_EQ(soil.AtCell(1, 0), 100 + F::kSoilRegenPerTick);
-    EXPECT_EQ(gate.owner_visits(), 3u);
+    EXPECT_EQ(gate.owner_visits(), 5u);
 }
 
 TEST(RegionConsumerGate, SessionSoilConsumptionUsesSealedPlantOwners) {
@@ -2004,7 +2007,7 @@ TEST(RegionConsumerGate, StagedConsumersRetainCapturedCreatureAdmissionAcrossOwn
                 const auto grazing =
                     AI::RunWildlifeFoliageOnTick(candidate, 1u, {}, gate, &admission);
                 const auto lifespan = AI::RunLifespanOnTick(candidate, 1u, gate, &admission);
-                const auto decay = AI::RunDecompositionOnTick(candidate, 1u, &admission);
+                const auto decay = AI::RunDecompositionOnTick(candidate, 1u, &admission, gate);
                 if (staged) {
                     stage.PreparePublication(registry);
                     stage.Commit(registry);
@@ -3616,3 +3619,212 @@ TEST(RegionConsumerGate, DeniedCreatureWaterSourceCannotQuenchAdmittedThirst) {
     EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
 }
 } // namespace
+
+TEST(RegionConsumerGate, ResourceFieldsAndNonCreatureDecayAdvanceOnlyDueOwners) {
+    entt::registry registry;
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const auto due_plant = Plant(registry, 511.0f);
+    const auto idle_plant = Plant(registry, 512.0f);
+    for (const auto plant : {due_plant, idle_plant}) {
+        registry.get<C::TransformComponent>(plant).position.z = 0.0f;
+        registry.emplace<C::WaterSourceComponent>(plant).output = 80;
+        registry.emplace<C::SoilFeederComponent>(plant).uptake = 0;
+        registry.emplace<C::MortalComponent>(plant).dead = 1;
+        registry.emplace<C::DecayComponent>(plant).decay_duration = 2;
+    }
+    // Two cells straddle the ownership boundary. Neither may exchange flux with an idle cell.
+    F::IrrigationGrid water(2, 1, 160);
+    F::SoilGrid soil(2, 1, 100);
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        const RegionConsumerGate gate(
+            registry, tick == 2 ? std::span<const RegionKey>{} : std::span<const RegionKey>{due});
+        const auto irrigation = F::RunIrrigationOnTick(registry, water, 511.0f, 0.0f, 1.0f, gate);
+        const auto nutrients = F::RunSoilNutrientOnTick(registry, soil, 511.0f, 0.0f, 1.0f, gate);
+        const auto decay = AI::RunDecompositionOnTick(registry, tick, nullptr, gate);
+        const bool idle = tick == 2;
+        EXPECT_EQ(irrigation.sources, idle ? 0 : 1);
+        EXPECT_EQ(irrigation.deposited, idle ? 0 : 80);
+        EXPECT_EQ(irrigation.drained, idle ? 0 : F::kMoistureDrainPerTick);
+        EXPECT_EQ(nutrients.participants, idle ? 0 : 1);
+        EXPECT_EQ(nutrients.regenerated, idle ? 0 : F::kSoilRegenPerTick);
+        EXPECT_EQ(decay.decaying, idle ? 0 : 1);
+        EXPECT_EQ(water.AtCell(0, 0), tick == 3 ? 308 : 234);
+        EXPECT_EQ(water.AtCell(1, 0), 160);
+        EXPECT_EQ(soil.AtCell(0, 0), tick == 3 ? 108 : 104);
+        EXPECT_EQ(soil.AtCell(1, 0), 100);
+        EXPECT_EQ(registry.get<C::DecayComponent>(due_plant).decay_ticks, tick == 3 ? 2u : 1u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(idle_plant).decay_ticks, 0u);
+    }
+    EXPECT_EQ(registry.get<C::DecayComponent>(due_plant).nutrient_released_milli, 1000u);
+    EXPECT_EQ(registry.get<C::DecayComponent>(due_plant).fully_decomposed, 1u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 4u, nullptr, RegionConsumerGate(registry, due))
+                  .decaying,
+              0);
+}
+
+TEST(RegionConsumerGate, DefaultResourceGateMatchesLegacyFullRateEvolution) {
+    entt::registry registry;
+    const auto plant = Plant(registry, 0.0f);
+    registry.get<C::TransformComponent>(plant).position.z = 0.0f;
+    registry.emplace<C::WaterSourceComponent>(plant).output = 80;
+    registry.emplace<C::SoilFeederComponent>(plant).uptake = 0;
+    registry.emplace<C::MortalComponent>(plant).dead = 1;
+    registry.emplace<C::DecayComponent>(plant).decay_duration = 2;
+    F::IrrigationGrid water(2, 1, 160);
+    F::SoilGrid soil(2, 1, 100);
+    EXPECT_EQ(F::RunIrrigationOnTick(registry, water, 0.0f, 0.0f, 1.0f).sources, 1);
+    // Legacy diffusion transfers 30 right, 20 left, then drains each cell by six.
+    EXPECT_EQ(water.AtCell(0, 0), 224);
+    EXPECT_EQ(water.AtCell(1, 0), 164);
+    EXPECT_EQ(F::RunSoilNutrientOnTick(registry, soil, 0.0f, 0.0f, 1.0f).regenerated, 8);
+    EXPECT_EQ(soil.AtCell(0, 0), 104);
+    EXPECT_EQ(soil.AtCell(1, 0), 104);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 100u).released_total, 500u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 200u).released_total, 500u);
+}
+
+TEST(RegionConsumerGate, SessionLegacyResourceFieldsAndDecayRemainFullRate) {
+    W::GameSession session;
+    session.SetActiveRegionsEnabled(false);
+    auto& registry = session.GetRegistry();
+    const auto plant = Plant(registry, 0.0f);
+    registry.get<C::TransformComponent>(plant).position.z = 0.0f;
+    registry.emplace<C::WaterSourceComponent>(plant).output = 80;
+    registry.emplace<C::SoilFeederComponent>(plant).uptake = 0;
+    registry.emplace<C::MortalComponent>(plant).dead = 1;
+    registry.emplace<C::DecayComponent>(plant).decay_duration = 100;
+    F::IrrigationGrid expected(256, 256);
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        F::RunIrrigationOnTick(registry, expected, -128.0f, -128.0f, 1.0f);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_NE(session.GetFoliageIrrigationGrid(), nullptr);
+        ASSERT_NE(session.GetFoliageSoilGrid(), nullptr);
+        EXPECT_EQ(session.GetRegistry().get<C::DecayComponent>(plant).decay_ticks, tick);
+        EXPECT_EQ(session.GetFoliageRegistryStageVisits(), 0u);
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+        EXPECT_TRUE(session.GetFoliageSoilGrid()->all_at(F::kSoilBaseline));
+        for (int z = 0; z < expected.height(); ++z) {
+            for (int x = 0; x < expected.width(); ++x) {
+                EXPECT_EQ(session.GetFoliageIrrigationGrid()->AtCell(x, z), expected.AtCell(x, z));
+            }
+        }
+    }
+}
+
+TEST(SoilNutrient, RegionalFallowRegenerationFreezesIdleCells) {
+    entt::registry registry;
+    F::SoilGrid soil(2, 1, 100);
+    const std::array<RegionKey, 1> left{{{0, 0}}}, right{{{1, 0}}};
+    const RegionConsumerGate blocked(registry, {});
+    EXPECT_EQ(F::RunSoilNutrientOnTick(registry, soil, 511.0f, 0.0f, 1.0f, blocked).regenerated, 0);
+    EXPECT_TRUE(soil.all_at(100));
+    const RegionConsumerGate first(registry, left);
+    EXPECT_EQ(F::RunSoilNutrientOnTick(registry, soil, 511.0f, 0.0f, 1.0f, first).regenerated, 4);
+    EXPECT_EQ(soil.AtCell(0, 0), 104);
+    EXPECT_EQ(soil.AtCell(1, 0), 100);
+    const RegionConsumerGate resumed(registry, right);
+    EXPECT_EQ(F::RunSoilNutrientOnTick(registry, soil, 511.0f, 0.0f, 1.0f, resumed).regenerated, 4);
+    EXPECT_EQ(soil.AtCell(0, 0), 104);
+    EXPECT_EQ(soil.AtCell(1, 0), 104);
+}
+
+TEST(Irrigation, RegionalSourcesUsePersistentOwnersAndRequireValidTransforms) {
+    for (int mode = 0; mode < 5; ++mode) {
+        SCOPED_TRACE(mode);
+        entt::registry registry;
+        const auto source = registry.create();
+        registry.emplace<C::WaterSourceComponent>(source).output = 80;
+        if (mode != 0) {
+            registry.emplace<C::TransformComponent>(source);
+        }
+        if (mode == 1) {
+            registry.get<C::TransformComponent>(source).position.x =
+                std::numeric_limits<float>::infinity();
+        }
+        if (mode >= 2) {
+            registry.emplace<C::PlantRegionComponent>(
+                source, std::uint64_t{1}, mode == 2 ? 1 : 0, 0, std::uint64_t{0});
+        }
+        if (mode == 4) {
+            registry.get<C::WaterSourceComponent>(source).output = 0;
+        }
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        F::IrrigationGrid water(1, 1);
+        const auto stats = F::RunIrrigationOnTick(registry, water, 0.0f, 0.0f, 1.0f, gate);
+        EXPECT_EQ(stats.sources, mode >= 3 ? 1 : 0);
+        EXPECT_EQ(stats.deposited, mode == 3 ? 80 : 0);
+        EXPECT_EQ(water.AtCell(0, 0), mode == 3 ? 74 : 0);
+    }
+}
+
+TEST(Decomposition, RegionalNonCreaturesHandleMissingOwnersLiveAndImmediateCompletion) {
+    entt::registry registry;
+    std::array<entt::entity, 6> entities{};
+    for (auto& entity : entities) {
+        entity = registry.create();
+        registry.emplace<C::MortalComponent>(entity).dead = 1;
+        registry.emplace<C::DecayComponent>(entity).decay_duration = 0;
+    }
+    // Persistent ownership wins even when a corpse's transform lies in another region.
+    registry.emplace<C::TransformComponent>(entities[0]).position.x = 513.0f;
+    registry.emplace<C::PlantRegionComponent>(
+        entities[0], std::uint64_t{1}, 0, 0, std::uint64_t{0});
+    registry.emplace<C::TransformComponent>(entities[1]);
+    registry.emplace<C::PlantRegionComponent>(
+        entities[1], std::uint64_t{2}, 1, 0, std::uint64_t{0});
+    registry.emplace<C::TransformComponent>(entities[3]).position.x =
+        std::numeric_limits<float>::infinity();
+    registry.emplace<C::TransformComponent>(entities[4]);
+    registry.get<C::MortalComponent>(entities[4]).dead = 0;
+    registry.emplace<C::TransformComponent>(entities[5]);
+    registry.get<C::DecayComponent>(entities[5]).fully_decomposed = 1;
+    const std::array<RegionKey, 1> due{{{0, 0}}};
+    const RegionConsumerGate gate(registry, due);
+    const auto stats = AI::RunDecompositionOnTick(registry, 1000u, nullptr, gate);
+    EXPECT_EQ(stats.decaying, 1);
+    EXPECT_EQ(stats.finished, 1);
+    EXPECT_EQ(stats.released_total, 1000u);
+    EXPECT_EQ(registry.get<C::DecayComponent>(entities[0]).fully_decomposed, 1u);
+    for (std::size_t index = 1; index < entities.size(); ++index) {
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[index]).nutrient_released_milli, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[index]).decay_ticks, 0u);
+    }
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 2000u, nullptr, gate).released_total, 0u);
+}
+
+namespace {
+template<typename Grid>
+void CheckResourceGridCopyDiagnostics() {
+    Grid original(2, 1, 100);
+    EXPECT_EQ(original.buffer_copies(), 0u);
+    Grid copied(original);
+    EXPECT_EQ(copied.buffer_copies(), 1u);
+    EXPECT_EQ(copied.AtCell(0, 0), 100);
+    Grid assigned(1, 1);
+    assigned = copied;
+    EXPECT_EQ(assigned.width(), 2);
+    EXPECT_EQ(assigned.height(), 1);
+    EXPECT_EQ(assigned.AtCell(1, 0), 100);
+    EXPECT_EQ(assigned.buffer_copies(), 2u);
+    const auto* same = &assigned;
+    assigned = *same;
+    EXPECT_EQ(assigned.buffer_copies(), 2u);
+    EXPECT_EQ(assigned.AtCell(1, 0), 100);
+    Grid moved(std::move(assigned));
+    EXPECT_EQ(moved.buffer_copies(), 2u);
+    copied = std::move(moved);
+    EXPECT_EQ(copied.buffer_copies(), 2u);
+    EXPECT_EQ(copied.AtCell(1, 0), 100);
+    Grid empty(0, 0);
+    copied = empty;
+    EXPECT_EQ(copied.width(), 0);
+    EXPECT_EQ(copied.height(), 0);
+}
+} // namespace
+
+TEST(RegionConsumerGate, ResourceGridCopiesPreserveCellsAndCountOnlyBufferCopies) {
+    ASSERT_NO_FATAL_FAILURE(CheckResourceGridCopyDiagnostics<F::SoilGrid>());
+    ASSERT_NO_FATAL_FAILURE(CheckResourceGridCopyDiagnostics<F::IrrigationGrid>());
+}
