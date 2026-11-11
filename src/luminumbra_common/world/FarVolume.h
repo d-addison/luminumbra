@@ -57,6 +57,13 @@ struct FarVolumeAuthority {
         density;
 };
 
+// Derived presentation identity. Zero refuses an unresolved dependency snapshot
+// or invalid policy. Both identity creation and capture use the worldgen scope.
+std::uint64_t WorldFarVolumeIdentity(const Systems::SHIELD_WorldSystem& world,
+                                     FarCaveMode caves,
+                                     FarVolumeNumericProfile numeric,
+                                     int water_resolution);
+
 // Owner-thread capture of a resolved canonical request and its complete normal
 // halo. Span discovery/extensions happen before capture; workers consume only
 // the returned immutable observation through its Authority adapter.

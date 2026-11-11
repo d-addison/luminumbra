@@ -24,6 +24,7 @@
 
 #include "../core/Log.h"
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -357,11 +358,11 @@ void PhysicsSystem::update(float delta_time) {
     m_batched_queries.ProcessBatch(this);
 }
 
-void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (!m_body_interface)
-        return;
+        return true;
     if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
-        return;
+        return true;
 
     constexpr std::size_t kHeightmapSide = CHUNK_SIZE_X + 1;
     if (chunk.heightmap_data.size() != kHeightmapSide * kHeightmapSide) {
@@ -370,7 +371,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                              chunk.get_coords().x,
                              chunk.get_coords().y,
                              chunk.get_coords().z);
-        return;
+        return true;
     }
 
     // 1. Copy the cached heightmap data into a Jolt-compatible array.
@@ -397,7 +398,7 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
     const float center_height = chunk.heightmap_data[static_cast<std::size_t>(center_index)];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
-        return;
+        return true;
     }
 
     // 2. Create the HeightFieldShape.
@@ -415,14 +416,14 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (result.HasError()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape error for chunk ({},{},{}): {}", cc.x, cc.y, cc.z, result.GetError());
-        return;
+        return true;
     }
 
     // Additional safety check
     if (!result.Get()) {
         LUMINUMBRA_CORE_ERROR(
             "HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
-        return;
+        return true;
     }
 
     // The position is baked into the shape, so the body itself can be created at the world origin.
@@ -432,8 +433,14 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                                             JPH::EMotionType::Static,
                                             Layers::NON_MOVING);
     JPH::Body* body = m_body_interface->CreateBody(body_settings);
+    if (body == nullptr) {
+        LUMINUMBRA_CORE_WARN(
+            "Body pool refused chunk collision for chunk ({},{},{})", cc.x, cc.y, cc.z);
+        return false;
+    }
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
     m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
+    return true;
 }
 
 void PhysicsSystem::remove_chunk_collision(ChunkID id) {
@@ -636,13 +643,64 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
 
 // ---  : server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
-    m_avatar_characters.clear();
-    m_avatar_wish.clear();
+    for (std::size_t index = 0; index < m_avatars.size(); ++index) {
+        remove_avatar_character(index);
+    }
+    m_avatars.clear();
+}
+
+void PhysicsSystem::remove_avatar_character(std::size_t index) {
+    if (index >= m_avatars.size()) {
+        return;
+    }
+    destroy_body(m_avatars[index].frozen_body);
+    m_avatars[index] = AvatarState{};
+}
+
+void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm::vec3& position) {
+    if (index >= m_avatars.size() || !m_avatars[index].character) {
+        return;
+    }
+    auto& avatar = m_avatars[index];
+    if (!frozen && !avatar.frozen) {
+        return;
+    }
+    auto& body = avatar.frozen_body;
+    auto& character = *avatar.character;
+    const JPH::RVec3 feet =
+        std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z)
+            ? JPH::RVec3(position.x, position.y, position.z)
+            : character.GetPosition();
+    if (frozen && body.IsInvalid()) {
+        const JPH::BodyCreationSettings settings(m_avatar_shape,
+                                                 feet,
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        // Count admission is O(1), in the caller's existing entity order. Leave
+        // terrain headroom even after this capsule takes a slot. Both headroom
+        // refusal and a null CreateBody leave an invalid ID for the next retry.
+        const auto max_bodies = m_jolt_system->GetMaxBodies();
+        if (max_bodies > kTerrainBodyHeadroom &&
+            m_jolt_system->GetNumBodies() < max_bodies - kTerrainBodyHeadroom) {
+            body = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+        }
+    } else if (!frozen) {
+        destroy_body(body);
+        body = JPH::BodyID();
+    } else if (feet != character.GetPosition()) {
+        m_body_interface->SetPosition(body, feet, JPH::EActivation::DontActivate);
+    }
+    avatar.frozen = frozen;
+    character.SetPosition(feet);
+    character.SetLinearVelocity(JPH::Vec3::sZero());
+    avatar.wish = glm::vec2(0.0f);
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
-    if (index < m_avatar_wish.size())
-        m_avatar_wish[index] = wish_xz;
+    if (index < m_avatars.size()) {
+        m_avatars[index].wish = m_avatars[index].frozen ? glm::vec2(0.0f) : wish_xz;
+    }
 }
 
 std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
@@ -663,13 +721,15 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
-    m_avatar_characters.push_back(
-        std::make_unique<JPH::CharacterVirtual>(&settings,
-                                                JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
-                                                JPH::Quat::sIdentity(),
-                                                m_jolt_system.get()));
-    m_avatar_wish.emplace_back(0.0f, 0.0f);
-    return m_avatar_characters.size() - 1;
+    m_avatars.push_back({.character = std::make_unique<JPH::CharacterVirtual>(
+                             &settings,
+                             JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
+                             JPH::Quat::sIdentity(),
+                             m_jolt_system.get()),
+                         .wish = glm::vec2(0.0f),
+                         .frozen_body = JPH::BodyID(),
+                         .frozen = false});
+    return m_avatars.size() - 1;
 }
 
 void PhysicsSystem::update_avatars(float dt) {
@@ -680,12 +740,12 @@ void PhysicsSystem::update_avatars(float dt) {
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
-    for (std::size_t i = 0; i < m_avatar_characters.size(); ++i) {
-        auto& character = m_avatar_characters[i];
-        if (!character)
+    for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+        auto& character = m_avatars[i].character;
+        if (!character || m_avatars[i].frozen)
             continue;
         ++m_work_items.characters;
-        const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);
+        const glm::vec2 wish = m_avatars[i].wish;
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
         const bool grounded =
             character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
@@ -707,23 +767,23 @@ void PhysicsSystem::update_avatars(float dt) {
 }
 
 glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return glm::vec3(0.0f);
-    const JPH::RVec3 p = m_avatar_characters[index]->GetPosition();
+    const JPH::RVec3 p = m_avatars[index].character->GetPosition();
     return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 }
 
 glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return glm::vec3(0.0f);
-    const JPH::Vec3 v = m_avatar_characters[index]->GetLinearVelocity();
+    const JPH::Vec3 v = m_avatars[index].character->GetLinearVelocity();
     return glm::vec3((float)v.GetX(), (float)v.GetY(), (float)v.GetZ());
 }
 
 bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+    if (index >= m_avatars.size() || !m_avatars[index].character)
         return false;
-    return m_avatar_characters[index]->GetGroundState() ==
+    return m_avatars[index].character->GetGroundState() ==
            JPH::CharacterBase::EGroundState::OnGround;
 }
 
@@ -816,9 +876,8 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
         JPH::Vec3 hit_pos = ray_start + ray_direction * result.distance;
         result.hit_point = {hit_pos.GetX(), hit_pos.GetY(), hit_pos.GetZ()};
 
-        // Query the hit body for the real surface normal and its object layer.
-        // Terrain heightfields live on NON_MOVING; dynamic spheres are the only
-        // other bodies (MOVING), so the layer identifies terrain hits.
+        // Query the hit body for the real surface normal and terrain shape identity.
+        // Chunk terrain uses heightfields; frozen capsules share its object layer.
         bool terrain_hit = false;
         JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), closest_hit.mBodyID);
         if (lock.Succeeded()) {
@@ -831,7 +890,7 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
                 normal = -normal;
             }
             result.surface_normal = {normal.GetX(), normal.GetY(), normal.GetZ()};
-            terrain_hit = body.GetObjectLayer() == Layers::NON_MOVING;
+            terrain_hit = body.GetShape()->GetSubType() == JPH::EShapeSubType::HeightField;
         }
 
         if (terrain_hit && m_world_system) {
@@ -843,7 +902,7 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
             result.material_type = static_cast<int>(material);
             result.material_absorption = get_material_audio_absorption(result.material_type);
         } else if (m_world_system) {
-            // Non-terrain (dynamic body): no worldgen material applies; classify
+            // Non-terrain body: no worldgen material applies; classify
             // as stone.
             result.material_type = static_cast<int>(MaterialType::Stone);
             result.material_absorption = get_material_audio_absorption(result.material_type);

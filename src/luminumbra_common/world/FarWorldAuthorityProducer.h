@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FarFrozenObservation.h"
 #include "FarWorldAuthorityChanges.h"
 #include "persistence/WorldSaveService.h"
 #include <bitset>
@@ -67,6 +68,19 @@ public:
         std::uint64_t serving_serial = 0, target_serial = 0;
         bool active = false, queued = false, paused = false, latest_ready = false;
     };
+    struct FrozenPolicy {
+        std::uint64_t pristine_identity = 0;
+        FarCaveMode caves = FarCaveMode::BandLimited;
+        FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat;
+        int water_resolution = 0;
+    };
+    struct FrozenResult {
+        Error source = Error::None;
+        FarFrozenCaptureError capture = FarFrozenCaptureError::None;
+        bool ok() const {
+            return source == Error::None && capture == FarFrozenCaptureError::None;
+        }
+    };
     explicit FarWorldAuthorityProducer(const Limits& limits);
     ~FarWorldAuthorityProducer();
     FarWorldAuthorityProducer(const FarWorldAuthorityProducer&) = delete;
@@ -100,6 +114,16 @@ public:
     const SourceCapture* capture() const;
     CaptureStatus capture_status() const;
     const std::string& capture_read_error() const;
+    // Synchronous composition from the accepted owned source capture. The world
+    // is used only for pristine terrain/base water under its sampling scope.
+    // The complete rectangular halo must lie in that capture's source window.
+    // Refusal preserves output and its pool charge; no mutable source is reread.
+    FrozenResult compose_frozen(const Systems::SHIELD_WorldSystem& world,
+                                const FarVolumeRequest& request,
+                                const FrozenPolicy& policy,
+                                const FarFrozenCaptureLimits& limits,
+                                const std::shared_ptr<FarVolumeMemoryPool>& pool,
+                                std::shared_ptr<const FarFrozenObservation>& output) const;
 
 private:
     struct Impl;
