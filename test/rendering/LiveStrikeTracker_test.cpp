@@ -12,6 +12,7 @@
 namespace {
 
 using Luminumbra::Rendering::ComposeLiveStrikes;
+using Luminumbra::Rendering::IsLiveBoltPenUp;
 using Luminumbra::Rendering::kLiveBoltPenUp;
 using Luminumbra::Rendering::LiveSegmentTouchesView;
 using Luminumbra::Rendering::LiveStrikeTracker;
@@ -153,7 +154,7 @@ ProjectedLiveStrike Strike(glm::vec2 origin, std::size_t branches, float pulse) 
 std::size_t Strokes(const std::vector<glm::vec2>& points) {
     std::size_t strokes = points.empty() ? 0 : 1;
     for (const glm::vec2& point : points) {
-        if (point == kLiveBoltPenUp) {
+        if (IsLiveBoltPenUp(point)) {
             ++strokes;
         }
     }
@@ -219,8 +220,94 @@ TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
     const std::vector<ProjectedLiveStrike> strikes{crossing, later};
     const auto composed = ComposeLiveStrikes(strikes, 96);
     ASSERT_EQ(composed.points.size(), 2u + 1u + 30u);
-    EXPECT_EQ(composed.points.front(), crossing.main_channel.front());
+    EXPECT_EQ(composed.points[0], glm::vec2(-1.0f, 0.0f));
+    EXPECT_EQ(composed.points[1], glm::vec2(1.0f, 0.0f));
+    EXPECT_FALSE(IsLiveBoltPenUp(composed.points[0]));
+    EXPECT_FALSE(IsLiveBoltPenUp(composed.points[1]));
     EXPECT_EQ(composed.strike_ndc, crossing.strike_ndc);
+}
+
+TEST(LiveStrikeComposer, CrossingSegmentsUploadOnlyClippedRealPoints) {
+    const std::array<std::array<glm::vec2, 2>, 8> segments{{
+        {{{-2.0f, 0.0f}, {2.0f, 0.0f}}},
+        {{{2.0f, 0.0f}, {-2.0f, 0.0f}}},
+        {{{-3.0f, 0.0f}, {0.0f, 0.0f}}},
+        {{{-1000.0f, 0.0f}, {1000.0f, 0.0f}}},
+        {{{0.0f, -3.0f}, {0.0f, 3.0f}}},
+        {{{0.0f, 3.0f}, {0.0f, -3.0f}}},
+        {{{-2.0f, -2.0f}, {2.0f, 2.0f}}},
+        {{{-2.0f, 1.0f}, {2.0f, 1.0f}}},
+    }};
+    for (const auto& segment : segments) {
+        ProjectedLiveStrike strike;
+        strike.main_channel.assign(segment.begin(), segment.end());
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 2);
+        ASSERT_EQ(composed.points.size(), 2u);
+        for (const glm::vec2 point : composed.points) {
+            // Both the shader's explicit predicate and its former x <= -2 test
+            // must distinguish every uploaded real endpoint from a pen-up.
+            EXPECT_FALSE(IsLiveBoltPenUp(point));
+            EXPECT_GT(point.x, -2.0f);
+            EXPECT_GE(point.x, -1.0f);
+            EXPECT_LE(point.x, 1.0f);
+            EXPECT_GE(point.y, -1.0f);
+            EXPECT_LE(point.y, 1.0f);
+        }
+    }
+}
+
+TEST(LiveStrikeComposer, ClippedExcursionsAndPenUpsKeepDisconnectedPiecesSeparate) {
+    ProjectedLiveStrike strike;
+    strike.main_channel = {{-2.0f, 0.0f},
+                           {0.0f, 0.0f},
+                           {2.0f, 0.0f},
+                           {2.0f, 0.5f},
+                           {0.0f, 0.5f},
+                           kLiveBoltPenUp,
+                           {-2.0f, -0.5f},
+                           {2.0f, -0.5f}};
+    const std::vector<glm::vec2> expected{{-1.0f, 0.0f},
+                                          {0.0f, 0.0f},
+                                          {1.0f, 0.0f},
+                                          kLiveBoltPenUp,
+                                          {1.0f, 0.5f},
+                                          {0.0f, 0.5f},
+                                          kLiveBoltPenUp,
+                                          {-1.0f, -0.5f},
+                                          {1.0f, -0.5f}};
+    EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), expected.size()).points, expected);
+    // A stroke that grows beyond the budget through clipping is dropped whole.
+    EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), expected.size() - 1).points.empty());
+    // A turn outside the view also needs a break when both segments touch the view.
+    strike.main_channel = {{0.0f, 0.0f}, {2.0f, 0.0f}, {0.0f, 1.0f}};
+    EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 5).points,
+              (std::vector<glm::vec2>{
+                  {0.0f, 0.0f}, {1.0f, 0.0f}, kLiveBoltPenUp, {1.0f, 0.5f}, {0.0f, 1.0f}}));
+    // Overflow rolls back only this stroke, preserving earlier geometry and its flash.
+    const ProjectedLiveStrike earlier = Strike({-0.5f, 0.5f}, 0, 0.2f);
+    const std::array<ProjectedLiveStrike, 2> strikes{earlier, strike};
+    const auto composed = ComposeLiveStrikes(strikes, earlier.main_channel.size() + 5);
+    EXPECT_EQ(composed.points, earlier.main_channel);
+    EXPECT_FLOAT_EQ(composed.pulse, earlier.pulse);
+}
+
+TEST(LiveStrikeComposer, NonFiniteEndpointsDoNotUploadOrJoinAcrossInvalidSegments) {
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const glm::vec2 invalid : {glm::vec2(infinity, 0.0f),
+                                    glm::vec2(0.0f, -infinity),
+                                    glm::vec2(nan, 0.0f),
+                                    glm::vec2(0.0f, nan)}) {
+        ProjectedLiveStrike strike;
+        strike.main_channel = {{0.0f, 0.0f}, invalid};
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 96).points.empty());
+        EXPECT_FALSE(LiveSegmentTouchesView({0.0f, 0.0f}, invalid));
+        EXPECT_FALSE(LiveSegmentTouchesView(invalid, {0.0f, 0.0f}));
+        strike.main_channel = {{-0.5f, 0.0f}, {0.0f, 0.0f}, invalid, {0.0f, 0.5f}, {0.5f, 0.5f}};
+        EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 96).points,
+                  (std::vector<glm::vec2>{
+                      {-0.5f, 0.0f}, {0.0f, 0.0f}, kLiveBoltPenUp, {0.0f, 0.5f}, {0.5f, 0.5f}}));
+    }
 }
 
 TEST(LiveStrikeComposer, VisibleBranchOfAnOffscreenChannelIsDrawn) {

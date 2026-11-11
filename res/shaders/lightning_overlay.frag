@@ -12,6 +12,9 @@ in vec2 TexCoords;
 uniform sampler2D u_scene;   // the composited (lit + sky) tonemapped color
 
 #define MAX_BOLT_POINTS 96
+// Matches Rendering::kLiveBoltPenUp and IsLiveBoltPenUp in LiveStrikeComposer.h.
+// Real live-bolt endpoints are clipped to [-1, 1] before upload.
+const vec2 kLiveBoltPenUp = vec2(-3.0, -3.0);
 uniform int   u_active = 0;
 uniform float u_pulse = 0.0;             // full-scene additive flash strength
 uniform vec3  u_color = vec3(0.72, 0.82, 1.0);
@@ -19,7 +22,7 @@ uniform vec2  u_strikeNdc = vec2(0.0);   // strike point in NDC (radial centre)
 uniform float u_boltWidth = 0.012;       // bolt core half-width (NDC)
 uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
-uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline (x<=-2 == pen-up)
+uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline with kLiveBoltPenUp breaks
 uniform float u_aspect = 1.777;          // framebuffer width/height
 // GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
 // a bright radial bloom at the touchdown point sells the strike connecting to the
@@ -61,7 +64,7 @@ float fbm(vec2 p) {
 }
 
 // Shortest distance (aspect-corrected NDC) from a screen point to the bolt
-// polyline. A pen-up separator (x <= -2.0) breaks disjoint strokes.
+// polyline. The explicit kLiveBoltPenUp marker breaks disjoint strokes.
 float boltDistance(vec2 ndc) {
     float best = 1e9;
     vec2 prev = vec2(0.0);
@@ -69,7 +72,7 @@ float boltDistance(vec2 ndc) {
     for (int i = 0; i < MAX_BOLT_POINTS; ++i) {
         if (i >= u_boltCount) break;
         vec2 p = u_bolt[i];
-        if (p.x <= -2.0) { have_prev = false; continue; }
+        if (all(equal(p, kLiveBoltPenUp))) { have_prev = false; continue; }
         if (have_prev) {
             vec2 a = vec2(prev.x * u_aspect, prev.y);
             vec2 b = vec2(p.x * u_aspect, p.y);
