@@ -46,7 +46,7 @@ struct Face {
     world::RegionKey owner{}, neighbor{};
     ChunkID positive = 0, other = 0;
     bool is_x = false;
-    std::uint8_t common_shift = 0; // Cross-owner phase is zero modulo 2^shift.
+    std::uint8_t common_shift = 0; // Coarser owner cadence; eligibility uses both persisted phases.
     auto operator<=>(const Face&) const = default;
 };
 struct RegionPlan {
@@ -72,17 +72,39 @@ struct Plan {
 // Pure planning: no chunk, ledger, cursor, debt or revision is changed. Invalid
 // inputs throw invalid_argument before budget allocation. Unready preparation seals the
 // whole owner without spending windows or crediting debt. Unknown/frozen owners
-// are excluded. Interiors require due membership and the owner's cadence phase;
-// cross-owner seams use their common zero phase, even off the interior cadence.
+// are excluded. Interiors and both owners of a face require due membership and
+// their persisted cadence phase.
 // Each window pays for preparation, one interior and four face endpoints. Keep
-// one interior window when claims exist, then reserve cross-owner pairs atomically.
+// one window for interior credit when claims exist, then reserve cross-owner pairs
+// atomically. Fractional owner credit can defer interior selection to a later call.
+// Interior credit is capped at serviceable demand: the total admitted due candidate
+// count, with one interior window usable per candidate. Existing debt is retained;
+// excess capacity creates no new debt. Post-credit debt must still fit kMaxDebt.
+// After owner credit allocation, an owner granted at least two interior windows
+// spends two of them on an eligible same-owner pair on odd owner cadence
+// opportunities (tick >> cadence_shift). Rotate its sorted eligible pairs by
+// (opportunity/2) modulo its pair count F. With fixed eligibility and at least two
+// awarded windows per due call, every pair is served within 2*F owner cadence
+// opportunities; this includes a sole owner with two remaining windows. Even
+// opportunities retain ordinary cursor service. Pair selection never changes
+// owner credit or grants, preserving the allocator's owner service guarantee.
+// Zero-candidate owners never compete for allocation; their debt and cursor are
+// carried unchanged.
+// Sorted eligible cross-owner faces start at (tick >> coarsest face cadence)
+// modulo their count. With a fixed eligible set and at least one funded pair,
+// all N faces are served within N common cadence opportunities, including skipped
+// off-phase ticks. Face outputs are sorted again after reservation.
 // Region outputs are patches for due admitted owners only (debt zero means erase);
-// all other registers must be retained by the eventual publisher. Fixed positive
-// eligibility inherits water_share's service bound; cursor rollover serves every
-// candidate under fixed eligibility. Changing eligibility has no such guarantee.
+// all other registers must be retained by the eventual publisher. Region windows
+// and allocated_windows count selected interiors only. Unselected grants retain
+// their Q32 debt; unused windows are global_windows-border_windows-allocated_windows.
+// Cursor rollover serves every candidate under fixed eligibility and recurring
+// positive awards on even owner cadence opportunities. Changing eligibility or
+// funding only pair opportunities has no such cursor guarantee.
 // Work: O((R+S+D) log(kMaxRegions+R+S+D)). Storage is bounded by the input
-// caps: at most R entries, S sources, D region outputs, 2*R topology faces and
-// 5*R participant IDs before deduplication. All products fit 32-bit size_t.
+// caps: at most R entries, S sources, D region outputs, 2*R topology faces,
+// 2*R pair pointers, 2*R output faces (including eligible borders before budget
+// truncation) and 5*R participant IDs before deduplication. All products fit 32-bit size_t.
 // Callers supply participating snapshots; this API has no production tick caller.
 [[nodiscard]] Plan Build(std::span<const Resident> residents,
                          std::span<const SourceInput> sources,

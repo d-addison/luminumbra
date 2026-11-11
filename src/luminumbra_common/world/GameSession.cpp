@@ -9,6 +9,7 @@
 #include "../simulation/SimBudgetTelemetry.h"
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
+#include "FarWorldAuthorityProducer.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -17,7 +18,8 @@
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
+#include "../ai/CreatureTickAdmission.h"
+#include "../ai/DecompositionSystem.h" // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
@@ -74,7 +76,8 @@
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
 #include "../systems/FireSpreadSystem.h"   // Fire propagation.
-#include "../systems/IrrigationSystem.h"   // Soil-moisture irrigation.
+#include "../systems/FoliageRegistryStage.h"
+#include "../systems/IrrigationSystem.h" // Soil-moisture irrigation.
 #include "../systems/PhysicsSystem.h"
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
@@ -100,6 +103,7 @@
 #include <ios>
 #include <limits>
 #include <map>
+#include <new>
 #include <span>
 #include <string>
 #include <system_error>
@@ -120,6 +124,15 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <string_view>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -210,6 +223,116 @@ struct GameSession::LoadedWorldState {
     bool input_refused = false;
     std::optional<luminumbra::fields::EnergyFieldState> energy;
 };
+
+struct GameSession::FoliageStep {
+    luminumbra::foliage::FoliageRegistryStage registry;
+    std::unique_ptr<luminumbra::foliage::SoilGrid> soil;
+    std::unique_ptr<luminumbra::foliage::IrrigationGrid> irrigation;
+    std::uint64_t published_tick = 0;
+    bool active = false, soil_staged = false, irrigation_staged = false;
+
+    static FoliageStep* Prepare(GameSession& session) {
+        if (!session.m_activeRegionsEnabled)
+            return nullptr;
+        auto& step = session.m_foliageStep;
+        if (!step)
+            step = std::make_unique<FoliageStep>();
+        // The regional gate selects foliage work; creature admission was captured
+        // before movement, and telemetry counts the full participant roster.
+        if (!luminumbra::foliage::FoliageRegistryStage::HasWork(session.m_registry))
+            return nullptr;
+        step->Begin(session);
+        return step.get();
+    }
+    void Begin(GameSession& session) {
+        registry.Begin(session.m_registry, session.m_activeRegionLedger.next_persistent_id());
+        soil_staged = !registry.registry().view<const Components::SoilFeederComponent>().empty();
+        irrigation_staged =
+            !registry.registry().view<const Components::WaterSourceComponent>().empty();
+        // Legacy grids have a fixed 256 * 256 cell bound. Reuse their buffers;
+        // regional soil and irrigation storage is handled separately.
+        if (soil_staged && session.m_soilGrid) {
+            if (!soil) {
+                soil = std::make_unique<luminumbra::foliage::SoilGrid>(*session.m_soilGrid);
+            } else {
+                *soil = *session.m_soilGrid;
+            }
+        } else if (soil_staged) {
+            soil.reset();
+        }
+        if (irrigation_staged && session.m_irrigationGrid) {
+            if (!irrigation) {
+                irrigation = std::make_unique<luminumbra::foliage::IrrigationGrid>(
+                    *session.m_irrigationGrid);
+            } else {
+                *irrigation = *session.m_irrigationGrid;
+            }
+        } else if (irrigation_staged) {
+            irrigation.reset();
+        }
+        if (soil_staged) {
+            soil.swap(session.m_soilGrid);
+        }
+        if (irrigation_staged) {
+            irrigation.swap(session.m_irrigationGrid);
+        }
+        active = true;
+    }
+    static bool AllocateIdentity(GameSession& session,
+                                 std::uint64_t tick,
+                                 FoliageStep* step,
+                                 std::uint64_t& id) {
+        if (step) {
+            if (!step->registry.AllocatePersistentId(id)) {
+                throw std::runtime_error("persistent id space exhausted");
+            }
+            return true;
+        }
+        try {
+            if (!session.m_activeRegionLedger.allocate_persistent_id(id)) {
+                session.LatchRegionFault(tick, "persistent id space exhausted");
+                return false;
+            }
+        } catch (const std::length_error& error) {
+            session.LatchRegionFault(tick, error.what());
+            return false;
+        }
+        return true;
+    }
+    void Commit(GameSession& session) noexcept {
+        registry.Commit(session.m_registry);
+        published_tick = session.m_worldClock.tick();
+        active = false;
+    }
+    struct Guard {
+        GameSession& session;
+        ~Guard() {
+            if (auto* step = session.m_foliageStep.get(); step && step->active) {
+                step->registry.Abort();
+                if (step->soil_staged) {
+                    step->soil.swap(session.m_soilGrid);
+                }
+                if (step->irrigation_staged) {
+                    step->irrigation.swap(session.m_irrigationGrid);
+                }
+                step->active = false;
+            }
+        }
+    };
+};
+
+std::uint64_t GameSession::GetFoliageRegistryStageVisits() const {
+    return m_foliageStep ? m_foliageStep->registry.visits() : 0;
+}
+std::uint64_t GameSession::GetFoliageRegistryPublications() const {
+    return m_foliageStep ? m_foliageStep->registry.publications() : 0;
+}
+const luminumbra::foliage::SoilGrid* GameSession::GetFoliageSoilGrid() const {
+    return m_soilGrid.get();
+}
+const luminumbra::foliage::IrrigationGrid* GameSession::GetFoliageIrrigationGrid() const {
+    return m_irrigationGrid.get();
+}
 
 struct GameSession::RegionalEnergyStep {
     luminumbra::fields::EnergyFieldState::RegionalTick transaction;
@@ -312,6 +435,7 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
+    DisableFarWorldAuthorityProducer();
     // Jobs can read world, water, weather and physics. Drain before member destruction.
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -321,7 +445,9 @@ GameSession::~GameSession() {
 }
 
 void GameSession::ResetWorldSystems() {
+    DisableFarWorldAuthorityProducer();
     m_regionalEnergyStep.reset();
+    m_foliageStep.reset();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -342,6 +468,7 @@ void GameSession::ResetWorldSystems() {
     ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionalFieldView = nullptr;
     m_scentRecenterPending = false;
     m_regionalFieldsBound = false;
@@ -546,6 +673,52 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
+namespace {
+
+// Captures this tick's creature admission before any movement, reusing the cache in the
+// registry context. Returns null when active regions are off, so every creature runs.
+luminumbra::ai::CreatureTickAdmission* CaptureCreatureTickAdmission(
+    entt::registry& registry, bool active_regions_enabled, const RegionConsumerGate& gate) {
+    if (!active_regions_enabled) {
+        return nullptr;
+    }
+    auto& admission = registry.ctx().emplace<luminumbra::ai::CreatureTickAdmission>();
+    admission.Capture(registry, gate);
+    return &admission;
+}
+
+void BlendCreatureSurvivalWishes(entt::registry& registry,
+                                 const luminumbra::ai::CreatureTickAdmission* admission) {
+    // Additive blend of the survival wishes into CreatureComponent.wish so a
+    // thirsty/scavenging creature actually steers to water/carrion. Entities
+    // without the opt-in components are untouched (try_get -> null), keeping
+    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+    auto sv = registry.view<Luminumbra::Components::CreatureComponent>();
+    for (auto e : sv) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
+        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+        // the thirst pull applies ONLY when the arbiter
+        // actually chose Drink — the old unconditional blend let a
+        // FLEEING creature be simultaneously steered toward water
+        // (the contract's exact defect). Thirst now competes inside
+        // DecideCreatureAction; this blend is its motor output.
+        if (cr.last_action == static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+            if (const auto* th = registry.try_get<Luminumbra::Components::ThirstComponent>(e)) {
+                cr.wish_x += th->wish_x;
+                cr.wish_z += th->wish_z;
+            }
+        }
+        if (const auto* scv = registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
+            cr.wish_x += scv->wish_x;
+            cr.wish_z += scv->wish_z;
+        }
+    }
+}
+
+} // namespace
+
 std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
@@ -605,8 +778,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault)
                     return i + 1;
             }
+            const FoliageStep::Guard foliage_guard{*this};
+            const auto creature_gate =
+                m_activeRegionsEnabled
+                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
+                    : RegionConsumerGate{};
+            luminumbra::ai::CreatureTickAdmission* const creature_admission =
+                CaptureCreatureTickAdmission(m_registry, m_activeRegionsEnabled, creature_gate);
             auto scheduled_fields = PrepareScheduledFieldPages(current_tick);
-            m_regionalFieldView = scheduled_fields ? &*scheduled_fields : nullptr;
+            auto* field_candidate = scheduled_fields ? &*scheduled_fields : nullptr;
+            m_regionalFieldView = field_candidate;
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
@@ -615,7 +796,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_registry);
             });
             // 1. Animation pose sampling: FIRST in the tick order.
-            luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+            luminumbra::animation::SamplePosesOnTick(
+                m_registry, m_simulationClock.fixed_dt(), creature_admission);
 
             budget.Next(Stage::Instinct, [&] {
                 return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
@@ -635,7 +817,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // tick. The engine still names no creature behavior.
             if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
                     .empty()) {
-                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, nullptr, true, creature_admission);
             } else {
                 luminumbra::ai::StimulusContext stimulus_context;
                 stimulus_context.tick = current_tick;
@@ -667,7 +850,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 }
                 const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
                 luminumbra::ai::RunInstinctSystemOnTick(
-                    m_registry, current_tick, &stimulus_registry);
+                    m_registry, current_tick, &stimulus_registry, true, creature_admission);
             }
 
             budget.Next(Stage::Perception, [&] {
@@ -684,7 +867,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // world_hash is UNCHANGED (byte-identical) -- same discipline as the
             // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
             luminumbra::ai::RunPerceptionSystemOnTick(
-                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()), creature_admission);
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
@@ -694,7 +877,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                  kScentFieldChannels
                            : 0ull;
             });
-            const bool scent_active = AdvanceNearScent(scheduled_fields);
+            const bool scent_active = AdvanceNearScent(field_candidate);
 
             budget.Next(Stage::Locomotion, [&] {
                 return SimParticipantCount<TelemetryComp::ActionPlanComponent,
@@ -704,13 +887,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // 2d.: action-plan locomotion, then scent gradient bias.
             // The executor writes only LocomotionIntentComponent; physics/render owners
             // consume that intent in their existing lanes.
-            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry, creature_admission);
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
                                                        ScentDomainOrigin(true),
                                                        ScentDomainOrigin(false),
-                                                       kScentCellSize);
+                                                       kScentCellSize,
+                                                       creature_admission);
             }
 
             budget.Next(Stage::Creatures, [&] {
@@ -736,20 +920,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    luminumbra::ai::RunMateSeekingOnTick(
+                        m_registry, m_reproductionTuning, creature_admission);
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
                     // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                     // integration layer is unit-tested independently of the producers.
-                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry, creature_admission);
 
                     // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
                     // systems wired into the live tick. Opt-in via ThirstComponent /
@@ -761,39 +947,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     luminumbra::ai::RunThirstOnTick(
                         m_registry,
                         static_cast<float>(m_simulationClock.fixed_dt()),
-                        m_thirstTuning);
+                        m_thirstTuning,
+                        creature_admission);
                     luminumbra::ai::RunScavengingOnTick(
-                        m_registry, current_tick, m_scavengingTuning);
-                    {
-                        // Additive blend of the survival wishes into CreatureComponent.wish so a
-                        // thirsty/scavenging creature actually steers to water/carrion. Entities
-                        // without the opt-in components are untouched (try_get -> null), keeping
-                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                        for (auto e : sv) {
-                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                            // the thirst pull applies ONLY when the arbiter
-                            // actually chose Drink — the old unconditional blend let a
-                            // FLEEING creature be simultaneously steered toward water
-                            // (the contract's exact defect). Thirst now competes inside
-                            // DecideCreatureAction; this blend is its motor output.
-                            if (cr.last_action ==
-                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                                if (const auto* th =
-                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
-                                            e)) {
-                                    cr.wish_x += th->wish_x;
-                                    cr.wish_z += th->wish_z;
-                                }
-                            }
-                            if (const auto* scv =
-                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
-                                        e)) {
-                                cr.wish_x += scv->wish_x;
-                                cr.wish_z += scv->wish_z;
-                            }
-                        }
-                    }
+                        m_registry, current_tick, m_scavengingTuning, creature_admission);
+                    BlendCreatureSurvivalWishes(m_registry, creature_admission);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                     // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
@@ -819,7 +977,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                 const auto& cp =
                                     phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
                                 m_physicsSystem->set_avatar_wish_velocity(
-                                    cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
+                                    cp.avatar_index,
+                                    creature_admission && !creature_admission->Allows(e)
+                                        ? glm::vec2(0.0f)
+                                        : glm::vec2(cr.wish_x, cr.wish_z));
                             }
                             m_physicsSystem->update_avatars(
                                 static_cast<float>(m_simulationClock.fixed_dt()));
@@ -848,7 +1009,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         current_tick,
                         static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_admission);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -867,7 +1029,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                            static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
                                Systems::kWeatherExtentCells;
                 });
-                StepRegionalWeather(scheduled_fields, current_tick);
+                StepRegionalWeather(field_candidate, current_tick);
                 m_weatherSystem->UpdateFromClock(
                     current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
             } else {
@@ -941,6 +1103,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             auto* scheduled_energy = AdvanceEnergy(current_tick);
             const RegionalEnergyStep::Guard energy_guard{scheduled_energy};
 
+            auto* foliage_step = FoliageStep::Prepare(*this);
+            auto& foliage_registry = foliage_step ? foliage_step->registry.registry() : m_registry;
             // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
             // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
             // had growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale
@@ -954,38 +1118,41 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-            const auto foliage_gate =
-                m_activeRegionsEnabled
-                    ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
-                    : RegionConsumerGate{};
+            const auto foliage_gate = m_activeRegionsEnabled
+                                          ? RegionConsumerGate(foliage_registry,
+                                                               m_regionSchedule.due,
+                                                               m_consumerGateScratch)
+                                          : RegionConsumerGate{};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
                 budget.Next(Stage::Irrigation, [&] {
-                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
+                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(
+                               foliage_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
-                if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
+                if (!foliage_registry.view<Comp::WaterSourceComponent>().empty()) {
                     if (!m_irrigationGrid)
                         m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(
                             kFoliageFieldCells, kFoliageFieldCells);
-                    fol::RunIrrigationOnTick(m_registry,
+                    fol::RunIrrigationOnTick(foliage_registry,
                                              *m_irrigationGrid,
                                              foliageOriginX,
                                              foliageOriginZ,
                                              kFoliageFieldCell);
                 }
                 budget.Next(Stage::Soil, [&] {
-                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
+                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(
+                               foliage_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
-                if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
+                if (!foliage_registry.view<Comp::SoilFeederComponent>().empty()) {
                     if (!m_soilGrid)
                         m_soilGrid =
                             std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
-                    fol::RunSoilNutrientOnTick(m_registry,
+                    fol::RunSoilNutrientOnTick(foliage_registry,
                                                *m_soilGrid,
                                                foliageOriginX,
                                                foliageOriginZ,
@@ -998,7 +1165,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 return SimParticipantCount<TelemetryComp::PlantTag,
                                            TelemetryComp::PlantGrowthComponent,
                                            TelemetryComp::PlantGenomeComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
+                                           TelemetryComp::TransformComponent>(foliage_registry);
             });
             // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
             // no plants -> the system never runs and world_hash stays byte-identical
@@ -1006,7 +1173,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // driven by the freshly-updated weather precip field (rain -> growth), so
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
-            if (HasPlantParticipants()) {
+            if (!foliage_registry.view<const Luminumbra::Components::PlantTag>().empty()) {
                 const luminumbra::foliage::EnvSampler plant_env =
                     [this, foliageOriginX, foliageOriginZ, current_tick](
                         const Luminumbra::Components::TransformComponent& tf) {
@@ -1116,17 +1283,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         return s;
                     };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
-                    m_registry, current_tick, plant_env, foliage_gate);
+                    foliage_registry, current_tick, plant_env, foliage_gate);
             }
 
-            // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
-            // / … Each is per-entity OPT-IN via its own participant component, so a world carrying
-            // none runs ZERO of them and world_hash stays byte-identical (canonical
-            // NetworkStateHash baseline holds) — same discipline as plants/creatures/scent.
-            // Deterministic (id-ordered, libm-free, seeded-from-ints). Fixed run order for
-            // run==replay. NOTE: the soil-nutrient + irrigation FIELDS now update at slot 5b
-            // (BEFORE plant growth) so growth reads fresh availability; only the consumers remain
-            // here. Wind coupling (fire/pollination) drifts downwind.
+            // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing /
+            // lifespan / … Each is per-entity OPT-IN via its own participant component, so a
+            // world carrying none runs ZERO of them and world_hash stays byte-identical
+            // (canonical NetworkStateHash baseline holds) — same discipline as
+            // plants/creatures/scent. Deterministic (id-ordered, libm-free, seeded-from-ints).
+            // Fixed run order for run==replay. NOTE: the soil-nutrient + irrigation FIELDS now
+            // update at slot 5b (BEFORE plant growth) so growth reads fresh availability; only
+            // the consumers remain here. Wind coupling (fire/pollination) drifts downwind.
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -1141,18 +1308,23 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::PlantGenomeComponent,
                                                TelemetryComp::PlantGrowthComponent,
                                                TelemetryComp::TransformComponent,
-                                               TelemetryComp::PollinationComponent>(m_registry);
+                                               TelemetryComp::PollinationComponent>(
+                        foliage_registry);
                 });
-                if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
-                    fol::RunPollinationOnTick(
-                        m_registry, current_tick, windXZ, 0, m_plantMutationRate, foliage_gate);
+                if (!foliage_registry.view<Comp::PlantGenomeComponent>().empty())
+                    fol::RunPollinationOnTick(foliage_registry,
+                                              current_tick,
+                                              windXZ,
+                                              0,
+                                              m_plantMutationRate,
+                                              foliage_gate);
                 budget.Next(Stage::Disease, [&] {
                     return SimParticipantCount<TelemetryComp::PlantTag,
                                                TelemetryComp::PlantHealthComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(foliage_registry);
                 });
-                if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(m_registry, current_tick, 0, foliage_gate);
+                if (!foliage_registry.view<Comp::PlantHealthComponent>().empty())
+                    fol::RunPlantDiseaseOnTick(foliage_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -1161,32 +1333,24 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
                                                TelemetryComp::PlantGrowthComponent,
                                                TelemetryComp::PlantGenomeComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(foliage_registry);
                 });
-                if (!m_registry.view<Comp::CropLifecycleComponent>().empty()) {
-                    const auto allocate_identity = [this, current_tick](std::uint64_t& id) {
-                        try {
-                            if (!m_activeRegionLedger.allocate_persistent_id(id)) {
-                                LatchRegionFault(current_tick, "persistent id space exhausted");
-                                return false;
-                            }
-                        } catch (const std::length_error& error) {
-                            LatchRegionFault(current_tick, error.what());
-                            return false;
-                        }
-                        return true;
+                if (!foliage_registry.view<Comp::CropLifecycleComponent>().empty()) {
+                    const auto allocate_identity = [this, current_tick, foliage_step](
+                                                       std::uint64_t& id) {
+                        return FoliageStep::AllocateIdentity(*this, current_tick, foliage_step, id);
                     };
                     fol::RunCropLifecycleOnTick(
-                        m_registry, current_tick, 0, foliage_gate, allocate_identity);
+                        foliage_registry, current_tick, 0, foliage_gate, allocate_identity);
                     if (m_regionFault) {
                         return i + 1;
                     }
                 }
                 budget.Next(Stage::Fire, [&] {
                     return SimParticipantCount<TelemetryComp::CombustibleComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(foliage_registry);
                 });
-                if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
+                if (!foliage_registry.view<Comp::CombustibleComponent>().empty()) {
                     std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
                     if (m_weatherSystem) {
                         for (const Systems::StrikeEvent& strike :
@@ -1199,38 +1363,49 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         }
                     }
                     luminumbra::sim::RunFireSpreadOnTick(
-                        m_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
+                        foliage_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
                 }
                 budget.Next(Stage::Grazing, [&] {
                     return SimParticipantCount<TelemetryComp::GrazeableComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(foliage_registry);
                 });
-                if (!m_registry.view<Comp::GrazeableComponent>().empty())
-                    luminumbra::ai::RunWildlifeFoliageOnTick(
-                        m_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
+                if (!foliage_registry.view<Comp::GrazeableComponent>().empty())
+                    luminumbra::ai::RunWildlifeFoliageOnTick(foliage_registry,
+                                                             current_tick,
+                                                             m_wildlifeFoliageTuning,
+                                                             foliage_gate,
+                                                             creature_admission);
                 budget.Next(Stage::Lifespan, [&] {
-                    return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
+                    return SimParticipantCount<TelemetryComp::MortalComponent>(foliage_registry);
                 });
-                if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
+                if (!foliage_registry.view<Comp::MortalComponent>().empty())
+                    luminumbra::ai::RunLifespanOnTick(
+                        foliage_registry, current_tick, foliage_gate, creature_admission);
+            }
+            {
+                auto& living_registry = foliage_step ? foliage_registry : m_registry;
+                namespace Comp = Luminumbra::Components;
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
                 budget.Next(Stage::Alarm, [&] {
                     return SimParticipantCount<TelemetryComp::AlarmComponent,
                                                TelemetryComp::CreatureComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(living_registry);
                 });
-                if (!m_registry.view<Comp::AlarmComponent>().empty())
+                if (!living_registry.view<Comp::AlarmComponent>().empty())
                     luminumbra::ai::RunHerdAlarmOnTick(
-                        m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                        living_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
                 budget.Next(Stage::Decay, [&] {
-                    return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
+                    return SimParticipantCount<TelemetryComp::DecayComponent>(living_registry);
                 });
-                if (!m_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+                if (!living_registry.view<Comp::DecayComponent>().empty())
+                    luminumbra::ai::RunDecompositionOnTick(
+                        living_registry, current_tick, creature_admission);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
@@ -1243,7 +1418,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                    luminumbra::ai::RunCircadianOnTick(
+                        m_registry, tod01, m_circadianAmplitude, creature_admission);
                 }
                 // Territory: claim home + emit a homing bias (movement blends it like
                 // mate-seeking).
@@ -1252,15 +1428,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunTerritoryOnTick(
+                        m_registry, current_tick, creature_admission);
                 // Predator pack: flanking coordination (a pack surrounds the prey).
                 budget.Next(Stage::Packs, [&] {
                     return SimParticipantCount<TelemetryComp::PackHunterComponent,
                                                TelemetryComp::CreatureComponent,
-                                               TelemetryComp::TransformComponent>(m_registry);
+                                               TelemetryComp::TransformComponent>(living_registry);
                 });
-                if (!m_registry.view<Comp::PackHunterComponent>().empty())
-                    luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+                if (!living_registry.view<Comp::PackHunterComponent>().empty())
+                    luminumbra::ai::RunPredatorPackOnTick(
+                        living_registry, current_tick, creature_admission);
                 // Migration: seasonal drive toward a moving target (tick-derived year fraction).
                 budget.Next(Stage::Migration, [&] {
                     return SimParticipantCount<TelemetryComp::MigratoryComponent,
@@ -1273,23 +1451,42 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+                    luminumbra::ai::RunMigrationOnTick(m_registry, season01, creature_admission);
                 }
             }
 
-            budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
-            if (m_activeRegionsEnabled)
-                m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
-            else
-                m_simulationEventBus.drain(current_tick);
-            budget.Finish();
-            m_regionalFieldView = nullptr;
+            const auto deliver_events = [&] {
+                budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
+                if (m_activeRegionsEnabled) {
+                    m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+                } else {
+                    m_simulationEventBus.drain(current_tick);
+                }
+                budget.Finish();
+            };
+            if (!foliage_step) {
+                deliver_events();
+            }
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                PublishRegionCompletedWork(std::move(scheduled_fields), scheduled_energy);
+                PublishRegionCompletedWork(
+                    field_candidate, scheduled_energy, defer_water_authority);
+            } else {
+                SettleWaterAuthority(defer_water_authority);
             }
-            SettleWaterAuthority(defer_water_authority);
+            m_regionalFieldView = nullptr;
+            if (foliage_step) {
+                foliage_step->Commit(*this);
+                // Callbacks use the live registry. Publish first so they observe
+                // same-tick births/deaths and their writes cannot be overwritten.
+                // Foliage IDs reach the shared allocator before callback allocations.
+                deliver_events();
+                SettleWaterAuthority(defer_water_authority);
+                if (m_regionFault) {
+                    return i + 1;
+                }
+            }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
                 throw;
@@ -1305,11 +1502,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
     return ticks_executed;
 }
 
+namespace {
+// Keep universal admission separate from the selected preset's dependencies.
 WorldConfigValidationResult
-GameSession::ValidateWorldConfig(const std::string& root_path,
-                                 const std::string& worldType,
-                                 const std::vector<std::filesystem::path>& required_assets,
-                                 const std::stop_token& stop) {
+ValidateWorldConfigInputs(const std::string& root_path,
+                          const std::string& worldType,
+                          const std::vector<std::filesystem::path>& required_assets) {
     WorldConfigValidationResult result;
     result.ok = true;
 
@@ -1328,9 +1526,8 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
                                Filesystem::GenericUtf8PathString(result.preset_path));
     }
 
-    // Preset loading below validates simulation dependencies. Further runtime
-    // assets are caller-supplied (the client registers shaders/RML/fonts; a
-    // headless host registers none).
+    // Runtime assets apply to every preset (the client registers shaders/RML/fonts;
+    // a headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
@@ -1340,9 +1537,19 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         }
     }
 
+    return result;
+}
+} // namespace
+
+WorldConfigValidationResult
+GameSession::ValidateWorldConfig(const std::string& root_path,
+                                 const std::string& worldType,
+                                 const std::vector<std::filesystem::path>& required_assets,
+                                 const std::stop_token& stop) {
+    auto result = ValidateWorldConfigInputs(root_path, worldType, required_assets);
     if (result.ok) {
         const TerrainPresetLoadResult preset =
-            LoadTerrainPreset(result.preset_path, root / "data", stop);
+            LoadTerrainPreset(result.preset_path, RuntimeRoot(root_path) / "data", stop);
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1422,7 +1629,7 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
     }
 
     const WorldConfigValidationResult validation =
-        ValidateWorldConfig(options.root_path, worldType, options.required_assets, stop);
+        ValidateWorldConfigInputs(options.root_path, worldType, options.required_assets);
     if (!validation.ok) {
         prepared->error =
             validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
@@ -1435,6 +1642,8 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
+    metadata.seedConversionVersion = kSeedConversionVersion;
+    metadata.resolvedSeed = StringToSeed(metadata.seed);
     metadata.worldType = worldType;
     metadata.worldId = options.transient_creation ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
@@ -1479,6 +1688,7 @@ GameSession::PrepareWorldCreation(const WorldPreparationOptions& options,
         prepared->error = "Saved-input admission refused: preset compatibility limit.";
         return prepared;
     }
+    // Validate dependencies only for the resolved preset that will run.
     // Both persisted and transient worlds adopt the parameters and identity of
     // these same resolved bytes. Explicit revision 1 remains authoritative.
     TerrainPresetLoadResult preset =
@@ -1573,7 +1783,7 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
-    m_numericSeed = StringToSeed(m_metadata.seed);
+    m_numericSeed = m_metadata.resolvedSeed;
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
@@ -1766,7 +1976,9 @@ GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
     }
     // Resolve the same terrain-bounded wanted set before reading any chunks. Worker
     // preparation owns its sampler and never reads a live session or starts jobs.
-    prepared->world_seed = static_cast<int>(StringToSeed(saved.metadata.seed));
+    prepared->world_seed = static_cast<int>(saved.metadata.seedConversionVersion == 0
+                                                ? ResolveWorldSeed(saved.metadata.seed, 0)
+                                                : saved.metadata.resolvedSeed);
     auto state_options = options;
     if (options.active_regions) {
         TerrainGenParams params = preset.params;
@@ -2154,7 +2366,8 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
                  input,
                  m_activeRegionLedger.records(),
                  true,
-                 m_energyFieldState->regional_deposit_capacity())
+                 m_energyFieldState->regional_deposit_capacity(),
+                 m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>())
                  .accepted)
             throw std::runtime_error("Regional energy emitter batch refused");
         if (!m_energyFieldState->BeginRegionalTick(
@@ -2169,17 +2382,41 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
     return &step;
 }
 
-void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> fields,
-                                             RegionalEnergyStep* energy) {
+void GameSession::PublishRegionCompletedWork(FieldPageState* fields,
+                                             RegionalEnergyStep* energy,
+                                             bool defer_water_authority) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
+    m_regionalFieldView = fields;
+    // Water observers still see the original registry and committed regional state.
+    SettleWaterAuthority(defer_water_authority);
+    if (m_regionFault) {
+        throw std::runtime_error("Water authority settlement refused");
+    }
+    auto* foliage = m_foliageStep && m_foliageStep->active ? m_foliageStep.get() : nullptr;
+    if (foliage && m_activeRegionLedger.next_persistent_id() != foliage->registry.initial_id()) {
+        throw std::runtime_error("Stale foliage allocator");
+    }
+    const auto ages = energy ? energy->transaction.ages()
+                             : std::span<const std::pair<RegionKey, std::uint64_t>>{};
+    const auto next_id =
+        foliage ? foliage->registry.next_id() : m_activeRegionLedger.next_persistent_id();
+    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork, next_id)) {
+        throw std::runtime_error("Regional registers refused");
+    }
+    if (foliage) {
+        foliage->registry.PreparePublication(m_registry);
+    }
+    // Backend bindings and weather projections can allocate. Prepare them against
+    // the candidate before publishing any regional registers or foliage payloads.
+    const bool regional =
+        m_activeRegionsEnabled && (m_fieldPages.has_ambient() || (fields && fields->has_ambient()));
+    if (regional != m_regionalFieldsBound) {
+        BindRegionalFieldQueries();
+        ProjectRegionalWeather(m_worldClock.tick(), false);
+    }
+    m_activeRegionLedger.commit_energy_work();
     if (energy) {
-        if (!m_activeRegionLedger.prepare_energy_work(energy->transaction.ages(),
-                                                      m_regionCompletedWork))
-            throw std::runtime_error("Regional energy registers refused");
-        m_activeRegionLedger.commit_energy_work();
         energy->transaction.commit();
-    } else {
-        m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
     }
     if (fields) {
         m_fieldPages.adopt_weather_state(*fields);
@@ -2194,12 +2431,6 @@ void GameSession::PublishRegionCompletedWork(std::optional<FieldPageState> field
         RestoreRegionalScent();
     }
     m_regionCompletedWork.clear();
-    // Authority may first appear in a running world. Rebind only at a transition, after
-    // publication has succeeded, and replace any legacy weather projection at that boundary.
-    if ((m_activeRegionsEnabled && m_fieldPages.has_ambient()) != m_regionalFieldsBound) {
-        BindRegionalFieldQueries();
-        ProjectRegionalWeather(m_worldClock.tick(), false);
-    }
 }
 
 FieldPageView GameSession::RegionalFields() const {
@@ -2235,7 +2466,9 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
-    const bool regional = m_activeRegionsEnabled && m_fieldPages.has_ambient();
+    const bool regional =
+        m_activeRegionsEnabled &&
+        (m_fieldPages.has_ambient() || (m_regionalFieldView && m_regionalFieldView->has_ambient()));
     if (!regional) {
         m_regionalWeatherBoundaryOwners.clear();
         m_regionalWeatherBoundaryShifts.clear();
@@ -2457,11 +2690,12 @@ void GameSession::ProjectRegionalWeather(std::uint64_t tick,
     m_regionalAmbientOwners.clear();
     for (const auto& [owner, record] : m_activeRegionLedger.records()) {
         (void)record;
-        UpdateRegionalWeatherBoundaryOwner(owner, m_fieldPages);
+        UpdateRegionalWeatherBoundaryOwner(
+            owner, m_regionalFieldView ? *m_regionalFieldView : m_fieldPages);
     }
 }
 
-void GameSession::StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick) {
+void GameSession::StepRegionalWeather(FieldPageState* fields, std::uint64_t tick) {
     if (!m_regionalWeatherParticipating || !fields) {
         if (m_regionalFieldsBound && m_weatherSystem)
             m_weatherSystem->RefreshRegionalWeather(tick, m_ambientFieldAnchor);
@@ -2743,6 +2977,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_groundObjects.clear();
     m_fieldPages.clear();
+    m_scentCandidate.reset();
     m_regionSchedulerOverride = config;
 }
 void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
@@ -2804,7 +3039,11 @@ void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
     if (m_activeRegionsEnabled && !m_regionFault) {
-        if (m_simulationBatchInProgress && m_activeRegionLedger.records().contains(work.key))
+        // Reports from callbacks after publication feed the next scheduler pass.
+        const bool published =
+            m_foliageStep && m_foliageStep->published_tick == m_worldClock.tick();
+        if (m_simulationBatchInProgress && !published &&
+            m_activeRegionLedger.records().contains(work.key))
             m_regionCompletedWork.push_back(work);
         else
             // Unknown records retain the scheduler's normal rejection accounting.
@@ -3254,6 +3493,85 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 
 } // namespace
 
+bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthorityConfig& config,
+                                                  std::string& error) {
+    error.clear();
+    if (!m_worldUsable || !m_worldSystem || m_transientWorld || !IsSimulationTickBoundary()) {
+        error = "Source capture requires a saved world at an owner boundary.";
+        return false;
+    }
+    if (m_worldSystem->pending_publication_chunks() != 0 ||
+        !m_worldSystem->get_streaming_telemetry_stats().quiescent()) {
+        error = "Source capture attachment requires settled streaming publication.";
+        return false;
+    }
+    try {
+        auto candidate = std::make_unique<World::FarWorldAuthorityProducer>(config.source);
+        if (!candidate->configure_capture(config.capture)) {
+            error = "Source capture requires finite limits.";
+            return false;
+        }
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+        if (!candidate->admit_saved_source(GetWorldSaveDir(), config.capture.read, error)) {
+            return false;
+        }
+        if (!m_worldSystem->set_far_world_authority_changes(candidate->changes())) {
+            error = "Source capture membership exceeds its limit.";
+            return false;
+        }
+        m_farWorldAuthorityProducer = std::move(candidate);
+        m_farWorldSourceNeedsRefresh = false;
+        return true;
+    } catch (const std::bad_alloc&) {
+        error = "Source capture allocation refused.";
+        return false;
+    }
+}
+World::FarWorldAuthorityProducer* GameSession::GetFarWorldAuthorityProducer() {
+    return m_farWorldAuthorityProducer.get();
+}
+void GameSession::PumpFarWorldAuthorityCapture() {
+    if (!m_farWorldAuthorityProducer || !m_worldUsable || !IsSimulationTickBoundary()) {
+        return;
+    }
+    if (m_farWorldAuthorityProducer->capture_status().paused) {
+        m_farWorldAuthorityProducer->pump_capture();
+        return;
+    }
+    if (m_farWorldSourceNeedsRefresh) {
+        if (Persistence::SaveTransaction::active_for(GetWorldSaveDir())) {
+            const bool paused = m_farWorldAuthorityProducer->capture_status().paused;
+            FenceFarWorldAuthorityReads(true);
+            m_farWorldAuthorityProducer->pump_capture();
+            FenceFarWorldAuthorityReads(paused);
+            return;
+        }
+        std::string error;
+        if (!m_farWorldAuthorityProducer->refresh_saved_source(GetWorldSaveDir(), error)) {
+            return;
+        }
+        m_farWorldSourceNeedsRefresh = false;
+    }
+    if (m_farWorldAuthorityProducer->needs_capture_boundary()) {
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+    }
+    m_farWorldAuthorityProducer->pump_capture();
+}
+void GameSession::FenceFarWorldAuthorityReads(bool paused) {
+    if (m_farWorldAuthorityProducer) {
+        m_farWorldAuthorityProducer->fence_source_reads(paused);
+    }
+}
+void GameSession::DisableFarWorldAuthorityProducer() {
+    m_farWorldSourceNeedsRefresh = false;
+    if (m_farWorldAuthorityProducer) {
+        if (m_worldSystem) {
+            m_worldSystem->set_far_world_authority_changes({});
+        }
+        m_farWorldAuthorityProducer.reset();
+    }
+}
+
 bool GameSession::SaveWorld() {
     if (m_transientWorld || m_metadata.worldId.empty())
         return false;
@@ -3430,6 +3748,10 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
+    if (m_metadata.seedConversionVersion != 0) {
+        metadata_json["seedConversionVersion"] = m_metadata.seedConversionVersion;
+        metadata_json["resolvedSeed"] = m_metadata.resolvedSeed;
+    }
     if (!m_activeRegionsEnabled && m_renderCalendar)
         metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
@@ -3524,6 +3846,33 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                                          .count());
         }
     } outcome{*this, save_started, false};
+
+    struct SourceReadFence {
+        World::FarWorldAuthorityProducer* producer;
+        bool previous;
+        const bool& accepted;
+        bool& refresh_needed;
+        bool canonical;
+        ~SourceReadFence() {
+            if (producer) {
+                if (canonical && !accepted) {
+                    producer->invalidate_source();
+                    refresh_needed = true;
+                }
+                producer->fence_source_reads(previous);
+            }
+        }
+    } source_fence{.producer = m_farWorldAuthorityProducer.get(),
+                   .previous = m_farWorldAuthorityProducer &&
+                               m_farWorldAuthorityProducer->capture_status().paused,
+                   .accepted = outcome.accepted,
+                   .refresh_needed = m_farWorldSourceNeedsRefresh,
+                   .canonical = canonical_save};
+    FenceFarWorldAuthorityReads(true);
+    // Rollback may restore identical committed bytes through new file handles.
+    // Re-admit at the next pump after the enclosing transaction has closed.
+    m_farWorldSourceNeedsRefresh =
+        m_farWorldSourceNeedsRefresh || (canonical_save && m_farWorldAuthorityProducer != nullptr);
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -3829,6 +4178,19 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                 });
         defer_success();
     }
+    if (canonical_save && m_farWorldAuthorityProducer) {
+        const auto invalidate_source = [this, revision = m_worldRevision]() {
+            if (revision == m_worldRevision && m_farWorldAuthorityProducer) {
+                m_farWorldAuthorityProducer->invalidate_source();
+                m_farWorldSourceNeedsRefresh = true;
+            }
+        };
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir)) {
+            transaction->defer_until_commit(invalidate_source);
+        } else {
+            invalidate_source();
+        }
+    }
     if (outer && !outer->Commit()) {
         return false;
     }
@@ -4085,6 +4447,7 @@ bool GameSession::ReadPreparedWorldState(
 }
 
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
+    DisableFarWorldAuthorityProducer();
     // All refusing readers have passed; publish the staged state together.
     m_lastLoadedChunkCount = 0;
     m_fieldPages = std::move(saved.field_pages);
@@ -4203,6 +4566,118 @@ std::string GameSession::GenerateWorldId() {
 }
 
 uint32_t GameSession::StringToSeed(const std::string& seedStr) {
+    return ResolveWorldSeed(seedStr, kSeedConversionVersion);
+}
+
+#if defined(_WIN32)
+namespace {
+
+// Split a command line with the C runtime's argv rules, so the result matches the
+// narrow argv the server parsed. The program name toggles quotes without escapes.
+// Arguments map 2n backslashes before a quote to n plus a delimiter and 2n+1 to n
+// plus a literal quote; "" inside quotes is a literal quote. CommandLineToArgvW
+// differs on that last rule ("a""""b" is a""b here but a"b there).
+std::vector<std::wstring> CrtCommandLineArguments(std::wstring_view line) {
+    const auto at = [&](std::size_t index) {
+        return index < line.size() ? line[index] : L'\0';
+    };
+    const auto blank = [](wchar_t unit) {
+        return unit == L' ' || unit == L'\t';
+    };
+    std::vector<std::wstring> arguments(1);
+    std::size_t p = 0;
+    bool quoted = false;
+    for (; p < line.size() && (quoted || !blank(line[p])); ++p) {
+        if (line[p] == L'"') {
+            quoted = !quoted;
+        } else {
+            arguments.front().push_back(line[p]);
+        }
+    }
+    for (;;) {
+        while (blank(at(p)))
+            ++p;
+        if (p >= line.size())
+            break;
+        std::wstring argument;
+        quoted = false;
+        for (;;) {
+            std::size_t slashes = 0;
+            while (at(p) == L'\\') {
+                ++p;
+                ++slashes;
+            }
+            bool copy = true;
+            if (at(p) == L'"') {
+                if (slashes % 2 == 0) {
+                    if (quoted && at(p + 1) == L'"') {
+                        ++p;
+                    } else {
+                        copy = false;
+                        quoted = !quoted;
+                    }
+                }
+                slashes /= 2;
+            }
+            argument.append(slashes, L'\\');
+            if (p >= line.size() || (!quoted && blank(line[p])))
+                break;
+            if (copy)
+                argument.push_back(line[p]);
+            ++p;
+        }
+        arguments.push_back(std::move(argument));
+    }
+    return arguments;
+}
+
+} // namespace
+
+std::optional<std::string>
+WorldSeedFromWindowsCommandLine(const wchar_t* command_line, int argument_count, int seed_index) {
+    if (command_line == nullptr || seed_index < 2 || seed_index >= argument_count)
+        return std::nullopt;
+    // Windows command lines are bounded to 32767 UTF-16 units including NUL.
+    // Enforce that bound before splitting it into arguments.
+    constexpr std::size_t kCommandLineUnits = 32767;
+    std::size_t command_length = 0;
+    while (command_length < kCommandLineUnits && command_line[command_length] != L'\0')
+        ++command_length;
+    if (command_length == 0 || command_length == kCommandLineUnits)
+        return std::nullopt;
+    const auto arguments = CrtCommandLineArguments(std::wstring_view(command_line, command_length));
+    if (arguments.size() != static_cast<std::size_t>(argument_count) ||
+        arguments[static_cast<std::size_t>(seed_index) - 1] != L"--seed")
+        return std::nullopt;
+    const std::wstring_view seed(arguments[static_cast<std::size_t>(seed_index)]);
+    if (seed.empty())
+        return std::string{};
+    if (seed.size() > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    const int length = static_cast<int>(seed.size());
+    const int bytes = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, seed.data(), length, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 ||
+        static_cast<std::size_t>(bytes) > Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
+    // At most 4 KiB, measured in UTF-8 bytes before allocation.
+    std::string utf8(static_cast<std::size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_UTF8,
+                            WC_ERR_INVALID_CHARS,
+                            seed.data(),
+                            length,
+                            utf8.data(),
+                            bytes,
+                            nullptr,
+                            nullptr) != bytes)
+        return std::nullopt;
+    return utf8;
+}
+#endif
+
+std::uint32_t ResolveWorldSeed(const std::string& seedStr, std::uint32_t conversion_version) {
+    if (conversion_version != 0 && conversion_version != kSeedConversionVersion)
+        throw std::invalid_argument("Unsupported seed conversion version.");
     if (seedStr.empty()) {
         return std::random_device{}();
     }
@@ -4211,10 +4686,42 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) {
         // Use std::stoull for 64-bit seed range, then cast
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
-        // If not a number, hash the string
-        const std::hash<std::string> hasher;
-        return static_cast<uint32_t>(hasher(seedStr));
+        if (conversion_version == 0) {
+            const std::hash<std::string> hasher;
+            return static_cast<std::uint32_t>(hasher(seedStr));
+        }
+        std::uint64_t hash = UINT64_C(14695981039346656037);
+        for (const char byte : seedStr) {
+            hash ^= static_cast<unsigned char>(byte);
+            hash *= UINT64_C(1099511628211);
+        }
+        return static_cast<std::uint32_t>(hash ^ (hash >> 32));
     }
+}
+
+std::string ValidateWorldSeedMetadata(const nlohmann::json& metadata) {
+    const bool has_version = metadata.contains("seedConversionVersion");
+    const bool has_seed = metadata.contains("resolvedSeed");
+    if (!has_version && !has_seed)
+        return {};
+    if (!has_version || !has_seed)
+        return "Corrupt world metadata: incomplete seed conversion pair.";
+    const auto& version = metadata.at("seedConversionVersion");
+    if (!version.is_number_integer() || version < 1)
+        return "Corrupt world metadata: invalid seed conversion version.";
+    if (version != kSeedConversionVersion)
+        return "Unsupported future seed conversion version.";
+    const auto& resolved = metadata.at("resolvedSeed");
+    if (!resolved.is_number_integer() || resolved < 0 ||
+        resolved > std::numeric_limits<std::uint32_t>::max())
+        return "Corrupt world metadata: invalid resolved seed.";
+    if (!metadata.contains("seed") || !metadata.at("seed").is_string() ||
+        metadata.at("seed").get_ref<const std::string&>().empty())
+        return "Corrupt world metadata: versioned seed requires nonempty seed text.";
+    if (resolved.get<std::uint32_t>() !=
+        ResolveWorldSeed(metadata.at("seed").get_ref<const std::string&>(), kSeedConversionVersion))
+        return "Corrupt world metadata: resolved seed disagrees with seed conversion.";
+    return {};
 }
 
 // scent/foraging grid <-> world helpers. The field is kScentFieldCells wide, cell
@@ -4367,7 +4874,7 @@ void GameSession::RestoreRegionalScent() {
     }
 }
 
-void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
+void GameSession::CaptureRegionalScent(FieldPageState*& fields) {
     m_scentCapture.resize(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
     auto& cells = m_scentCapture;
     for (int x = 0; x < kScentFieldCells; ++x)
@@ -4377,7 +4884,10 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
                      [static_cast<std::size_t>(channel)] =
                          std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
     if (!fields) {
-        fields.emplace();
+        if (!m_scentCandidate) {
+            m_scentCandidate = std::make_unique<FieldPageState>();
+        }
+        fields = m_scentCandidate.get();
         fields->begin_weather_update(m_fieldPages);
     }
     fields->reuse_scent_buffers(m_scentChangeBuffers);
@@ -4399,6 +4909,9 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
         // Capacity pressure cannot latch a scheduler fault. Discard the unadmitted window
         // and retry on a later tick, preserving both frozen bytes and the live projection.
         fields->reuse_scent_buffers(m_scentChangeBuffers);
+        if (fields == m_scentCandidate.get()) {
+            fields = nullptr;
+        }
         RestoreRegionalScent();
         return;
     }
@@ -4407,7 +4920,10 @@ void GameSession::CaptureRegionalScent(std::optional<FieldPageState>& fields) {
     m_regionalFieldView = &*fields;
 }
 
-bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {
+bool GameSession::AdvanceNearScent(FieldPageState*& fields) {
+    const auto* admission = m_activeRegionsEnabled
+                                ? m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>()
+                                : nullptr;
     const bool scent_active = HasScentParticipants();
     const auto foragers = m_registry.view<const Luminumbra::Components::ForagerComponent>();
     const bool foraging_active =
@@ -4423,9 +4939,10 @@ bool GameSession::AdvanceNearScent(std::optional<FieldPageState>& fields) {
                                               *m_scentField,
                                               ScentDomainOrigin(true),
                                               ScentDomainOrigin(false),
-                                              kScentCellSize);
+                                              kScentCellSize,
+                                              admission);
     if (foraging_active)
-        luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+        luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning, admission);
     double wind_cx = 0.0, wind_cz = 0.0;
     if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
         const auto wind = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);

@@ -85,13 +85,44 @@ retained output, so only the pool is required for them.
 ## Serving and target handoff
 
 `FarVolumeHandoff` is an owner-thread companion to the fixture controller. Its
-bounded manifests use complete per-tile build identities and committed frozen
-terrain/water observations. Preview-use captures are refused even when their
+bounded manifests use complete per-tile build identities and Committed or
+SessionRender frozen terrain/water observations. Preview-use captures are refused even when their
 durable identity is committed. `MakeFarHandoffTileInput` creates the water bridge
 from that same observation and admits its shared allocation in the image pool.
 Frozen capture must use the controller's tier pool; every image alias retains
 its original allocation charge. Publication serials are process-local render
 control state, separate from committed generation and content fingerprints.
+
+SessionRender is an immutable presentation snapshot of a committed durable
+baseline plus published session edits. Terrain resolves live, parked, committed,
+then pristine; water uses the equivalent live, parked, then committed/base truth.
+Expected unavailable or partial authority refuses capture rather than falling
+through to a lower layer. The caller resolves ambiguous water ownership as
+unavailable. Prepared SessionRender captures are refused. Unsaved edits change
+resolved observations and their render fingerprint without incrementing durable
+generation. SessionRender cannot publish an edited bake, even when its durable
+identity matches. Committed and Preview capture and fingerprint rules are unchanged.
+Normal play does not select SessionRender yet. Native qualification and a separately
+named, measured production limits profile remain outstanding;
+`FarWorldDevelopmentLimits()` is not a production profile.
+
+`FarVolumeHandoff::AdmissionRefusal()` is a const diagnostic of the last staging
+attempt. It returns existing selection reasons and resets to `None` on successful
+staging or drain. Refusal preserves the target, serving resources and retained
+charges. Validation retains the header, bounded manifest/key, per-input and
+serving/target union order. Capacity and coverage scratch memory failures report
+`AdmissionFailed`; they do not report missing authority.
+
+| Staging failure | Selection reason |
+|---|---|
+| Invalid cave mode | `InvalidCavePolicy` |
+| Missing/ineligible image, content or generation mismatch | `ImmutableAuthorityUnavailable` |
+| Bound cave mode mismatch | `CavePolicyMismatch` |
+| Missing/inconsistent water bridge or bounds | `WaterUnavailable` |
+| Wrong capture pool, capacity or memory admission | `AdmissionFailed` |
+| Invalid manifest identity, duplicate keys or publication ordering | `InvalidRequests` |
+| Invalid/out-of-range coverage, insufficient support or shrinking retained span | `SpanRejected` |
+| Wet water outside resolved coverage | `WaterSpanRefused` |
 
 One set of per-tier queues shares one memory domain across serving and staged
 generations. Entry descriptors, retained key/span history, validation/order and

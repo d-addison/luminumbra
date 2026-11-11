@@ -27,12 +27,13 @@ struct Entry {
     IVec3 coords{};
     RegionKey owner{};
     const world::ActiveRegionRecord* record = nullptr;
-    bool admitted = false, preparation = false, source = false, selected = false;
+    bool admitted = false, preparation = false, source = false, candidate = false, selected = false;
 };
 struct Group {
     const world::ActiveRegionRecord* record = nullptr;
     bool ready = true, due = false;
     std::vector<std::size_t> candidates;
+    std::vector<const Face*> pairs;
 };
 using Groups = std::map<RegionKey, Group>;
 
@@ -120,7 +121,7 @@ std::vector<Entry> Admit(std::span<const Resident> residents,
 
 std::int32_t SourceAmount(const SourceInput& source, int resolution) {
     const auto& position = source.position;
-    if (!ActiveRegionLedger::valid_anchor(position) ||
+    if (!std::isfinite(position.y) || !ActiveRegionLedger::valid_anchor(position) ||
         static_cast<double>(position.y) < -2097152.0 * CHUNK_SIZE_Y ||
         static_cast<double>(position.y) >= 2097152.0 * CHUNK_SIZE_Y) {
         Refuse();
@@ -158,12 +159,14 @@ void PlanSources(std::span<const SourceInput> sources,
         if (!target || !target->admitted || amount == 0) {
             continue;
         }
-        const auto x = static_cast<int>(
-            std::floor((static_cast<double>(position.x) - coords.x * CHUNK_SIZE_X) * resolution /
-                       CHUNK_SIZE_X));
-        const auto z = static_cast<int>(
-            std::floor((static_cast<double>(position.z) - coords.z * CHUNK_SIZE_Z) * resolution /
-                       CHUNK_SIZE_Z));
+        // Floor before subtracting the integer origin: a tiny negative position
+        // can otherwise round up to the chunk width when the origin is added.
+        const auto x = static_cast<int>(std::floor(static_cast<double>(position.x) * resolution /
+                                                   CHUNK_SIZE_X)) -
+                       coords.x * resolution;
+        const auto z = static_cast<int>(std::floor(static_cast<double>(position.z) * resolution /
+                                                   CHUNK_SIZE_Z)) -
+                       coords.z * resolution;
         if (x < 0 || x >= resolution || z < 0 || z >= resolution) {
             Refuse();
         }
@@ -212,21 +215,22 @@ void PlanCandidates(std::vector<Entry>& entries,
             eligible = eligible || (neighbor && neighbor->admitted && Awake(*neighbor));
         }
         if (eligible) {
+            entries[i].candidate = true;
             groups.at(entry.owner).candidates.push_back(i);
         }
     }
 }
 
-std::vector<Face> Topology(std::vector<Entry>& entries) {
+std::vector<Face> Topology(std::vector<Entry>& entries, const Groups& groups) {
     std::vector<Face> faces;
     for (const auto& entry : entries) {
-        if (!entry.admitted) {
+        if (!entry.admitted || !groups.at(entry.owner).due) {
             continue;
         }
         for (const bool is_x : {false, true}) {
             const auto* other =
                 Find(entries, entry.coords + (is_x ? IVec3(1, 0, 0) : IVec3(0, 0, 1)));
-            if (!other || !other->admitted) {
+            if (!other || !other->admitted || !groups.at(other->owner).due) {
                 continue;
             }
             faces.push_back({entry.owner,
@@ -241,56 +245,107 @@ std::vector<Face> Topology(std::vector<Entry>& entries) {
     return faces;
 }
 
+void PlanInteriorPairs(const std::vector<Face>& faces,
+                       std::vector<Entry>& entries,
+                       Groups& groups) {
+    // At most 2*kMaxResidents faces. Filter before rotation so sealed or
+    // ineligible endpoints cannot occupy a service slot.
+    for (const auto& face : faces) {
+        if (face.owner == face.neighbor &&
+            Find(entries, Chunk::decode_id(face.positive))->candidate &&
+            Find(entries, Chunk::decode_id(face.other))->candidate) {
+            groups.at(face.owner).pairs.push_back(&face);
+        }
+    }
+}
+
+std::uint64_t SelectInteriorPair(const Group& group,
+                                 std::vector<Entry>& entries,
+                                 std::uint64_t tick,
+                                 std::uint64_t windows) {
+    const auto opportunity = tick >> group.record->cadence_shift;
+    if (windows < 2 || group.pairs.empty() || opportunity % 2 == 0) {
+        return 0;
+    }
+    const auto& face =
+        *group.pairs[static_cast<std::size_t>((opportunity / 2) % group.pairs.size())];
+    // The owner's grant pays for both endpoints; pair selection cannot change
+    // any owner's credit, debt service or granted windows.
+    Find(entries, Chunk::decode_id(face.positive))->selected = true;
+    Find(entries, Chunk::decode_id(face.other))->selected = true;
+    return 2;
+}
+
 void Allocate(Groups& groups,
               const ActiveRegionLedger& ledger,
               std::uint64_t windows,
+              std::uint64_t tick,
               std::vector<Entry>& entries,
               Plan& plan) {
     std::vector<world::water_share::Claim> claims;
-    // Copy only due debt; absent/frozen/off-phase registers remain with the caller.
+    // All positive candidate demand competes for credit and saved debt service.
     ActiveRegionLedger::WaterDebts debts;
+    std::uint64_t serviceable_demand = 0;
     for (const auto& [owner, group] : groups) {
-        if (!group.due) {
+        if (!group.due || group.candidates.empty()) {
             continue;
         }
         claims.push_back({owner, static_cast<std::uint64_t>(group.candidates.size())});
+        // Each admitted due candidate can use one interior window per plan.
+        // Candidate groups partition the snapshot, so the sum is <= kMaxResidents.
+        serviceable_demand += claims.back().awake;
         const auto found = ledger.water_debts().find(owner);
         if (found != ledger.water_debts().end()) {
             debts.emplace(owner, found->second);
         }
     }
     std::vector<world::water_share::Grant> grants;
-    if (!world::water_share::allocate(windows, claims, debts, grants)) {
+    if (!world::water_share::allocate(
+            std::min(windows, serviceable_demand), claims, debts, grants)) {
         Refuse();
     }
     std::sort(
         grants.begin(), grants.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
     auto grant = grants.begin();
-    for (const auto& claim : claims) {
-        const auto& group = groups.at(claim.key);
-        const auto awarded =
-            grant != grants.end() && grant->key == claim.key ? (grant++)->windows : 0;
-        plan.allocated_windows += awarded;
-        const auto count = static_cast<std::uint64_t>(group.candidates.size());
-        const auto used = std::min(awarded, count);
-        auto cursor = group.record->water_cursor;
-        if (used != 0) {
-            const auto start = cursor % count;
-            for (std::uint64_t j = 0; j < used; ++j) {
-                auto& entry =
-                    entries[group.candidates[static_cast<std::size_t>((start + j) % count)]];
-                entry.selected = true;
-            }
-            cursor = (start + used) % count;
+    for (const auto& [owner, group] : groups) {
+        if (!group.due) {
+            continue;
         }
-        const auto debt = debts.find(claim.key);
-        plan.regions.push_back({claim.key,
+        const auto granted = grant != grants.end() && grant->key == owner ? (grant++)->windows : 0;
+        const auto count = static_cast<std::uint64_t>(group.candidates.size());
+        const auto awarded = std::min(granted, count);
+        plan.allocated_windows += awarded;
+        const auto reserved = SelectInteriorPair(group, entries, tick, awarded);
+        auto cursor = group.record->water_cursor;
+        if (awarded > reserved) {
+            const auto start = cursor % count;
+            std::uint64_t selected = reserved, scanned = 0;
+            // At most count entries: only the two funded
+            // endpoints may already be selected in this candidate group.
+            for (; selected < awarded; ++scanned) {
+                auto& entry =
+                    entries[group.candidates[static_cast<std::size_t>((start + scanned) % count)]];
+                if (entry.selected) {
+                    continue;
+                }
+                entry.selected = true;
+                ++selected;
+            }
+            cursor = (start + scanned) % count;
+        }
+        const auto& carried = count == 0 ? ledger.water_debts() : debts;
+        const auto debt = carried.find(owner);
+        // Grants are budget-bounded. Restoring their unselected Q32 units cannot
+        // exceed the allocator's checked post-credit debt (at most kMaxDebt).
+        const auto carried_debt = (debt == carried.end() ? 0 : debt->second) +
+                                  (granted - awarded) * world::water_share::kQ32;
+        plan.regions.push_back({owner,
                                 group.record->cadence_shift,
                                 group.record->cadence_phase,
                                 count,
                                 awarded,
                                 cursor,
-                                debt == debts.end() ? 0 : debt->second});
+                                carried_debt});
     }
 }
 } // namespace
@@ -324,25 +379,38 @@ Plan Build(std::span<const Resident> residents,
         }
         positive_claim = positive_claim || !group.candidates.empty();
     }
-    const auto faces = Topology(entries);
+    const auto faces = Topology(entries, groups);
     auto remaining = plan.global_windows;
     const std::uint64_t keep = positive_claim && remaining > 0 ? 1 : 0;
     for (const auto& face : faces) {
-        if (face.owner == face.neighbor ||
-            schedule.tick % (std::uint64_t{1} << face.common_shift) != 0) {
+        if (face.owner == face.neighbor) {
             continue;
         }
         const auto* a = Find(entries, Chunk::decode_id(face.positive));
         const auto* b = Find(entries, Chunk::decode_id(face.other));
-        if (a->preparation || b->preparation || remaining - keep < 2 ||
+        if (a->preparation || b->preparation ||
             (!Awake(*a) && !Awake(*b) && !inputs.raining && !a->source && !b->source)) {
             continue;
         }
         plan.faces.push_back(face);
-        remaining -= 2;
+    }
+    if (!plan.faces.empty()) {
+        std::uint8_t common_shift = 0;
+        for (const auto& face : plan.faces) {
+            common_shift = std::max(common_shift, face.common_shift);
+        }
+        const auto opportunity = schedule.tick >> common_shift;
+        const auto start =
+            static_cast<std::vector<Face>::difference_type>(opportunity % plan.faces.size());
+        std::rotate(plan.faces.begin(), plan.faces.begin() + start, plan.faces.end());
+        const auto pairs =
+            std::min(static_cast<std::uint64_t>(plan.faces.size()), (remaining - keep) / 2);
+        plan.faces.resize(static_cast<std::size_t>(pairs));
+        remaining -= 2 * pairs;
     }
     plan.border_windows = plan.global_windows - remaining;
-    Allocate(groups, ledger, remaining, entries, plan);
+    PlanInteriorPairs(faces, entries, groups);
+    Allocate(groups, ledger, remaining, schedule.tick, entries, plan);
     for (const auto& entry : entries) {
         if (entry.selected) {
             plan.interiors.push_back(entry.resident.id);

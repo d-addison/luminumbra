@@ -76,7 +76,19 @@ def check():
             }
         }
     """), "Shutdown must lock, store, unlock, notify all, then join every joinable worker"
-    assert len(re.findall(r"m_shutdown\s*=", source)) == 1, "Audit every shutdown writer"
+    # Startup failure must use the same lock/store/unlock/notify/join ordering.
+    constructor = body(source, "AudioPropagationSystem::AudioPropagationSystem(")
+    startup = body(constructor, "try ")
+    assert "m_worker_threads.emplace_back(" in startup and "LUMINUMBRA_CORE_INFO(" in startup, \
+        "Every worker start and post-start logging must be inside the cleanup boundary"
+    cleanup = body(constructor, "catch (...)")
+    cleanup = re.sub(r"#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING.*?#endif", "",
+                     cleanup, flags=re.DOTALL)
+    assert code(cleanup) == code(destructor + "throw;"), \
+        "Startup failure must join every owned worker before rethrowing the original exception"
+    assert constructor.index("m_worker_threads.reserve(") < constructor.index("try {"), \
+        "Worker ownership storage must be allocated before any worker starts"
+    assert len(re.findall(r"m_shutdown\s*=", source)) == 2, "Audit every shutdown writer"
     assert source.count("m_task_cv.wait(") == 1, "Audit every task waiter"
     worker = body(source, "void AudioPropagationSystem::WorkerThreadFunction()")
     assert code(worker) == code("""
@@ -142,6 +154,9 @@ def check():
             'DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"',
             "luminumbra_configure_first_party_target(audio_shutdown_test)"):
         assert registration in cmake, f"Missing native/source registration: {registration}"
+    assert "target_compile_definitions(audio_propagation_metrics_test PRIVATE\n" \
+           "    LUMINUMBRA_AUDIO_PROPAGATION_TESTING=1\n)" in cmake, \
+        "The registered regression target must enable the startup failure hooks"
     check_generation(cmake)
     with tempfile.TemporaryDirectory(prefix="audio-shutdown-") as temporary:
         destination = Path(temporary) / "audio_shutdown_body.inc"
