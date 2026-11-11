@@ -53,8 +53,7 @@ constexpr GraphicsValues kUltraRevision1{
     .live_menu_preview = true,
 };
 
-// Retained for existing saved selections. These lower-tier visual reductions
-// are pending owner approval and are not used by new selections.
+// Immutable revision-1 visuals, also used by revision 3.
 constexpr auto kRevision1 = [] {
     std::array values{kUltraRevision1, kUltraRevision1, kUltraRevision1, kUltraRevision1};
     values[0].render_scale = 0.67;
@@ -81,8 +80,7 @@ constexpr auto kRevision1 = [] {
     return values;
 }();
 
-// Revision 2 is conservative until the owner approves lower-tier visual changes.
-// Every newly selected tier preserves Ultra's complete shipping presentation.
+// Immutable revision-2 visuals preserve Ultra's complete shipping presentation for every tier.
 constexpr std::array kRevision2{kUltraRevision1, kUltraRevision1, kUltraRevision1, kUltraRevision1};
 
 // Compare every resolved field without serialization or allocation.
@@ -229,7 +227,7 @@ bool SelectGraphicsPreset(GraphicsSettings& settings, GraphicsPreset preset) {
     if (GraphicsPresetName(preset).empty())
         return false;
     settings.base_preset = preset;
-    settings.preset_revision = kGraphicsPresetRevision;
+    settings.preset_revision = preset == GraphicsPreset::Ultra ? 2 : kGraphicsPresetRevision;
     ResetGraphicsOverrides(settings);
     return true;
 }
@@ -243,7 +241,8 @@ bool ResolveGraphics(const GraphicsSettings& settings,
                      ResolvedGraphics& result,
                      std::string& error,
                      FramePacing frame_pacing) {
-    if ((settings.preset_revision != 1 && settings.preset_revision != kGraphicsPresetRevision) ||
+    if ((settings.preset_revision != 1 && settings.preset_revision != 2 &&
+         settings.preset_revision != kGraphicsPresetRevision) ||
         GraphicsPresetName(settings.base_preset).empty()) {
         error = "unsupported graphics preset or revision";
         return false;
@@ -253,7 +252,7 @@ bool ResolveGraphics(const GraphicsSettings& settings,
         return false;
     }
     const auto index = static_cast<std::size_t>(settings.base_preset);
-    const auto& base = settings.preset_revision == 1 ? kRevision1[index] : kRevision2[index];
+    const auto& base = settings.preset_revision == 2 ? kRevision2[index] : kRevision1[index];
     ResolvedGraphics resolved{.values = base,
                               .frame_pacing = frame_pacing,
                               .base_preset = settings.base_preset,
