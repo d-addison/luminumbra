@@ -7784,24 +7784,24 @@
     {
       "id": "iss.393",
       "source": "issue #393",
-      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-2 selections preserve Ultra visuals for every tier pending owner approval; saved revision-1 values remain readable. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
+      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-3 Low/Medium/High selections apply the approved revision-1 visual table; Ultra retains revision 2 and identical values and saved bytes. Saved revision-1 and revision-2 values and overrides remain intact until explicit reselection. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
       "status": "needs-native-run",
       "evidence": [
         {
           "kind": "ctest",
-          "ref": "GraphicsPresets.NewSelectionsPreserveUltraAndIndependentFramePacingPendingApproval"
+          "ref": "GraphicsPresets.NewSelectionsApplyApprovedVisualsAndPreserveIndependentFramePacing"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsPresets.SavedRevisionOneRetainsItsVisualsUntilExplicitReselection"
+          "ref": "GraphicsPresets.SavedRevisionsRetainValuesAndBytesUntilExplicitReselection"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsSettingsState.DetectionIsRepeatableAndPreservesConservativeVisualsForEveryCpuTier"
+          "ref": "GraphicsSettingsState.DetectionKeepsCpuTiersAndAppliesApprovedVisuals"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsRuntime.NewSelectionsRetainUltraPassValuesPendingVisualApproval"
+          "ref": "GraphicsRuntime.NewSelectionsApplyApprovedPassValues"
         },
         {
           "kind": "ctest",

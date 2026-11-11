@@ -26,16 +26,20 @@ def rules(path):
 
 
 class GraphicsUiContract(unittest.TestCase):
-    def test_new_presets_are_conservative_and_saved_revisions_stay_explicit(self):
+    def test_approved_presets_reuse_revision_one_and_preserve_saved_revisions(self):
         header = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.h")
         resolver = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.cpp")
         loader = compact_cpp(ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
-        self.assertIn("kGraphicsPresetRevision=2;", header)
+        self.assertIn("kGraphicsPresetRevision=3;", header)
         self.assertIn("constexprstd::arraykRevision2{kUltraRevision1,kUltraRevision1,"
                       "kUltraRevision1,kUltraRevision1};", resolver)
-        self.assertIn("settings.preset_revision==1?kRevision1[index]:kRevision2[index]", resolver)
+        self.assertIn("settings.preset_revision==2?kRevision2[index]:kRevision1[index]", resolver)
+        self.assertIn("settings.preset_revision=preset==GraphicsPreset::Ultra?2:"
+                      "kGraphicsPresetRevision;", resolver)
+        self.assertIn("settings.preset_revision!=1&&settings.preset_revision!=2&&"
+                      "settings.preset_revision!=kGraphicsPresetRevision", resolver)
         self.assertIn('parsed.preset_revision=graphics["preset_revision"].get<std::uint32_t>();', loader)
-        self.assertIn('(graphics["preset_revision"]!=1&&'
+        self.assertIn('(graphics["preset_revision"]!=1&&graphics["preset_revision"]!=2&&'
                       'graphics["preset_revision"]!=kGraphicsPresetRevision)', loader)
 
     def test_frame_pacing_choices_reach_resolved_graphics_and_persistence(self):
