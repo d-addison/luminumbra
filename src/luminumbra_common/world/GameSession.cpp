@@ -229,9 +229,10 @@ struct GameSession::FoliageStep {
     luminumbra::foliage::FoliageRegistryStage registry;
     luminumbra::foliage::RegionalFoliageWindows windows;
     FieldPageState pages, previous;
+    std::map<RegionKey, std::uint32_t> field_windows;
     luminumbra::foliage::FoliageEdges borders;
     std::map<RegionKey, std::uint64_t> last_ticks;
-    std::set<RegionKey> pending;
+    std::set<RegionKey> pending, field_owners;
     std::map<std::uint8_t, std::set<RegionKey>> border_owners;
     std::uint64_t published_tick = 0;
     bool active = false;
@@ -243,20 +244,47 @@ struct GameSession::FoliageStep {
         session.m_foliageStep = std::make_unique<FoliageStep>();
         auto& step = *session.m_foliageStep;
         for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
-            if (session.m_fieldPages.soil().owns_region(key) ||
-                session.m_fieldPages.irrigation().owns_region(key)) {
-                step.last_ticks.emplace(key, record.last_ticked);
-            }
+            step.last_ticks.emplace(key, luminumbra::foliage::FoliagePriorTick(record));
             if (record.frozen_at != 0 && record.state != RegionState::Frozen) {
                 step.pending.insert(key);
             }
         }
-        for (const auto& [key, page] : session.m_fieldPages.irrigation().pages()) {
-            const auto owner = FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16});
-            const auto found = session.m_activeRegionLedger.records().find(owner);
-            if (found != session.m_activeRegionLedger.records().end() &&
-                found->second.state != RegionState::Frozen) {
-                step.border_owners[found->second.cadence_shift].insert(owner);
+        // Only full, admitted pages opt into autonomous foliage evolution.
+        // Sparse typed field records retain their prior owners and semantics.
+        for (const bool soil : {true, false}) {
+            const auto& channel =
+                soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
+            for (const auto& [key, page] : channel.pages()) {
+                const bool full = std::all_of(page.mask.begin(), page.mask.end(), [](auto word) {
+                    return word == std::numeric_limits<std::uint64_t>::max();
+                });
+                const auto owner = FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16});
+                if (!full && (soil || !step.field_owners.contains(owner))) {
+                    continue;
+                }
+                const auto found = session.m_activeRegionLedger.records().find(owner);
+                if (found == session.m_activeRegionLedger.records().end()) {
+                    continue;
+                }
+                const auto& record = found->second;
+                step.field_owners.insert(owner);
+                if (record.frozen_at != 0 && record.state != RegionState::Frozen) {
+                    step.pending.insert(owner);
+                }
+                if (!soil && record.state != RegionState::Frozen) {
+                    step.border_owners[record.cadence_shift].insert(owner);
+                }
+            }
+        }
+    }
+    void StageOwner(const GameSession& session, RegionKey key) {
+        for (const bool soil : {false, true}) {
+            const auto& channel =
+                soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
+            for (const auto& [cell, value] : luminumbra::foliage::FlatFoliageCells(channel, key)) {
+                if (!(soil ? pages.set_soil(cell, value) : pages.set_irrigation(cell, value))) {
+                    throw std::runtime_error("Foliage staging refused");
+                }
             }
         }
     }
@@ -274,7 +302,7 @@ struct GameSession::FoliageStep {
             for (auto& [shift, owners] : step.border_owners) {
                 owners.erase(transition.key);
             }
-            if (record.state != RegionState::Frozen &&
+            if (record.state != RegionState::Frozen && step.field_owners.contains(transition.key) &&
                 session.m_fieldPages.irrigation().owns_region(transition.key)) {
                 step.border_owners[record.cadence_shift].insert(transition.key);
             }
@@ -285,6 +313,29 @@ struct GameSession::FoliageStep {
                                                              step.last_ticks,
                                                              step.pending,
                                                              session.m_worldClock);
+        const auto index_borders = [&]<typename T>() {
+            for (const auto entity :
+                 session.m_registry.view<const T, const Components::TransformComponent>()) {
+                const auto& position =
+                    session.m_registry.get<Components::TransformComponent>(entity).position;
+                if (!ActiveRegionLedger::valid_anchor(position)) {
+                    continue;
+                }
+                const auto owner = ActiveRegionLedger::region_at(position);
+                const auto* identity =
+                    session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
+                if (identity && RegionKey{identity->owner_x, identity->owner_z} != owner) {
+                    continue;
+                }
+                const auto window = step.windows.elapsed.find(owner);
+                if (window != step.windows.elapsed.end() && window->second != 0 &&
+                    session.m_fieldPages.irrigation().owns_region(owner)) {
+                    step.border_owners[ledger.records().at(owner).cadence_shift].insert(owner);
+                }
+            }
+        };
+        index_borders.template operator()<Components::PlantTag>();
+        index_borders.template operator()<Components::WaterSourceComponent>();
         std::vector<RegionKey> owners;
         for (const auto& [shift, members] : step.border_owners) {
             if (shift <= 16 &&
@@ -295,26 +346,25 @@ struct GameSession::FoliageStep {
         step.borders = luminumbra::foliage::FoliageBorderEdges(
             session.m_fieldPages, ledger.records(), owners, session.m_worldClock.tick());
         step.pages = {};
+        std::set<RegionKey> staged;
         for (const auto& [key, elapsed] : step.windows.elapsed) {
-            for (const bool soil : {false, true}) {
-                const auto& channel =
-                    soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
-                for (const auto& [cell, value] :
-                     luminumbra::foliage::FlatFoliageCells(channel, key)) {
-                    if (!(soil ? step.pages.set_soil(cell, value)
-                               : step.pages.set_irrigation(cell, value))) {
-                        throw std::runtime_error("Foliage staging refused");
-                    }
-                }
+            if (step.field_owners.contains(key)) {
+                step.StageOwner(session, key);
+                staged.insert(key);
             }
         }
         std::set<FieldPageKey> border_pages;
         for (const auto& [cell, next] : step.borders) {
             for (const auto endpoint : {cell, next}) {
-                if (!step.pages.set_irrigation(
-                        endpoint, session.m_fieldPages.irrigation().sample(endpoint, 0))) {
-                    throw std::runtime_error("Border staging refused");
+                const auto owner = FieldPageState::region_of_scent_cell(endpoint);
+                if (staged.insert(owner).second) {
+                    step.StageOwner(session, owner);
                 }
+                if (!luminumbra::foliage::ActivateFoliagePage(step.pages, endpoint, false)) {
+                    throw std::runtime_error("Border page admission refused");
+                }
+                step.field_owners.insert(owner);
+                step.border_owners[ledger.records().at(owner).cadence_shift].insert(owner);
                 const auto page = [](int value) {
                     return value >= 0 ? value / 16 : (value - 15) / 16;
                 };
@@ -326,8 +376,54 @@ struct GameSession::FoliageStep {
             step.windows,
             border_pages,
             session.m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>());
+        // Admission is shared by every creation/load path through the sealed
+        // registry selection. No live page is inserted before publication.
+        const auto admit = [&](entt::entity entity, bool soil, bool activate) {
+            const auto* transform = selected.try_get<const Components::TransformComponent>(entity);
+            if (!transform || !ActiveRegionLedger::valid_anchor(transform->position)) {
+                return;
+            }
+            const auto cell = luminumbra::foliage::FoliageCell(transform->position);
+            const auto owner = FieldPageState::region_of_scent_cell(cell);
+            const auto window = step.windows.elapsed.find(owner);
+            if (window == step.windows.elapsed.end() || window->second == 0) {
+                return;
+            }
+            if (staged.insert(owner).second) {
+                step.StageOwner(session, owner);
+            }
+            const auto& record = ledger.records().at(owner);
+            step.last_ticks.try_emplace(owner, luminumbra::foliage::FoliagePriorTick(record));
+            step.field_owners.insert(owner);
+            if (activate && !luminumbra::foliage::ActivateFoliagePage(step.pages, cell, soil)) {
+                throw std::runtime_error("Foliage page admission refused");
+            }
+            if (!soil) {
+                step.border_owners[record.cadence_shift].insert(owner);
+            }
+        };
+        for (const auto entity : selected.view<const Components::PlantTag>()) {
+            admit(
+                entity,
+                true,
+                selected.all_of<Components::SoilFeederComponent, Components::PlantGrowthComponent>(
+                    entity));
+        }
+        for (const auto entity : selected.view<const Components::WaterSourceComponent>()) {
+            admit(entity, false, true);
+        }
+        step.field_windows.clear();
+        for (const auto& [key, elapsed] : step.windows.elapsed) {
+            if (step.field_owners.contains(key)) {
+                // A fresh page has no historical field state to replay.
+                const bool fresh = !session.m_fieldPages.soil().owns_region(key) &&
+                                   !session.m_fieldPages.irrigation().owns_region(key);
+                step.field_windows.emplace(key,
+                                           fresh ? std::min(elapsed, std::uint32_t{1}) : elapsed);
+            }
+        }
         if (!luminumbra::foliage::FoliageRegistryStage::HasWork(session.m_registry) &&
-            step.pages.empty() && step.windows.resumes.empty()) {
+            step.pages.empty()) {
             return nullptr;
         }
         step.previous = step.pages;
@@ -357,7 +453,7 @@ struct GameSession::FoliageStep {
         for (const auto& [key, work] :
              luminumbra::foliage::AdvanceFoliageInteriors(step->registry.registry(),
                                                           step->pages,
-                                                          step->windows.elapsed,
+                                                          step->field_windows,
                                                           session.m_worldClock.tick())) {
             session.m_regionCompletedWork.push_back({key, 0, 0, 0, work});
         }
@@ -412,27 +508,14 @@ struct GameSession::FoliageStep {
                     session.m_worldClock.tick();
             }
         }
+        if (!session.m_fieldPages.can_adopt_foliage(pages)) {
+            throw std::runtime_error("Foliage page capacity reached");
+        }
         registry.PreparePublication(session.m_registry);
     }
     void Commit(GameSession& session) noexcept {
         registry.Commit(session.m_registry);
-        // Staging retains live initialized cells only; these writes cannot allocate.
-        for (const bool soil : {false, true}) {
-            const auto& channel = soil ? pages.soil() : pages.irrigation();
-            for (const auto& [key, page] : channel.pages()) {
-                for (unsigned index = 0; index < 256; ++index) {
-                    if ((page.mask[index / 64] >> (index % 64)) & 1) {
-                        const ScentCellKey cell{key.x * 16 + static_cast<int>(index % 16),
-                                                key.z * 16 + static_cast<int>(index / 16)};
-                        if (soil) {
-                            session.m_fieldPages.set_soil(cell, page.cells[index]);
-                        } else {
-                            session.m_fieldPages.set_irrigation(cell, page.cells[index]);
-                        }
-                    }
-                }
-            }
-        }
+        session.m_fieldPages.adopt_foliage(std::move(pages));
         for (const auto& [key, token] : windows.resumes) {
             session.m_activeRegionLedger.acknowledge_resume(key, token);
             pending.erase(key);
@@ -469,17 +552,57 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
         value > (soil ? FieldPageState::kSoilBaseline : FieldPageState::kIrrigationLimit)) {
         return false;
     }
+    FoliageStep::Initialize(*this);
     auto pages = m_fieldPages.foliage_snapshot();
     auto ledger = m_activeRegionLedger;
     const auto cell = luminumbra::foliage::FoliageCell(position);
+    const auto owner = ActiveRegionLedger::region_at(position);
+    const auto record = ledger.records().find(owner);
+    const auto previous = m_foliageStep->last_ticks.find(owner);
+    std::uint64_t prior = record == ledger.records().end()
+                              ? m_worldClock.tick()
+                              : luminumbra::foliage::FoliagePriorTick(record->second);
+    if (previous != m_foliageStep->last_ticks.end()) {
+        prior = std::max(prior, previous->second);
+    }
+    const bool frozen = record != ledger.records().end() && record->second.frozen_at != 0;
+    if (frozen) {
+        prior = std::max(prior, record->second.frozen_at);
+    }
+    if (prior > m_worldClock.tick()) {
+        return false;
+    }
+    const auto elapsed =
+        frozen ? ActiveRegionLedger::resume_window(owner, prior, m_worldClock, 36000).elapsed_ticks
+               : std::min<std::uint64_t>(m_worldClock.tick() - prior, 65536);
+    luminumbra::foliage::RegionalFoliageWindows windows;
+    windows.elapsed.emplace(owner, static_cast<std::uint32_t>(elapsed));
+    auto selected = luminumbra::foliage::SelectFoliageRegistry(m_registry, windows, {});
+    luminumbra::foliage::FoliageRegistryStage registry;
+    registry.Begin(selected, ledger.next_persistent_id());
+    luminumbra::foliage::AdvanceFoliageInteriors(
+        registry.registry(), pages, windows.elapsed, m_worldClock.tick());
     if (!luminumbra::foliage::ActivateFoliagePage(pages, cell, soil) ||
         !(soil ? pages.set_soil(cell, value) : pages.set_irrigation(cell, value))) {
         return false;
     }
-    ledger.mark_edited(ActiveRegionLedger::region_at(position), m_worldClock);
+    ledger.mark_materialized_edit(owner, m_worldClock);
+    registry.PreparePublication(m_registry);
+    // Reserve runtime index nodes before publishing the edited state. The edit
+    // tick is persisted by matching edit/work stamps; resume clips to it.
+    m_foliageStep->last_ticks.try_emplace(owner, prior);
+    m_foliageStep->field_owners.insert(owner);
+    if (frozen) {
+        m_foliageStep->pending.insert(owner);
+    }
+    if (pages.irrigation().owns_region(owner) && record != ledger.records().end() &&
+        record->second.state != RegionState::Frozen) {
+        m_foliageStep->border_owners[record->second.cadence_shift].insert(owner);
+    }
     ReplaceActiveRegionLedger(std::move(ledger));
+    registry.Commit(m_registry);
     m_fieldPages.restore_foliage(std::move(pages));
-    m_foliageStep.reset();
+    m_foliageStep->last_ticks.at(owner) = m_worldClock.tick();
     return true;
 }
 const luminumbra::foliage::SoilGrid* GameSession::GetFoliageSoilGrid() const {
@@ -952,7 +1075,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     m_registry);
             });
             // 1. Animation pose sampling: FIRST in the tick order.
-            luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+            luminumbra::animation::SamplePosesOnTick(
+                m_registry, m_simulationClock.fixed_dt(), creature_admission);
 
             budget.Next(Stage::Instinct, [&] {
                 return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
@@ -1102,9 +1226,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     luminumbra::ai::RunThirstOnTick(
                         m_registry,
                         static_cast<float>(m_simulationClock.fixed_dt()),
-                        m_thirstTuning);
+                        m_thirstTuning,
+                        creature_admission);
                     luminumbra::ai::RunScavengingOnTick(
-                        m_registry, current_tick, m_scavengingTuning);
+                        m_registry, current_tick, m_scavengingTuning, creature_admission);
                     BlendCreatureSurvivalWishes(m_registry, creature_admission);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
@@ -1375,7 +1500,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
                         // starves itself (monoculture-starves). No grid -> unchanged terrain
                         // quality.
-                        if (m_activeRegionsEnabled || m_soilGrid) {
+                        if ((m_activeRegionsEnabled && !m_foliageStep->pages.soil().empty()) ||
+                            m_soilGrid) {
                             const int nut = FoliageStep::Sample(*this, p, true);
                             // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
                             // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
@@ -1534,7 +1660,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!living_registry.view<Comp::AlarmComponent>().empty())
                     luminumbra::ai::RunHerdAlarmOnTick(
-                        living_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                        living_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
                 budget.Next(Stage::Decay, [&] {
@@ -1565,7 +1693,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunTerritoryOnTick(
+                        m_registry, current_tick, creature_admission);
                 // Predator pack: flanking coordination (a pack surrounds the prey).
                 budget.Next(Stage::Packs, [&] {
                     return SimParticipantCount<TelemetryComp::PackHunterComponent,
@@ -1573,7 +1702,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!living_registry.view<Comp::PackHunterComponent>().empty())
-                    luminumbra::ai::RunPredatorPackOnTick(living_registry, current_tick);
+                    luminumbra::ai::RunPredatorPackOnTick(
+                        living_registry, current_tick, creature_admission);
                 // Migration: seasonal drive toward a moving target (tick-derived year fraction).
                 budget.Next(Stage::Migration, [&] {
                     return SimParticipantCount<TelemetryComp::MigratoryComponent,
@@ -1586,7 +1716,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                             ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+                    luminumbra::ai::RunMigrationOnTick(m_registry, season01, creature_admission);
                 }
             }
 

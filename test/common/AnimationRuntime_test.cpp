@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -200,8 +201,8 @@ TEST(AnimationRuntime, BindPosePaletteIsIdentity) {
     ASSERT_EQ(palette.size(), skeleton.joints.size() * 16);
 
     for (size_t j = 0; j < skeleton.joints.size(); ++j) {
-        for (int col = 0; col < 4; ++col) {
-            for (int row = 0; row < 4; ++row) {
+        for (std::size_t col = 0; col < 4; ++col) {
+            for (std::size_t row = 0; row < 4; ++row) {
                 const float expected = (col == row) ? 1.0f : 0.0f;
                 EXPECT_FLOAT_EQ(palette[j * 16 + col * 4 + row], expected)
                     << "joint " << j << " col " << col << " row " << row;

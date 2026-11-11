@@ -604,3 +604,60 @@ TEST(FoliageFieldPages, ZeroResumeAndStaleOrRepeatedTokensCannotReplayAWindow) {
     EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock).elapsed.empty());
 }
 } // namespace
+
+namespace {
+TEST(FoliageFieldPages, ReplayCollectsSourcesOnceAndVisitsOnlyDueOwnersAndBirths) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, kSoilBaseline));
+    ASSERT_TRUE(pages.set_irrigation({512, 0}, 0));
+    for (int index = 0; index < 64; ++index) {
+        const auto plant = registry.create();
+        registry.emplace<C::PlantTag>(plant);
+        registry.emplace<C::TransformComponent>(plant);
+        registry.emplace<C::PlantGrowthComponent>(plant);
+        registry.emplace<C::SoilFeederComponent>(plant);
+        registry.emplace<C::PlantRegionComponent>(
+            plant, static_cast<std::uint64_t>(index + 1), 0, 0, std::uint64_t{999});
+        const auto source = registry.create();
+        registry.emplace<C::TransformComponent>(source).position = {512, 0, 0};
+        registry.emplace<C::WaterSourceComponent>(source);
+    }
+    FoliageInteriorReplay::Work work;
+    AdvanceFoliageInteriors(registry, pages, {{{0, 0}, 1000}, {{1, 0}, 1}}, 1000, &work);
+    EXPECT_EQ(work.source_preparations, 128u);
+    EXPECT_EQ(work.source_visits, 128u);
+    EXPECT_EQ(work.evolved_cells, 1001u);
+    EXPECT_TRUE(AdvanceFoliageInteriors(registry, pages, {}, 1000, &work).empty());
+    EXPECT_EQ(work.source_preparations, 0u);
+    const auto before = pages.serialize();
+    EXPECT_THROW(AdvanceFoliageInteriors(registry, pages, {{{0, 0}, 1001}}, 1000),
+                 std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+}
+
+TEST(FoliageFieldPages, SparsePublicationPreservesUntouchedCellsAndPreflightsBothChannels) {
+    FieldPageState live, candidate;
+    ASSERT_TRUE(live.set_soil({0, 0}, 7));
+    ASSERT_TRUE(candidate.set_soil({1, 0}, 9));
+    ASSERT_TRUE(live.can_adopt_foliage(candidate));
+    live.adopt_foliage(std::move(candidate));
+    EXPECT_EQ(live.soil().sample({0, 0}, -1), 7);
+    EXPECT_EQ(live.soil().sample({1, 0}, -1), 9);
+    for (std::size_t index = 0; index < FoliageFieldPages::kMaxPages; ++index) {
+        ASSERT_TRUE(live.set_irrigation({static_cast<std::int32_t>(index * 16), 0}, 0));
+    }
+    const auto before = live.serialize();
+    FieldPageState refused;
+    ASSERT_TRUE(refused.set_soil({16, 0}, 11));
+    ASSERT_TRUE(refused.set_irrigation({-16, 0}, 13));
+    EXPECT_FALSE(live.can_adopt_foliage(refused));
+    EXPECT_EQ(live.serialize(), before);
+    FieldPageState replacement;
+    ASSERT_TRUE(replacement.set_irrigation({0, 0}, 13));
+    ASSERT_TRUE(live.can_adopt_foliage(replacement));
+    live.adopt_foliage(std::move(replacement));
+    EXPECT_EQ(live.irrigation().sample({0, 0}, -1), 13);
+}
+} // namespace
