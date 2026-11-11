@@ -19,7 +19,8 @@ CI_EVENTS = frozenset(("opened", "synchronize", "reopened", "ready_for_review",
 CI_BASES = frozenset(("main", "devel"))
 RECOVERY = ("Re-trigger ci.yml with synchronize (push a new head), reopened, "
             "ready_for_review, converted_to_draft, labeled or unlabeled "
-            "(opened also starts CI). Re-running an old run retains its old base.")
+            "(opened also starts CI). Re-running an old run retains its old base. "
+            "Guard reruns require the newest CI run to record the current base.")
 # The filtered Actions endpoint exposes at most 1,000 runs, 100 per page.
 MAX_RUNS = 1000
 # Bound each REST response to 8 MiB before decoding JSON.
@@ -44,15 +45,23 @@ def require_live(event, live):
         raise ValueError("stale event: live pull-request number, base or head changed; re-trigger CI")
 
 
-def evaluate(event, api):
+def is_rerun(run_attempt):
+    """Validate a positive ASCII decimal without a bounded integer conversion."""
+    if not isinstance(run_attempt, str) or not re.fullmatch(r"0*[1-9][0-9]*", run_attempt):
+        raise ValueError("invalid run attempt: expected a positive decimal integer")
+    return run_attempt.lstrip("0") != "1"
+
+
+def evaluate(event, api, run_attempt="1"):
     """Return a printable verdict; invalid or incomplete evidence raises ValueError."""
+    rerun = is_rerun(run_attempt)
     number, head, base = pull_identity(event["pull_request"])
     if base not in CI_BASES:
         raise ValueError(f"CI does not run for base={base!r}; base is outside ci.yml's pull_request branches filter")
     current = f"base={base!r} head={head!r}"
-    if event["action"] in CI_EVENTS:
+    if event["action"] in CI_EVENTS and not rerun:
         return f"BASEMATCH {current}: {event['action']} starts CI against this base."
-    if event["action"] != "edited":
+    if event["action"] not in CI_EVENTS and event["action"] != "edited":
         raise ValueError("unsupported pull-request action")
     runs = api["workflow_runs"]
     if not isinstance(runs, list) or type(api["total_count"]) is not int or not 0 <= len(runs) == api["total_count"] <= MAX_RUNS:
@@ -148,19 +157,22 @@ def main(argv=None):
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--api-json", type=Path, help="inject a complete workflow-run listing for offline checks")
     parser.add_argument("--pr-json", type=Path, help="inject the live pull-request response for offline checks")
+    parser.add_argument("--run-attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+                        help="positive decimal attempt (defaults to GITHUB_RUN_ATTEMPT, then 1)")
     args = parser.parse_args(argv)
     try:
+        rerun = is_rerun(args.run_attempt)
         if args.event is None:
             raise ValueError("missing event JSON")
         event = json.loads(args.event.read_text(encoding="utf-8"))
         print(f"Checking base={event['pull_request']['base']['ref']!r} "
               f"head={event['pull_request']['head']['sha']!r}")
         api = None
-        if event["action"] == "edited":
+        if event["action"] == "edited" or (rerun and event["action"] in CI_EVENTS):
             api = (json.loads(args.api_json.read_text(encoding="utf-8")) if args.api_json else
                    fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
                               os.environ.get("GH_TOKEN", "")))
-        verdict = evaluate(event, api)
+        verdict = evaluate(event, api, args.run_attempt)
         # Fetch last: a workflow-run lookup can take multiple pages before this check.
         live = (json.loads(args.pr_json.read_text(encoding="utf-8")) if args.pr_json else
                 fetch_pull(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["number"],
