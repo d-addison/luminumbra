@@ -373,13 +373,19 @@ public:
     // and a process-local identity without creating an index. No handle survives either call.
     class AuthorityWindowReader {
     public:
+        enum class AdmissionRefusal {
+            None,
+            InvalidSource,
+            InventoryMismatch
+        };
         AuthorityWindowReader();
         ~AuthorityWindowReader();
         AuthorityWindowReader(const AuthorityWindowReader&) = delete;
         AuthorityWindowReader& operator=(const AuthorityWindowReader&) = delete;
         bool admit(const std::filesystem::path& save_dir,
                    const AuthorityReadLimits& limits,
-                   std::string& error);
+                   std::string& error,
+                   AdmissionRefusal* refusal = nullptr);
         // Includes a one-chunk XZ halo for shared face/edge/corner contributors,
         // and every Y layer. Outputs are owned and never enter the chunk-reader cache.
         [[nodiscard]] AuthorityWindowResult read(const AuthorityWindow& window,

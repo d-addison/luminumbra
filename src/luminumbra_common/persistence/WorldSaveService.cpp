@@ -8010,9 +8010,11 @@ WorldSaveService::AuthorityWindowReader::~AuthorityWindowReader() = default;
 
 bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path& save_dir,
                                                     const AuthorityReadLimits& limits,
-                                                    std::string& error) {
+                                                    std::string& error,
+                                                    AdmissionRefusal* refusal) {
     const detail::SnapshotReadOwnership ownership;
     error.clear();
+    auto reason = AdmissionRefusal::InvalidSource;
     try {
         AuthorityReadBudget budget{limits};
         if (!budget.valid())
@@ -8030,6 +8032,7 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
         candidate->generation = index.generation;
         const auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
         if (index.generation != 0) {
+            std::size_t present_regions = 0;
             for (const auto& member : index.members) {
                 int rx = 0, rz = 0;
                 const auto path = std::filesystem::path(member.path);
@@ -8040,6 +8043,22 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                     if (member.cls != MemberClass::Authoritative)
                         throw std::runtime_error("unsupported derived authority member");
                     candidate->members.emplace(std::pair{rx, rz}, Impl::Member{member, {}});
+                    present_regions += member.present ? 1u : 0u;
+                }
+            }
+            // Reuse the probe/member-bounded listing: O(I + R log(I + 1)) reconciliation,
+            // with no payload reads, extra filesystem probes or per-window directory pass.
+            if (inventory.region_files.size() != present_regions) {
+                reason = AdmissionRefusal::InventoryMismatch;
+                throw std::runtime_error("inconsistent authority region inventory");
+            }
+            for (const auto& path : inventory.region_files) {
+                int rx = 0, rz = 0;
+                ParseRegionFileName(path, rx, rz);
+                const auto member = candidate->members.find({rx, rz});
+                if (member == candidate->members.end() || !member->second.expected.present) {
+                    reason = AdmissionRefusal::InventoryMismatch;
+                    throw std::runtime_error("inconsistent authority region inventory");
                 }
             }
         } else {
@@ -8071,9 +8090,13 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
         candidate->verify_envelope(budget);
         candidate->identity = NextAuthoritySourceIdentity();
         m_impl = std::move(candidate);
+        if (refusal)
+            *refusal = AdmissionRefusal::None;
         return true;
     } catch (const std::exception& failure) {
         error = failure.what();
+        if (refusal)
+            *refusal = reason;
         return false;
     }
 }

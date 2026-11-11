@@ -4916,6 +4916,109 @@ TEST(WorldSaveService, AuthorityWindowRefusesMissingExpectedMemberAndRecord) {
     }
 }
 
+TEST(WorldSaveService, AuthorityWindowAdmissionRefusesMissingMemberOutsideWindow) {
+    namespace P = Luminumbra::Persistence;
+    for (const int replacement : {0, 1, 2}) {
+        SCOPED_TRACE(replacement);
+        const TempSaveDir save("authority_window_missing_outside");
+        WorldStreamingState state;
+        AddWindowChunk(state, {320, 0, 320});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        if (replacement == 2) {
+            P::SnapshotIndex index;
+            ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+            index.members.push_back({"chunks/region/r.11.10.lmr",
+                                     P::MemberClass::Authoritative,
+                                     false,
+                                     0,
+                                     0,
+                                     index.generation});
+            std::sort(index.members.begin(),
+                      index.members.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                       P::encode_snapshot_index(index)));
+        }
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto original = reader.read({}, WindowLimits());
+        ASSERT_EQ(original.membership, AuthorityMembership::ProvenAbsent) << original.error;
+        const auto path = WorldSaveService::region_file_path(save.path(), 10, 10);
+        const auto bytes = ReadFileBytes(path);
+        ASSERT_TRUE(std::filesystem::remove(path));
+        if (replacement != 0) {
+            // Keep the inventory size unchanged, but replace the indexed path.
+            ASSERT_NO_FATAL_FAILURE(
+                ReplaceWindowBytes(WorldSaveService::region_file_path(save.path(), 11, 10), bytes));
+        }
+        AuthorityReader unadmitted;
+        auto refusal = AuthorityReader::AdmissionRefusal::None;
+        EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error, &refusal));
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch);
+        EXPECT_EQ(error, "inconsistent authority region inventory");
+        ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmissionRefusesExtraRegionOutsideWindow) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir original_save("authority_window_inventory_original");
+    WorldStreamingState state;
+    AddWindowChunk(state, {320, 0, 320});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state));
+    const auto bytes =
+        ReadFileBytes(WorldSaveService::region_file_path(original_save.path(), 10, 10));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({320, 320, 320, 320}, WindowLimits());
+    ASSERT_EQ(original.membership, AuthorityMembership::Present) << original.error;
+    for (const bool listed_absent : {false, true}) {
+        for (const auto& payload : {bytes, std::string{}, std::string{"LMR1"}}) {
+            SCOPED_TRACE(::testing::Message() << listed_absent << ":" << payload.size());
+            const TempSaveDir save("authority_window_extra_outside");
+            ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+            if (listed_absent) {
+                P::SnapshotIndex index;
+                ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+                index.members.push_back({"chunks/region/r.10.10.lmr",
+                                         P::MemberClass::Authoritative,
+                                         false,
+                                         0,
+                                         0,
+                                         index.generation});
+                std::sort(index.members.begin(),
+                          index.members.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+                ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                           P::encode_snapshot_index(index)));
+            }
+            AuthorityReader unadmitted;
+            auto refusal = AuthorityReader::AdmissionRefusal::InventoryMismatch;
+            // An absent tombstone and an empty inventory agree before the extra file exists.
+            ASSERT_TRUE(unadmitted.admit(save.path(), WindowLimits(), error, &refusal)) << error;
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::None);
+            EXPECT_EQ(unadmitted.read({}, WindowLimits()).membership,
+                      AuthorityMembership::ProvenAbsent);
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
+                WorldSaveService::region_file_path(save.path(), 10, 10), payload));
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error, &refusal));
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch);
+            EXPECT_EQ(error, "inconsistent authority region inventory");
+            const auto retained = reader.read({320, 320, 320, 320}, WindowLimits());
+            EXPECT_EQ(retained.membership, original.membership) << retained.error;
+            EXPECT_EQ(retained.source_identity, original.source_identity);
+            AuthorityReader refused;
+            EXPECT_FALSE(refused.admit(save.path(), WindowLimits(), error));
+            EXPECT_EQ(error, "inconsistent authority region inventory");
+            ExpectWindowUnavailable(refused.read({}, WindowLimits()));
+            EXPECT_FALSE(refused.admit(save.path(), {}, error, &refusal));
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InvalidSource);
+        }
+    }
+}
+
 TEST(WorldSaveService, AuthorityWindowRefusesChangedCommitAndInvalidMemberGenerations) {
     namespace P = Luminumbra::Persistence;
     const TempSaveDir save("authority_window_generation");
