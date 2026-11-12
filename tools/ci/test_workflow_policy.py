@@ -3810,7 +3810,37 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
         response = MagicMock(wraps=io.BytesIO(json.dumps(valid).encode()))
         with patch.object(base_match, "urlopen", return_value=closing(response)):
             self.assertEqual(base_match.fetch_pull("owner/repo", 17, "token"), valid)
-        response.read.assert_called_once_with(base_match.MAX_PAGE_BYTES + 1)
+        self.assertEqual(response.read1.call_args_list[0].args, (base_match.READ_CHUNK_BYTES,))
+        response.read.assert_not_called()
+
+    def test_base_match_slow_response_body_stops_at_the_retry_deadline(self):
+        clock = [0.0]
+
+        class Drip:
+            reads = 0
+
+            def read1(self, size):
+                Drip.reads += 1
+                clock[0] += 10.0
+                return b" "
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(base_match.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(TimeoutError):
+                base_match.fetch_json("https://api.github.com/x", "token",
+                                      lambda *args, **kwargs: Drip(), deadline=150.0)
+        self.assertEqual(Drip.reads, 15)
+        self.assertLessEqual(clock[0], 150.0)
+
+        def opener(*args, **kwargs):
+            return io.BytesIO(b"[" + b" " * (3 * base_match.READ_CHUNK_BYTES) + b"]")
+
+        self.assertEqual(base_match.fetch_json("https://api.github.com/x", "token", opener), [])
 
     def test_base_match_ci_branch_filter_matches_workflow(self):
         trigger = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]

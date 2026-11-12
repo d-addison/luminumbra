@@ -26,6 +26,7 @@ RECOVERY = ("Re-trigger ci.yml with synchronize (push a new head), reopened, "
 MAX_RUNS = 1000
 # Bound each REST response to 8 MiB before decoding JSON.
 MAX_PAGE_BYTES = 8 * 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
 # Retry work, including paginated requests, ends within 150 seconds. The final
 # live lookup retains its 20-second timeout, keeping the budget below 3 minutes.
 RETRY_BUDGET_SECONDS = 150
@@ -154,7 +155,16 @@ def fetch_json(url, token, opener, *, deadline=None):
     request = Request(url, headers={"Authorization": f"Bearer {token}",
                       "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
     with opener(request, timeout=request_timeout(deadline)) as response:
-        payload = response.read(MAX_PAGE_BYTES + 1)
+        # read1 returns after at most one socket receive, so a slowly dripping body cannot
+        # outlive the retry deadline by more than one receive timeout.
+        read = getattr(response, "read1", None) or response.read
+        payload = bytearray()
+        while len(payload) <= MAX_PAGE_BYTES:
+            chunk = read(min(READ_CHUNK_BYTES, MAX_PAGE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+            request_timeout(deadline)
     request_timeout(deadline)
     if len(payload) > MAX_PAGE_BYTES:
         raise ValueError("API response exceeds byte limit")
