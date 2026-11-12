@@ -784,6 +784,7 @@ void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
             if (!count.is_number_unsigned() || count.get<std::uint64_t>() > limit)
                 throw std::invalid_argument("Saved water grid shape refused");
             counts[index] = static_cast<std::size_t>(count.get<std::uint64_t>());
+            // EncodedArrayFromJson enforces finiteness of float32 elements before insertion.
             continue;
         }
         if (!array.is_array() || array.size() > limit)
