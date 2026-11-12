@@ -492,9 +492,15 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
     LUMINUMBRA_CORE_INFO("Replay fixture mutation: {} -> (corrupt one checkpoint)",
                          options.mutate_replay_fixture);
 
-    auto contents = Luminumbra::Replay::ReadReplay(options.mutate_replay_fixture);
+    Luminumbra::Replay::ReplayWriter writer;
+    auto contents = writer.OpenForReplacement(options.mutate_replay_fixture);
     if (!contents.has_value()) {
         LUMINUMBRA_CORE_ERROR("mutate: '{}' is not a valid LREC1 stream",
+                              options.mutate_replay_fixture);
+        return 1;
+    }
+    if (contents->truncated || !contents->trailer_present) {
+        LUMINUMBRA_CORE_ERROR("mutate: stream '{}' is truncated (no valid trailer)",
                               options.mutate_replay_fixture);
         return 1;
     }
@@ -509,11 +515,6 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
 
     // Re-emit the stream with the FIRST checkpoint's hashes flipped to a value
     // that cannot occur (prefix "dead"), guaranteeing a mismatch there.
-    Luminumbra::Replay::ReplayWriter writer;
-    if (!writer.Open(options.mutate_replay_fixture, contents->header)) {
-        LUMINUMBRA_CORE_ERROR("mutate: cannot reopen '{}'", options.mutate_replay_fixture);
-        return 1;
-    }
     for (const auto& input : contents->inputs) {
         writer.RecordInput(input.tick, input.inputs);
     }

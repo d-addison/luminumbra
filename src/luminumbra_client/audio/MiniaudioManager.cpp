@@ -527,7 +527,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
     return true;
 }
 
-bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
+bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus, float gain) {
     if (!m_engine)
         return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
@@ -552,6 +552,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
         MA_SUCCESS) {
         return false;
     }
+    ma_sound_set_volume(sound.get(), gain > 0.0f ? std::min(gain, 1.0f) : 0.0f);
     ma_sound_start(sound.get());
 
     if (bus == BusId::Events) {
