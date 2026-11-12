@@ -29,6 +29,33 @@ def read_source(path):
 
 
 class ReplaySourceContract(unittest.TestCase):
+    def test_first_durable_activation_precedes_the_first_water_update(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        update = source.split("bool activation_ran_this_tick = false;", 1)[1]
+        self.assertRegex(update, r"const bool initial_durable_activation =\s*"
+                         r"m_first_update && m_durable_residency && !m_durable_chunks.empty\(\);")
+        self.assertLess(update.index("m_first_update = false;"),
+                        update.index("if (initial_durable_activation || interval_activation)"))
+        self.assertLess(update.index("update_chunk_activation("),
+                        update.index("m_water_system->update(registry, m_streaming_state.chunks);"))
+        self.assertLess(update.index("if (m_durable_read_failed)"),
+                        update.index("m_water_system->update(registry, m_streaming_state.chunks);"))
+
+    def test_initial_restoration_preserves_periodic_generation_and_eviction(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertRegex(source, r"m_update_tick_counter\+\+;\s*const bool interval_activation =\s*"
+                         r"m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES;")
+        self.assertRegex(source, r"update_chunk_activation\(anchor_positions, physics_system, "
+                         r"!interval_activation\);")
+        self.assertRegex(source, r"if \(interval_activation\) \{\s*m_update_tick_counter = 0;")
+        activation = source.split("bool SHIELD_WorldSystem::update_chunk_activation(", 1)[1]
+        self.assertRegex(activation, r"else \{\s*if \(restorations_only\)\s*continue;\s*"
+                         r"generate_now.push_back")
+        self.assertRegex(activation, r"if \(restorations_only\)\s*return restored != 0;\s*"
+                         r"if \(!generate_now.empty\(\)\)")
+        self.assertLess(activation.index("if (restorations_only)\n        return restored != 0;"),
+                        activation.index("std::unordered_set<ChunkID> to_unload;"))
+
     # Pin mode-local admission and its ordering without tightening the
     # generic reader/writer, whose opaque and sparse records serve lockstep.
     def assert_mode_admission(self, source):

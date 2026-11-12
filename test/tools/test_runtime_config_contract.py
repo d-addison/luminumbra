@@ -927,12 +927,15 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("work();", refusal)
         update = cpp_block(world, "SHIELD_WorldSystem::update(entt::registry&registry,"
                            "conststd::vector<Vec3>&anchor_positions,")
-        self.assertIn("m_update_tick_counter++;if("
-                      "m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES)", update)
-        activation = cpp_block(update,
-                               "if(m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES)")
+        self.assertIn("initial_durable_activation=m_first_update&&m_durable_residency&&"
+                      "!m_durable_chunks.empty();m_first_update=false;", update)
+        self.assertIn("m_update_tick_counter++;constboolinterval_activation="
+                      "m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES;", update)
+        activation = cpp_block(update, "if(initial_durable_activation||interval_activation)")
         self.assertIn("activation_ran_this_tick=update_chunk_activation("
-                      "anchor_positions,physics_system);m_update_tick_counter=0;", activation)
+                      "anchor_positions,physics_system,!interval_activation);", activation)
+        self.assertEqual(cpp_block(update, "if(interval_activation)"),
+                         "{m_update_tick_counter=0;}")
 
     def test_session_digests_and_active_source_reads_use_worker_boundaries(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
