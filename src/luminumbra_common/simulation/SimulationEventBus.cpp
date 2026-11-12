@@ -13,16 +13,6 @@
 namespace luminumbra::simulation {
 namespace {
 
-bool event_order_less(const SimulationEvent& lhs, const SimulationEvent& rhs) {
-    if (lhs.tick != rhs.tick) {
-        return lhs.tick < rhs.tick;
-    }
-    if (lhs.lane != rhs.lane) {
-        return lhs.lane < rhs.lane;
-    }
-    return lhs.sequence < rhs.sequence;
-}
-
 void mix_byte(std::uint64_t& hash, unsigned char value) {
     constexpr std::uint64_t fnv_prime = 1099511628211ull;
     hash ^= static_cast<std::uint64_t>(value);
@@ -98,72 +88,10 @@ std::uint64_t OrderedEventBus::publish(std::uint64_t tick,
 std::vector<SimulationEvent>
 OrderedEventBus::drain(std::uint64_t inclusive_tick,
                        const std::function<bool()>& continue_delivery) {
-    std::vector<SimulationEvent> delivered;
-    for (;;) {
-        const bool resuming = pending_batch_size_ != 0;
-        if (!resuming) {
-            std::stable_sort(
-                pending_events_.begin(), pending_events_.end(), [](const auto& a, const auto& b) {
-                    return event_order_less(a.event, b.event);
-                });
-        }
-
-        std::vector<PendingEvent> due;
-        auto first_future = pending_events_.begin();
-        const auto batch_end =
-            resuming ? pending_events_.begin() + static_cast<std::ptrdiff_t>(pending_batch_size_)
-                     : pending_events_.end();
-        while (first_future != batch_end && first_future->event.tick <= inclusive_tick) {
-            const auto& event = first_future->event;
-            const auto bytes = pending_bytes_.find(event.topic);
-            bytes->second -= event.canonical_size() + 1;
-            if (bytes->second == 0)
-                pending_bytes_.erase(bytes);
-            due.push_back(std::move(*first_future));
-            ++first_future;
-        }
-        pending_events_.erase(pending_events_.begin(), first_future);
-        if (resuming)
-            pending_batch_size_ -= due.size();
-
-        std::size_t current = 0;
-        const auto requeue = [&] {
-            for (std::size_t i = current; i < due.size(); ++i) {
-                const auto& event = due[i].event;
-                pending_bytes_[event.topic] += event.canonical_size() + 1;
-            }
-            // Preserve this batch's order and handler cutoffs before forming the next batch.
-            pending_events_.insert(
-                pending_events_.begin(),
-                std::make_move_iterator(due.begin() + static_cast<std::ptrdiff_t>(current)),
-                std::make_move_iterator(due.end()));
-            pending_batch_size_ += due.size() - current;
-        };
-        try {
-            for (; current < due.size(); ++current) {
-                auto& pending = due[current];
-                if (!pending.handler_count)
-                    pending.handler_count = handlers_.size();
-                while (pending.next_handler < pending.handler_count.value_or(0)) {
-                    if (continue_delivery && !continue_delivery()) {
-                        requeue();
-                        return delivered;
-                    }
-                    // std::deque appends keep references to existing handler elements valid.
-                    const Handler& handler = handlers_[pending.next_handler];
-                    ++pending.next_handler;
-                    handler(pending.event);
-                }
-                delivered.push_back(pending.event);
-            }
-        } catch (...) {
-            requeue();
-            throw;
-        }
-
-        if (!resuming || pending_batch_size_ != 0)
-            return delivered;
+    if (continue_delivery) {
+        return drain(inclusive_tick, [&continue_delivery] { return continue_delivery(); });
     }
+    return drain(inclusive_tick, [] { return true; });
 }
 
 void OrderedEventBus::subscribe(Handler handler) {

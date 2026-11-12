@@ -5,6 +5,7 @@
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -128,13 +129,18 @@ public:
     std::size_t GetActiveSourceCount() const {
         return m_active_sources.size();
     }
+    // Stored attenuation, including inactive sources until the next update retires them.
+    // Returns no value after retirement or for an unknown handle.
+    std::optional<float> GetSourceAttenuation(u32 event_handle) const;
     int GetClusterCount() const {
         return m_cluster_count;
     }
 
 private:
     // Audio source storage
-    std::unordered_map<u32, std::unique_ptr<AudioSource>> m_active_sources;
+    // Source changes and physics batch callbacks run on the main thread. Only this
+    // map owns sources between calls; queued callbacks retain weak identities.
+    std::unordered_map<u32, std::shared_ptr<AudioSource>> m_active_sources;
     std::vector<AudioSource*> m_sources_to_process; // Cached for performance
 
     // Clustering system
@@ -163,14 +169,6 @@ private:
     float CalculateAttenuation(const AudioSource& source,
                                const glm::vec3& listener_pos,
                                bool include_occlusion);
-
-    // Batched occlusion state
-    struct PendingOcclusionQuery {
-        AudioSource* source;
-        int query_id;
-        float fallback_occlusion;
-    };
-    std::vector<PendingOcclusionQuery> m_pending_occlusion_queries;
 
     // Performance settings
     int m_max_audio_sources = 128;

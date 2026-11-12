@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -154,7 +155,8 @@ RenderTarget MakeTarget(int w, int h) {
     return rt;
 }
 std::vector<unsigned char> ReadTarget(const RenderTarget& rt) {
-    std::vector<unsigned char> px(static_cast<std::size_t>(rt.w) * rt.h * 4, 0);
+    std::vector<unsigned char> px(
+        static_cast<std::size_t>(rt.w) * static_cast<std::size_t>(rt.h) * 4, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, rt.w, rt.h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -307,7 +309,8 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         const GLuint opaque = MakeFloatTexture(
             extent,
             extent,
-            std::vector<float>(static_cast<std::size_t>(extent) * extent * 4, 0.8f));
+            std::vector<float>(
+                static_cast<std::size_t>(extent) * static_cast<std::size_t>(extent) * 4, 0.8f));
         GLuint depth = 0;
         glGenRenderbuffers(1, &depth);
         glBindRenderbuffer(GL_RENDERBUFFER, depth);
@@ -339,10 +342,13 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
             EXPECT_EQ(glGetError(), GL_NO_ERROR);
             const auto pixels = ReadTarget(target);
             const std::size_t center =
-                (static_cast<std::size_t>(extent / 2) * extent + extent / 2) * 4;
+                (static_cast<std::size_t>(extent / 2) * static_cast<std::size_t>(extent) +
+                 static_cast<std::size_t>(extent / 2)) *
+                4;
             if (occluded) {
-                for (int channel = 0; channel < 3; ++channel)
-                    EXPECT_NEAR(pixels[center + channel], 204, 1);
+                for (int channel = 0; channel < 3; ++channel) {
+                    EXPECT_NEAR(pixels[center + static_cast<std::size_t>(channel)], 204, 1);
+                }
             } else {
                 EXPECT_LT(pixels[center], 100) << "visible glass must tint the lit scene";
                 EXPECT_GT(pixels[center + 1], pixels[center] + 60);
@@ -350,10 +356,14 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         }
         // A spatially varying background must stay registered with the pane when
         // the output resolution changes independently of the internal OIT extent.
-        std::vector<float> background(static_cast<std::size_t>(extent) * extent * 4);
+        std::vector<float> background(static_cast<std::size_t>(extent) *
+                                      static_cast<std::size_t>(extent) * 4);
         for (int y = 0; y < extent; ++y) {
             for (int x = 0; x < extent; ++x) {
-                const auto offset = (static_cast<std::size_t>(y) * extent + x) * 4;
+                const auto offset =
+                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(extent) +
+                     static_cast<std::size_t>(x)) *
+                    4;
                 background[offset] = static_cast<float>(x) / static_cast<float>(extent - 1);
                 background[offset + 1] = static_cast<float>(y) / static_cast<float>(extent - 1);
                 background[offset + 2] = 0.2f;
@@ -383,9 +393,13 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
             if (output_multiple == 1) {
                 full_scale = pixels;
                 const std::size_t near_corner =
-                    (static_cast<std::size_t>(extent / 4) * extent + extent / 4) * 4;
+                    (static_cast<std::size_t>(extent / 4) * static_cast<std::size_t>(extent) +
+                     static_cast<std::size_t>(extent / 4)) *
+                    4;
                 const std::size_t far_corner =
-                    (static_cast<std::size_t>(3 * extent / 4) * extent + 3 * extent / 4) * 4;
+                    (static_cast<std::size_t>(3 * extent / 4) * static_cast<std::size_t>(extent) +
+                     static_cast<std::size_t>(3 * extent / 4)) *
+                    4;
                 EXPECT_GT(pixels[far_corner], pixels[near_corner] + 60);
                 EXPECT_GT(pixels[far_corner + 1], pixels[near_corner + 1] + 60);
             } else {
@@ -497,7 +511,8 @@ TEST(PassContext, GroundDecalTintsFromContextPositionAndScentMirror) {
     std::vector<float> pos(static_cast<std::size_t>(W) * H * 4);
     for (int j = 0; j < H; ++j) {
         for (int i = 0; i < W; ++i) {
-            const std::size_t o = (static_cast<std::size_t>(j) * W + i) * 4;
+            const std::size_t o =
+                (static_cast<std::size_t>(j) * W + static_cast<std::size_t>(i)) * 4;
             pos[o + 0] = (i + 0.5f) / W * 16.0f; // world X in [0,16]
             pos[o + 1] = 1.0f;                   // nonzero -> not rejected as sky
             pos[o + 2] = (j + 0.5f) / H * 16.0f; // world Z in [0,16]

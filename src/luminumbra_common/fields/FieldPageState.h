@@ -67,6 +67,8 @@ struct ScentWindowWork {
 // Reused runtime storage; never serialized or included in authority hashes.
 struct ScentChangeBuffers {
     std::vector<std::pair<ScentCellKey, ScentCell>> changes, scratch, floors, floor_scratch;
+    std::map<ScentCellKey, ScentCell> admitted, floor_admitted;
+    std::map<RegionKey, std::uint64_t> work_scratch;
 };
 
 class FieldPageState {
@@ -135,6 +137,9 @@ public:
         m_scentFloorUpdates.clear();
         m_scentChanges.floors.clear();
         m_scentChanges.floor_scratch.clear();
+        m_scentChanges.admitted.clear();
+        m_scentChanges.floor_admitted.clear();
+        m_scentChanges.work_scratch.clear();
         m_scentUpdates.clear();
         m_scentChanges.changes.clear();
         m_scentChanges.scratch.clear();
@@ -252,9 +257,15 @@ public:
         return m_scentUpdates.size() + m_scentChanges.changes.size() + m_scentFloorUpdates.size() +
                m_scentChanges.floors.size();
     }
-    // Swap retained contiguous storage into/out of a short-lived tick candidate.
+    // Swap retained staging storage into/out of a tick candidate.
     void reuse_scent_buffers(ScentChangeBuffers& buffers) noexcept {
-        std::swap(m_scentChanges, buffers);
+        m_scentChanges.changes.swap(buffers.changes);
+        m_scentChanges.scratch.swap(buffers.scratch);
+        m_scentChanges.floors.swap(buffers.floors);
+        m_scentChanges.floor_scratch.swap(buffers.floor_scratch);
+        m_scentChanges.admitted.swap(buffers.admitted);
+        m_scentChanges.floor_admitted.swap(buffers.floor_admitted);
+        m_scentChanges.work_scratch.swap(buffers.work_scratch);
     }
     [[nodiscard]] std::size_t staged_scent_nodes() const {
         return m_scentUpdates.size() + m_scentFloorUpdates.size();

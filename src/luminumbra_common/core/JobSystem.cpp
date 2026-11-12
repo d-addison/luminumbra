@@ -15,6 +15,11 @@ namespace Luminumbra {
 
 namespace {
 
+JobSystem*& CurrentWorkerPool() {
+    static thread_local JobSystem* pool = nullptr;
+    return pool;
+}
+
 // cache-line size for false-sharing avoidance. The
 // completion counter is written by every worker that finishes a job in the
 // batch (a contended hot atomic); padding it onto its own line keeps those RMW
@@ -418,7 +423,12 @@ JobSystem::RuntimeStats JobSystem::get_runtime_stats() const {
     return stats;
 }
 
+bool JobSystem::is_current_worker() const noexcept {
+    return CurrentWorkerPool() == this;
+}
+
 void JobSystem::worker_loop() {
+    CurrentWorkerPool() = this;
     LUMIN_PROFILE_THREAD("Job worker");
     while (true) {
         PooledJob slot;
@@ -430,6 +440,7 @@ void JobSystem::worker_loop() {
             }));
 
             if (m_stop_threads.load() && m_high_queue.empty() && m_normal_queue.empty()) {
+                CurrentWorkerPool() = nullptr;
                 return;
             }
 

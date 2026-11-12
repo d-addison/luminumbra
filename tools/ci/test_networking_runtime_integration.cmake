@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
-foreach(_required IN ITEMS NETWORK_TEST_ROOT NETWORK_TEST_GENERATOR NETWORK_TEST_COMPILER)
+foreach(_required IN ITEMS NETWORK_TEST_ROOT NETWORK_TEST_GENERATOR NETWORK_TEST_COMPILER
+                           NETWORK_TEST_COMPILER_INFO)
     if(NOT ${_required})
         message(FATAL_ERROR "Pass ${_required} for the networking build fixture")
     endif()
@@ -39,6 +40,7 @@ foreach(_generator IN LISTS _generators)
     set(_build "${_root}/${_generator_key}")
     set(_configure_args -S "${_source}" -B "${_build}" -G "${_generator}"
         "-DCMAKE_CXX_COMPILER=${NETWORK_TEST_COMPILER}"
+        "-DNETWORK_TEST_COMPILER_INFO=${NETWORK_TEST_COMPILER_INFO}"
         -DCMAKE_BUILD_TYPE=Release)
     # Preserve the host generator's platform/toolset, but do not pass those
     # options to Ninja Multi-Config (which does not accept them).

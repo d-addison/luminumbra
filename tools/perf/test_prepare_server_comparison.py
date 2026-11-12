@@ -8,10 +8,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import types
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import capture_sim_budget as capture
 import fixture_paths

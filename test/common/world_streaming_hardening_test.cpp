@@ -28,22 +28,32 @@
 
 #include "gtest/gtest.h"
 
+#include "../support/PersistenceFileOps.h"
 #include "../support/UniqueTempPath.h"
 
+#include "persistence/SaveTransaction.h"
+#include "persistence/WorkerBoundary.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
 #include "world/FarLodStore.h"
+#include "world/FarWorldAuthorityProducer.h"
+#include "world/GameSession.h"
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -198,6 +208,47 @@ struct TempSaveDir {
 };
 
 constexpr int kSeed = 4242;
+
+class OwnerReadProbe {
+public:
+    OwnerReadProbe() {
+        state().owner = std::this_thread::get_id();
+        reset();
+        Persistence::detail::set_file_read_observer_for_testing(&Observe);
+    }
+    ~OwnerReadProbe() {
+        Persistence::detail::set_file_read_observer_for_testing(nullptr);
+    }
+    void reset() const {
+        state().reads.store(0);
+        state().owner_reads.store(0);
+    }
+    int reads() const {
+        return state().reads.load();
+    }
+    int owner_reads() const {
+        return state().owner_reads.load();
+    }
+
+private:
+    struct State {
+        std::thread::id owner;
+        std::atomic<int> reads{0};
+        std::atomic<int> owner_reads{0};
+    };
+    static State& state() {
+        static State probe;
+        return probe;
+    }
+    static void Observe(const fs::path&, bool opening) {
+        if (opening) {
+            ++state().reads;
+            if (std::this_thread::get_id() == state().owner) {
+                ++state().owner_reads;
+            }
+        }
+    }
+};
 
 } // namespace
 
@@ -650,6 +701,402 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*captured));
 }
 
+TEST(StreamingHardening, FarLodOwnerPathsNeverLoadDiskOnlyAuthority) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), kSeed);
+    world.set_durable_residency(true);
+    int reads = 0;
+    int faults = 0;
+    world.set_durable_chunk_loader(
+        [&](const IVec3&) -> std::shared_ptr<Chunk> {
+            ++reads;
+            throw std::runtime_error("unreadable authority");
+        },
+        [&](const std::string&) { ++faults; });
+    world.remember_durable_chunks({{0, 0, 0}, {1000, 0, 1000}});
+    const auto captured = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(captured);
+    EXPECT_TRUE(captured->entries.empty());
+    auto evicted = *captured;
+    evicted.entries.push_back({.coords = {0, 0, 0},
+                               .provenance = ChunkSdfProvenance::LoadedOrEdited,
+                               .voxel_revision = 1,
+                               .authority_durable = true,
+                               .payload = {}});
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(evicted));
+    EXPECT_EQ(reads, 0);
+    EXPECT_EQ(faults, 0);
+    world.notify_far_lod_authority_durable({0, 0, 0});
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(evicted));
+    EXPECT_EQ(reads, 0);
+}
+
+TEST(StreamingHardening, DurableLoaderRunsOffOwnerForEveryRestorationEntry) {
+    const auto owner = std::this_thread::get_id();
+    for (const int workers : {1, 2}) {
+        for (const int entry : {0, 1, 2, 3, 4, 5}) {
+            SCOPED_TRACE(workers);
+            SCOPED_TRACE(entry);
+            Luminumbra::JobSystem jobs;
+            jobs.startup(static_cast<std::size_t>(workers));
+            auto params = FixtureParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+            world.set_durable_residency(true);
+            world.debug_set_streaming_radius_cap(1);
+            const IVec3 coords(0, 0, 0);
+            world.remember_durable_chunks({coords});
+            int reads = 0;
+            int owner_reads = 0;
+            std::string fault;
+            world.set_durable_chunk_loader(
+                [&](const IVec3& requested) {
+                    ++reads;
+                    owner_reads += std::this_thread::get_id() == owner ? 1 : 0;
+                    auto chunk = std::make_shared<Chunk>(requested);
+                    chunk->sdf_data.assign(17u * 17u * 17u, -4.0f);
+                    chunk->mark_voxel_data_dirty();
+                    return chunk;
+                },
+                [&](std::string error) { fault = std::move(error); });
+            if (entry == 0) {
+                EXPECT_TRUE(world.find_authoritative_chunk(coords));
+                EXPECT_FALSE(world.find_streamed_chunk(coords));
+            } else if (entry == 1) {
+                EXPECT_TRUE(world.restore_authoritative_chunk(coords));
+                EXPECT_TRUE(world.restore_authoritative_chunk(coords));
+            } else if (entry == 2) {
+                world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+                world.wait_for_streaming_jobs();
+            } else if (entry == 3) {
+                EXPECT_TRUE(world.PrepareTerrainVoxelEdit(Vec3(8.0f), 1.0f));
+            } else if (entry == 4) {
+                EXPECT_EQ(world.EditTerrainVoxel(Vec3(8.0f), 1.0f, false, nullptr), 1);
+            } else {
+                entt::registry registry;
+                for (int step = 1; step <= 4; ++step) {
+                    SCOPED_TRACE(step);
+                    world.update(registry, Vec3(8.0f), nullptr);
+                    EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+                    EXPECT_EQ(reads, step == 4 ? 1 : 0);
+                    if (step < 4) {
+                        EXPECT_FALSE(world.find_streamed_chunk(coords));
+                    }
+                }
+            }
+            EXPECT_EQ(reads, 1);
+            EXPECT_EQ(owner_reads, 0);
+            EXPECT_TRUE(fault.empty());
+            if (entry != 0) {
+                const auto restored = world.find_streamed_chunk(coords);
+                ASSERT_TRUE(restored);
+                EXPECT_EQ(restored->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+            }
+        }
+    }
+}
+
+TEST(StreamingHardening, DurableWorkerRefusalsPublishFailStopOnOwner) {
+    const auto owner = std::this_thread::get_id();
+    for (const bool update_entry : {false, true}) {
+        SCOPED_TRACE(update_entry);
+        for (const int failure : {0, 1, 2, 3, 4, 5}) {
+            SCOPED_TRACE(failure);
+            Luminumbra::JobSystem jobs;
+            jobs.startup(1);
+            auto params = FixtureParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+            world.debug_set_streaming_radius_cap(1);
+            world.set_durable_residency(true);
+            const IVec3 coords(0, 0, 0);
+            world.remember_durable_chunks({coords});
+            int reads = 0;
+            int owner_reads = 0;
+            int faults = 0;
+            std::thread::id fault_thread;
+            world.set_durable_chunk_loader(
+                [&](const IVec3& requested) -> std::shared_ptr<Chunk> {
+                    ++reads;
+                    owner_reads += std::this_thread::get_id() == owner ? 1 : 0;
+                    if (failure == 0) {
+                        throw std::runtime_error("unreadable or partial region");
+                    }
+                    if (failure == 1) {
+                        return nullptr;
+                    }
+                    auto chunk = std::make_shared<Chunk>(failure == 2 ? IVec3(1, 0, 0) : requested);
+                    if (failure != 3) {
+                        chunk->heightmap_data = {1.0f};
+                    }
+                    return chunk;
+                },
+                [&](const std::string&) {
+                    ++faults;
+                    fault_thread = std::this_thread::get_id();
+                });
+            if (failure == 4) {
+                jobs.shutdown();
+            }
+            if (failure == 5) {
+                world.set_durable_chunk_loader({}, [&](const std::string&) {
+                    ++faults;
+                    fault_thread = std::this_thread::get_id();
+                });
+            }
+            if (update_entry) {
+                entt::registry registry;
+                for (int step = 1; step <= 4; ++step) {
+                    SCOPED_TRACE(step);
+                    world.update(registry, Vec3(8.0f), nullptr);
+                    EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+                    if (step < 4) {
+                        EXPECT_EQ(reads, 0);
+                        EXPECT_EQ(faults, 0);
+                    }
+                }
+                EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
+                EXPECT_EQ(faults, 1);
+                EXPECT_EQ(fault_thread, owner);
+            }
+            EXPECT_TRUE(world.restore_authoritative_chunk(coords));
+            EXPECT_FALSE(world.find_streamed_chunk(coords));
+            EXPECT_FALSE(world.find_authoritative_chunk(coords));
+            world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+            EXPECT_FALSE(world.find_streamed_chunk(coords));
+            EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
+            EXPECT_EQ(owner_reads, 0);
+            EXPECT_EQ(faults, 1);
+            EXPECT_EQ(fault_thread, owner);
+        }
+    }
+}
+
+TEST(StreamingHardening, DurableActivationRetainsFourUpdateCadenceFromStartup) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, kSeed);
+    world.set_durable_residency(true);
+    world.debug_set_streaming_radius_cap(1);
+    world.remember_durable_chunks({{0, 0, 0}, {10, 0, 10}});
+    int reads = 0;
+    world.set_durable_chunk_loader(
+        [&](const IVec3& coords) {
+            ++reads;
+            auto chunk = std::make_shared<Chunk>(coords);
+            chunk->sdf_data.assign(17u * 17u * 17u, -4.0f);
+            chunk->mark_voxel_data_dirty();
+            return chunk;
+        },
+        {});
+    entt::registry registry;
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    EXPECT_EQ(reads, 0);
+    EXPECT_FALSE(world.find_streamed_chunk({0, 0, 0}));
+    for (int step = 2; step <= 4; ++step) {
+        SCOPED_TRACE(step);
+        world.update(registry, Vec3(8.0f), nullptr);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
+        EXPECT_EQ(reads, step == 4 ? 1 : 0);
+        EXPECT_EQ(static_cast<bool>(world.find_streamed_chunk({0, 0, 0})), step == 4);
+    }
+    for (int step = 1; step <= 4; ++step) {
+        SCOPED_TRACE(step);
+        world.update(registry, Vec3(168.0f, 8.0f, 168.0f), nullptr);
+        EXPECT_EQ(reads, step == 4 ? 2 : 1);
+        EXPECT_EQ(static_cast<bool>(world.find_streamed_chunk({10, 0, 10})), step == 4);
+    }
+}
+
+TEST(StreamingHardening, WorkerBoundaryRunsInlineInsideSingleWorkerBatch) {
+    Luminumbra::JobSystem jobs;
+    Luminumbra::JobSystem other;
+    Luminumbra::JobSystem stopped;
+    jobs.startup(1);
+    other.startup(1);
+    EXPECT_FALSE(jobs.is_current_worker());
+    std::packaged_task<std::thread::id()> task([&] {
+        const auto worker = std::this_thread::get_id();
+        EXPECT_TRUE(jobs.is_current_worker());
+        EXPECT_FALSE(other.is_current_worker());
+        std::thread::id nested;
+        Luminumbra::RunWorkerBoundary(&jobs, [&] {
+            EXPECT_EQ(std::this_thread::get_id(), worker);
+            Luminumbra::RunWorkerBoundary(&jobs, [&] { nested = std::this_thread::get_id(); });
+        });
+        EXPECT_EQ(nested, worker);
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+                     std::runtime_error);
+        Luminumbra::RunWorkerBoundary(&other, [&] {
+            EXPECT_TRUE(other.is_current_worker());
+            EXPECT_FALSE(jobs.is_current_worker());
+            EXPECT_NE(std::this_thread::get_id(), worker);
+        });
+        bool ran = false;
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&stopped, [&] { ran = true; }),
+                     Luminumbra::WorkerBoundaryUnavailable);
+        EXPECT_FALSE(ran);
+        return worker;
+    });
+    auto completed = task.get_future();
+    const auto batch = jobs.dispatch_batch({[&] {
+        task();
+    }});
+    jobs.wait(batch);
+    EXPECT_NE(completed.get(), std::this_thread::get_id());
+    jobs.shutdown();
+    EXPECT_FALSE(jobs.is_current_worker());
+}
+
+TEST(StreamingHardening, WorkerBoundaryPreservesCompletionExceptionsAndStandaloneExecution) {
+    const auto owner = std::this_thread::get_id();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    std::thread::id completed;
+    Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = std::this_thread::get_id(); });
+    EXPECT_NE(completed, owner);
+    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+                 std::runtime_error);
+    Luminumbra::RunWorkerBoundary(nullptr, [&] { completed = std::this_thread::get_id(); });
+    EXPECT_EQ(completed, owner);
+    jobs.shutdown();
+    completed = {};
+    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = owner; }),
+                 std::runtime_error);
+    EXPECT_EQ(completed, std::thread::id{});
+}
+
+TEST(StreamingHardening, ExplicitMaintenanceTransactionsRetainTheirWorkerBoundaryOwnership) {
+    const TempSaveDir storage("transaction_owner");
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    const auto owner = std::this_thread::get_id();
+    std::thread::id completed;
+    {
+        Persistence::SaveTransaction transaction(
+            storage.path, 0, {}, &Persistence::WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        EXPECT_EQ(Persistence::SaveTransaction::active_for(storage.path / "other"), nullptr);
+        Luminumbra::RunWorkerBoundary(&jobs, [&] {
+            completed = std::this_thread::get_id();
+            EXPECT_EQ(Persistence::SaveTransaction::active_for(storage.path), &transaction);
+        });
+        EXPECT_EQ(completed, owner);
+        jobs.shutdown();
+        EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [] { throw std::runtime_error("read"); }),
+                     std::runtime_error);
+        transaction.abort(&errors);
+        EXPECT_TRUE(errors.empty());
+    }
+    completed = {};
+    EXPECT_THROW(Luminumbra::RunWorkerBoundary(&jobs, [&] { completed = owner; }),
+                 Luminumbra::WorkerBoundaryUnavailable);
+    EXPECT_EQ(completed, std::thread::id{});
+}
+
+TEST(StreamingHardening, SessionSaveDigestFreezeAndFarCaptureNeverOpenFilesOnOwner) {
+    const TempSaveDir storage("owner_reads");
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    Luminumbra::world::GameSession session;
+    session.SetRootPath(std::string(LUMINUMBRA_SOURCE_ROOT) +
+                        static_cast<char>(fs::path::preferred_separator));
+    session.SetSaveRootPath(storage.path);
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetAetherStateEnabled(false);
+    session.SetRegionSchedulerConfig({1, 1, 1});
+    ASSERT_TRUE(session.CreateWorld("Owner reads", "1337", "default"));
+    const OwnerReadProbe probe;
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+
+    probe.reset();
+    EXPECT_FALSE(session.ComputeChunkStateHash().empty());
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+
+    const World::FarWorldAuthorityConfig config{
+        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+    std::string error;
+    probe.reset();
+    ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    const std::array<Persistence::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
+    ASSERT_TRUE(producer->request_capture(windows));
+    session.PumpFarWorldAuthorityCapture();
+    ASSERT_TRUE(producer->capture_status().active);
+    probe.reset();
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_TRUE(producer->capture_status().latest_ready);
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+
+    ASSERT_TRUE(session.SaveWorldState());
+    probe.reset();
+    session.PumpFarWorldAuthorityCapture();
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+
+    const Luminumbra::world::RegionKey far{40, -40};
+    session.PinActiveRegion(far, true);
+    probe.reset();
+    for (int tick = 0; tick < 3; ++tick) {
+        session.RecordActiveRegionWork({far, 5, 0, 0, 0});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(far).state,
+              Luminumbra::world::RegionState::Frozen);
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+
+    // Closed-pool refusals do not perform I/O inline, replace a capture, or
+    // hang a one-worker host. Restarting the same pool permits a retry.
+    ASSERT_TRUE(producer->capture_status().active);
+    jobs.shutdown();
+    probe.reset();
+    EXPECT_NO_THROW(session.PumpFarWorldAuthorityCapture());
+    EXPECT_TRUE(producer->capture_status().active);
+    for (int frame = 0; frame < 3; ++frame) {
+        EXPECT_NO_THROW(session.PumpFarWorldAuthorityCapture());
+    }
+    EXPECT_FALSE(producer->capture_status().active);
+    EXPECT_EQ(producer->capture_status().error,
+              World::FarWorldAuthorityProducer::Error::DeadlineExceeded);
+    EXPECT_FALSE(producer->capture_status().paused);
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(config, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(probe.reads(), 0);
+    jobs.startup(1);
+    ASSERT_TRUE(session.SaveWorldState());
+    jobs.shutdown();
+    probe.reset();
+    EXPECT_NO_THROW(session.PumpFarWorldAuthorityCapture());
+    EXPECT_FALSE(producer->capture_status().latest_ready);
+    EXPECT_EQ(probe.reads(), 0);
+
+    jobs.startup(1);
+    ASSERT_TRUE(Persistence::WorldSaveService::write_file_durably(
+        session.GetWorldSaveDir() / "world_info.json", "{"));
+    probe.reset();
+    (void)session.ComputeChunkStateHash();
+    EXPECT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_GT(probe.reads(), 0);
+    EXPECT_EQ(probe.owner_reads(), 0);
+}
+
 TEST(StreamingHardening, ChunkSdfProvenanceRevisionLifecycleIsSticky) {
     Chunk chunk(IVec3(0, 0, 0));
     EXPECT_EQ(chunk.sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
@@ -691,6 +1138,62 @@ TEST(StreamingHardening, PendingLodPreventsStreamingQuiescence) {
     EXPECT_EQ(stats.last_queue_depth, 0u);
     EXPECT_EQ(stats.pending_lod_chunks, 1u);
     EXPECT_FALSE(stats.quiescent());
+}
+
+TEST(StreamingHardening, RestoredPendingJobsResetOnlyBeforeExplicitAdoption) {
+    WorldStreamingState saved;
+    const auto original = std::make_shared<Chunk>(IVec3(0));
+    StampChunk(*original, 2u);
+    original->pending_promotion_ready.store(true);
+    original->pending_promotion_failed.store(true);
+    original->pending_generation_ready.store(true);
+    original->pending_sdf_data = {1.0f};
+    original->pending_heightmap_data = {2.0f};
+    original->pending_material_data = {3u};
+    ASSERT_TRUE(saved.insert_chunk(original));
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+        Persistence::SerializeWorldStreamingStateSnapshotJson(saved, true), restored, errors));
+    const auto loaded = restored.find_chunk(original->get_id());
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(loaded->pending_lod.load(), 0);
+    EXPECT_TRUE(loaded->pending_mesh_ready.load());
+    // This newly decoded owner has no workers. Only the adoption boundary may
+    // retire serialized reservations; ordinary live adoption preserves them.
+    loaded->pending_water_mesh_generated.store(true);
+    const auto stamp = loaded->authority_stamp();
+    const auto sdf = loaded->sdf_data;
+    const auto terrain_version = loaded->mesh_version.load();
+    const auto water_version = loaded->water_mesh_version.load();
+    loaded->reset_pending_jobs();
+    EXPECT_EQ(loaded->pending_lod.load(), -1);
+    EXPECT_FALSE(loaded->pending_mesh_ready.load());
+    EXPECT_FALSE(loaded->pending_water_mesh_generated.load());
+    EXPECT_FALSE(loaded->pending_mesh_failed.load());
+    EXPECT_FALSE(loaded->pending_promotion_ready.load());
+    EXPECT_FALSE(loaded->pending_promotion_failed.load());
+    EXPECT_FALSE(loaded->pending_generation_ready.load());
+    EXPECT_TRUE(loaded->pending_mesh_vertices.empty());
+    EXPECT_TRUE(loaded->pending_mesh_indices.empty());
+    EXPECT_TRUE(loaded->pending_water_mesh_vertices.empty());
+    EXPECT_TRUE(loaded->pending_water_mesh_indices.empty());
+    EXPECT_TRUE(loaded->pending_sdf_data.empty());
+    EXPECT_TRUE(loaded->pending_heightmap_data.empty());
+    EXPECT_TRUE(loaded->pending_material_data.empty());
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), 42);
+    ASSERT_TRUE(world.adopt_streamed_chunk(loaded));
+    EXPECT_EQ(loaded->authority_stamp(), stamp);
+    EXPECT_EQ(loaded->sdf_data, sdf);
+    EXPECT_EQ(loaded->mesh_version.load(), terrain_version);
+    EXPECT_EQ(loaded->water_mesh_version.load(), water_version);
+    loaded->pending_water_mesh_generated.store(true);
+    loaded->normalize_for_park();
+    EXPECT_FALSE(loaded->pending_water_mesh_generated.load());
+    EXPECT_EQ(loaded->authority_stamp(), stamp);
+    EXPECT_EQ(loaded->sdf_data, sdf);
+    EXPECT_EQ(original->pending_lod.load(), 0);
+    EXPECT_TRUE(original->pending_mesh_ready.load());
 }
 
 TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {

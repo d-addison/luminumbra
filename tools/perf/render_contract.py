@@ -286,10 +286,24 @@ def require_matching_render_identity(first, second):
         raise ValueError('capture warmup/presentation offset differs')
 
 
+def validate_window_visibility(data):
+    settings = data.get('settings')
+    render = settings.get('effective_render') if isinstance(settings, dict) else None
+    if not isinstance(render, dict):
+        raise ValueError('qualification requires effective_render.window_visible to prove window visibility')
+    if render.get('window_mode') == 'headless':
+        return
+    if render.get('window_visible') is False:
+        raise ValueError('hidden-window captures cannot qualify native rendering or the performance floor')
+    if render.get('window_visible') is not True:
+        raise ValueError('qualification requires boolean effective_render.window_visible=true to prove window visibility')
+
+
 def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
              ladder_baseline=False):
     if data.get('schema') not in SCHEMAS:
         raise ValueError('unsupported render measurement schema')
+    validate_window_visibility(data)
     if data['schema'] == WORKLOAD_SCHEMA:
         validate_workload(data, traversal_manifest(data['workload']['script']))
     if data.get('gpu_timers_supported') is not True:

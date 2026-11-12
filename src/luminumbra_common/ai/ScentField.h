@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <functional>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "../fields/ScalarFieldDiffusion.h"
@@ -118,6 +119,22 @@ public:
               double wind_cz,
               const CellGate& participants,
               const EdgeGate& exchange) {
+        Step<CellGate, EdgeGate>(
+            diffusion_rate, diffusion_iters, evaporation, wind_cx, wind_cz, participants, exchange);
+    }
+    // Gates are borrowed only for this call; concrete callables need not be copyable.
+    template<typename Participants = CellGate, typename Exchange = EdgeGate>
+        requires((std::is_invocable_r_v<bool, const Participants&, int, int> ||
+                  std::is_same_v<Participants, std::nullptr_t>) &&
+                 (std::is_invocable_r_v<bool, const Exchange&, int, int, int, int> ||
+                  std::is_same_v<Exchange, std::nullptr_t>))
+    void Step(double diffusion_rate,
+              std::size_t diffusion_iters,
+              double evaporation,
+              double wind_cx,
+              double wind_cz,
+              const Participants& participants,
+              const Exchange& exchange) {
         const double keep =
             1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
         const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
@@ -127,41 +144,43 @@ public:
         for (auto& field : m_ch) {
             if (advect) {
                 // Snapshot the channel, then rewrite each cell from its upwind source.
-                std::vector<double> src(W * H);
+                m_scratch.resize(field.values().size());
+                const auto& src = m_scratch;
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        src[y * W + x] = field.at(x, y);
+                        m_scratch[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
-                        if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                        if (!Allows(participants, static_cast<int>(x), static_cast<int>(y)))
                             continue;
                         field.set(x,
                                   y,
-                                  exchange ? BilinearSealed(src,
-                                                            static_cast<int>(x),
-                                                            static_cast<int>(y),
-                                                            static_cast<double>(x) - wind_cx,
-                                                            static_cast<double>(y) - wind_cz,
-                                                            exchange)
-                                           : BilinearClamped(src,
-                                                             static_cast<double>(x) - wind_cx,
-                                                             static_cast<double>(y) - wind_cz));
+                                  Present(exchange)
+                                      ? BilinearSealed(src,
+                                                       static_cast<int>(x),
+                                                       static_cast<int>(y),
+                                                       static_cast<double>(x) - wind_cx,
+                                                       static_cast<double>(y) - wind_cz,
+                                                       exchange)
+                                      : BilinearClamped(src,
+                                                        static_cast<double>(x) - wind_cx,
+                                                        static_cast<double>(y) - wind_cz));
                     }
                 }
             }
             if (did_diffuse) {
-                if (exchange)
+                if (Present(exchange))
                     DiffuseSealed(field, diffusion_iters, diffusion_rate, exchange);
                 else
                     (void)field.diffuse(diffusion_iters, diffusion_rate);
                 // Smoothing and evaporation skip nonparticipants, so diffusion through
                 // an open edge can leave roundoff below zero there. Settle it at zero
                 // so a later advection or clamp never reads a negative cell.
-                if (participants) {
+                if (Present(participants)) {
                     for (std::size_t y = 0; y < H; ++y)
                         for (std::size_t x = 0; x < W; ++x)
                             if (field.at(x, y) < 0.0 &&
-                                !participants(static_cast<int>(x), static_cast<int>(y)))
+                                !Allows(participants, static_cast<int>(x), static_cast<int>(y)))
                                 field.set(x, y, 0.0);
                 }
                 // The conservative 4-neighbour solver leaves a parity (checkerboard)
@@ -172,32 +191,33 @@ public:
                 // gaps so the scent gradient is usable from any cell. Evaporation is
                 // folded into the same write. Only runs when diffusing, so a pure
                 // evaporation step (iters 0) stays an exact per-cell decay.
-                std::vector<double> tmp(W * H);
+                m_scratch.resize(field.values().size());
+                const auto& tmp = m_scratch;
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        tmp[y * W + x] = field.at(x, y);
+                        m_scratch[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
-                        if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                        if (!Allows(participants, static_cast<int>(x), static_cast<int>(y)))
                             continue;
                         double acc = 0.5 * tmp[y * W + x];
                         double wsum = 0.5;
                         // x/y are below the int-sized grid dimensions, so these conversions
                         // and the guarded neighbour coordinates are representable on every host.
                         const int ix = static_cast<int>(x), iy = static_cast<int>(y);
-                        if (x > 0 && (!exchange || exchange(ix, iy, ix - 1, iy))) {
+                        if (x > 0 && Allows(exchange, ix, iy, ix - 1, iy)) {
                             acc += 0.125 * tmp[y * W + (x - 1)];
                             wsum += 0.125;
                         }
-                        if (x + 1 < W && (!exchange || exchange(ix, iy, ix + 1, iy))) {
+                        if (x + 1 < W && Allows(exchange, ix, iy, ix + 1, iy)) {
                             acc += 0.125 * tmp[y * W + (x + 1)];
                             wsum += 0.125;
                         }
-                        if (y > 0 && (!exchange || exchange(ix, iy, ix, iy - 1))) {
+                        if (y > 0 && Allows(exchange, ix, iy, ix, iy - 1)) {
                             acc += 0.125 * tmp[(y - 1) * W + x];
                             wsum += 0.125;
                         }
-                        if (y + 1 < H && (!exchange || exchange(ix, iy, ix, iy + 1))) {
+                        if (y + 1 < H && Allows(exchange, ix, iy, ix, iy + 1)) {
                             acc += 0.125 * tmp[(y + 1) * W + x];
                             wsum += 0.125;
                         }
@@ -207,7 +227,7 @@ public:
             } else if (keep < 1.0) {
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        if (!participants || participants(static_cast<int>(x), static_cast<int>(y)))
+                        if (Allows(participants, static_cast<int>(x), static_cast<int>(y)))
                             field.set(x, y, field.at(x, y) * keep);
             }
         }
@@ -222,10 +242,16 @@ public:
         Clamp(tau_min, tau_max, {});
     }
     void Clamp(double tau_min, double tau_max, const CellGate& participants) {
+        Clamp<CellGate>(tau_min, tau_max, participants);
+    }
+    template<typename Participants = CellGate>
+        requires(std::is_invocable_r_v<bool, const Participants&, int, int> ||
+                 std::is_same_v<Participants, std::nullptr_t>)
+    void Clamp(double tau_min, double tau_max, const Participants& participants) {
         for (auto& field : m_ch) {
             for (std::size_t y = 0; y < static_cast<std::size_t>(m_h); ++y) {
                 for (std::size_t x = 0; x < static_cast<std::size_t>(m_w); ++x) {
-                    if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                    if (!Allows(participants, static_cast<int>(x), static_cast<int>(y)))
                         continue;
                     double v = field.at(x, y);
                     if (v < tau_min)
@@ -306,7 +332,27 @@ public:
     }
 
 private:
+    template<typename Gate>
+    static bool Present(const Gate& gate) {
+        if constexpr (std::is_same_v<Gate, std::nullptr_t>) {
+            return false;
+        } else if constexpr (fields::kNullableGate<Gate>) {
+            return static_cast<bool>(gate);
+        } else {
+            return true;
+        }
+    }
+    template<typename Gate, typename... Args>
+    static bool Allows(const Gate& gate, Args... args) {
+        if constexpr (std::is_same_v<Gate, std::nullptr_t>) {
+            return true;
+        } else {
+            return !Present(gate) || gate(args...);
+        }
+    }
     CellGate m_deposit_gate;
+    // One channel-sized snapshot, shared by sequential advection and smoothing passes.
+    std::vector<double> m_scratch;
     [[nodiscard]] bool valid(int ch, int x, int z) const {
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
     }
@@ -316,25 +362,28 @@ private:
     // order and unclamped intermediates. Participation does not gate flux: a
     // common border phase can exchange scent even when neither owner's interior
     // is due.
+    template<typename Exchange>
     static void DiffuseSealed(luminumbra::fields::ScalarFieldDiffusion& field,
                               std::size_t iterations,
                               double diffusion_rate,
-                              const EdgeGate& exchange) {
+                              const Exchange& exchange) {
         const std::size_t grid_width = field.width();
         (void)field.diffuse(iterations, diffusion_rate, [&](std::size_t lhs, std::size_t rhs) {
-            return exchange(static_cast<int>(lhs % grid_width),
-                            static_cast<int>(lhs / grid_width),
-                            static_cast<int>(rhs % grid_width),
-                            static_cast<int>(rhs / grid_width));
+            return Allows(exchange,
+                          static_cast<int>(lhs % grid_width),
+                          static_cast<int>(lhs / grid_width),
+                          static_cast<int>(rhs % grid_width),
+                          static_cast<int>(rhs / grid_width));
         });
     }
 
+    template<typename Exchange>
     [[nodiscard]] double BilinearSealed(const std::vector<double>& values,
                                         int x,
                                         int z,
                                         double fx,
                                         double fz,
-                                        const EdgeGate& exchange) const {
+                                        const Exchange& exchange) const {
         fx = std::clamp(fx, 0.0, static_cast<double>(m_w - 1));
         fz = std::clamp(fz, 0.0, static_cast<double>(m_h - 1));
         const int x0 = static_cast<int>(fx), z0 = static_cast<int>(fz);
@@ -347,13 +396,13 @@ private:
             int px = x, pz = z;
             while (px != sx) {
                 const int nx = px + (sx > px ? 1 : -1);
-                if (!exchange(px, pz, nx, pz))
+                if (!Allows(exchange, px, pz, nx, pz))
                     return values[index(x, z)];
                 px = nx;
             }
             while (pz != sz) {
                 const int nz = pz + (sz > pz ? 1 : -1);
-                if (!exchange(px, pz, px, nz))
+                if (!Allows(exchange, px, pz, px, nz))
                     return values[index(x, z)];
                 pz = nz;
             }

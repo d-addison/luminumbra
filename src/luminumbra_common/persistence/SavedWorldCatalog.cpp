@@ -198,6 +198,14 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         }
         result.metadata.name = json.value("name", "Unnamed World");
         result.metadata.seed = json.value("seed", "0");
+        result.error = world::ValidateWorldSeedMetadata(json);
+        if (!result.error.empty())
+            return result;
+        if (json.contains("seedConversionVersion")) {
+            result.metadata.seedConversionVersion =
+                json.at("seedConversionVersion").get<std::uint32_t>();
+            result.metadata.resolvedSeed = json.at("resolvedSeed").get<std::uint32_t>();
+        }
         result.metadata.worldType = json.value("worldType", "default");
         result.metadata.creationTime = json.value("creationTime", std::time_t{0});
         result.has_spawn_point = json.contains("spawnPoint");

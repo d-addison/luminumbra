@@ -10,6 +10,8 @@
 // (DeterministicMath Sin/Cos/Sqrt only). A world with no CreatureComponent runs it as a no-op,
 // so the canonical roster is byte-identical (the component is the opt-in, like PlantTag).
 
+#include "CreatureTickAdmission.h"
+
 #include "CreatureBrain.h"
 #include "CreatureSpeciesRegistry.h"
 #include "Flocking.h"
@@ -132,13 +134,17 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
                              float scent_origin_z = 0.0f,
                              float scent_cell_size = 0.0f,
                              bool use_perception_substrate = true,
-                             const CreatureSpeciesRegistry* species = nullptr) {
+                             const CreatureSpeciesRegistry* species = nullptr,
+                             const CreatureTickAdmission* admission = nullptr) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
     std::vector<entt::entity> ents;
-    for (auto e : view)
-        ents.push_back(e);
+    for (auto e : view) {
+        if (!admission || admission->Allows(e)) {
+            ents.push_back(e);
+        }
+    }
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });

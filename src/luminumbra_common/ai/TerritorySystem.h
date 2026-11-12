@@ -44,6 +44,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/TerritoryComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -73,7 +74,9 @@ struct TerritoryStats {
 // id-ordered, two-phase. `tick` is accepted for signature parity with the other tick systems
 // (this system is rng-free, so it does not consume the tick, but keeping it keeps the wire
 // site uniform).
-inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*tick*/ = 0) {
+inline TerritoryStats RunTerritoryOnTick(entt::registry& reg,
+                                         std::uint64_t /*tick*/ = 0,
+                                         const CreatureTickAdmission* admission = nullptr) {
     TerritoryStats stats;
 
     auto view = reg.view<Comp::TerritoryComponent, Comp::TransformComponent>();
@@ -96,6 +99,9 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     std::vector<Snap> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& terr = view.get<Comp::TerritoryComponent>(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);
         if (terr.established == 0) {

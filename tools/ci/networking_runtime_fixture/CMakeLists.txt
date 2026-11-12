@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
+
+# Reuse the outer configure's compiler identity, ABI, features and tools.
+# The outer project has already tested this compiler; the DLLs and executable
+# below still have to compile, link and run through the real staging module.
+include("${NETWORK_TEST_COMPILER_INFO}")
+# Still initialize this build's language rules and binary inspector paths.
+unset(CMAKE_CXX_COMPILER_LOADED)
+set(CMAKE_CXX_COMPILER_FORCED TRUE)
 project(NetworkingRuntimeFixture LANGUAGES CXX)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")

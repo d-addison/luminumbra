@@ -46,6 +46,7 @@
 #include "../components/CreatureComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -73,7 +74,9 @@ struct PredatorPackStats {
 
 // RunPredatorPackOnTick: maintain the pack-hunting coordination field. id-ordered, two-phase
 // snapshot. Returns per-tick stats (telemetry / test hooks).
-inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_t tick) {
+inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
+                                               std::uint64_t tick,
+                                               const CreatureTickAdmission* admission = nullptr) {
     (void)tick; // no rng / time dependence; kept for signature parity with sibling systems.
     PredatorPackStats stats;
 
@@ -99,6 +102,9 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     std::vector<PredSnap> ps;
     ps.reserve(preds.size());
     for (auto e : preds) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         const auto& cr = predView.get<Comp::CreatureComponent>(e);
         const auto& tf = predView.get<Comp::TransformComponent>(e);
         ps.push_back({e, tf.position.x, tf.position.z, cr.is_predator, cr.eaten});
@@ -114,6 +120,9 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     {
         auto preyView = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : preyView) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& cr = preyView.get<Comp::CreatureComponent>(e);
             if (cr.is_predator || cr.eaten)
                 continue;
@@ -204,7 +213,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
             const float dx = q.x - cx;
             const float dz = q.z - cz;
             const float d2 = dx * dx + dz * dz;
-            if (first || d2 < bestD2) {
+            if (first || d2 < bestD2 ||
+                (admission && d2 == bestD2 && (q.x < preyX || (q.x == preyX && q.z < preyZ)))) {
                 bestD2 = d2;
                 preyX = q.x;
                 preyZ = q.z;

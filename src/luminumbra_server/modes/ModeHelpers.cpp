@@ -106,11 +106,20 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
                        const Luminumbra::Replay::ReplayHeader& header) {
     namespace fs = std::filesystem;
     using Luminumbra::world::TerrainPresetUse;
+    // Keep the new-world 4 KiB seed bound before hashing or replacing the input.
+    if (header.seed_string.size() > Luminumbra::Persistence::SavedInputLimits::kWorldSeedBytes)
+        return std::nullopt;
     if (!Luminumbra::World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return std::nullopt;
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = options.root;
     config.seed = header.seed_string;
+    if ((header.seed >> 32) == (Luminumbra::Replay::kResolvedSeedTag >> 32)) {
+        config.seed = std::to_string(static_cast<std::uint32_t>(header.seed));
+    } else if (!header.seed_string.empty()) {
+        // Pass decimal text into new-world creation so it cannot rehash a legacy seed.
+        config.seed = std::to_string(Luminumbra::world::ResolveWorldSeed(header.seed_string, 0));
+    }
     config.preset = header.preset;
     config.world_id.clear();
     config.world_name = "Replay Playback";

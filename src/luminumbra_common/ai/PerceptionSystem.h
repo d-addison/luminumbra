@@ -13,6 +13,8 @@
 // and the canonical headless determinism roster carries none (terrain/water only),
 // so wiring it into the tick does not move world_hash.
 
+#include "CreatureTickAdmission.h"
+
 #include <algorithm>
 #include <vector>
 
@@ -32,7 +34,8 @@ struct PerceptionTickStats {
     std::uint64_t engaged = 0;    // reached the Engaged state
 };
 
-inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, float dt) {
+inline PerceptionTickStats RunPerceptionSystemOnTick(
+    entt::registry& registry, float dt, const CreatureTickAdmission* admission = nullptr) {
     using Luminumbra::Components::AwarenessComponent;
     using Luminumbra::Components::PerceptionComponent;
     using Luminumbra::Components::SensableComponent;
@@ -53,6 +56,9 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
     {
         auto view = registry.view<const TransformComponent, const SensableComponent>();
         for (auto e : view) {
+            if (admission && !admission->Allows(e)) {
+                continue;
+            }
             const auto& tf = view.get<const TransformComponent>(e);
             const auto& s = view.get<const SensableComponent>(e);
             sensables.push_back(
@@ -68,8 +74,11 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
         auto view =
             registry
                 .view<const TransformComponent, const PerceptionComponent, AwarenessComponent>();
-        for (auto e : view)
-            perceivers.push_back(e);
+        for (auto e : view) {
+            if (!admission || admission->Allows(e)) {
+                perceivers.push_back(e);
+            }
+        }
         std::sort(perceivers.begin(), perceivers.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });

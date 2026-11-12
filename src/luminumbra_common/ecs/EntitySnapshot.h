@@ -122,8 +122,8 @@ inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
         std::size_t component_count = 0;
         for (const nlohmann::json& entity_json : snapshot.at("entities")) {
             EntitySnapshotRecord entity;
-            if (loaded.persistent_identity && !entity_json.at("entity_id").is_number_unsigned()) {
-                errors.push_back("persistent entity ID must be an unsigned integer");
+            if (!entity_json.at("entity_id").is_number_unsigned()) {
+                errors.push_back("entity ID must be an unsigned integer");
                 return false;
             }
             entity.entity_id = entity_json.at("entity_id").get<std::uint64_t>();
@@ -138,11 +138,19 @@ inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
             loaded.entities.push_back(std::move(entity));
         }
 
-        if (loaded.entities.size() != snapshot.at("entity_count").get<std::size_t>()) {
+        if (!snapshot.at("entity_count").is_number_unsigned()) {
+            errors.push_back("entity_count must be an unsigned integer");
+            return false;
+        }
+        if (loaded.entities.size() != snapshot.at("entity_count").get<std::uint64_t>()) {
             errors.push_back("loaded entity count does not match entity_count");
             return false;
         }
-        if (component_count != snapshot.at("component_count").get<std::size_t>()) {
+        if (!snapshot.at("component_count").is_number_unsigned()) {
+            errors.push_back("component_count must be an unsigned integer");
+            return false;
+        }
+        if (component_count != snapshot.at("component_count").get<std::uint64_t>()) {
             errors.push_back("loaded component count does not match component_count");
             return false;
         }

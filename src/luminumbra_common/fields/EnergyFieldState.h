@@ -177,6 +177,18 @@ public:
                                                        : 0;
     }
 
+    // Const diagnostic for queued input before the next field step. Out-of-range
+    // queries are empty; inspection allocates nothing and never changes field state.
+    [[nodiscard]] std::optional<RegionalDeposit> pending_deposit(std::size_t index) const {
+        if (index >= m_pending.size()) {
+            return std::nullopt;
+        }
+        const auto& deposit = m_pending[index];
+        int cx = 0, cz = 0;
+        UnpackCellKey(deposit.cell_key, cx, cz);
+        return RegionalDeposit{deposit.emitter_id, cx, cz, deposit.channel, deposit.amount};
+    }
+
     // Advance to `tick`: catch-up any page re-entering the window, apply the
     // sorted deposit buffer, then (on the cadence, honouring the persisted
     // phase) decay + diffuse the window with sealed edges. Returns the raw

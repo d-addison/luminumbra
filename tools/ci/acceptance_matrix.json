@@ -72,7 +72,7 @@
     {
       "id": "ci.base-edit-routing",
       "source": "issue #637",
-      "statement": "CI admits pull-request edited events only when changes.base is present. Metadata-only edits skip every job before runner allocation, use unique non-cancelling concurrency groups, and publish distinct skipped check names so required check names retain their validation results. Real base edits preserve normal routing; every ready pull request retargeted to main enables Windows/UCRT64 regardless of labels, Windows-sensitive paths or C++ classification, including confirmed non-C++ changes. MSVC runs when C++ or Python classification is required or uncertain. Offline behavioural regressions cover missing and partial edit metadata, dependency failures and cancellation, concurrency isolation, check names, draft guards and retarget admission. Hosted check publication remains pending qualification.",
+      "statement": "CI does not subscribe to pull-request edited events and keeps plain required check names. The separate Base retarget workflow always computes Base retarget / fresh CI required on opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled and edited, including drafts. Bases outside ci.yml's pull_request branch filter (main and devel) fail closed, and a source-contract test pins the script's allowed bases to the filter. CI-triggering events supply event-base evidence; edited events compare the event base against the newest ci.yml pull_request run for the head and pull request using pull_requests[].base.ref. Missing run/base metadata, incomplete API pages and API failures fail closed; title/body edits cannot clear a mismatch. Immediately before any successful verdict, a live pull-request lookup must match the event number, base.ref and head.sha; stale reruns after retargets or pushes, missing responses and malformed responses fail closed and require CI to be re-triggered. The check records base and head, reads only a sparse checkout of the base revision, uses read-only Actions, contents and pull-request permissions, and serializes running guards per pull request with cancel-in-progress false. GitHub may replace pending runs and does not guarantee ordering; the final live check prevents stale success even when an old event finishes last. A missing base-revision script fails. Fresh CI requires opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled or unlabeled; rerunning a previous-base run retains its old payload. The context is not yet required; the owner adds it to the ruleset separately after this lands. Windows validation retains same-repository windows-proof admission and full native producers. Registered offline regressions cover base matching, fail-closed evidence, API pagination, every subscribed event and draft state, static naming, trusted checkout, branch-filter parity, pinned concurrency and read-only permissions. Hosted check publication remains pending qualification.",
       "status": "covered",
       "evidence": [
         {
@@ -5903,6 +5903,38 @@
       ]
     },
     {
+      "id": "render.session-render-admission",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Normal-play activation, native qualification and a separately named measured production limits profile remain outstanding.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarFrozenObservation.SessionRender*",
+          "planned": "native frozen capture and bake refusal regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.SessionRenderAdmitsUnsavedTerrainAndWaterAtTheSameDurableGeneration",
+          "planned": "native explicit session handoff regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.PreviewUseWithCommittedIdentityIsRefusedTransactionally",
+          "planned": "native preview refusal diagnostic regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.TypedAdmissionRefusalsPreserveTargetAndChargesAndExistingNames",
+          "planned": "native typed admission refusal regression execution; owner: rendering"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-volume-memory.md"
+        }
+      ]
+    },
+    {
       "id": "station.architecture",
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",
@@ -7752,24 +7784,24 @@
     {
       "id": "iss.393",
       "source": "issue #393",
-      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-2 selections preserve Ultra visuals for every tier pending owner approval; saved revision-1 values remain readable. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
+      "statement": "Graphics presets persist named selections and their revision. First-launch detection is a pure GPU/CPU description classifier. New revision-3 Low/Medium/High selections apply the approved revision-1 visual table; Ultra retains revision 2 and identical values and saved bytes. Saved revision-1 and revision-2 values and overrides remain intact until explicit reselection. Independent vsync and frame-cap choices remain in user.video and are included in resolved graphics. Settings UI and persistence regressions are registered; native execution and visual qualification remain pending.",
       "status": "needs-native-run",
       "evidence": [
         {
           "kind": "ctest",
-          "ref": "GraphicsPresets.NewSelectionsPreserveUltraAndIndependentFramePacingPendingApproval"
+          "ref": "GraphicsPresets.NewSelectionsApplyApprovedVisualsAndPreserveIndependentFramePacing"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsPresets.SavedRevisionOneRetainsItsVisualsUntilExplicitReselection"
+          "ref": "GraphicsPresets.SavedRevisionsRetainValuesAndBytesUntilExplicitReselection"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsSettingsState.DetectionIsRepeatableAndPreservesConservativeVisualsForEveryCpuTier"
+          "ref": "GraphicsSettingsState.DetectionKeepsCpuTiersAndAppliesApprovedVisuals"
         },
         {
           "kind": "ctest",
-          "ref": "GraphicsRuntime.NewSelectionsRetainUltraPassValuesPendingVisualApproval"
+          "ref": "GraphicsRuntime.NewSelectionsApplyApprovedPassValues"
         },
         {
           "kind": "ctest",

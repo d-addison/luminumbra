@@ -44,6 +44,7 @@ def artifact():
             'adapter': {'vendor': 'NVIDIA Corporation', 'renderer': QUALIFIED, 'version': '4.5 synthetic fixture'},
             'profile': {'name': 'quality', 'render_scale': 1.0, 'width': 1280, 'height': 720},
             'debug_overrides': {'active': {}, 'declared': {}},
+            'settings': {'effective_render': {'window_mode': 'windowed', 'window_visible': True}},
             'excluded_windows': [{'first_frame': 0, 'last_frame': 1, 'reason': 'warmup'},
                                  {'first_frame': 6, 'last_frame': 6, 'reason': 'report and optional screenshot'}],
             'workload': {'kind': 'fixed_view', 'seed': 424242, 'preset': 'default',
@@ -842,7 +843,7 @@ def workload_artifact(kind, script):
         effective_render=dict(render_scale=1.0, width=1280, height=720, vsync=False,
                               taau=True, ssao_quality=0, cloud_quality=2, fov=45.0,
                               ui_scale=1.0,
-                              window_mode='windowed', volumetric_quality=1))
+                              window_mode='windowed', window_visible=True, volumetric_quality=1))
     systems = {}
     for name, params in contract.render_registry().items():
         systems[name] = dict(enabled=True, params={
@@ -978,6 +979,65 @@ class ScriptedWorkloadTests(unittest.TestCase):
                         capture.validate(data, args(traversal=script))
                 else:
                     self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+
+    def test_window_visibility_evidence_for_both_schemas(self):
+        script = self.scripts['save_load']
+        for schema in contract.SCHEMAS:
+            for mode in ('windowed', 'borderless', 'fullscreen', 'headless'):
+                for visible in (True, False, None, 0, 1, 'true', 'false', [], {}, 'missing'):
+                    data = (workload_artifact('save_load', script)
+                            if schema == contract.WORKLOAD_SCHEMA else artifact())
+                    render = data['settings']['effective_render']
+                    render.update(window_mode=mode, window_visible=visible)
+                    if visible == 'missing':
+                        del render['window_visible']
+                    if visible is False:
+                        override = {'cli:--hidden-window': 'true', 'cli:--window-mode': mode}
+                        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+                        data['settings']['render_overrides'] = dict(override)
+                    if schema == contract.WORKLOAD_SCHEMA:
+                        data['render_identity'] = contract.render_identity(data['settings'])
+                    with self.subTest(schema=schema, mode=mode, visible=visible):
+                        for validate in (lambda: contract.validate(data, QUALIFIED,
+                                                                  traversal=script if schema == contract.WORKLOAD_SCHEMA else None),
+                                         lambda: capture.validate(data, args(traversal=script)
+                                                                  if schema == contract.WORKLOAD_SCHEMA else args())):
+                            if mode == 'headless' and schema == contract.WORKLOAD_SCHEMA:
+                                with self.assertRaisesRegex(ValueError, 'headless'):
+                                    validate()
+                            elif mode == 'headless' or visible is True:
+                                self.assertEqual(validate()['verdict'], 'PASS')
+                            else:
+                                message = 'hidden-window' if visible is False else 'window_visible'
+                                with self.assertRaisesRegex(ValueError, message):
+                                    validate()
+
+    def test_missing_or_malformed_visibility_blocks(self):
+        for schema in contract.SCHEMAS:
+            for settings in (None, [], {}, {'effective_render': None}, {'effective_render': []}, 'missing'):
+                data = artifact()
+                data['schema'] = schema
+                data['settings'] = settings
+                if settings == 'missing':
+                    del data['settings']
+                with self.subTest(schema=schema, settings=settings), self.assertRaisesRegex(ValueError, 'window_visible'):
+                    contract.validate(data, QUALIFIED)
+
+    def test_capture_producer_records_visibility_before_render_identity(self):
+        source = (Path(__file__).resolve().parents[2] /
+                  'src/luminumbra_client/main_client.cpp').read_text(encoding='utf-8')
+        predicate = source.split('const bool hidden_window =', 1)[1].split(';', 1)[0]
+        for condition in ('runtime_boot_recorder.enabled()', 'scenario_config.hidden_window',
+                          'scenario_config.window_mode == WindowMode::Headless'):
+            self.assertIn(condition, predicate)
+        self.assertIn('if (hidden_window) {\n        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);', source)
+        capture_source = source.split('j["schema"] = "luminumbra.render_benchmark.v3";', 1)[1]
+        visibility, remainder = capture_source.split('{"window_visible",', 1)
+        self.assertIn('j["settings"]["effective_render"] =', visibility)
+        self.assertIn('!hidden_window && glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_TRUE', remainder)
+        self.assertIn('j["settings"]["effective_render"].update(', remainder)
+        self.assertLess(remainder.index('glfwGetWindowAttrib'),
+                        remainder.index('Measurement::render_identity(j["settings"])'))
 
     def test_reload_waits_for_all_streaming_lanes(self):
         script = self.scripts['save_load']

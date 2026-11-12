@@ -1,8 +1,11 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "core/JobSystem.h"
 #include "luminumbra_client/rendering/FarVolumeBuildQueue.h"
 #include "luminumbra_client/rendering/FarVolumeHandoff.h"
 #include "luminumbra_client/rendering/FarVolumeResidency.h"
 #include "luminumbra_client/rendering/FarVolumeUpload.h"
+#include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldOwnership.h"
 #include "luminumbra_client/rendering/FarWorldWaterMesh.h"
 #include "world/Chunk.h"
@@ -15,6 +18,7 @@
 #include "world/FarVolumeTierMemory.h"
 #include "world/FarVolumeTile.h"
 #include "world/FarWantedSet.h"
+#include "world/WorldStreamingState.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,6 +27,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <gtest/gtest.h>
 #include <latch>
@@ -35,6 +40,7 @@
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -787,7 +793,8 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
              bool wet = false,
              FarFrozenUse use = FarFrozenUse::Committed,
              FarCaveMode caves = FarCaveMode::BandLimited,
-             FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
+             FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat,
+             float water_height = 0) {
     auto wanted = Wanted(key);
     wanted.identity.cave_policy = static_cast<std::uint8_t>(caves);
     wanted.identity.bake_generation = wanted.identity.span_generation = generation;
@@ -813,8 +820,8 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
     source.committed = [](std::uint8_t, const FarVolumePosition&) {
         return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Absent, {}};
     };
-    source.water = [wet](std::int64_t, std::int64_t) {
-        return FarFrozenWaterSample{wet, 0};
+    source.water = [wet, water_height](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{wet, water_height};
     };
     FarVolumeRequest request;
     EXPECT_TRUE(ResolveFarVolumeCoverage(wanted.intent,
@@ -825,10 +832,11 @@ HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
     std::shared_ptr<const FarFrozenObservation> image;
     const auto error = CaptureFarVolumeObservation(
         request, source, {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024}, pool, image);
-    if (failure)
+    if (failure) {
         *failure = error;
-    else
+    } else {
         EXPECT_EQ(error, FarFrozenCaptureError::None);
+    }
     if (!image)
         return {};
     wanted.identity.content_hash = image->content_identity();
@@ -1072,6 +1080,7 @@ TEST(FarVolumeHandoff, PreviewUseWithCommittedIdentityIsRefusedTransactionally) 
         }
         const auto before = owner.Memory();
         EXPECT_FALSE(owner.StageTarget(HandoffManifest(2, preview)));
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::ImmutableAuthorityUnavailable);
         EXPECT_EQ(owner.State().target_serial, phase > 0 ? 1u : 0u);
         EXPECT_EQ(owner.State().serving_serial, phase == 2 ? 1u : 0u);
         const auto after = owner.Memory();
@@ -1099,6 +1108,548 @@ TEST(FarVolumeHandoff, PreviewUseWithCommittedIdentityIsRefusedTransactionally) 
         EXPECT_EQ(owner.State().serving_serial, 2u);
         EXPECT_EQ(calls, 0u);
     }
+}
+
+class FarSessionPublicationTest : public testing::Test {
+protected:
+    using Producer = FarWorldAuthorityProducer;
+    using Save = Persistence::WorldSaveService;
+    std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("session_handoff_");
+    Producer producer{{512, 4u * 1024u * 1024u, 300'000}};
+    std::unique_ptr<Systems::SHIELD_WorldSystem> world;
+    Producer::FrozenPolicy policy;
+    FarFrozenCaptureLimits capture_limits{1, 100'000, 20'000'000, 200'000, 64u * 1024u * 1024u};
+    void SetUp() override {
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.caves_enabled = false;
+        params.base_amplitude = params.peaks_amplitude = 0;
+        params.continental_spline = {{-1, 0}, {1, 0}};
+        world = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+        policy = {WorldFarVolumeIdentity(
+                      *world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4),
+                  FarCaveMode::BandLimited,
+                  FarVolumeNumericProfile::RawFloat,
+                  4};
+        WorldStreamingState disk;
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        const Save::AuthorityReadLimits reads{
+            512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.configure_capture({reads, 4}));
+        const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_NE(producer.capture(), nullptr);
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+    FarSessionHandoffTile Tile(std::int64_t x) const {
+        auto wanted = Wanted({1, x, 0});
+        wanted.intent.extra_span = FarVolumeCoverageSpan{SEA_LEVEL, SEA_LEVEL};
+        return {wanted, {{1, x, 0}, {-256, 16}, policy.pristine_identity}};
+    }
+    FarSessionHandoffTile Fallback() const {
+        auto wanted = Wanted({5, 0, 0});
+        wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 512};
+        return {wanted, {{5, 0, 0}, {-256, 768}, policy.pristine_identity}};
+    }
+};
+
+TEST_F(FarSessionPublicationTest, ElevatedShorelineKeepsDryBedsThroughAdmissionAndMesh) {
+    auto params = world->get_params();
+    params.height_offset = 512;
+    world->set_params(params);
+    policy.pristine_identity =
+        WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, policy.water_resolution);
+    auto chunk = std::make_shared<Chunk>(IVec3{0, 32, 0});
+    chunk->set_water_authority();
+    chunk->set_state(ChunkState::Idle);
+    chunk->current_water_resolution.store(4);
+    chunk->water_bed_mm.assign(16, 512'000);
+    chunk->water_depth_mm.assign(16, 0);
+    chunk->water_depth_mm[0] = 1000;
+    producer.changes()->membership(chunk, false, true);
+    producer.pump_capture();
+    producer.pump_capture();
+    auto wanted = Wanted({1, 0, 0});
+    const FarVolumeRequest request{{1, 0, 0}, {256, 528}, policy.pristine_identity};
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    const auto pool = std::shared_ptr<FarVolumeMemoryPool>(memory, memory->Pool(1));
+    std::shared_ptr<const FarFrozenObservation> image;
+    ASSERT_TRUE(producer.compose_frozen(*world, request, policy, capture_limits, pool, image).ok());
+    ASSERT_TRUE(image);
+    EXPECT_EQ(image->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, 513}}));
+    EXPECT_EQ(image->WaterSample(0, 4, 0), (std::optional<FarFrozenWaterSample>{{false, 512}}));
+    EXPECT_EQ(image->WaterSample(0, 100, 100), (std::optional<FarFrozenWaterSample>{{false, 512}}));
+    const FarWorldFrozenWaterObservation water(image, {1, 0, 0});
+    const auto bound = water.WaterBound({1, 0, 0});
+    ASSERT_TRUE(bound.has_value());
+    if (!bound) {
+        return;
+    }
+    EXPECT_EQ(bound->min_y, 512);
+    EXPECT_EQ(bound->max_y, 513);
+    FarVolumeRenderMesh terrain;
+    terrain.request = request;
+    terrain.request.field_identity = image->content_identity();
+    terrain.origin_meters = {0, 256, 0};
+    terrain.sampled_max_meters = {512, 528, 512};
+    FarVolumeMemoryLease retained(*pool);
+    FarVolumeRenderMesh mesh;
+    ASSERT_TRUE(BuildFarWorldWaterMesh(terrain,
+                                       water,
+                                       *bound,
+                                       {16641, 16384, 100000, 200000, 4 * 1024 * 1024},
+                                       {pool.get(), &retained, nullptr},
+                                       mesh));
+    ASSERT_FALSE(mesh.vertices.empty());
+    bool dry_corner = false, wet_corner = false;
+    for (const auto& vertex : mesh.vertices) {
+        const auto height = vertex.position.y + float(mesh.origin_meters.y);
+        EXPECT_TRUE(height == 512 || height == 513);
+        dry_corner |= height == 512;
+        wet_corner |= height == 513;
+    }
+    EXPECT_TRUE(dry_corner);
+    EXPECT_TRUE(wet_corner);
+    auto fallback = Fallback();
+    fallback.capture.span = {-256, 768};
+    const std::array tiles{FarSessionHandoffTile{wanted, request}, fallback};
+    JobSystem jobs;
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    ASSERT_TRUE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+}
+
+TEST_F(FarSessionPublicationTest, CompleteManifestUsesSourceSerialAndPerTileFingerprints) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array first{Tile(0), Fallback()};
+    ASSERT_TRUE(
+        owner.StageSessionTarget(producer, *world, 7, first, policy, capture_limits, memory));
+    const auto first_observation = owner.Observe({1, 0, 0});
+    ASSERT_TRUE(first_observation.has_value());
+    if (first_observation.has_value()) {
+        ASSERT_TRUE(first_observation->target.has_value());
+        if (first_observation->target.has_value()) {
+            EXPECT_NE(first_observation->target->identity.content_hash, policy.pristine_identity);
+            EXPECT_EQ(first_observation->target->identity.bake_generation, 0u);
+            EXPECT_EQ(first_observation->target->water_bound,
+                      (std::optional<FarWorldWaterBound>{{true, 0, 0}}));
+        }
+        EXPECT_FALSE(first_observation->target_water_complete);
+        EXPECT_FALSE(first_observation->target_water_known_dry);
+    }
+    EXPECT_EQ(owner.State().target_serial, 1u);
+    EXPECT_EQ(owner.State().serving_serial, 0u);
+    // Repeating the same owned source is idempotent despite fresh composition.
+    EXPECT_TRUE(
+        owner.StageSessionTarget(producer, *world, 7, first, policy, capture_limits, memory));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture()->serial, 2u);
+    const auto bytes = memory->Pool(1)->used();
+    const std::array invalid{Tile(0), Tile(17), Fallback()};
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 7, invalid, policy, capture_limits, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(owner.State().target_serial, 1u);
+    EXPECT_EQ(owner.State().serving_serial, 0u);
+    EXPECT_EQ(memory->Pool(1)->used(), bytes);
+    EXPECT_FALSE(owner.Observe({1, 1, 0}));
+    const std::array replacement{Tile(0), Tile(1), Fallback()};
+    ASSERT_TRUE(
+        owner.StageSessionTarget(producer, *world, 7, replacement, policy, capture_limits, memory));
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    EXPECT_EQ(owner.State().serving_serial, 0u);
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    const auto a = owner.Observe({1, 0, 0}), b = owner.Observe({1, 1, 0});
+    ASSERT_TRUE(a.has_value() && b.has_value());
+    if (a.has_value() && b.has_value()) {
+        ASSERT_TRUE(a->target.has_value() && b->target.has_value());
+        if (a->target.has_value() && b->target.has_value()) {
+            EXPECT_NE(a->target->identity.content_hash, b->target->identity.content_hash);
+            EXPECT_EQ(a->target->identity.world_epoch, 7u);
+            EXPECT_EQ(b->target->identity.bake_generation, 0u);
+        }
+    }
+    owner.CancelAndDrain();
+    jobs.shutdown();
+}
+
+TEST_F(FarSessionPublicationTest, EmptySavedSourceProjectsOceanAndDryLandThroughUpload) {
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const float height : {-1.0f, 0.0f, 16.0f}) {
+        SCOPED_TRACE(height);
+        auto params = world->get_params();
+        params.height_offset = height;
+        world->set_params(params);
+        policy.pristine_identity =
+            WorldFarVolumeIdentity(*world, policy.caves, policy.numeric, policy.water_resolution);
+        EXPECT_EQ(world->GetTerrainHeightAt(0, 0), height);
+        EXPECT_EQ(world->WaterLevelAt(0, 0), SEA_LEVEL);
+        const bool dry = height >= SEA_LEVEL;
+        const float surface = std::max(height, SEA_LEVEL);
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        FarVolumeHandoff owner(jobs, *memory, Limits());
+        std::array tiles{Tile(0), Fallback()};
+        tiles[0].capture.span = {-272, 32};
+        tiles[1].capture.span = {-512, 768};
+        const bool staged_target =
+            owner.StageSessionTarget(producer, *world, 7, tiles, policy, capture_limits, memory);
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+        ASSERT_TRUE(staged_target);
+        const auto staged = owner.Observe({1, 0, 0});
+        ASSERT_TRUE(staged.has_value());
+        if (staged.has_value()) {
+            ASSERT_TRUE(staged->target.has_value());
+            if (staged->target.has_value()) {
+                EXPECT_EQ(staged->target->water_bound,
+                          (std::optional<FarWorldWaterBound>{{dry, surface, surface}}));
+            }
+            EXPECT_FALSE(staged->target_water_complete);
+            EXPECT_FALSE(staged->target_water_known_dry);
+        }
+        std::size_t uploads = 0;
+        const auto backend = Backend(uploads);
+        ASSERT_TRUE(HandoffWait([&] {
+            owner.AdvanceFrame(0, 0, {6, 6, 32ULL * 1024 * 1024}, backend);
+            return IsFarTileCovering(HandoffObserve(owner, {1, 0, 0}).target_coverage);
+        }));
+        const auto uploaded = HandoffObserve(owner, {1, 0, 0});
+        EXPECT_TRUE(uploaded.target_water_complete);
+        EXPECT_EQ(uploaded.target_water_known_dry, dry);
+        EXPECT_EQ(uploaded.target_water_indices, dry ? 0u : 98304u);
+        owner.CancelAndDrain();
+    }
+    jobs.shutdown();
+}
+
+TEST_F(FarSessionPublicationTest, RefusalMatrixPreservesTargetAndClassifiesResources) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array tiles{Tile(0), Fallback()};
+    ASSERT_TRUE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    const auto bytes = memory->Pool(1)->used();
+    const auto check = [&](FarWorldRefusal reason) {
+        EXPECT_EQ(owner.AdmissionRefusal(), reason);
+        EXPECT_EQ(owner.State().target_serial, 1u);
+        EXPECT_EQ(memory->Pool(1)->used(), bytes);
+    };
+    auto invalid_policy = policy;
+    invalid_policy.caves = static_cast<FarCaveMode>(255);
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+    check(FarWorldRefusal::InvalidCavePolicy);
+    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, tiles, policy, {}, memory));
+    check(FarWorldRefusal::MissingLimits);
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 0, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::InvalidRequests);
+    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, {}, policy, capture_limits, memory));
+    check(FarWorldRefusal::InvalidRequests);
+    invalid_policy = policy;
+    invalid_policy.numeric = static_cast<FarVolumeNumericProfile>(255);
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+    check(FarWorldRefusal::InvalidRequests);
+    Producer cold({512, 4u * 1024u * 1024u, 300'000});
+    EXPECT_FALSE(owner.StageSessionTarget(cold, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::ImmutableAuthorityUnavailable);
+    auto other = std::make_shared<FarVolumeTierMemory>(Budgets());
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, other));
+    check(FarWorldRefusal::AdmissionFailed);
+    auto invalid_tile = tiles;
+    invalid_tile[0].capture.key.x = 1;
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, invalid_tile, policy, capture_limits, memory));
+    check(FarWorldRefusal::InvalidRequests);
+    invalid_policy = policy;
+    invalid_policy.water_resolution = 0;
+    EXPECT_FALSE(owner.StageSessionTarget(
+        producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
+    check(FarWorldRefusal::WaterUnavailable);
+    world->set_seed(19);
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::ImmutableAuthorityUnavailable);
+    world->set_seed(1337);
+    auto small = capture_limits;
+    small.max_bytes = 1;
+    EXPECT_FALSE(owner.StageSessionTarget(producer, *world, 1, tiles, policy, small, memory));
+    check(FarWorldRefusal::AdmissionFailed);
+    memory->Pool(1)->RefuseAttemptsFrom(memory->Pool(1)->attempts());
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::AdmissionFailed);
+    Save::AuthorityReadLimits reads{
+        512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.configure_capture({reads, 1}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture_status().error, Producer::Error::DeadlineExceeded);
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::AdmissionFailed);
+    reads.members = 1;
+    ASSERT_TRUE(producer.configure_capture({reads, 4}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture_status().error, Producer::Error::CommittedReadRefused);
+    EXPECT_FALSE(producer.capture_read_error().empty());
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::AdmissionFailed);
+    producer.invalidate_source();
+    EXPECT_FALSE(
+        owner.StageSessionTarget(producer, *world, 1, tiles, policy, capture_limits, memory));
+    check(FarWorldRefusal::ImmutableAuthorityUnavailable);
+}
+
+TEST_F(FarSessionPublicationTest, ServingSerialBridgesSuccessfulTargetAndSurvivesRefusal) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    std::array original{HandoffInput(memory, {5, 0, 0}, 0, false)};
+    original[0].wanted.identity.world_epoch = 7;
+    original[0].wanted.identity.span_generation = 1;
+    const FarHandoffManifest initial{7, 1, 0, policy.caves, policy.numeric, original};
+    ASSERT_TRUE(owner.StageTarget(initial));
+    std::size_t uploads = 0;
+    const auto backend = Backend(uploads);
+    ASSERT_TRUE(HandoffSettle(owner, original, backend));
+    ASSERT_TRUE(owner.TryPromote());
+    ASSERT_EQ(owner.State().serving_serial, 1u);
+    Producer wide({512, 4u * 1024u * 1024u, 300'000});
+    const Save::AuthorityReadLimits reads{
+        512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    std::string error;
+    ASSERT_TRUE(wide.admit_saved_source(root, reads, error)) << error;
+    ASSERT_TRUE(wide.configure_capture({reads, 4}));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    for (unsigned serial = 0; serial < 2; ++serial) {
+        ASSERT_TRUE(wide.request_capture(windows));
+        wide.pump_capture();
+        wide.pump_capture();
+    }
+    ASSERT_NE(wide.capture(), nullptr);
+    ASSERT_EQ(wide.capture()->serial, 2u);
+    auto wanted = Wanted({5, 0, 0});
+    wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 512};
+    const std::array next{
+        FarSessionHandoffTile{wanted, {{5, 0, 0}, {-256, 768}, policy.pristine_identity}}};
+    ASSERT_TRUE(owner.StageSessionTarget(wide, *world, 7, next, policy, capture_limits, memory));
+    EXPECT_EQ(owner.State().serving_serial, 1u);
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    EXPECT_TRUE(owner.State().awaiting_replacement_fallback);
+    const auto bytes = memory->Pool(5)->used();
+    auto invalid = next;
+    invalid[0].capture.span.min_y = -255;
+    EXPECT_FALSE(
+        owner.StageSessionTarget(wide, *world, 7, invalid, policy, capture_limits, memory));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(owner.State().serving_serial, 1u);
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    EXPECT_EQ(memory->Pool(5)->used(), bytes);
+    owner.CancelAndDrain();
+    jobs.shutdown();
+}
+
+TEST(FarVolumeHandoff, SessionRenderAdmitsUnsavedTerrainAndWaterAtTheSameDurableGeneration) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const FarTileKey key{5, 0, 0};
+    const std::array committed{HandoffInput(memory, key, 1, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, committed)));
+    auto session = committed;
+    auto source = FarFrozenCaptureSource{};
+    source.pristine = Authority(committed[0].wanted, false);
+    source.content_identity = source.pristine.field_identity;
+    source.durable = {1, FarEditedImageState::Committed};
+    source.use = FarFrozenUse::SessionRender;
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.live = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Present, {-3.0f, 9}};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{};
+    };
+    source.live_water = [](std::int64_t, std::int64_t) {
+        return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Present, {true, 16.0f}};
+    };
+    const auto region = committed[0].observation->Region(0);
+    ASSERT_TRUE(region);
+    if (!region) {
+        return;
+    }
+    std::shared_ptr<const FarFrozenObservation> image;
+    ASSERT_EQ(CaptureFarFrozenObservation({&*region, 1},
+                                          source,
+                                          {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024},
+                                          committed[0].observation->memory_pool_handle(),
+                                          image),
+              FarFrozenCaptureError::None);
+    auto wanted = session[0].wanted;
+    wanted.identity.content_hash = image->content_identity();
+    const auto input = MakeFarHandoffTileInput(wanted, image);
+    ASSERT_TRUE(input);
+    if (!input) {
+        return;
+    }
+    session[0] = *input;
+    auto manifest = HandoffManifest(2, session);
+    manifest.committed_generation = 1;
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    const auto& diagnostic = std::as_const(owner);
+    EXPECT_EQ(diagnostic.AdmissionRefusal(), FarWorldRefusal::None);
+    EXPECT_EQ(owner.State().committed_generation, 1u);
+    const auto retained = HandoffObserve(owner, key);
+    ASSERT_TRUE(retained.target);
+    if (!retained.target) {
+        return;
+    }
+    EXPECT_EQ(retained.target->identity, wanted.identity);
+    EXPECT_NE(wanted.identity.content_hash, committed[0].wanted.identity.content_hash);
+    EXPECT_EQ(image->Sample(5, {0, 0, 0}), (std::optional<FarVolumeSample>{{-3.0f, 9}}));
+    EXPECT_EQ(image->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, 16.0f}}));
+}
+
+TEST(FarVolumeHandoff, TypedAdmissionRefusalsPreserveTargetAndChargesAndExistingNames) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = Limits();
+    limits.entry_slots.fill(1);
+    FarVolumeHandoff owner(jobs, *memory, limits);
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    const std::array original{HandoffInput(memory, {5, 0, 0}, 1, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    const auto next = HandoffInput(memory, {5, 0, 0}, 2, false);
+    const auto outside_water = HandoffInput(memory,
+                                            {5, 0, 0},
+                                            2,
+                                            false,
+                                            -256,
+                                            64,
+                                            false,
+                                            false,
+                                            nullptr,
+                                            true,
+                                            FarFrozenUse::Committed,
+                                            FarCaveMode::BandLimited,
+                                            FarVolumeNumericProfile::RawFloat,
+                                            1024.0f);
+    const auto other = HandoffInput(memory, {5, 1, 0}, 2, false);
+    auto foreign_memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    const auto foreign = HandoffInput(foreign_memory, {5, 0, 0}, 2, false);
+    const auto check =
+        [&](const FarHandoffManifest& manifest, FarWorldRefusal expected, const char* name) {
+            const auto before = owner.Memory();
+            EXPECT_FALSE(owner.StageTarget(manifest));
+            EXPECT_EQ(std::as_const(owner).AdmissionRefusal(), expected);
+            EXPECT_STREQ(FarWorldRefusalName(owner.AdmissionRefusal()), name);
+            EXPECT_EQ(owner.State().target_serial, 1u);
+            EXPECT_EQ(owner.State().committed_generation, 1u);
+            const auto retained = HandoffObserve(owner, {5, 0, 0});
+            ASSERT_TRUE(retained.target);
+            if (!retained.target) {
+                return;
+            }
+            EXPECT_EQ(retained.target->identity, original[0].wanted.identity);
+            EXPECT_EQ(retained.target->intent, original[0].wanted.intent);
+            const auto after = owner.Memory();
+            for (std::size_t i = 0; i < before.size(); ++i) {
+                EXPECT_EQ(after[i].bytes_cpu, before[i].bytes_cpu);
+                EXPECT_EQ(after[i].bytes_gpu, before[i].bytes_gpu);
+                EXPECT_EQ(after[i].bytes_total, before[i].bytes_total);
+            }
+        };
+    std::array inputs{next};
+    auto manifest = HandoffManifest(2, inputs);
+    manifest.caves = static_cast<FarCaveMode>(255);
+    manifest.world_epoch = 0;
+    check(manifest, FarWorldRefusal::InvalidCavePolicy, "InvalidCavePolicy");
+    manifest = HandoffManifest(2, inputs);
+    manifest.world_epoch = 0;
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    manifest.numeric = static_cast<FarVolumeNumericProfile>(255);
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    manifest.tiles = {};
+    check(manifest, FarWorldRefusal::InvalidRequests, "InvalidRequests");
+    manifest = HandoffManifest(2, inputs);
+    ++inputs[0].wanted.identity.content_hash;
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    manifest.committed_generation = 0;
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    manifest.committed_generation = 3;
+    inputs[0].wanted.water.reset();
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    manifest = HandoffManifest(2, inputs);
+    manifest.caves = FarCaveMode::BoxFiltered;
+    check(manifest, FarWorldRefusal::CavePolicyMismatch, "CavePolicyMismatch");
+    manifest = HandoffManifest(2, inputs);
+    inputs[0].observation.reset();
+    check(
+        manifest, FarWorldRefusal::ImmutableAuthorityUnavailable, "ImmutableAuthorityUnavailable");
+    inputs[0] = next;
+    inputs[0].wanted.water.reset();
+    check(manifest, FarWorldRefusal::WaterUnavailable, "WaterUnavailable");
+    inputs[0] = next;
+    inputs[0].wanted.intent.extra_span = FarVolumeCoverageSpan{64.0f, -256.0f};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0].wanted.intent.extra_span =
+        FarVolumeCoverageSpan{-256.0f, std::numeric_limits<float>::quiet_NaN()};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-1024.0f, 64.0f};
+    check(manifest, FarWorldRefusal::SpanRejected, "SpanRejected");
+    inputs[0] = outside_water;
+    check(manifest, FarWorldRefusal::WaterSpanRefused, "WaterSpanRefused");
+    inputs[0] = foreign;
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    inputs[0] = next;
+    const std::array excess{next, other};
+    manifest.tiles = excess;
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    manifest.tiles = inputs;
+    auto* pool = memory->Pool(5);
+    pool->RefuseAttemptsFrom(pool->attempts());
+    check(manifest, FarWorldRefusal::AdmissionFailed, "AdmissionFailed");
+    pool->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    ASSERT_TRUE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+    manifest.publication_serial = 0;
+    EXPECT_FALSE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
+    owner.CancelAndDrain();
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
 }
 
 TEST(FarVolumeHandoff, NewPublicationCannotRegressCommittedGenerationWithinEpoch) {
@@ -1608,6 +2159,7 @@ TEST(FarVolumeHandoff, DuplicateKeysWithFreshSerialAreTransactional) {
     manifest.committed_generation = 1;
     const auto before = owner.Memory();
     EXPECT_FALSE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
     EXPECT_EQ(owner.State().target_serial, 1u);
     EXPECT_EQ(owner.State().serving_serial, 0u);
     EXPECT_EQ(owner.State().committed_generation, 1u);
@@ -1947,6 +2499,7 @@ TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     const std::array c{HandoffInput(memory, {5, 0, 0}, 3, false)};
     const auto used = memory->Pool(5)->used();
     EXPECT_FALSE(owner.StageTarget(HandoffManifest(3, c)));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
     EXPECT_EQ(owner.State().serving_serial, 2u);
     EXPECT_EQ(owner.State().target_serial, 2u);
     EXPECT_EQ(memory->Pool(5)->used(), used);
@@ -2313,7 +2866,7 @@ FarVolumeResidencyLimits AdmissionLimits(std::size_t count) {
 void CheckAdmissionWork(const FarVolumeAdmissionWork& work, std::size_t count) {
     // A deterministic comparison envelope, not a time or production work limit.
     // Pairwise validation/retirement at 512 keys exceeds this envelope.
-    const auto levels = std::bit_width(count) + 1;
+    const auto levels = static_cast<std::size_t>(std::bit_width(count)) + 1;
     EXPECT_LE(work.key_comparisons, 12 * count * levels);
     EXPECT_LE(work.descriptor_visits, 12 * count);
 }
@@ -2550,7 +3103,8 @@ TEST(FarVolumeHandoff, AdmissionScaleLateDuplicatesAndInvalidSupportLeavePublish
         inputs.back() = inputs.front();
         EXPECT_FALSE(owner.StageTarget(manifest));
         EXPECT_GE(owner.AdmissionWork().key_comparisons, count - 1);
-        EXPECT_LE(owner.AdmissionWork().key_comparisons, 12 * count * (std::bit_width(count) + 1));
+        EXPECT_LE(owner.AdmissionWork().key_comparisons,
+                  12 * count * (static_cast<std::size_t>(std::bit_width(count)) + 1));
         CheckAdmissionWork(owner.AdmissionWork(), 5 * count);
         EXPECT_EQ(owner.State().target_serial, 1u);
         EXPECT_EQ(owner.Memory()[4].bytes_total, used);

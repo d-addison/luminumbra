@@ -19,8 +19,10 @@
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "systems/WaterSystem.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
+#include "world/FarLodStore.h"
 #include "world/GameSession.h"
 #include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
@@ -53,6 +55,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -4777,4 +4780,1830 @@ TEST(WorldSaveService, AbandonedPlantPublicationRestoresBothMembers) {
     EXPECT_EQ(ReadFileBytes(map_path), identity);
     EXPECT_EQ(ReadFileBytes(P::snapshot_index_path(save.path())), index);
     EXPECT_TRUE(WorldSaveService::validate_save(save.path()));
+}
+
+namespace {
+WorldSaveService::AuthorityReadLimits WindowLimits();
+
+std::string SavedWaterFixture(const IVec3& coords, bool encoded = false) {
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk(coords);
+    chunk->set_state(ChunkState::Idle);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(4);
+    chunk->water_depth_mm.assign(16, 1000);
+    chunk->water_bed_mm.assign(16, -100);
+    chunk->water_edge_flux.assign(32, -10);
+    chunk->water_level_data.assign(16, 0.9f);
+    chunk->water_flow_data.assign(16, Vec2(0.1f, -0.2f));
+    chunk->water_sim_terrain_height.assign(16, -0.1f);
+    chunk->mark_water_data_dirty();
+    return encoded ? Luminumbra::Persistence::SerializeChunkRecordPayloadJson(*chunk)
+                   : Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state, true);
+}
+
+std::string MalformedEncodedSavedWaterFixture(const IVec3& coords, int variant) {
+    namespace P = Luminumbra::Persistence;
+    auto payload = nlohmann::json::parse(SavedWaterFixture(coords, true));
+    Chunk chunk(coords);
+    chunk.water_depth_mm.assign(16, 1000);
+    chunk.water_bed_mm.assign(16, -100);
+    chunk.water_edge_flux.assign(32, -10);
+    if (variant == 0) {
+        chunk.water_depth_mm[0] = -1;
+    } else if (variant == 1) {
+        chunk.water_bed_mm.clear();
+    } else if (variant == 2) {
+        chunk.water_edge_flux.pop_back();
+    } else if (variant == 3) {
+        chunk.water_depth_mm.push_back(0);
+    } else if (variant == 5) {
+        chunk.water_depth_mm.clear();
+    } else if (variant == 6) {
+        chunk.water_bed_mm.pop_back();
+    } else if (variant == 7) {
+        chunk.water_depth_mm.resize(15);
+        chunk.water_bed_mm.resize(15);
+        chunk.water_edge_flux.resize(30);
+    } else if (variant == 8) {
+        chunk.water_depth_mm.resize(17);
+        chunk.water_bed_mm.resize(17);
+        chunk.water_edge_flux.resize(34);
+    } else if (variant == 9) {
+        chunk.water_depth_mm.clear();
+        chunk.water_bed_mm.clear();
+    } else if (variant == 10) {
+        chunk.water_level_data.assign(1025, 0.0f);
+    } else if (variant == 11) {
+        chunk.water_flow_data.assign(1025, Vec2(0.0f));
+    } else if (variant == 12) {
+        chunk.water_sim_terrain_height.assign(1025, 0.0f);
+    }
+    const auto arrays = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    for (const char* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
+        payload["chunks"][0][field] = arrays["chunks"][0][field];
+    }
+    if (variant == 4) {
+        payload["chunks"][0].erase("water_bed_mm");
+    }
+    if (variant >= 10) {
+        constexpr std::array mirrors{
+            "water_level_data", "water_flow_data", "water_sim_terrain_height"};
+        const char* field = mirrors[static_cast<std::size_t>(variant - 10)];
+        payload["chunks"][0][field] = arrays["chunks"][0][field];
+    }
+    return payload.dump();
+}
+
+std::string MalformedSavedWaterFixture(const IVec3& coords, int variant) {
+    auto payload = nlohmann::json::parse(SavedWaterFixture(coords));
+    auto& water = payload["chunks"][0];
+    if (variant == 0) {
+        water["water_depth_mm"][0] = -1;
+    }
+    if (variant == 1) {
+        water["water_bed_mm"] = nlohmann::json::array();
+    }
+    if (variant == 2) {
+        water["water_edge_flux"].erase(water["water_edge_flux"].begin());
+    }
+    if (variant == 3) {
+        water["water_flow_data"][0]["x"] = 1e100;
+    }
+    if (variant == 4) {
+        water.erase("water_bed_mm");
+    }
+    return payload.dump();
+}
+
+void WriteWaterRecord(const std::filesystem::path& root,
+                      const IVec3& coords,
+                      const std::string& payload,
+                      Luminumbra::u8 flags = 0) {
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(root, rx, rz),
+        {{Chunk::calculate_id(coords), 0, flags, payload}}));
+}
+
+// Build an internally matching index without admitting the deliberately malformed payload.
+void IndexWaterFixture(const std::filesystem::path& root) {
+    namespace P = Luminumbra::Persistence;
+    P::SnapshotIndex index;
+    index.generation = 1;
+    index.txn_id = 1;
+    for (const int rx : {0, 1}) {
+        const auto raw = ReadFileBytes(WorldSaveService::region_file_path(root, rx, 0));
+        ASSERT_GE(raw.size(), 26u);
+        ASSERT_EQ(static_cast<unsigned char>(raw[6]), 1u);
+        ASSERT_EQ(static_cast<unsigned char>(raw[7]), 0u);
+        // One lod-0 record: omit the file header and the record's lod byte.
+        const auto stream = raw.substr(8, 8) + raw.substr(17);
+        index.members.push_back({.path = "chunks/region/r." + std::to_string(rx) + ".0.lmr",
+                                 .bytes = static_cast<std::uint64_t>(stream.size()),
+                                 .fnv64 = P::fnv1a64_bytes(stream.data(), stream.size()),
+                                 .generation = 1});
+    }
+    // Admission reconciles the control files too; list any the fixture's save wrote.
+    // The paths sort after the region members, keeping the index ordered.
+    for (const char* control : {"chunks/region/world-manifest.json", "world_info.json"}) {
+        if (!std::filesystem::exists(root / control))
+            continue;
+        const auto bytes = ReadFileBytes(root / control);
+        index.members.push_back({.path = control,
+                                 .bytes = static_cast<std::uint64_t>(bytes.size()),
+                                 .fnv64 = P::fnv1a64_bytes(bytes.data(), bytes.size()),
+                                 .generation = 1});
+    }
+    ASSERT_TRUE(WorldSaveService::write_file_durably(P::snapshot_index_path(root),
+                                                     P::encode_snapshot_index(index)));
+}
+
+void ExpectIndexedWaterReadersRefuse(const std::filesystem::path& root,
+                                     const IVec3& coords,
+                                     const std::string& before,
+                                     bool cached,
+                                     const char* diagnostic = "Saved water") {
+    const auto exact_decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    const auto exact = WorldSaveService::read_chunk(root, coords);
+    EXPECT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_EQ(exact.chunk, nullptr);
+    EXPECT_NE(exact.error.find(diagnostic), std::string::npos) << exact.error;
+    if (cached) {
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), exact_decodes);
+    }
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+    const auto region = WorldSaveService::region_file_path(root, rx, rz);
+    std::vector<std::string> errors;
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks, &errors));
+    EXPECT_TRUE(chunks.empty());
+    EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(
+        region, coords.x, coords.x, coords.z, coords.z, chunks, &errors));
+    EXPECT_TRUE(chunks.empty());
+    WorldSaveService::AuthorityWindowReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+    const auto window = reader.read({coords.x, coords.x, coords.z, coords.z}, WindowLimits());
+    EXPECT_EQ(window.membership, WorldSaveService::AuthorityMembership::Unavailable);
+    EXPECT_TRUE(window.chunks.empty());
+    EXPECT_NE(window.error.find(diagnostic), std::string::npos) << window.error;
+    EXPECT_EQ(ReadFileBytes(region), before);
+}
+void ExpectBadWaterRegionRefused(const std::filesystem::path& root,
+                                 const std::filesystem::path& region,
+                                 const std::string& legacy_bytes) {
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    EXPECT_FALSE(WorldSaveService::read_region_chunks(region, chunks));
+    EXPECT_TRUE(chunks.empty());
+    EXPECT_FALSE(WorldSaveService::read_authoritative_region_chunks(region, 32, 32, 0, 0, chunks));
+    EXPECT_TRUE(chunks.empty());
+    WorldSaveService::AuthorityWindowReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+    const auto result = reader.read({32, 32, 0, 0}, WindowLimits());
+    EXPECT_EQ(result.membership, WorldSaveService::AuthorityMembership::Unavailable);
+    EXPECT_TRUE(result.chunks.empty());
+    EXPECT_NE(result.error.find("Saved water"), std::string::npos) << result.error;
+    EXPECT_EQ(ReadFileBytes(region), legacy_bytes);
+}
+
+struct EncodedWaterFloatCase {
+    std::uint32_t bits;
+    const char* scalar;
+    const char* flow_x;
+    const char* flow_y;
+};
+
+// Little-endian float32 NaN, +Inf and -Inf, alone and in either Vec2 component.
+constexpr std::array kNonFiniteWaterFloats{
+    EncodedWaterFloatCase{0x7fc00000u, "AADAfw==", "AADAfwAAAAA=", "AAAAAAAAwH8="},
+    EncodedWaterFloatCase{0x7f800000u, "AACAfw==", "AACAfwAAAAA=", "AAAAAAAAgH8="},
+    EncodedWaterFloatCase{0xff800000u, "AACA/w==", "AACA/wAAAAA=", "AAAAAAAAgP8="}};
+
+void ExpectWaterDecodeRefused(const std::string& payload) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool strict : {false, true}) {
+        WorldStreamingState decoded;
+        decoded.get_or_create_chunk({0, 0, 0});
+        std::vector<std::string> errors;
+        bool proof = true;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            payload, decoded, errors, {.strict_water = strict, .strict_water_valid = &proof}));
+        EXPECT_FALSE(proof);
+        EXPECT_TRUE(decoded.empty());
+        EXPECT_FALSE(errors.empty());
+    }
+}
+
+void ExpectWaterLoadRefused(const std::filesystem::path& root, const char* diagnostic) {
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::validate_save(root, &errors));
+    EXPECT_NE(JoinErrors(errors).find(diagnostic), std::string::npos) << JoinErrors(errors);
+    WorldStreamingState loaded;
+    loaded.get_or_create_chunk({0, 0, 0});
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(loaded, root, errors));
+    EXPECT_TRUE(loaded.empty());
+    EXPECT_NE(JoinErrors(errors).find(diagnostic), std::string::npos) << JoinErrors(errors);
+    // Full loading consumes the valid record; no malformed record may remain pending.
+    EXPECT_EQ(WorldSaveService::pending_chunk_admission_count_for_testing(), 0u);
+}
+
+void ExpectNoWaterRecordProof(const std::filesystem::path& region) {
+    WorldSaveService::AdmittedChunkRecordAudit audit;
+    ASSERT_TRUE(WorldSaveService::audit_admitted_chunk_records_for_testing(region, audit));
+    EXPECT_EQ(audit.records, 1u);
+    EXPECT_EQ(audit.admitted, 0u);
+    EXPECT_EQ(audit.mismatched, 0u);
+}
+
+void CheckNonFiniteWaterReaders(const std::string& payload,
+                                const char* diagnostic,
+                                bool warm,
+                                Luminumbra::u8 flags) {
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    const TempSaveDir save("encoded_water_float_refusal");
+    ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), good, SavedWaterFixture(good, true)));
+    ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), bad, payload, flags));
+    const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+    const auto before = ReadFileBytes(region);
+    const WorldSaveService::WorldReadScope reads;
+    if (warm) {
+        ASSERT_NO_FATAL_FAILURE(ExpectWaterLoadRefused(save.path(), diagnostic));
+        ASSERT_NO_FATAL_FAILURE(ExpectNoWaterRecordProof(region));
+    }
+    ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+    ASSERT_NO_FATAL_FAILURE(ExpectWaterLoadRefused(save.path(), diagnostic));
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectIndexedWaterReadersRefuse(save.path(), bad, before, false, diagnostic));
+    Luminumbra::Persistence::MemberDigest digest{};
+    std::string error;
+    EXPECT_FALSE(
+        WorldSaveService::member_digest(save.path(), "chunks/region/r.1.0.lmr", digest, error));
+    EXPECT_NE(error.find(diagnostic), std::string::npos) << error;
+    ASSERT_NO_FATAL_FAILURE(ExpectNoWaterRecordProof(region));
+    EXPECT_EQ(WorldSaveService::pending_chunk_admission_count_for_testing(), 0u);
+    EXPECT_EQ(ReadFileBytes(region), before);
+}
+} // namespace
+
+TEST(WorldSaveService, EncodedWaterFloatBitsNeverAdmitOrRecordPositiveProofs) {
+    for (const char* field : {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+        for (const auto& invalid : kNonFiniteWaterFloats) {
+            for (const bool second_component : {false, true}) {
+                if (second_component && std::string_view(field) != "water_flow_data") {
+                    continue;
+                }
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.bits);
+                SCOPED_TRACE(second_component);
+                auto payload = nlohmann::json::parse(SavedWaterFixture({32, 0, 0}, true));
+                const bool flow = std::string_view(field) == "water_flow_data";
+                payload["chunks"][0][field] = {
+                    {"enc", "le-b64"},
+                    {"type", flow ? "f32x2" : "f32"},
+                    {"count", 1u},
+                    {"data",
+                     flow ? (second_component ? invalid.flow_y : invalid.flow_x) : invalid.scalar}};
+                const auto bytes = payload.dump();
+                ASSERT_NO_FATAL_FAILURE(ExpectWaterDecodeRefused(bytes));
+                for (const bool warm : {false, true}) {
+                    SCOPED_TRACE(warm);
+                    for (const auto flags : std::array<Luminumbra::u8, 2>{0, 1}) {
+                        SCOPED_TRACE(flags);
+                        ASSERT_NO_FATAL_FAILURE(
+                            CheckNonFiniteWaterReaders(bytes, field, warm, flags));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, EncodedWaterFloatWriterNeverCapturesNonFiniteProofs) {
+    namespace P = Luminumbra::Persistence;
+    for (const char* field : {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+        for (const auto& invalid : kNonFiniteWaterFloats) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(invalid.bits);
+            WorldStreamingState source;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                SavedWaterFixture({32, 0, 0}, true), source, errors));
+            auto chunk = source.find_chunk({32, 0, 0});
+            ASSERT_NE(chunk, nullptr);
+            const float number = std::bit_cast<float>(invalid.bits);
+            if (std::string_view(field) == "water_flow_data") {
+                chunk->water_flow_data.front().y = number;
+            } else if (std::string_view(field) == "water_level_data") {
+                chunk->water_level_data.front() = number;
+            } else {
+                chunk->water_sim_terrain_height.front() = number;
+            }
+            bool proof = true;
+            const auto bytes = P::SerializeChunkRecordPayloadJson(*chunk, &proof);
+            EXPECT_FALSE(proof);
+            EXPECT_TRUE(nlohmann::json::parse(bytes)["chunks"][0][field].is_null());
+            ASSERT_NO_FATAL_FAILURE(ExpectWaterDecodeRefused(bytes));
+            source.get_or_create_chunk({0, 0, 0})->set_state(ChunkState::Idle);
+            const TempSaveDir save("encoded_water_float_writer");
+            ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path(), &errors))
+                << JoinErrors(errors);
+            const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+            ASSERT_NO_FATAL_FAILURE(ExpectNoWaterRecordProof(region));
+            ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+            const auto before = ReadFileBytes(region);
+            const WorldSaveService::WorldReadScope reads;
+            ASSERT_NO_FATAL_FAILURE(ExpectWaterLoadRefused(save.path(), "Saved water"));
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectIndexedWaterReadersRefuse(save.path(), {32, 0, 0}, before, false));
+            ASSERT_NO_FATAL_FAILURE(ExpectNoWaterRecordProof(region));
+        }
+    }
+}
+
+TEST(WorldSaveService, IndexedWaterRefusalCoversEveryReaderAndCachedLegacyAdmission) {
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    for (int variant = 0; variant < 5; ++variant) {
+        SCOPED_TRACE(variant);
+        const TempSaveDir save("strict_water");
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), good, SavedWaterFixture(good)));
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(),
+                                                 bad,
+                                                 MalformedSavedWaterFixture(bad, variant),
+                                                 static_cast<Luminumbra::u8>(variant % 2)));
+        const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+        const auto legacy_bytes = ReadFileBytes(region);
+        const WorldSaveService::WorldReadScope reads;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+        EXPECT_EQ(loaded.size(), 2u);
+        EXPECT_EQ(ReadFileBytes(region), legacy_bytes);
+        ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        errors.clear();
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+        EXPECT_EQ(loaded.size(), 0u);
+        // Full loading materializes the valid first chunk before the later cached refusal.
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
+        EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+        EXPECT_EQ(WorldSaveService::read_chunk(save.path(), bad).status,
+                  WorldSaveService::ChunkReadStatus::Error);
+        ASSERT_NO_FATAL_FAILURE(ExpectBadWaterRegionRefused(save.path(), region, legacy_bytes));
+    }
+}
+
+TEST(WorldSaveService, IndexedEncodedWaterRefusesEveryReaderWithColdAndCachedProofs) {
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    for (const bool warm : {false, true}) {
+        for (int variant = 0; variant < 13; ++variant) {
+            SCOPED_TRACE(warm);
+            SCOPED_TRACE(variant);
+            const TempSaveDir save("encoded_water_refusal");
+            ASSERT_NO_FATAL_FAILURE(
+                WriteWaterRecord(save.path(), good, SavedWaterFixture(good, true)));
+            auto malformed = nlohmann::json::parse(MalformedEncodedSavedWaterFixture(bad, variant));
+            // Distinct payloads keep cold admission independent of earlier cached records.
+            malformed["chunks"][0]["water_state"]["water_mesh_dirty_ticks"] =
+                200 + variant + (warm ? 10 : 0);
+            ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(
+                save.path(), bad, malformed.dump(), static_cast<Luminumbra::u8>(variant % 2)));
+            const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+            const auto before = ReadFileBytes(region);
+            const WorldSaveService::WorldReadScope reads;
+            std::vector<std::string> errors;
+            WorldStreamingState loaded;
+            // Encoded records always require every array, including in compatibility mode.
+            const bool legacy_loadable = variant != 4;
+            if (warm) {
+                EXPECT_EQ(WorldSaveService::validate_save(save.path(), &errors), legacy_loadable);
+                EXPECT_EQ(WorldSaveService{}.load_world(loaded, save.path(), errors),
+                          legacy_loadable);
+                EXPECT_EQ(loaded.size(), legacy_loadable ? 2u : 0u);
+            }
+            ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+            errors.clear();
+            EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+            if (warm && legacy_loadable) {
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+            }
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+            // Only the valid first chunk needs materialization during full loading.
+            if (warm && legacy_loadable) {
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
+            }
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectIndexedWaterReadersRefuse(save.path(), bad, before, warm && legacy_loadable));
+        }
+    }
+}
+
+TEST(WorldSaveService, EncodedWriterCachesTheIntegerWaterProofWithoutDecoding) {
+    namespace P = Luminumbra::Persistence;
+    const IVec3 good{0, 0, 0}, bad{32, 0, 0};
+    for (const int variant : {0, 1, 2, 3, 10, 11, 12}) {
+        SCOPED_TRACE(variant);
+        const TempSaveDir save("encoded_writer_proof");
+        WorldStreamingState source;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            MalformedEncodedSavedWaterFixture(bad, variant), source, errors));
+        source.get_or_create_chunk(good)->set_state(ChunkState::Idle);
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path(), &errors))
+            << JoinErrors(errors);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        ASSERT_NO_FATAL_FAILURE(IndexWaterFixture(save.path()));
+        const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+        const auto before = ReadFileBytes(region);
+        WorldStreamingState loaded;
+        loaded.get_or_create_chunk(good);
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + 1u);
+        EXPECT_EQ(ReadFileBytes(region), before);
+        WorldSaveService::AdmittedChunkRecordAudit audit;
+        ASSERT_TRUE(WorldSaveService::audit_admitted_chunk_records_for_testing(region, audit));
+        EXPECT_EQ(audit.admitted, 1u);
+        EXPECT_EQ(audit.mismatched, 0u);
+    }
+}
+
+TEST(WorldSaveService, IndexedUpgradeRefusesUnloadedMalformedWaterWithoutChangingSavedBytes) {
+    namespace P = Luminumbra::Persistence;
+    const IVec3 bad{32, 0, 0};
+    for (const bool encoded : {false, true}) {
+        SCOPED_TRACE(encoded);
+        for (const bool warm : {false, true}) {
+            for (int variant = 0; variant < (encoded ? 4 : 5); ++variant) {
+                SCOPED_TRACE(warm);
+                SCOPED_TRACE(variant);
+                const TempSaveDir save("water_upgrade_refusal");
+                auto malformed =
+                    nlohmann::json::parse(encoded ? MalformedEncodedSavedWaterFixture(bad, variant)
+                                                  : MalformedSavedWaterFixture(bad, variant));
+                // Distinct bytes keep the cold/warm decode oracle independent of other cases.
+                malformed["chunks"][0]["water_mesh_dirty_ticks"] = 100 + variant + (warm ? 5 : 0);
+                malformed["chunks"][0]["water_state"]["water_mesh_dirty_ticks"] =
+                    100 + variant + (warm ? 5 : 0);
+                ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), bad, malformed.dump()));
+                const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+                const auto before = ReadFileBytes(region);
+                std::vector<std::string> errors;
+                const WorldSaveService::WorldReadScope reads;
+                if (warm) {
+                    ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
+                }
+                const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+                {
+                    P::SaveTransaction transaction(
+                        save.path(), 0, {}, WorldSaveService::member_digest);
+                    ASSERT_TRUE(transaction.begin(&errors));
+                    WorldStreamingState resident;
+                    resident.get_or_create_chunk({0, 0, 0})->set_state(ChunkState::Idle);
+                    ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path(), &errors))
+                        << JoinErrors(errors);
+                    EXPECT_EQ(resident.find_chunk(bad), nullptr);
+                    ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
+                    EXPECT_FALSE(transaction.commit(&errors));
+                    EXPECT_FALSE(std::filesystem::exists(P::snapshot_index_path(save.path())));
+                }
+                EXPECT_NE(JoinErrors(errors).find("Saved water"), std::string::npos)
+                    << JoinErrors(errors);
+                EXPECT_EQ(ReadFileBytes(region), before);
+                for (const auto& entry :
+                     std::filesystem::recursive_directory_iterator(save.path())) {
+                    if (entry.is_regular_file()) {
+                        EXPECT_EQ(entry.path(), region);
+                    }
+                }
+                EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(),
+                          decodes + (warm ? 0u : 1u));
+            }
+        }
+    }
+}
+
+namespace {
+void ExpectSavedWater(const Chunk* actual, const Chunk& expected) {
+    ASSERT_NE(actual, nullptr);
+    EXPECT_EQ(actual->get_coords(), expected.get_coords());
+    EXPECT_TRUE(actual->has_water_authority());
+    EXPECT_TRUE(actual->same_water_state(expected));
+    EXPECT_EQ(actual->water_mesh_dirty_ticks, expected.water_mesh_dirty_ticks);
+}
+
+void CheckIndexedWaterRecord(const std::filesystem::path& root,
+                             const Chunk& expected,
+                             const WorldSaveService::AuthorityWindowReader& reader,
+                             const WorldStreamingState& loaded) {
+    namespace P = Luminumbra::Persistence;
+    std::vector<std::string> errors;
+    const auto coords = expected.get_coords();
+    SCOPED_TRACE(coords.x);
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(loaded.find_chunk(coords).get(), expected));
+    const auto exact = WorldSaveService::read_chunk(root, coords, true);
+    ASSERT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Found) << exact.error;
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(exact.chunk.get(), expected));
+    int rx = 0, rz = 0;
+    WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+    const auto region = WorldSaveService::region_file_path(root, rx, rz);
+    const auto before = ReadFileBytes(region);
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    ASSERT_TRUE(WorldSaveService::read_region_chunks(region, chunks, &errors))
+        << JoinErrors(errors);
+    ASSERT_EQ(chunks.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(chunks.front().get(), expected));
+    ASSERT_TRUE(WorldSaveService::read_authoritative_region_chunks(
+        region, coords.x, coords.x, coords.z, coords.z, chunks, &errors))
+        << JoinErrors(errors);
+    ASSERT_EQ(chunks.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(chunks.front().get(), expected));
+    const auto window = reader.read({coords.x, coords.x, coords.z, coords.z}, WindowLimits());
+    ASSERT_EQ(window.membership, WorldSaveService::AuthorityMembership::Present) << window.error;
+    ASSERT_EQ(window.chunks.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(window.chunks.front().get(), expected));
+    EXPECT_EQ(ReadFileBytes(region), before);
+    WorldStreamingState decoded;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+        P::SerializeChunkRecordPayloadJson(expected), decoded, errors, {.strict_water = true}));
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(decoded.find_chunk(coords).get(), expected));
+    decoded.clear();
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+        P::SerializeChunkAuthoritySnapshotJson(expected), decoded, errors, {.strict_water = true}));
+    ASSERT_NO_FATAL_FAILURE(ExpectSavedWater(decoded.find_chunk(coords).get(), expected));
+    EXPECT_TRUE(errors.empty()) << JoinErrors(errors);
+}
+} // namespace
+
+TEST(WorldSaveService, IndexedUpgradeReopensUnloadedHistoricalWaterWithLegacyDefaults) {
+    namespace P = Luminumbra::Persistence;
+    const IVec3 good{0, 0, 0}, retained{32, 0, 0};
+    for (const int shape : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(shape);
+        const TempSaveDir save("water_missing_flux");
+        auto payload = nlohmann::json::parse(SavedWaterFixture(retained));
+        auto& water = payload["chunks"][0];
+        water.erase("water_edge_flux");
+        if (shape == 4) {
+            water["water_edge_flux"] = nlohmann::json::array();
+        }
+        if (shape == 1 || shape == 3) {
+            water.erase("water_depth_mm");
+            water.erase("water_bed_mm");
+        }
+        if (shape == 3) {
+            water.erase("water_state");
+        }
+        if (shape == 2) {
+            for (const char* field :
+                 {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+                water[field] = nlohmann::json::array();
+            }
+            water["has_water_sim"] = false;
+            water["water_state"]["has_water_sim"] = false;
+            water["current_water_resolution"] = 0;
+            water["water_state"]["current_water_resolution"] = 0;
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), good, SavedWaterFixture(good)));
+        ASSERT_NO_FATAL_FAILURE(WriteWaterRecord(save.path(), retained, payload.dump()));
+        const auto region = WorldSaveService::region_file_path(save.path(), 1, 0);
+        const auto before = ReadFileBytes(region);
+        WorldStreamingState expected;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(payload.dump(), expected, errors));
+        const auto chunk = expected.find_chunk(retained);
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->water_edge_flux,
+                  std::vector<std::int32_t>(shape == 1 || shape == 3 || shape == 4 ? 0u : 32u, 0));
+        {
+            P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+            ASSERT_TRUE(transaction.begin(&errors));
+            WorldStreamingState resident;
+            resident.get_or_create_chunk({1, 0, 0})->set_state(ChunkState::Idle);
+            ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path(), &errors))
+                << JoinErrors(errors);
+            EXPECT_EQ(resident.find_chunk(retained), nullptr);
+            ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(save.path(), &errors));
+            ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+        }
+        EXPECT_EQ(ReadFileBytes(region), before);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors))
+            << JoinErrors(errors);
+        WorldSaveService::AuthorityWindowReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        ASSERT_NO_FATAL_FAILURE(CheckIndexedWaterRecord(save.path(), *chunk, reader, loaded));
+        EXPECT_EQ(ReadFileBytes(region), before);
+    }
+}
+
+namespace {
+using AuthorityLimits = WorldSaveService::AuthorityReadLimits;
+using AuthorityReader = WorldSaveService::AuthorityWindowReader;
+using AuthorityMembership = WorldSaveService::AuthorityMembership;
+
+AuthorityLimits WindowLimits() {
+    return {.members = 64,
+            .records = 128,
+            .headers = 256,
+            .probes = 256,
+            .compressed_member_bytes = 4u * 1024u * 1024u,
+            .compressed_total_bytes = 16u * 1024u * 1024u,
+            .decoded_member_bytes = 4u * 1024u * 1024u,
+            .decoded_total_bytes = 16u * 1024u * 1024u,
+            .control_bytes = 128u * 1024u};
+}
+
+std::shared_ptr<Chunk>
+AddWindowChunk(WorldStreamingState& state, const IVec3& coords, bool water = false) {
+    auto chunk = state.get_or_create_chunk(coords);
+    chunk->set_state(ChunkState::Ready);
+    constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.resize(lattice);
+    for (std::size_t cell = 0; cell < lattice; ++cell)
+        chunk->sdf_data[cell] = static_cast<float>(cell % 101u) - 49.5f;
+    chunk->mark_voxel_data_dirty();
+    if (water) {
+        chunk->current_water_resolution.store(8, std::memory_order_release);
+        chunk->water_bed_mm.assign(64, 1000);
+        chunk->water_depth_mm.assign(64, 2000);
+        chunk->set_water_authority();
+    }
+    return chunk;
+}
+
+void WriteWindowWorld(const std::filesystem::path& root,
+                      const WorldStreamingState& state,
+                      bool indexed = true) {
+    namespace P = Luminumbra::Persistence;
+    std::vector<std::string> errors;
+    if (!indexed) {
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, root, &errors)) << JoinErrors(errors);
+        return;
+    }
+    P::SaveTransaction transaction(root, 0, {}, WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, root, &errors)) << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::finalize_indexed_envelope(root, &errors)) << JoinErrors(errors);
+    ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+}
+
+void ReplaceWindowBytes(const std::filesystem::path& path, const std::string& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    ASSERT_TRUE(output.good());
+}
+
+void WriteWindowFarTile(const std::filesystem::path& root,
+                        Luminumbra::World::FarLodTier tier,
+                        int rx,
+                        int rz,
+                        Luminumbra::u16 height = 0) {
+    namespace W = Luminumbra::World;
+    W::FarLodTile tile;
+    tile.tier = tier;
+    tile.rx = rx;
+    tile.rz = rz;
+    tile.samples_per_side = W::FarLodSamplesPerSide(tier);
+    tile.height_q.assign(tile.sample_count(), height);
+    tile.material.assign(tile.sample_count(), 0);
+    tile.flags.assign(tile.sample_count(), 0);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(W::FarLodStore(root).save_tile(tile, &errors)) << JoinErrors(errors);
+}
+
+void ExpectWindowUnavailable(const WorldSaveService::AuthorityWindowResult& result) {
+    EXPECT_EQ(result.membership, AuthorityMembership::Unavailable);
+    EXPECT_TRUE(result.chunks.empty());
+    EXPECT_FALSE(result.error.empty());
+}
+} // namespace
+
+TEST(WorldSaveService, EveryWriterWaterShapeSavesAndReopensThroughIndexedAdmission) {
+    namespace P = Luminumbra::Persistence;
+    constexpr std::array shapes{"default",
+                                "dormant",
+                                "promoted_empty",
+                                "float_only",
+                                "complete",
+                                "empty_flux",
+                                "sleeping",
+                                "off",
+                                "retained_grid",
+                                "unowned",
+                                "dormant_flux",
+                                "render_mirrors"};
+    for (const int resolution : {0, 2, 4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        const TempSaveDir save("writer_water_shapes");
+        WorldStreamingState state;
+        // Twelve bounded shapes share one region, so each resolution needs one publication.
+        for (std::size_t shape = 0; shape < shapes.size(); ++shape) {
+            const auto chunk = state.get_or_create_chunk({static_cast<int>(shape), 0, 0});
+            chunk->set_state(ChunkState::Idle);
+            chunk->current_water_resolution.store(resolution);
+            if (shape == 1u || shape == 10u) {
+                chunk->water_depth_mm = {123};
+                if (shape == 10u) {
+                    chunk->water_edge_flux = {2, 3};
+                }
+            } else if (shape >= 2u) {
+                // A retained partial grid belongs to a dormant simulation.
+                chunk->has_water_sim.store(shape != 8u);
+                if (shape == 3u || shape == 9u) {
+                    chunk->water_level_data = {2.0f, 2.25f};
+                    chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
+                    chunk->water_sim_terrain_height = {1.0f, 1.5f};
+                } else if (shape >= 4u) {
+                    const auto cells = shape == 8u || resolution == 0
+                                           ? std::size_t{2}
+                                           : static_cast<std::size_t>(resolution) *
+                                                 static_cast<std::size_t>(resolution);
+                    chunk->water_depth_mm.assign(cells, 123);
+                    chunk->water_bed_mm.assign(cells, -100);
+                    if (shape != 5u) {
+                        chunk->water_edge_flux.assign(2u * cells, -10);
+                    }
+                    if (shape == 6u || shape == 8u) {
+                        chunk->water_level_data.assign(cells, 0.023f);
+                        chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+                        chunk->water_sim_terrain_height.assign(cells, -0.1f);
+                    }
+                    if (shape == 11u) {
+                        chunk->water_level_data = {2.0f, 2.25f};
+                        chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
+                        chunk->water_sim_terrain_height = {1.0f, 1.5f};
+                    }
+                    if (shape == 6u) {
+                        chunk->is_water_sleeping.store(true);
+                    } else if (shape == 7u) {
+                        chunk->current_water_resolution.store(resolution == 0 ? 2 : resolution);
+                        Luminumbra::Systems::WaterSystem water(nullptr, nullptr);
+                        ASSERT_TRUE(water.ResizeSimulationGrid(
+                            *chunk, Luminumbra::Systems::WaterDetailLevel::Off));
+                    }
+                }
+            }
+            if (shape != 9u) {
+                chunk->set_water_authority();
+                chunk->mark_water_state_dirty();
+            }
+            bool valid = false;
+            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk, &valid);
+            EXPECT_TRUE(valid) << shapes[shape];
+            for (const auto& bytes : {encoded, P::SerializeChunkAuthoritySnapshotJson(*chunk)}) {
+                WorldStreamingState decoded;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                    bytes, decoded, errors, {.strict_water = true}))
+                    << shapes[shape] << JoinErrors(errors);
+                const auto restored = decoded.find_chunk(chunk->get_coords());
+                ASSERT_NE(restored, nullptr);
+                EXPECT_TRUE(restored->same_water_state(*chunk)) << shapes[shape];
+            }
+        }
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path(), &errors)) << JoinErrors(errors);
+        WorldStreamingState loaded;
+        ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors))
+            << JoinErrors(errors);
+        ASSERT_EQ(loaded.size(), shapes.size());
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto window = reader.read({0, 11, 0, 0}, WindowLimits());
+        ASSERT_EQ(window.membership, AuthorityMembership::Present) << window.error;
+        ASSERT_EQ(window.chunks.size(), shapes.size() - 1u);
+        for (std::size_t shape = 0; shape < shapes.size(); ++shape) {
+            SCOPED_TRACE(shapes[shape]);
+            const IVec3 coords{static_cast<int>(shape), 0, 0};
+            const auto expected = state.find_chunk(coords);
+            ASSERT_NE(expected, nullptr);
+            const auto restored = loaded.find_chunk(coords);
+            ASSERT_NE(restored, nullptr);
+            EXPECT_TRUE(restored->same_water_state(*expected));
+            const auto exact = WorldSaveService::read_chunk(save.path(), coords, true);
+            ASSERT_EQ(exact.status, WorldSaveService::ChunkReadStatus::Found) << exact.error;
+            ASSERT_NE(exact.chunk, nullptr);
+            EXPECT_TRUE(exact.chunk->same_water_state(*expected));
+            const auto found = std::find_if(
+                window.chunks.begin(), window.chunks.end(), [&coords](const auto& chunk) {
+                    return chunk->get_coords() == coords;
+                });
+            if (shape == 9u) {
+                EXPECT_EQ(found, window.chunks.end());
+            } else {
+                ASSERT_NE(found, window.chunks.end());
+                EXPECT_TRUE((*found)->same_water_state(*expected));
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowOwnsDiskOnlyTerrainWaterAndBoundaryContributors) {
+    const TempSaveDir save("authority_window_owned");
+    WorldStreamingState state;
+    auto terrain = AddWindowChunk(state, {0, 0, 0});
+    auto boundary = AddWindowChunk(state, {-1, 2, -1}, true);
+    AddWindowChunk(state, {20, 0, 20});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto result = reader.read({}, WindowLimits());
+    ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+    ASSERT_EQ(result.chunks.size(), 2u);
+    EXPECT_GT(result.generation, 0u);
+    EXPECT_GT(result.source_identity, 0u);
+    for (const auto& chunk : result.chunks) {
+        EXPECT_NE(chunk.get(), terrain.get());
+        EXPECT_NE(chunk.get(), boundary.get());
+        EXPECT_EQ(chunk->sdf_data, terrain->sdf_data);
+        if (chunk->get_coords().x == -1) {
+            EXPECT_TRUE(chunk->has_water_authority());
+            EXPECT_EQ(chunk->water_depth_mm, boundary->water_depth_mm);
+        }
+    }
+    terrain->sdf_data.front() = 999.0f;
+    EXPECT_NE(result.chunks.front()->sdf_data.front(), 999.0f);
+    EXPECT_TRUE(std::is_sorted(
+        result.chunks.begin(), result.chunks.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs->get_id() < rhs->get_id();
+        }));
+    EXPECT_TRUE(WorldSaveService::remove_file_and_staging(
+        WorldSaveService::region_file_path(save.path(), 0, 0)));
+    EXPECT_FALSE(result.chunks.front()->sdf_data.empty());
+}
+
+TEST(WorldSaveService, AuthorityWindowCompleteEmptyInventoryProvesAbsence) {
+    const TempSaveDir save("authority_window_empty");
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto result = reader.read({}, WindowLimits());
+    EXPECT_EQ(result.membership, AuthorityMembership::ProvenAbsent) << result.error;
+    EXPECT_TRUE(result.error.empty());
+    EXPECT_TRUE(result.chunks.empty());
+    ASSERT_EQ(result.members.size(), 4u);
+    for (const auto& member : result.members) {
+        EXPECT_EQ(member.membership, AuthorityMembership::ProvenAbsent);
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesMissingExpectedMemberAndRecord) {
+    for (const bool remove_member : {false, true}) {
+        const TempSaveDir save("authority_window_missing");
+        WorldStreamingState state;
+        AddWindowChunk(state, {0, 0, 0});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
+        if (remove_member) {
+            ASSERT_TRUE(std::filesystem::remove(path));
+        } else {
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, std::string("LMR1\2\0\0\0", 8)));
+        }
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmissionRefusesMissingMemberOutsideWindow) {
+    namespace P = Luminumbra::Persistence;
+    for (const int replacement : {0, 1, 2, 3}) {
+        SCOPED_TRACE(replacement);
+        const TempSaveDir save("authority_window_missing_outside");
+        WorldStreamingState state;
+        AddWindowChunk(state, {320, 0, 320});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        if (replacement == 2) {
+            P::SnapshotIndex index;
+            ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+            index.members.push_back({"chunks/region/r.11.10.lmr",
+                                     P::MemberClass::Authoritative,
+                                     false,
+                                     0,
+                                     0,
+                                     index.generation});
+            std::sort(index.members.begin(),
+                      index.members.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                       P::encode_snapshot_index(index)));
+        }
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto original = reader.read({}, WindowLimits());
+        ASSERT_EQ(original.membership, AuthorityMembership::ProvenAbsent) << original.error;
+        const auto path = WorldSaveService::region_file_path(save.path(), 10, 10);
+        const auto bytes = ReadFileBytes(path);
+        ASSERT_TRUE(std::filesystem::remove(path));
+        if (replacement != 0) {
+            // Keep the inventory size unchanged, but replace the indexed path.
+            ASSERT_NO_FATAL_FAILURE(
+                ReplaceWindowBytes(WorldSaveService::region_file_path(save.path(), 11, 10),
+                                   replacement == 3 ? std::string("LMR1\2\0\0\0", 8) : bytes));
+        }
+        AuthorityReader unadmitted;
+        auto refusal = AuthorityReader::AdmissionRefusal::None;
+        EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error, &refusal));
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch);
+        EXPECT_EQ(error, "inconsistent authority region inventory");
+        ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmissionRefusesExtraRegionOutsideWindow) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir original_save("authority_window_inventory_original");
+    WorldStreamingState state;
+    AddWindowChunk(state, {320, 0, 320});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state));
+    const auto bytes =
+        ReadFileBytes(WorldSaveService::region_file_path(original_save.path(), 10, 10));
+    auto unknown_lod = bytes;
+    ASSERT_GT(unknown_lod.size(), 16u);
+    unknown_lod[16] = 3;
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({320, 320, 320, 320}, WindowLimits());
+    ASSERT_EQ(original.membership, AuthorityMembership::Present) << original.error;
+    for (const bool listed_absent : {false, true}) {
+        for (const auto& payload :
+             {bytes, std::string{}, std::string{"LMR1"}, bytes.substr(0, 25), unknown_lod}) {
+            SCOPED_TRACE(::testing::Message() << listed_absent << ":" << payload.size());
+            const TempSaveDir save("authority_window_extra_outside");
+            ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+            if (listed_absent) {
+                P::SnapshotIndex index;
+                ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+                index.members.push_back({"chunks/region/r.10.10.lmr",
+                                         P::MemberClass::Authoritative,
+                                         false,
+                                         0,
+                                         0,
+                                         index.generation});
+                std::sort(index.members.begin(),
+                          index.members.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+                ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                           P::encode_snapshot_index(index)));
+            }
+            AuthorityReader unadmitted;
+            auto refusal = AuthorityReader::AdmissionRefusal::InventoryMismatch;
+            // An absent tombstone and an empty inventory agree before the extra file exists.
+            ASSERT_TRUE(unadmitted.admit(save.path(), WindowLimits(), error, &refusal)) << error;
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::None);
+            EXPECT_EQ(unadmitted.read({}, WindowLimits()).membership,
+                      AuthorityMembership::ProvenAbsent);
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
+                WorldSaveService::region_file_path(save.path(), 10, 10), payload));
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error, &refusal));
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch);
+            EXPECT_EQ(error, "inconsistent authority region inventory");
+            const auto retained = reader.read({320, 320, 320, 320}, WindowLimits());
+            EXPECT_EQ(retained.membership, original.membership) << retained.error;
+            EXPECT_EQ(retained.source_identity, original.source_identity);
+            AuthorityReader refused;
+            EXPECT_FALSE(refused.admit(save.path(), WindowLimits(), error));
+            EXPECT_EQ(error, "inconsistent authority region inventory");
+            ExpectWindowUnavailable(refused.read({}, WindowLimits()));
+            EXPECT_FALSE(refused.admit(save.path(), {}, error, &refusal));
+            EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InvalidSource);
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmitsDerivedOnlyContainersAndTheirCacheRewrites) {
+    namespace P = Luminumbra::Persistence;
+    namespace W = Luminumbra::World;
+    for (const int index_mode : {0, 1, 2}) {
+        SCOPED_TRACE(index_mode);
+        const TempSaveDir save("authority_window_derived_inventory");
+        WorldStreamingState state;
+        AddWindowChunk(state, {0, 0, 0});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, index_mode != 0));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 0, 0));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10));
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F2, 10, 10));
+        if (index_mode == 2) {
+            P::SnapshotIndex index;
+            ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+            index.members.push_back({"chunks/region/r.10.10.lmr",
+                                     P::MemberClass::Authoritative,
+                                     false,
+                                     0,
+                                     0,
+                                     index.generation});
+            std::sort(index.members.begin(),
+                      index.members.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+            ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                       P::encode_snapshot_index(index)));
+        }
+        ASSERT_TRUE(WorldSaveService::validate_save(save.path()));
+        AuthorityReader reader;
+        std::string error;
+        auto refusal = AuthorityReader::AdmissionRefusal::InventoryMismatch;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error, &refusal)) << error;
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::None);
+        EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::Present);
+        const WorldSaveService::AuthorityWindow far_window{320, 320, 320, 320};
+        const auto absent = reader.read(far_window, WindowLimits());
+        ASSERT_EQ(absent.membership, AuthorityMembership::ProvenAbsent) << absent.error;
+        ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10, 1));
+        const auto rewritten = reader.read(far_window, WindowLimits());
+        EXPECT_EQ(rewritten.membership, AuthorityMembership::ProvenAbsent) << rewritten.error;
+        EXPECT_EQ(rewritten.source_identity, absent.source_identity);
+        const auto path = WorldSaveService::region_file_path(save.path(), 10, 10);
+        const auto bytes = ReadFileBytes(path);
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, bytes.substr(0, bytes.size() - 1)));
+        ExpectWindowUnavailable(reader.read(far_window, WindowLimits()));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        ASSERT_TRUE(std::filesystem::remove(path));
+        EXPECT_EQ(reader.read(far_window, WindowLimits()).membership,
+                  AuthorityMembership::ProvenAbsent);
+        // An empty, well-formed container also has no LOD-0 membership.
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, std::string("LMR1\2\0\0\0", 8)));
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        EXPECT_EQ(reader.read(far_window, WindowLimits()).membership,
+                  AuthorityMembership::ProvenAbsent);
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(
+            path, ReadFileBytes(WorldSaveService::region_file_path(save.path(), 0, 0))));
+        ExpectWindowUnavailable(reader.read(far_window, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowDerivedInventoryVerificationChargesReadBudgets) {
+    namespace W = Luminumbra::World;
+    const TempSaveDir save("authority_window_derived_budgets");
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+    ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F1, 10, 10));
+    ASSERT_NO_FATAL_FAILURE(WriteWindowFarTile(save.path(), W::FarLodTier::F2, 10, 10));
+    const auto bytes = ReadFileBytes(WorldSaveService::region_file_path(save.path(), 10, 10));
+    const auto envelope_bytes =
+        ReadFileBytes(WorldSaveService::world_manifest_path(save.path())).size() +
+        ReadFileBytes(Luminumbra::Persistence::snapshot_index_path(save.path())).size();
+    const auto decoded_bytes = 2u * 72u + 4u * (W::FarLodSamplesPerSide(W::FarLodTier::F1) *
+                                                    W::FarLodSamplesPerSide(W::FarLodTier::F1) +
+                                                W::FarLodSamplesPerSide(W::FarLodTier::F2) *
+                                                    W::FarLodSamplesPerSide(W::FarLodTier::F2));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    for (const int limit_kind : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(limit_kind);
+        auto limits = WindowLimits();
+        if (limit_kind == 0)
+            limits.records = 1;
+        else if (limit_kind == 1)
+            limits.headers = 5;
+        else if (limit_kind == 2)
+            limits.compressed_total_bytes = envelope_bytes + bytes.size() - 1;
+        else if (limit_kind == 3)
+            limits.decoded_member_bytes = decoded_bytes - 1;
+        else
+            limits.decoded_total_bytes = envelope_bytes + decoded_bytes - 1;
+        auto refusal = AuthorityReader::AdmissionRefusal::None;
+        EXPECT_FALSE(reader.admit(save.path(), limits, error, &refusal));
+        EXPECT_EQ(refusal, AuthorityReader::AdmissionRefusal::InventoryMismatch) << error;
+        const auto retained = reader.read({}, WindowLimits());
+        EXPECT_EQ(retained.membership, original.membership) << retained.error;
+        EXPECT_EQ(retained.source_identity, original.source_identity);
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesChangedCommitAndInvalidMemberGenerations) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_generation");
+    WorldStreamingState state;
+    auto chunk = AddWindowChunk(state, {0, 0, 0});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    chunk->sdf_data.front() = 321.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+    ASSERT_FALSE(index.members.empty());
+    const auto original = index.members.front().generation;
+    for (const auto generation : {std::uint64_t{0}, index.generation + 1}) {
+        index.members.front().generation = generation;
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                   P::encode_snapshot_index(index)));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
+    }
+    index.members.front().generation = original;
+    ASSERT_NO_FATAL_FAILURE(
+        ReplaceWindowBytes(P::snapshot_index_path(save.path()), P::encode_snapshot_index(index)));
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::Present);
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesMalformedPartialAndUnsupportedContainers) {
+    for (const int damage : {0, 1, 2, 3, 4}) {
+        const TempSaveDir save("authority_window_malformed");
+        WorldStreamingState state;
+        AddWindowChunk(state, {0, 0, 0});
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+        const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
+        auto bytes = ReadFileBytes(path);
+        ASSERT_GT(bytes.size(), 26u);
+        if (damage == 0)
+            bytes.resize(4);
+        else if (damage == 1)
+            bytes.pop_back();
+        else if (damage == 2)
+            bytes[4] = 3;
+        else if (damage == 3)
+            bytes[8 + 8] = 3;
+        else
+            bytes.back() ^= 0x7f;
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, bytes));
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesPartialLatticeAndWaterBeforeReturningAuthority) {
+    for (const int damage : {0, 1, 2, 3, 4}) {
+        const TempSaveDir save("authority_window_partial_truth");
+        WorldStreamingState state;
+        auto chunk = AddWindowChunk(state, {0, 0, 0}, damage >= 2);
+        if (damage == 0)
+            chunk->sdf_data.pop_back();
+        else if (damage == 1)
+            chunk->sdf_data.clear();
+        else if (damage == 2)
+            chunk->water_depth_mm.pop_back();
+        else if (damage == 3)
+            chunk->current_water_resolution.store(3, std::memory_order_release);
+        else
+            chunk->water_depth_mm.front() = -1;
+        // Raw container writing deliberately bypasses the ordinary writer's semantic gate.
+        const WorldSaveService::ContainerRecord record{
+            chunk->get_id(),
+            0,
+            1,
+            Luminumbra::Persistence::SerializeChunkRecordPayloadJson(*chunk)};
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(
+            WorldSaveService::region_file_path(save.path(), 0, 0), {record}));
+        AuthorityReader reader;
+        std::string error;
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowEveryFiniteCapRefusesWithoutDecoding) {
+    const TempSaveDir save("authority_window_caps");
+    WorldStreamingState state;
+    AddWindowChunk(state, {0, 0, 0});
+    AddWindowChunk(state, {20, 0, 20});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const std::array fields{&AuthorityLimits::members,
+                            &AuthorityLimits::records,
+                            &AuthorityLimits::headers,
+                            &AuthorityLimits::probes,
+                            &AuthorityLimits::compressed_member_bytes,
+                            &AuthorityLimits::compressed_total_bytes,
+                            &AuthorityLimits::decoded_member_bytes,
+                            &AuthorityLimits::decoded_total_bytes,
+                            &AuthorityLimits::control_bytes};
+    for (const auto field : fields) {
+        for (const std::uint64_t cap : {std::uint64_t{0}, std::uint64_t{1}}) {
+            auto limits = WindowLimits();
+            limits.*field = cap;
+            if (cap == 0) {
+                EXPECT_FALSE(reader.admit(save.path(), limits, error));
+            }
+            const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+            ExpectWindowUnavailable(reader.read({}, limits));
+            EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        }
+    }
+    EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::Present);
+}
+
+TEST(WorldSaveService, AuthorityWindowLegacyAdmissionPinsGenerationZeroWithoutCreatingIndex) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_legacy");
+    WorldStreamingState state;
+    AddWindowChunk(state, {-32, 0, 0}, true);
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, false));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto result = reader.read({-32, -32, 0, 0}, WindowLimits());
+    ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+    EXPECT_EQ(result.generation, 0u);
+    EXPECT_GT(result.source_identity, 0u);
+    ASSERT_EQ(result.chunks.size(), 1u);
+    EXPECT_TRUE(result.chunks.front()->has_water_authority());
+    EXPECT_FALSE(std::filesystem::exists(P::snapshot_index_path(save.path())));
+    AuthorityReader second;
+    ASSERT_TRUE(second.admit(save.path(), WindowLimits(), error)) << error;
+    EXPECT_NE(second.read({-32, -32, 0, 0}, WindowLimits()).source_identity,
+              result.source_identity);
+    const auto path = WorldSaveService::region_file_path(save.path(), -1, 0);
+    const auto bytes = ReadFileBytes(path);
+    std::filesystem::rename(path, path.parent_path() / "retained-original");
+    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, bytes));
+    ExpectWindowUnavailable(reader.read({-32, -32, 0, 0}, WindowLimits()));
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesNoncanonicalRegionMembersAndPreservesAdmission) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir original_save("authority_window_canonical");
+    WorldStreamingState state;
+    const auto chunk = AddWindowChunk(state, {0, 0, 0}, true);
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    ASSERT_EQ(original.membership, AuthorityMembership::Present) << original.error;
+    ASSERT_EQ(original.chunks.size(), 1u);
+
+    for (const bool indexed : {false, true}) {
+        for (const char* name : {"r.00.0.lmr", "r.0.00.lmr", "r.-0.0.lmr"}) {
+            for (const bool canonical_sibling : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << indexed << ":" << name << ":" << canonical_sibling);
+                const TempSaveDir save("authority_window_noncanonical");
+                ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, indexed));
+                const auto canonical = WorldSaveService::region_file_path(save.path(), 0, 0);
+                const auto alias = canonical.parent_path() / name;
+                ASSERT_TRUE(std::filesystem::copy_file(canonical, alias));
+                if (!canonical_sibling) {
+                    ASSERT_TRUE(std::filesystem::remove(canonical));
+                }
+                if (indexed) {
+                    P::SnapshotIndex index;
+                    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+                    const auto member = std::find_if(
+                        index.members.begin(), index.members.end(), [](const auto& value) {
+                            return value.path == "chunks/region/r.0.0.lmr";
+                        });
+                    ASSERT_NE(member, index.members.end());
+                    auto alias_member = *member;
+                    alias_member.path = std::string("chunks/region/") + name;
+                    ASSERT_TRUE(P::member_path_allowed(alias_member.path));
+                    if (canonical_sibling)
+                        index.members.push_back(alias_member);
+                    else
+                        *member = alias_member;
+                    std::sort(index.members.begin(),
+                              index.members.end(),
+                              [](const auto& lhs, const auto& rhs) { return lhs.path < rhs.path; });
+                    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(P::snapshot_index_path(save.path()),
+                                                               P::encode_snapshot_index(index)));
+                }
+                EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+                EXPECT_EQ(error, "unrecognised region file name");
+                const auto retained = reader.read({}, WindowLimits());
+                EXPECT_EQ(retained.membership, original.membership) << retained.error;
+                EXPECT_EQ(retained.generation, original.generation);
+                EXPECT_EQ(retained.source_identity, original.source_identity);
+                ASSERT_EQ(retained.members.size(), original.members.size());
+                for (std::size_t i = 0; i < retained.members.size(); ++i) {
+                    EXPECT_EQ(retained.members[i].region_x, original.members[i].region_x);
+                    EXPECT_EQ(retained.members[i].region_z, original.members[i].region_z);
+                    EXPECT_EQ(retained.members[i].generation, original.members[i].generation);
+                    EXPECT_EQ(retained.members[i].membership, original.members[i].membership);
+                }
+                ASSERT_EQ(retained.chunks.size(), 1u);
+                EXPECT_EQ(retained.chunks.front()->sdf_data, chunk->sdf_data);
+                EXPECT_EQ(retained.chunks.front()->water_depth_mm, chunk->water_depth_mm);
+                EXPECT_EQ(original.chunks.front()->sdf_data, chunk->sdf_data);
+                EXPECT_EQ(original.chunks.front()->water_depth_mm, chunk->water_depth_mm);
+                AuthorityReader unadmitted;
+                EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error));
+                ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesNoncanonicalIndexStatesAndClasses) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_noncanonical_index");
+    std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
+    for (const char* name : {"r.00.0.lmr", "r.0.00.lmr", "r.2147483648.0.lmr"}) {
+        for (const bool present : {false, true}) {
+            for (const auto cls : {P::MemberClass::Authoritative, P::MemberClass::Derived}) {
+                P::SnapshotIndex index;
+                index.generation = 1;
+                const auto relative = std::string("chunks/region/") + name;
+                ASSERT_TRUE(P::member_path_allowed(relative));
+                index.members.push_back({relative, cls, present, 0, 0, 1});
+                const auto bytes = P::encode_snapshot_index(index);
+                P::SnapshotIndex decoded;
+                std::string error;
+                ASSERT_TRUE(P::decode_snapshot_index(bytes, decoded, error)) << error;
+                ASSERT_NO_FATAL_FAILURE(
+                    ReplaceWindowBytes(P::snapshot_index_path(save.path()), bytes));
+                AuthorityReader reader;
+                EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error)) << relative;
+                EXPECT_EQ(error, "unrecognised region file name") << relative;
+                ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+            }
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesMalformedLegacyRegionNamesBeforeReadingPayloads) {
+    const TempSaveDir save("authority_window_noncanonical_legacy");
+    const auto region_dir = WorldSaveService::region_directory(save.path());
+    std::filesystem::create_directories(region_dir);
+    for (const char* name : {"r.00.0.lmr", "r.+0.0.lmr", "r.0.lmr", "unknown.lmr"}) {
+        for (const int kind : {0, 1, 2}) {
+            const auto path = region_dir / name;
+            if (kind == 2) {
+                std::filesystem::create_directory(path);
+            } else {
+                ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, kind == 0 ? "" : "LMRG"));
+            }
+            AuthorityReader reader;
+            std::string error;
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error)) << name;
+            EXPECT_EQ(error, "unrecognised region file name") << name;
+            ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+            ASSERT_TRUE(std::filesystem::remove(path));
+        }
+    }
+}
+
+namespace {
+void CheckRejectedWindowArtifact(const WorldStreamingState& state,
+                                 bool indexed,
+                                 bool populated,
+                                 const char* name,
+                                 int kind,
+                                 AuthorityReader& reader,
+                                 const WorldSaveService::AuthorityWindowResult& original) {
+    std::string error;
+    const TempSaveDir save("authority_window_rejected_artifact");
+    if (indexed || populated) {
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state, indexed));
+    }
+    AuthorityReader admitted;
+    ASSERT_TRUE(admitted.admit(save.path(), WindowLimits(), error)) << error;
+    const auto before = admitted.read({}, WindowLimits());
+    const auto path = save.path() / name;
+    std::filesystem::create_directories(path.parent_path());
+    if (kind == 2) {
+        ASSERT_TRUE(std::filesystem::create_directory(path));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, kind == 0 ? "" : "unsupported snapshot"));
+    }
+    WorldStreamingState rejected;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save.path(), errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    EXPECT_FALSE(error.empty());
+    const auto retained = reader.read({}, WindowLimits());
+    EXPECT_EQ(retained.membership, original.membership) << retained.error;
+    EXPECT_EQ(retained.source_identity, original.source_identity);
+    EXPECT_EQ(retained.generation, original.generation);
+    AuthorityReader unadmitted;
+    EXPECT_FALSE(unadmitted.admit(save.path(), WindowLimits(), error));
+    ExpectWindowUnavailable(unadmitted.read({}, WindowLimits()));
+    if (std::string_view(name).starts_with("chunks/world-state.json")) {
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_EQ(errors.front(), WorldSaveService::kObsoleteWorldMessage);
+        ExpectWindowUnavailable(admitted.read({}, WindowLimits()));
+    }
+    ASSERT_TRUE(std::filesystem::remove(path));
+    const auto restored = admitted.read({}, WindowLimits());
+    EXPECT_EQ(restored.membership, before.membership) << restored.error;
+    EXPECT_EQ(restored.source_identity, before.source_identity);
+    ASSERT_TRUE(unadmitted.admit(save.path(), WindowLimits(), error)) << error;
+}
+
+#if !defined(_WIN32)
+void CheckWindowObsoleteLinks() {
+    for (const char* name : {"world-state.json", "world-state.json.bak"}) {
+        for (const bool loop : {false, true}) {
+            const TempSaveDir save("authority_window_obsolete_link");
+            AuthorityReader reader;
+            std::string error;
+            ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+            const auto path = save.path() / "chunks" / name;
+            std::filesystem::create_directory(path.parent_path());
+            std::filesystem::create_symlink(loop ? name : "missing-snapshot", path);
+            EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+            ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        }
+    }
+}
+#endif
+
+void CheckWindowInvalidInventoryParents() {
+    for (const char* parent : {"chunks", "chunks/region"}) {
+        const TempSaveDir save("authority_window_uninspectable_inventory");
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto path = save.path() / parent;
+        std::filesystem::create_directories(path.parent_path());
+        ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(path, "not a directory"));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        ASSERT_TRUE(std::filesystem::remove(path));
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    }
+}
+
+void CheckWindowInventoryProbeBudget() {
+    const TempSaveDir empty("authority_window_inventory_probe_budget");
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(empty.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    // Sweep every probe boundary through admission and both read-time envelope checks.
+    for (std::uint64_t probes = 1; probes <= 18; ++probes) {
+        auto limits = WindowLimits();
+        limits.probes = probes;
+        const bool admitted = reader.admit(empty.path(), limits, error);
+        EXPECT_EQ(admitted, probes >= 15) << probes << ":" << error;
+        const auto result = reader.read({}, limits);
+        if (probes < 18) {
+            ExpectWindowUnavailable(result);
+        } else {
+            EXPECT_EQ(result.membership, AuthorityMembership::ProvenAbsent) << result.error;
+        }
+        if (!admitted) {
+            EXPECT_EQ(reader.read({}, WindowLimits()).source_identity, original.source_identity);
+        }
+    }
+}
+} // namespace
+
+TEST(WorldSaveService, AuthorityWindowRefusesLoaderRejectedArtifactsAndPreservesAdmission) {
+    for (const bool indexed : {false, true}) {
+        for (const bool populated : {false, true}) {
+            const TempSaveDir original_save("authority_window_original_inventory");
+            WorldStreamingState state;
+            if (populated) {
+                AddWindowChunk(state, {0, 0, 0});
+            }
+            if (indexed || populated) {
+                ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(original_save.path(), state, indexed));
+            }
+            AuthorityReader reader;
+            std::string error;
+            ASSERT_TRUE(reader.admit(original_save.path(), WindowLimits(), error)) << error;
+            const auto original = reader.read({}, WindowLimits());
+            ASSERT_NE(original.membership, AuthorityMembership::Unavailable) << original.error;
+            for (const char* name : {"chunks/world-state.json",
+                                     "chunks/world-state.json.bak",
+                                     "chunks/unknown.bin",
+                                     "chunks/region/notes.txt",
+                                     "chunks/region/r.00.0.txt",
+                                     "chunks/region/r.00.0.lmr.tmp"}) {
+                for (const int kind : {0, 1, 2}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << indexed << ":" << populated << ":" << name << ":" << kind);
+                    ASSERT_NO_FATAL_FAILURE(CheckRejectedWindowArtifact(
+                        state, indexed, populated, name, kind, reader, original));
+                }
+            }
+        }
+    }
+#if !defined(_WIN32)
+    ASSERT_NO_FATAL_FAILURE(CheckWindowObsoleteLinks());
+#endif
+    ASSERT_NO_FATAL_FAILURE(CheckWindowInvalidInventoryParents());
+    ASSERT_NO_FATAL_FAILURE(CheckWindowInventoryProbeBudget());
+}
+
+TEST(WorldSaveService, AuthorityWindowUnknownIndexStatusRefusesAndPreservesAdmission) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_unknown_index");
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}, false));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto original = reader.read({}, WindowLimits());
+    ASSERT_EQ(original.membership, AuthorityMembership::ProvenAbsent);
+    std::filesystem::create_directory(P::snapshot_index_path(save.path()));
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+    ASSERT_TRUE(std::filesystem::remove(P::snapshot_index_path(save.path())));
+    const auto restored = reader.read({}, WindowLimits());
+    EXPECT_EQ(restored.membership, AuthorityMembership::ProvenAbsent) << restored.error;
+    EXPECT_EQ(restored.source_identity, original.source_identity);
+}
+
+namespace {
+class WindowReplacement {
+public:
+    WindowReplacement() {
+        attempted() = false;
+        replaced() = false;
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(&Observe);
+    }
+    ~WindowReplacement() {
+        Luminumbra::Persistence::detail::set_file_read_observer_for_testing(nullptr);
+    }
+    static bool& attempted() {
+        static bool value = false;
+        return value;
+    }
+    static bool& replaced() {
+        static bool value = false;
+        return value;
+    }
+
+private:
+    static void Observe(const std::filesystem::path& path, bool opening) {
+        if (!opening || attempted() || path.extension() != ".lmr")
+            return;
+        attempted() = true;
+        std::error_code error;
+        std::filesystem::rename(path, path.parent_path() / "original.lmr", error);
+        if (!error) {
+            std::ofstream output(path, std::ios::binary);
+            output << "replacement";
+            output.close();
+            replaced() = output.good();
+        }
+    }
+};
+} // namespace
+
+TEST(WorldSaveService, AuthorityWindowUsesLockedAdmittedHandleAndClosesBeforeReplacement) {
+    const TempSaveDir save("authority_window_handle");
+    WorldStreamingState state;
+    AddWindowChunk(state, {0, 0, 0});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    {
+        const WindowReplacement replacement;
+        const auto result = reader.read({}, WindowLimits());
+        EXPECT_TRUE(WindowReplacement::attempted());
+#if defined(_WIN32)
+        EXPECT_FALSE(WindowReplacement::replaced());
+        EXPECT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+#else
+        EXPECT_TRUE(WindowReplacement::replaced());
+        ExpectWindowUnavailable(result);
+#endif
+    }
+    EXPECT_TRUE(WorldSaveService::remove_file_and_staging(
+        WorldSaveService::region_file_path(save.path(), 0, 0)));
+}
+
+TEST(WorldSaveService, AuthorityWindowRejectsInvalidBoundsAndIgnoresDerivedAuthority) {
+    const TempSaveDir save("authority_window_derived");
+    const WorldSaveService::ContainerRecord far{42, 1, 1, "derived cache"};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(save.path(), 0, 0), {far}));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::ProvenAbsent);
+    for (const auto window :
+         {WorldSaveService::AuthorityWindow{2, 1, 0, 0},
+          WorldSaveService::AuthorityWindow{0, 0, 2, 1},
+          WorldSaveService::AuthorityWindow{std::numeric_limits<int>::min(), 0, 0, 0},
+          WorldSaveService::AuthorityWindow{0, std::numeric_limits<int>::max(), 0, 0},
+          WorldSaveService::AuthorityWindow{-1000000, 1000000, -1000000, 1000000}}) {
+        ExpectWindowUnavailable(reader.read(window, WindowLimits()));
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowContainerBudgetsApplyAfterControlAdmission) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_payload_caps");
+    WorldStreamingState state;
+    const auto first = AddWindowChunk(state, {16, 0, 16});
+    const auto second = AddWindowChunk(state, {20, 0, 20});
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), state));
+    const auto file_bytes =
+        std::filesystem::file_size(WorldSaveService::region_file_path(save.path(), 0, 0));
+    const auto control_bytes =
+        std::filesystem::file_size(P::snapshot_index_path(save.path())) +
+        std::filesystem::file_size(WorldSaveService::world_manifest_path(save.path()));
+    const auto raw_bytes = P::SerializeChunkRecordPayloadJson(*first).size() +
+                           P::SerializeChunkRecordPayloadJson(*second).size();
+    ASSERT_GT(file_bytes, control_bytes);
+    ASSERT_GT(raw_bytes, control_bytes);
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const std::array fields{&AuthorityLimits::records,
+                            &AuthorityLimits::headers,
+                            &AuthorityLimits::compressed_member_bytes,
+                            &AuthorityLimits::compressed_total_bytes,
+                            &AuthorityLimits::decoded_member_bytes,
+                            &AuthorityLimits::decoded_total_bytes};
+    const std::array<std::uint64_t, 6> caps{1,
+                                            5,
+                                            file_bytes - 1,
+                                            control_bytes + file_bytes - 1,
+                                            raw_bytes - 1,
+                                            control_bytes + raw_bytes - 1};
+    for (std::size_t cap = 0; cap < fields.size(); ++cap) {
+        auto limits = WindowLimits();
+        limits.*fields[cap] = caps[cap];
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        const auto result = reader.read({16, 16, 16, 16}, limits);
+        ExpectWindowUnavailable(result);
+        EXPECT_NE(result.error.find("limit"), std::string::npos) << result.error;
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+    }
+    EXPECT_EQ(reader.read({16, 16, 16, 16}, WindowLimits()).membership,
+              AuthorityMembership::Present);
+}
+
+TEST(WorldSaveService, AuthorityWindowRefusesWrongTypeAndUnexpectedAuthority) {
+    for (const bool wrong_type : {false, true}) {
+        const TempSaveDir save("authority_window_inventory");
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+        AuthorityReader reader;
+        std::string error;
+        ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+        const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
+        if (wrong_type) {
+            std::filesystem::create_directory(path);
+        } else {
+            WorldStreamingState state;
+            const auto chunk = AddWindowChunk(state, {0, 0, 0});
+            // Copy a valid member without publishing another committed index.
+            const TempSaveDir other("authority_window_unlisted");
+            ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(other.path(), state, false));
+            std::filesystem::copy_file(WorldSaveService::region_file_path(other.path(), 0, 0),
+                                       path);
+            EXPECT_TRUE(chunk->has_terrain_authority());
+        }
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        EXPECT_FALSE(error.empty());
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowRejectsUncommittedAndMismatchedControlInputs) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_controls");
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(save.path(), {}));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    {
+        P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        transaction.abort(nullptr);
+    }
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto manifest = WorldSaveService::world_manifest_path(save.path());
+    const auto bytes = ReadFileBytes(manifest);
+    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(manifest, bytes + " "));
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    EXPECT_NE(error.find("membership"), std::string::npos) << error;
+    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(manifest, bytes));
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    ASSERT_TRUE(std::filesystem::remove(P::snapshot_index_path(save.path())));
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    EXPECT_NE(error.find("index missing"), std::string::npos) << error;
+}
+
+TEST(WorldSaveService, AuthorityWindowLegacyEmptyMissingAndUnknownInventoryStayDistinct) {
+    const TempSaveDir save("authority_window_legacy_empty");
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::ProvenAbsent);
+    std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
+    const auto index = Luminumbra::Persistence::snapshot_index_path(save.path());
+    ASSERT_NO_FATAL_FAILURE(ReplaceWindowBytes(index, "{"));
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    ASSERT_TRUE(std::filesystem::remove(index));
+    std::filesystem::create_directory(Luminumbra::Persistence::journal_directory(save.path()));
+    EXPECT_FALSE(reader.admit(save.path(), WindowLimits(), error));
+    ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+}
+
+TEST(WorldSaveService, AuthorityWindowPinsRootAndAdmitsExplicitlyDryWater) {
+    const TempSaveDir save("authority_window_root");
+    const auto root = save.path() / "world";
+    std::filesystem::create_directory(root);
+    WorldStreamingState state;
+    const auto chunk = AddWindowChunk(state, {0, 0, 0}, true);
+    chunk->water_depth_mm.assign(64, 0);
+    ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(root, state));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+    const auto result = reader.read({}, WindowLimits());
+    ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+    ASSERT_EQ(result.chunks.size(), 1u);
+    EXPECT_EQ(result.chunks.front()->water_depth_mm, chunk->water_depth_mm);
+    std::filesystem::rename(root, save.path() / "retained");
+    std::filesystem::create_directory(root);
+    ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+}
+
+TEST(WorldSaveService, AuthorityWindowAdmissionMemberCapPrecedesInventoryConversion) {
+    const TempSaveDir save("authority_window_member_cap");
+    WorldStreamingState state;
+    AddWindowChunk(state, {0, 0, 0});
+    AddWindowChunk(state, {32, 0, 0});
+    for (const bool indexed : {false, true}) {
+        const auto root = save.path() / (indexed ? "indexed" : "legacy");
+        std::filesystem::create_directory(root);
+        ASSERT_NO_FATAL_FAILURE(WriteWindowWorld(root, state, indexed));
+        AuthorityReader reader;
+        std::string error;
+        auto limits = WindowLimits();
+        limits.members = 1;
+        EXPECT_FALSE(reader.admit(root, limits, error));
+        EXPECT_NE(error.find("member limit"), std::string::npos) << error;
+        ExpectWindowUnavailable(reader.read({}, WindowLimits()));
+        ASSERT_TRUE(reader.admit(root, WindowLimits(), error)) << error;
+        EXPECT_EQ(reader.read({}, WindowLimits()).membership, AuthorityMembership::Present);
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowMalformedInventoryValuesCannotBypassMemberCap) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("authority_window_malformed_inventory");
+    std::filesystem::create_directories(WorldSaveService::region_directory(save.path()));
+    P::SnapshotIndex index;
+    index.generation = 1;
+    auto document = nlohmann::json::parse(P::encode_snapshot_index(index));
+    auto limits = WindowLimits();
+    limits.members = 1;
+    for (const auto& value :
+         {nlohmann::json(0), nlohmann::json::array(), nlohmann::json::object()}) {
+        document["members"] = nlohmann::json::array({value, value});
+        ASSERT_NO_FATAL_FAILURE(
+            ReplaceWindowBytes(P::snapshot_index_path(save.path()), document.dump()));
+        AuthorityReader reader;
+        std::string error;
+        EXPECT_FALSE(reader.admit(save.path(), limits, error));
+        EXPECT_NE(error.find("member limit"), std::string::npos) << error;
+    }
+}
+
+TEST(WorldSaveService, AuthorityWindowPreservesUnflaggedLegacyWaterWithoutTerrainOwnership) {
+    const TempSaveDir save("authority_window_unflagged_water");
+    WorldStreamingState state;
+    const auto chunk = AddWindowChunk(state, {0, 0, 0}, true);
+    chunk->mark_sdf_generated_current_params();
+    const WorldSaveService::ContainerRecord record{
+        chunk->get_id(), 0, 0, Luminumbra::Persistence::SerializeChunkRecordPayloadJson(*chunk)};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(save.path(), 0, 0), {record}));
+    AuthorityReader reader;
+    std::string error;
+    ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
+    const auto result = reader.read({}, WindowLimits());
+    ASSERT_EQ(result.membership, AuthorityMembership::Present) << result.error;
+    ASSERT_EQ(result.chunks.size(), 1u);
+    EXPECT_EQ(result.generation, 0u);
+    EXPECT_TRUE(result.chunks.front()->has_water_authority());
+    EXPECT_FALSE(result.chunks.front()->has_terrain_authority());
+    EXPECT_EQ(result.chunks.front()->water_bed_mm, chunk->water_bed_mm);
+    EXPECT_EQ(result.chunks.front()->water_depth_mm, chunk->water_depth_mm);
 }

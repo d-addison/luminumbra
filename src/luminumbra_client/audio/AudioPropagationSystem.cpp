@@ -2,21 +2,76 @@
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+#include <string_view>
+#endif
 
 namespace Luminumbra::Client {
+
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+// Supplied only by the regression executable; shipping builds have no hooks.
+void AudioPropagationTestEvent(std::string_view event, size_t worker_count);
+std::chrono::steady_clock::time_point AudioPropagationTestNow();
+unsigned int AudioPropagationTestWorkerCount();
+#endif
+
+namespace {
+std::chrono::steady_clock::time_point CacheNow() {
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+    return AudioPropagationTestNow();
+#else
+    return std::chrono::steady_clock::now();
+#endif
+}
+} // namespace
 
 AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSystem* physicsSystem)
     : m_physicsSystem(physicsSystem) {
     // Initialize worker threads for async computation
-    int num_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
-    for (int i = 0; i < num_threads; ++i) {
-        m_worker_threads.emplace_back(&AudioPropagationSystem::WorkerThreadFunction, this);
-    }
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+    const unsigned int num_threads = AudioPropagationTestWorkerCount();
+#else
+    const unsigned int num_threads = std::max(1U, std::thread::hardware_concurrency() / 2U);
+#endif
+    // Allocate ownership slots before starting any worker.
+    m_worker_threads.reserve(num_threads);
+    try {
+        for (unsigned int i = 0; i < num_threads; ++i) {
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+            m_worker_threads.emplace_back([this] {
+                WorkerThreadFunction();
+                AudioPropagationTestEvent("worker exited", 0);
+            });
+            AudioPropagationTestEvent("worker started", m_worker_threads.size());
+#else
+            m_worker_threads.emplace_back(&AudioPropagationSystem::WorkerThreadFunction, this);
+#endif
+        }
 
-    LUMINUMBRA_CORE_INFO("Audio Propagation System initialized with {} worker threads",
-                         num_threads);
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+        AudioPropagationTestEvent("before logging", m_worker_threads.size());
+#endif
+        LUMINUMBRA_CORE_INFO("Audio Propagation System initialized with {} worker threads",
+                             num_threads);
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(m_task_mutex);
+            m_shutdown = true;
+        }
+        m_task_cv.notify_all();
+        for (auto& thread : m_worker_threads) {
+            if (thread.joinable()) {
+                thread.join();
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+                AudioPropagationTestEvent("worker joined", 0);
+#endif
+            }
+        }
+        throw;
+    }
 }
 
 AudioPropagationSystem::~AudioPropagationSystem() {
@@ -43,12 +98,16 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
 
     AudioPropagationResult result;
 
-    // Check cache first
-    if (ShouldUseCachedResult(source, listener)) {
-        uint64_t hash = m_cache.HashPositions(source, listener);
+    PropagationSettings settings;
+    PropagationCache::Key key;
+    {
         LUMIN_PROFILE_LOCK(
             std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
-        auto it = m_cache.entries.find(hash);
+        m_cache.CleanupOldEntries(CacheNow());
+        settings = m_settings;
+        key = PropagationCache::MakeKey(
+            source, listener, max_distance, max_reflections, m_settings_generation);
+        auto it = m_cache.entries.find(key);
         if (it != m_cache.entries.end()) {
             UpdatePerformanceMetrics(0.1f, true); // Cache hit
             return it->second.result;
@@ -56,13 +115,13 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
     }
 
     // Calculate direct path
-    result.direct_path = CalculateDirectPath(source, listener);
+    result.direct_path = CalculateDirectPath(source, listener, settings);
 
     // Calculate reflection paths if within range
     float distance = glm::distance(source, listener);
     if (distance <= max_distance && max_reflections > 0) {
         result.reflection_paths = CalculateReflectionPaths(
-            source, listener, std::min(max_reflections, m_settings.max_reflection_depth));
+            source, listener, std::min(max_reflections, settings.max_reflection_depth), settings);
     }
 
     // Calculate overall occlusion
@@ -96,16 +155,18 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
         }
     }
 
-    // Cache the result
-    uint64_t hash = m_cache.HashPositions(source, listener);
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+    AudioPropagationTestEvent("before cache publication", 0);
+#endif
+    // An in-flight calculation owns its settings snapshot but cannot repopulate a newer cache.
     {
         LUMIN_PROFILE_LOCK(
             std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
-        PropagationCache::CacheEntry& entry = m_cache.entries[hash];
-        entry.result = result;
-        entry.timestamp = std::chrono::steady_clock::now();
-        entry.source_pos = source;
-        entry.listener_pos = listener;
+        const auto now = CacheNow();
+        m_cache.CleanupOldEntries(now);
+        if (key.settings_generation == m_settings_generation) {
+            m_cache.Store(key, result, now);
+        }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -138,7 +199,8 @@ AudioPropagationSystem::ComputeThunderCue(const glm::vec3& strike_position,
     // setting (343 m/s default).
     ThunderCue cue;
     cue.distance = glm::distance(strike_position, listener);
-    const float c = m_settings.speed_of_sound > 1.0f ? m_settings.speed_of_sound : 343.0f;
+    const auto settings = GetSettings();
+    const float c = settings.speed_of_sound > 1.0f ? settings.speed_of_sound : 343.0f;
     cue.delay_seconds = cue.distance / c;
     // Inverse-ish falloff: distant strikes are quieter (and the low rumble carries),
     // bounded to [0, 1]. ~600 m halves the volume.
@@ -197,13 +259,13 @@ AudioPropagationSystem::ComputeWaterfallRoar(const glm::vec3& crest_position,
     return roar;
 }
 
-AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(const glm::vec3& source,
-                                                                 const glm::vec3& listener) {
+AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(
+    const glm::vec3& source, const glm::vec3& listener, const PropagationSettings& settings) {
     AudioPropagationPath path;
     path.is_direct_path = true;
     path.points = {source, listener};
     path.total_distance = glm::distance(source, listener);
-    path.delay_ms = (path.total_distance / m_settings.speed_of_sound) * 1000.0f;
+    path.delay_ms = (path.total_distance / settings.speed_of_sound) * 1000.0f;
 
     if (m_physicsSystem) {
         auto ray_result = m_physicsSystem->audio_raycast(source, listener);
@@ -223,8 +285,11 @@ AudioPropagationPath AudioPropagationSystem::CalculateDirectPath(const glm::vec3
     return path;
 }
 
-std::vector<AudioPropagationPath> AudioPropagationSystem::CalculateReflectionPaths(
-    const glm::vec3& source, const glm::vec3& listener, int max_bounces) {
+std::vector<AudioPropagationPath>
+AudioPropagationSystem::CalculateReflectionPaths(const glm::vec3& source,
+                                                 const glm::vec3& listener,
+                                                 int max_bounces,
+                                                 const PropagationSettings& settings) {
     std::vector<AudioPropagationPath> paths;
 
     if (!m_physicsSystem)
@@ -264,10 +329,10 @@ std::vector<AudioPropagationPath> AudioPropagationSystem::CalculateReflectionPat
         path.absorption_factor +=
             AudioPropagationUtils::CalculateAirAbsorption(path.total_distance, 1000.0f);
         path.volume_multiplier = std::max(0.01f, 1.0f - path.absorption_factor);
-        path.delay_ms = (path.total_distance / m_settings.speed_of_sound) * 1000.0f;
+        path.delay_ms = (path.total_distance / settings.speed_of_sound) * 1000.0f;
 
         // Skip paths that are too quiet or too late
-        if (path.volume_multiplier > m_settings.min_reflection_energy && path.delay_ms < 500.0f) {
+        if (path.volume_multiplier > settings.min_reflection_energy && path.delay_ms < 500.0f) {
             paths.push_back(path);
         }
     }
@@ -360,40 +425,75 @@ float AudioPropagationSystem::CalculateRT60(float room_volume,
     return 0.161f * room_volume / absorption_area;
 }
 
-uint64_t AudioPropagationSystem::PropagationCache::HashPositions(const glm::vec3& source,
-                                                                 const glm::vec3& listener,
-                                                                 float tolerance) {
-    // Quantize positions to tolerance grid for caching
-    auto quantize = [tolerance](float value) {
-        return static_cast<int>(std::round(value / tolerance));
-    };
-
-    uint64_t hash = 0;
-    hash ^= std::hash<int>{}(quantize(source.x)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-    hash ^= std::hash<int>{}(quantize(source.y)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-    hash ^= std::hash<int>{}(quantize(source.z)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-    hash ^= std::hash<int>{}(quantize(listener.x)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-    hash ^= std::hash<int>{}(quantize(listener.y)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-    hash ^= std::hash<int>{}(quantize(listener.z)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-
-    return hash;
+AudioPropagationSystem::PropagationCache::Key
+AudioPropagationSystem::PropagationCache::MakeKey(const glm::vec3& source,
+                                                  const glm::vec3& listener,
+                                                  float max_distance,
+                                                  int max_reflections,
+                                                  uint64_t generation) {
+    // Exact bit identity avoids quantization overflow and hash collisions reusing other inputs.
+    return {.inputs = {std::bit_cast<uint32_t>(source.x),
+                       std::bit_cast<uint32_t>(source.y),
+                       std::bit_cast<uint32_t>(source.z),
+                       std::bit_cast<uint32_t>(listener.x),
+                       std::bit_cast<uint32_t>(listener.y),
+                       std::bit_cast<uint32_t>(listener.z),
+                       std::bit_cast<uint32_t>(max_distance),
+                       static_cast<uint32_t>(max_reflections)},
+            .settings_generation = generation};
 }
 
-bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
-                                                   const glm::vec3& listener) {
-    uint64_t hash = m_cache.HashPositions(source, listener);
-    LUMIN_PROFILE_LOCK(
-        std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
+size_t AudioPropagationSystem::PropagationCache::KeyHash::operator()(const Key& key) const {
+    // FNV-1a over eight 32-bit inputs followed by the 64-bit generation, low byte first.
+    uint64_t hash = 14695981039346656037ULL;
+    const auto fold = [&hash](uint64_t value, unsigned int bytes) {
+        for (unsigned int byte = 0; byte < bytes; ++byte) {
+            hash = (hash ^ (value & 0xffU)) * 1099511628211ULL;
+            value >>= 8;
+        }
+    };
+    for (const uint32_t input : key.inputs) {
+        fold(input, 4);
+    }
+    fold(key.settings_generation, 8);
+    return static_cast<size_t>(hash);
+}
 
-    auto it = m_cache.entries.find(hash);
-    if (it == m_cache.entries.end())
-        return false;
+void AudioPropagationSystem::PropagationCache::CleanupOldEntries(
+    std::chrono::steady_clock::time_point now) {
+    // Insertion order is also expiry order. Each of at most max_entries nodes is retired once.
+    while (!insertion_order.empty()) {
+        const auto oldest = entries.find(insertion_order.front());
+        if (std::chrono::duration<float>(now - oldest->second.timestamp).count() <
+            max_age_seconds) {
+            break;
+        }
+        entries.erase(oldest);
+        insertion_order.pop_front();
+    }
+}
 
-    // Check if cached result is still valid
-    auto now = std::chrono::steady_clock::now();
-    auto age = std::chrono::duration<float>(now - it->second.timestamp).count();
-
-    return age < m_cache.max_age_seconds;
+void AudioPropagationSystem::PropagationCache::Store(const Key& key,
+                                                     const AudioPropagationResult& result,
+                                                     std::chrono::steady_clock::time_point now) {
+    // Concurrent duplicate calculations retain the first publication and its expiry.
+    if (entries.contains(key)) {
+        return;
+    }
+    insertion_order.push_back(key);
+    try {
+#ifdef LUMINUMBRA_AUDIO_PROPAGATION_TESTING
+        AudioPropagationTestEvent("before cache insertion", 0);
+#endif
+        entries.emplace(key, CacheEntry{.result = result, .timestamp = now});
+    } catch (...) {
+        insertion_order.pop_back();
+        throw;
+    }
+    if (entries.size() > max_entries) {
+        entries.erase(insertion_order.front());
+        insertion_order.pop_front();
+    }
 }
 
 void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms, bool cache_hit) {

@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "nlohmann/json.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -18,8 +20,11 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace Luminumbra;
@@ -52,6 +57,64 @@ auto Snapshot(const Chunk& chunk) {
                            chunk.is_water_state_dirty(),
                            chunk.has_water_authority(),
                            chunk.water_revision());
+}
+
+TEST(RegionalWater, MaximalDirtyTickCounterInvalidatesWithoutOverflow) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const auto policy :
+         {WaterKernels::OverflowPolicy::Refuse, WaterKernels::OverflowPolicy::Saturate}) {
+        for (const int initial_ticks :
+             {std::numeric_limits<int>::max() - 1, std::numeric_limits<int>::max()}) {
+            for (const std::int32_t rain_mm : {0, 1, 2}) {
+                SCOPED_TRACE(::testing::Message() << initial_ticks << " rain=" << rain_mm
+                                                  << " policy=" << static_cast<int>(policy));
+                Chunk chunk({0, 0, 0});
+                FillWater(chunk, 8);
+                chunk.water_mesh_generated.store(true);
+                chunk.water_mesh_dirty_ticks = initial_ticks;
+
+                const auto result =
+                    WaterKernels::StepInterior(chunk, shield, {.rain_mm = rain_mm}, policy);
+
+                ASSERT_TRUE(result.applied);
+                ASSERT_EQ(chunk.water_depth_mm.front(), 1000 + rain_mm);
+                const bool invalidated = rain_mm > 1;
+                EXPECT_EQ(result.water_mesh_invalidated, invalidated);
+                EXPECT_EQ(chunk.water_mesh_generated.load(), !invalidated);
+                EXPECT_EQ(chunk.water_mesh_dirty_ticks, invalidated ? 0 : initial_ticks);
+            }
+        }
+    }
+}
+
+TEST(RegionalWater, DirtyTickCounterPreservesRemeshCadence) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const auto policy :
+         {WaterKernels::OverflowPolicy::Refuse, WaterKernels::OverflowPolicy::Saturate}) {
+        for (int initial_ticks = 0; initial_ticks <= 16; ++initial_ticks) {
+            for (const std::int32_t rain_mm : {0, 1, 2}) {
+                SCOPED_TRACE(::testing::Message() << initial_ticks << " rain=" << rain_mm
+                                                  << " policy=" << static_cast<int>(policy));
+                Chunk chunk({0, 0, 0});
+                FillWater(chunk, 8);
+                chunk.water_mesh_generated.store(true);
+                chunk.water_mesh_dirty_ticks = initial_ticks;
+
+                const auto result =
+                    WaterKernels::StepInterior(chunk, shield, {.rain_mm = rain_mm}, policy);
+
+                ASSERT_TRUE(result.applied);
+                ASSERT_EQ(chunk.water_depth_mm.front(), 1000 + rain_mm);
+                const bool dirty = rain_mm > 1;
+                const bool invalidated = dirty && initial_ticks >= 14;
+                const int expected_ticks =
+                    invalidated ? 0 : initial_ticks + static_cast<int>(dirty);
+                EXPECT_EQ(result.water_mesh_invalidated, invalidated);
+                EXPECT_EQ(chunk.water_mesh_generated.load(), !invalidated);
+                EXPECT_EQ(chunk.water_mesh_dirty_ticks, expected_ticks);
+            }
+        }
+    }
 }
 
 TEST(RegionalWater, InteriorAndSeamsConserveRandomizedSignedCoordinateGrids) {
@@ -302,6 +365,607 @@ TEST(RegionalWater, MalformedGridsAndFacesRefuseWithoutRepairOrPartialTransfer) 
 } // namespace
 
 namespace {
+TEST(RegionalWaterPersistence, StrictWaterRefusesMalformedPresentArraysBeforeInsertion) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState original;
+    auto chunk = original.get_or_create_chunk({-1, 0, 2});
+    FillWater(*chunk, 4);
+    chunk->water_flow_data.assign(16, Vec2(0.1f, -0.2f));
+    chunk->water_sim_terrain_height.assign(16, -0.1f);
+    const auto snapshot =
+        nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(original));
+    const std::vector<std::pair<std::string, nlohmann::json>> changes{
+        {"/water_depth_mm/0", -1},
+        {"/water_depth_mm/0", 2147483648ULL},
+        {"/water_bed_mm/0", -2147483649LL},
+        {"/water_edge_flux/0", 1.5},
+        {"/water_depth_mm", std::vector<int>(15, 0)},
+        {"/water_bed_mm", std::vector<int>(17, 0)},
+        {"/water_edge_flux", std::vector<int>(31, 0)},
+        {"/water_level_data", std::vector<float>(1025, 0.0f)},
+        {"/water_flow_data", nlohmann::json::array({{{"x", 0}, {"y", "invalid"}}})},
+        {"/water_sim_terrain_height", std::vector<float>(1025, 0.0f)},
+        {"/water_level_data/0", 1e100},
+        {"/water_flow_data/0/x", 1e100},
+        {"/water_flow_data/0/y", -1e100},
+        {"/water_sim_terrain_height/0", 1e100},
+        {"/water_level_data/0", nullptr},
+        {"/water_depth_mm", std::vector<int>(1025, 0)},
+        {"/water_edge_flux", std::vector<int>(2049, 0)}};
+    for (const auto& [pointer, replacement] : changes) {
+        SCOPED_TRACE(pointer);
+        auto malformed = snapshot;
+        // A valid first record must also be cleared when a later record fails.
+        malformed["chunks"].push_back(malformed["chunks"][0]);
+        malformed["chunks"][0]["coords"] = {{"x", 0}, {"y", 0}, {"z", 0}};
+        malformed["chunks"][0]["chunk_id"] = Chunk::calculate_id({0, 0, 0});
+        malformed["chunk_count"] = 2;
+        malformed["chunks"][1][nlohmann::json::json_pointer(pointer)] = replacement;
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            malformed.dump(), restored, errors, {.strict_water = true}));
+        EXPECT_EQ(restored.size(), 0u);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+    }
+    for (const char* field : {"water_depth_mm", "water_bed_mm"}) {
+        auto missing = snapshot;
+        missing["chunks"][0].erase(field);
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            missing.dump(), restored, errors, {.strict_water = true}));
+        EXPECT_EQ(restored.size(), 0u);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterAcceptsDormantActiveSleepingOffAndPromotedWriters) {
+    namespace P = Luminumbra::Persistence;
+    for (const int resolution : {0, 2, 4, 8, 16, 32}) {
+        for (int shape = 0; shape < 8; ++shape) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(shape);
+            WorldStreamingState original;
+            const auto chunk = original.get_or_create_chunk({0, 0, 0});
+            chunk->current_water_resolution.store(resolution);
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            if (shape == 1) {
+                // Dormant authority can precede bed, flux, and mirror initialization.
+                chunk->water_depth_mm = {123};
+                chunk->mark_water_data_dirty();
+            } else if (shape == 2) {
+                chunk->water_depth_mm.assign(cells, 123);
+                chunk->water_bed_mm.assign(cells, -100);
+                chunk->water_level_data = {0.023f};
+                chunk->water_flow_data.assign(2, Vec2(0.1f, -0.2f));
+                chunk->water_sim_terrain_height.assign(3, -0.1f);
+            } else if (shape >= 3) {
+                FillWater(*chunk, resolution);
+                chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+                chunk->water_sim_terrain_height.assign(cells, -0.1f);
+                if (shape == 3) {
+                    chunk->water_depth_mm.clear();
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux.clear();
+                } else if (shape == 5) {
+                    chunk->is_water_sleeping.store(true);
+                } else if (shape == 6) {
+                    chunk->mark_water_data_dirty();
+                    chunk->water_level_data.clear();
+                    chunk->water_flow_data.clear();
+                    chunk->water_sim_terrain_height.clear();
+                } else if (shape == 7) {
+                    WaterSystem water(nullptr, nullptr);
+                    ASSERT_TRUE(water.ResizeSimulationGrid(*chunk, WaterDetailLevel::Off));
+                }
+            }
+            const auto encoded = P::SerializeChunkRecordPayloadJson(*chunk);
+            for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                                      P::SerializeChunkAuthoritySnapshotJson(*chunk),
+                                      encoded}) {
+                WorldStreamingState restored;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                    bytes, restored, errors, {.strict_water = true}))
+                    << (errors.empty() ? "" : errors.front());
+                const auto actual = restored.find_chunk({0, 0, 0});
+                ASSERT_NE(actual, nullptr);
+                EXPECT_TRUE(actual->same_water_state(*chunk));
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, WaterObservationKeepsLegacyLoadsPermissiveAndStrictLoadsRefusing) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool active : {false, true}) {
+        for (int fault = 0; fault < 7; ++fault) {
+            SCOPED_TRACE(active);
+            SCOPED_TRACE(fault);
+            WorldStreamingState original;
+            const auto chunk = original.get_or_create_chunk({0, 0, 0});
+            FillWater(*chunk, 4);
+            chunk->has_water_sim.store(active);
+            auto json =
+                nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(original));
+            auto& water = json["chunks"][0];
+            if (fault == 1) {
+                water["water_depth_mm"][0] = -1;
+            } else if (fault == 2) {
+                water["water_edge_flux"].erase(water["water_edge_flux"].begin());
+            } else if (fault == 3) {
+                water.erase("water_depth_mm");
+                water.erase("water_bed_mm");
+                water.erase("water_edge_flux");
+            } else if (fault == 4) {
+                water.erase("water_edge_flux");
+            } else if (fault == 5) {
+                water["water_depth_mm"].push_back(0);
+                water["chunk_id"] = Chunk::calculate_id({1, 0, 0});
+            }
+            const auto bytes = fault == 6 ? std::string("{") : json.dump();
+            const bool loadable = fault < 5;
+            const bool valid = loadable && fault != 1 && fault != 2;
+            bool observed = true;
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                          bytes, restored, errors, {.strict_water_valid = &observed}),
+                      loadable);
+            EXPECT_EQ(observed, valid);
+            errors.clear();
+            EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                          bytes, restored, errors, {.strict_water = true}),
+                      valid);
+            if (!valid) {
+                EXPECT_TRUE(restored.empty());
+                EXPECT_FALSE(errors.empty());
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterPreservesMissingJsonIntegerDefaults) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool missing_pair : {false, true}) {
+        SCOPED_TRACE(missing_pair);
+        WorldStreamingState original;
+        const auto chunk = original.get_or_create_chunk({0, 0, 0});
+        FillWater(*chunk, 4);
+        auto json = nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(original));
+        auto& water = json["chunks"][0];
+        water.erase("water_edge_flux");
+        if (missing_pair) {
+            water.erase("water_depth_mm");
+            water.erase("water_bed_mm");
+        }
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            json.dump(), restored, errors, {.strict_water = true}))
+            << (errors.empty() ? "" : errors.front());
+        const auto actual = restored.find_chunk({0, 0, 0});
+        ASSERT_NE(actual, nullptr);
+        EXPECT_EQ(actual->water_depth_mm,
+                  missing_pair ? std::vector<std::int32_t>{} : chunk->water_depth_mm);
+        EXPECT_EQ(actual->water_bed_mm,
+                  missing_pair ? std::vector<std::int32_t>{} : chunk->water_bed_mm);
+        EXPECT_EQ(actual->water_edge_flux, std::vector<std::int32_t>(missing_pair ? 0u : 32u, 0));
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterAcceptsHistoricalEmptyFluxForBothArrayEncodings) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState original;
+    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+    FillWater(*chunk, 4);
+    chunk->water_edge_flux.clear();
+    for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                              P::SerializeChunkRecordPayloadJson(*chunk)}) {
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(
+            P::LoadWorldStreamingStateSnapshotJson(bytes, restored, errors, {.strict_water = true}))
+            << (errors.empty() ? "" : errors.front());
+        const auto actual = restored.find_chunk({0, 0, 0});
+        ASSERT_NE(actual, nullptr);
+        EXPECT_TRUE(actual->same_water_state(*chunk));
+        EXPECT_TRUE(actual->water_edge_flux.empty());
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterRequiresCompletePopulatedActiveGrid) {
+    namespace P = Luminumbra::Persistence;
+    for (const int resolution : {2, 4, 8, 16, 32}) {
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        for (const auto count : {cells - 1u, cells, cells + 1u}) {
+            for (const bool active : {false, true}) {
+                for (const bool empty_flux : {false, true}) {
+                    SCOPED_TRACE(resolution);
+                    SCOPED_TRACE(count);
+                    SCOPED_TRACE(active);
+                    SCOPED_TRACE(empty_flux);
+                    WorldStreamingState original;
+                    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+                    FillWater(*chunk, resolution);
+                    chunk->has_water_sim.store(active);
+                    chunk->water_depth_mm.assign(count, 123);
+                    chunk->water_bed_mm.assign(count, -100);
+                    chunk->water_edge_flux.assign(empty_flux ? 0u : 2u * count, -10);
+                    chunk->mark_water_data_dirty();
+                    const bool expected = count <= 1024u && (!active || count == cells);
+                    for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                                              P::SerializeChunkAuthoritySnapshotJson(*chunk),
+                                              P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                        bool observed = !expected;
+                        WorldStreamingState restored;
+                        std::vector<std::string> errors;
+                        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                            bytes, restored, errors, {.strict_water_valid = &observed}));
+                        EXPECT_EQ(observed, expected);
+                        EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                                      bytes,
+                                      restored,
+                                      errors,
+                                      {.strict_water = true, .strict_water_valid = &observed}),
+                                  expected);
+                        EXPECT_EQ(observed, expected);
+                        if (expected) {
+                            ASSERT_NE(restored.find_chunk({0, 0, 0}), nullptr);
+                            EXPECT_TRUE(restored.find_chunk({0, 0, 0})->same_water_state(*chunk));
+                            EXPECT_TRUE(errors.empty());
+                        } else {
+                            EXPECT_TRUE(restored.empty());
+                            ASSERT_FALSE(errors.empty());
+                            EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterRequiresExactSizesForEachPopulatedActiveArray) {
+    namespace P = Luminumbra::Persistence;
+    for (const int resolution : {2, 4, 8, 16, 32}) {
+        WorldStreamingState original;
+        const auto chunk = original.get_or_create_chunk({0, 0, 0});
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+        for (const char* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
+            const std::string_view name(field);
+            const auto required = name == "water_edge_flux" ? 2u * cells : cells;
+            for (const auto count : {required - 1u, required, required + 1u}) {
+                SCOPED_TRACE(resolution);
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(count);
+                FillWater(*chunk, resolution);
+                auto& grid = name == "water_depth_mm" ? chunk->water_depth_mm
+                             : name == "water_bed_mm" ? chunk->water_bed_mm
+                                                      : chunk->water_edge_flux;
+                grid.assign(count, 0);
+                for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                                          P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                    WorldStreamingState restored;
+                    std::vector<std::string> errors;
+                    EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                                  bytes, restored, errors, {.strict_water = true}),
+                              count == required);
+                    if (count == required) {
+                        EXPECT_EQ(restored.size(), 1u);
+                        EXPECT_TRUE(errors.empty());
+                    } else {
+                        EXPECT_TRUE(restored.empty());
+                        ASSERT_FALSE(errors.empty());
+                        EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictEncodedWaterRefusesMalformedIntegersAndEnvelopes) {
+    namespace P = Luminumbra::Persistence;
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 4);
+    auto snapshot = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    snapshot["chunks"].push_back(snapshot["chunks"][0]);
+    snapshot["chunks"][1]["coords"] = {{"x", 1}, {"y", 0}, {"z", 0}};
+    snapshot["chunks"][1]["chunk_id"] = Chunk::calculate_id({1, 0, 0});
+    snapshot["chunk_count"] = 2;
+    for (const char* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
+        for (int fault = 0; fault < 17; ++fault) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(fault);
+            auto malformed = snapshot;
+            auto& water = malformed["chunks"][1];
+            auto& array = water[field];
+            if (fault == 0) {
+                water.erase(field);
+            } else if (fault == 1) {
+                array = nullptr;
+            } else if (fault == 2) {
+                array = nlohmann::json::array();
+            } else if (fault == 3) {
+                array.erase("count");
+            } else if (fault == 4) {
+                array["count"] = -1;
+            } else if (fault == 5) {
+                array["count"] = 1.5;
+            } else if (fault == 6) {
+                array["count"] = std::numeric_limits<std::uint64_t>::max();
+            } else if (fault == 7) {
+                array["count"] = 1025u;
+            } else if (fault == 8) {
+                array["type"] = "u32";
+            } else if (fault == 9) {
+                array["type"] = "i64";
+            } else if (fault == 10) {
+                array["enc"] = "unknown";
+            } else if (fault == 11) {
+                array["data"] = false;
+            } else if (fault == 12) {
+                array["data"] = "!" + array["data"].get<std::string>().substr(1);
+            } else if (fault == 13) {
+                array["data"] = array["data"].get<std::string>().substr(1);
+            } else if (fault == 14) {
+                array.erase("data");
+            } else if (fault == 15) {
+                array["extra"] = 0;
+            } else {
+                array["count"] = 0u;
+            }
+            WorldStreamingState restored;
+            restored.get_or_create_chunk({2, 0, 0});
+            std::vector<std::string> errors;
+            bool valid = true;
+            EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                malformed.dump(),
+                restored,
+                errors,
+                {.strict_water = true, .strict_water_valid = &valid}));
+            EXPECT_FALSE(valid);
+            EXPECT_TRUE(restored.empty());
+            ASSERT_FALSE(errors.empty());
+            EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+        }
+    }
+    for (const auto depth : {-1, std::numeric_limits<std::int32_t>::min()}) {
+        FillWater(chunk, 4, depth);
+        auto malformed = snapshot;
+        malformed["chunks"][1]["water_depth_mm"] = nlohmann::json::parse(
+            P::SerializeChunkRecordPayloadJson(chunk))["chunks"][0]["water_depth_mm"];
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        bool valid = true;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            malformed.dump(), restored, errors, {.strict_water_valid = &valid}));
+        EXPECT_FALSE(valid);
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            malformed.dump(), restored, errors, {.strict_water = true}));
+        EXPECT_TRUE(restored.empty());
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictEncodedWaterChecksMirrorCountsBeforeDecodingArrays) {
+    namespace P = Luminumbra::Persistence;
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 4);
+    const auto snapshot = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    for (const char* field : {"water_level_data", "water_flow_data", "water_sim_terrain_height"}) {
+        for (const std::size_t count : {0u, 1u, 1024u}) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(count);
+            chunk.water_level_data.assign(count, 0.1f);
+            chunk.water_flow_data.assign(count, Vec2(0.1f));
+            chunk.water_sim_terrain_height.assign(count, -0.1f);
+            bool valid = false;
+            const auto bytes = P::SerializeChunkRecordPayloadJson(chunk, &valid);
+            EXPECT_TRUE(valid);
+            WorldStreamingState restored;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+                bytes, restored, errors, {.strict_water = true, .strict_water_valid = &valid}))
+                << (errors.empty() ? "" : errors.front());
+            EXPECT_TRUE(valid);
+            ASSERT_NE(restored.find_chunk({0, 0, 0}), nullptr);
+            EXPECT_TRUE(restored.find_chunk({0, 0, 0})->same_water_state(chunk));
+        }
+        for (int fault = 0; fault < 9; ++fault) {
+            SCOPED_TRACE(field);
+            SCOPED_TRACE(fault);
+            auto malformed = snapshot;
+            auto& array = malformed["chunks"][0][field];
+            if (fault == 0) {
+                array["count"] = 1025u;
+            } else if (fault == 1) {
+                array["count"] = std::numeric_limits<std::uint64_t>::max();
+            } else if (fault == 2) {
+                array["count"] = -1;
+            } else if (fault == 3) {
+                array["count"] = 1.5;
+            } else if (fault == 4) {
+                array["count"] = "1025";
+            } else if (fault == 5) {
+                array["count"] = nullptr;
+            } else if (fault == 6) {
+                array.erase("count");
+            } else if (fault == 7) {
+                array = nullptr;
+            } else {
+                malformed["chunks"][0].erase(field);
+            }
+            // The earlier SDF array must never be decoded before water counts are checked.
+            malformed["chunks"][0]["sdf_data"] = nullptr;
+            WorldStreamingState restored;
+            restored.get_or_create_chunk({1, 0, 0});
+            std::vector<std::string> errors;
+            bool valid = true;
+            EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                malformed.dump(),
+                restored,
+                errors,
+                {.strict_water = true, .strict_water_valid = &valid}));
+            EXPECT_FALSE(valid);
+            EXPECT_TRUE(restored.empty());
+            ASSERT_FALSE(errors.empty());
+            EXPECT_NE(errors.front().find(fault < 6 ? "Saved water grid shape refused"
+                                                    : "Saved water structure refused"),
+                      std::string::npos);
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictEncodedWaterRefusesInvalidResolutionAndState) {
+    namespace P = Luminumbra::Persistence;
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 4);
+    const auto snapshot = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(chunk));
+    const std::vector<std::pair<std::string, nlohmann::json>> changes{
+        {"/water_state", nullptr},
+        {"/water_state/has_water_sim", "true"},
+        {"/water_state/current_water_resolution", -1},
+        {"/water_state/current_water_resolution", 1},
+        {"/water_state/current_water_resolution", 3},
+        {"/water_state/current_water_resolution", 33},
+        {"/water_state/current_water_resolution", std::numeric_limits<std::uint64_t>::max()},
+        {"/water_state/current_water_resolution", 4.5},
+        {"/water_state/current_water_resolution", "4"}};
+    for (const auto& [pointer, replacement] : changes) {
+        SCOPED_TRACE(pointer);
+        SCOPED_TRACE(replacement.dump());
+        auto malformed = snapshot;
+        malformed["chunks"][0][nlohmann::json::json_pointer(pointer)] = replacement;
+        WorldStreamingState restored;
+        restored.get_or_create_chunk({1, 0, 0});
+        std::vector<std::string> errors;
+        bool valid = true;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+            malformed.dump(),
+            restored,
+            errors,
+            {.strict_water = true, .strict_water_valid = &valid}));
+        EXPECT_FALSE(valid);
+        EXPECT_TRUE(restored.empty());
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictEncodedWaterPreservesIntegerRangeEndpoints) {
+    namespace P = Luminumbra::Persistence;
+    Chunk chunk({0, 0, 0});
+    FillWater(chunk, 2);
+    constexpr auto minimum = std::numeric_limits<std::int32_t>::min();
+    constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+    chunk.water_depth_mm = {0, maximum, 0, maximum};
+    chunk.water_bed_mm = {minimum, maximum, minimum, maximum};
+    chunk.water_edge_flux = {
+        minimum, maximum, minimum, maximum, minimum, maximum, minimum, maximum};
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    bool valid = false;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+        P::SerializeChunkRecordPayloadJson(chunk),
+        restored,
+        errors,
+        {.strict_water = true, .strict_water_valid = &valid}));
+    EXPECT_TRUE(valid);
+    ASSERT_NE(restored.find_chunk({0, 0, 0}), nullptr);
+    EXPECT_TRUE(restored.find_chunk({0, 0, 0})->same_water_state(chunk));
+}
+
+TEST(RegionalWaterPersistence, StrictWaterReportsMalformedStructuresBeforeInsertion) {
+    namespace P = Luminumbra::Persistence;
+    WorldStreamingState original;
+    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+    FillWater(*chunk, 4);
+    for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                              P::SerializeChunkAuthoritySnapshotJson(*chunk)}) {
+        const auto snapshot = nlohmann::json::parse(bytes);
+        for (const char* field : {"water_state",
+                                  "water_depth_mm",
+                                  "water_bed_mm",
+                                  "water_edge_flux",
+                                  "water_level_data",
+                                  "water_flow_data",
+                                  "water_sim_terrain_height"}) {
+            for (const auto& invalid : {nlohmann::json(nullptr),
+                                        nlohmann::json(false),
+                                        nlohmann::json(1),
+                                        nlohmann::json(1.5),
+                                        nlohmann::json("invalid"),
+                                        nlohmann::json::array(),
+                                        nlohmann::json::object()}) {
+                // Empty flux and render mirrors are legal, independent writer shapes.
+                const std::string_view name(field);
+                if (invalid.is_array() && invalid.empty() &&
+                    (name == "water_edge_flux" || name == "water_level_data" ||
+                     name == "water_flow_data" || name == "water_sim_terrain_height"))
+                    continue;
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto malformed = snapshot;
+                malformed["chunks"][0][field] = invalid;
+                WorldStreamingState restored;
+                restored.get_or_create_chunk({1, 0, 0});
+                std::vector<std::string> errors;
+                bool valid = true;
+                EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                    malformed.dump(),
+                    restored,
+                    errors,
+                    {.strict_water = true, .strict_water_valid = &valid}));
+                EXPECT_FALSE(valid);
+                EXPECT_TRUE(restored.empty());
+                ASSERT_FALSE(errors.empty());
+                EXPECT_NE(errors.front().find("Saved water"), std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPersistence, StrictWaterRefusesPartialRetainedPairsRegardlessOfActivity) {
+    namespace P = Luminumbra::Persistence;
+    for (const bool active : {false, true}) {
+        for (const int resolution : {0, 4, 8}) {
+            for (const bool partial_flux : {false, true}) {
+                SCOPED_TRACE(active);
+                SCOPED_TRACE(resolution);
+                SCOPED_TRACE(partial_flux);
+                WorldStreamingState original;
+                const auto chunk = original.get_or_create_chunk({0, 0, 0});
+                FillWater(*chunk, 4);
+                chunk->has_water_sim.store(active);
+                chunk->current_water_resolution.store(resolution);
+                chunk->water_depth_mm.pop_back();
+                if (partial_flux) {
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux = {2, 3, 4};
+                }
+                for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
+                                          P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                    WorldStreamingState restored;
+                    std::vector<std::string> errors;
+                    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                        bytes, restored, errors, {.strict_water = true}));
+                    EXPECT_TRUE(restored.empty());
+                    EXPECT_FALSE(errors.empty());
+                }
+            }
+        }
+    }
+}
+
 namespace Planning = Luminumbra::Systems::RegionalWater;
 using Luminumbra::world::ActiveRegionLedger;
 using Luminumbra::world::RegionKey;
@@ -317,8 +981,9 @@ Planning::SourceInput SourceAt(std::uint64_t id, const Vec3& position, float rat
     return {.id = id, .position = position, .physical = {.flow_rate = rate}};
 }
 
-ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners) {
-    ActiveRegionLedger ledger;
+ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners,
+                                  world::RegionSchedulerConfig config = {}) {
+    ActiveRegionLedger ledger(config);
     for (const auto owner : owners) {
         ledger.mark_edited(owner, WorldClock{});
     }
@@ -326,6 +991,28 @@ ActiveRegionLedger PlanningLedger(std::initializer_list<RegionKey> owners) {
 }
 
 constexpr std::uint64_t kPlanningCapacity = 2 * 64 + 4 * 8;
+
+void ExpectInteriorCreditConserved(const ActiveRegionLedger& ledger, const Planning::Plan& plan) {
+    const auto old_debt =
+        std::accumulate(ledger.water_debts().begin(),
+                        ledger.water_debts().end(),
+                        std::uint64_t{0},
+                        [](std::uint64_t sum, const auto& debt) { return sum + debt.second; });
+    const auto new_debt =
+        std::accumulate(plan.regions.begin(),
+                        plan.regions.end(),
+                        std::uint64_t{0},
+                        [](std::uint64_t sum, const auto& region) { return sum + region.debt; });
+    const auto demand =
+        std::accumulate(plan.regions.begin(),
+                        plan.regions.end(),
+                        std::uint64_t{0},
+                        [](auto sum, const auto& region) { return sum + region.candidates; });
+    EXPECT_EQ(new_debt + plan.allocated_windows * world::water_share::kQ32,
+              old_debt + std::min(plan.global_windows - plan.border_windows, demand) *
+                             world::water_share::kQ32);
+    EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+}
 
 TEST(RegionalWaterPlanning, EveryResidentSourceAndDuePermutationProducesTheSameCanonicalPlan) {
     auto ledger = PlanningLedger({{0, 0}, {1, 0}});
@@ -365,7 +1052,7 @@ TEST(RegionalWaterPlanning, EveryResidentSourceAndDuePermutationProducesTheSameC
     EXPECT_EQ(ledger.encode(), encoded);
 }
 
-TEST(RegionalWaterPlanning, InteriorCadenceAndCommonSeamPhaseExcludeUnavailableOwners) {
+TEST(RegionalWaterPlanning, InteriorAndSeamCadenceExcludeUnavailableOwners) {
     auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
     auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
     records.at({0, 0}).state = RegionState::Reduced;
@@ -383,15 +1070,320 @@ TEST(RegionalWaterPlanning, InteriorCadenceAndCommonSeamPhaseExcludeUnavailableO
     schedule.tick = 2;
     EXPECT_TRUE(Planning::Build(residents, {}, ledger, schedule, inputs).participants.empty());
     schedule.tick = 4;
-    const auto common = Planning::Build(residents, {}, ledger, schedule, inputs);
-    ASSERT_EQ(common.faces.size(), 1u);
-    EXPECT_EQ(common.faces[0].common_shift, 2u);
-    EXPECT_TRUE(common.interiors.empty());
-    EXPECT_EQ(common.participants, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
+    const auto off_phase = Planning::Build(residents, {}, ledger, schedule, inputs);
+    EXPECT_TRUE(off_phase.faces.empty());
+    EXPECT_TRUE(off_phase.interiors.empty());
+    EXPECT_TRUE(off_phase.participants.empty());
     schedule.tick = 3;
     const auto due = Planning::Build(residents, {}, ledger, schedule, inputs);
     EXPECT_EQ(due.interiors, (std::vector<ChunkID>{residents[0].id, residents[1].id}));
-    EXPECT_TRUE(due.faces.empty());
+    ASSERT_EQ(due.faces.size(), 1u);
+    EXPECT_EQ(due.faces[0].common_shift, 2u);
+    EXPECT_EQ(due.participants, due.interiors);
+}
+
+TEST(RegionalWaterPlanning, EveryFaceRequiresBothPersistedPhasesAndScheduleMembership) {
+    struct Cadences {
+        std::uint8_t left_shift, right_shift;
+        std::uint32_t left_phase, right_phase;
+    };
+    for (const auto cadence : {Cadences{0, 0, 0, 0},
+                               Cadences{1, 1, 1, 1},
+                               Cadences{1, 1, 0, 1},
+                               Cadences{2, 1, 3, 1},
+                               Cadences{1, 2, 1, 2},
+                               Cadences{16, 16, 65535, 65535}}) {
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+        auto& records =
+            const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+        records.at({0, 0}).cadence_shift = cadence.left_shift;
+        records.at({0, 0}).cadence_phase = cadence.left_phase;
+        records.at({1, 0}).cadence_shift = cadence.right_shift;
+        records.at({1, 0}).cadence_phase = cadence.right_phase;
+        const auto before = ledger.encode();
+        const std::vector residents{ResidentAt(30), ResidentAt(31), ResidentAt(32), ResidentAt(33)};
+        for (const std::uint64_t tick : {std::uint64_t{0},
+                                         std::uint64_t{1},
+                                         std::uint64_t{2},
+                                         std::uint64_t{3},
+                                         std::uint64_t{4},
+                                         std::uint64_t{5},
+                                         std::uint64_t{6},
+                                         std::uint64_t{7},
+                                         std::uint64_t{65535},
+                                         WorldClock::kTickLimit - 1}) {
+            for (unsigned int membership = 0; membership < 4; ++membership) {
+                SCOPED_TRACE(::testing::Message()
+                             << static_cast<unsigned int>(cadence.left_shift) << ','
+                             << static_cast<unsigned int>(cadence.right_shift) << ','
+                             << cadence.left_phase << ',' << cadence.right_phase << ',' << tick
+                             << ',' << membership);
+                RegionSchedule schedule;
+                schedule.tick = tick;
+                if ((membership & 1u) != 0) {
+                    schedule.due.push_back({0, 0});
+                }
+                if ((membership & 2u) != 0) {
+                    schedule.due.push_back({1, 0});
+                }
+                const bool left_due =
+                    (membership & 1u) != 0 &&
+                    tick % (std::uint64_t{1} << cadence.left_shift) == cadence.left_phase;
+                const bool right_due =
+                    (membership & 2u) != 0 &&
+                    tick % (std::uint64_t{1} << cadence.right_shift) == cadence.right_phase;
+                const auto plan = Planning::Build(
+                    residents, {}, ledger, schedule, {.cell_budget = 10 * kPlanningCapacity});
+                const auto owner_count =
+                    static_cast<std::size_t>(left_due) + static_cast<std::size_t>(right_due);
+                EXPECT_EQ(plan.interiors.size(), 2 * owner_count);
+                EXPECT_EQ(plan.regions.size(), owner_count);
+                EXPECT_EQ(plan.faces.size(), owner_count + (left_due && right_due ? 1u : 0u));
+                EXPECT_EQ(plan.border_windows, left_due && right_due ? 2u : 0u);
+                EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+                EXPECT_EQ(plan.participants, plan.interiors);
+                for (const auto& face : plan.faces) {
+                    EXPECT_TRUE(face.owner.x == 0 ? left_due : right_due);
+                    EXPECT_TRUE(face.neighbor.x == 0 ? left_due : right_due);
+                }
+                EXPECT_LE(plan.total_cells, 10 * kPlanningCapacity);
+                EXPECT_EQ(ledger.encode(), before);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, ThreeWindowsServeEveryEligibleSeamWithinItsFaceCountTicks) {
+    for (const int seam_count : {1, 2, 3, 5}) {
+        for (const bool is_x : {false, true}) {
+            auto ledger = PlanningLedger({});
+            RegionSchedule schedule;
+            std::vector<Planning::Resident> residents;
+            for (int seam = 0; seam < seam_count; ++seam) {
+                for (const int coordinate : {64 * seam + 31, 64 * seam + 32}) {
+                    const RegionKey owner =
+                        is_x ? RegionKey{coordinate / 32, 0} : RegionKey{0, coordinate / 32};
+                    ledger.mark_edited(owner, WorldClock{});
+                    schedule.due.push_back(owner);
+                    residents.push_back(is_x ? ResidentAt(coordinate) : ResidentAt(0, coordinate));
+                }
+            }
+            const auto count = static_cast<std::uint64_t>(seam_count);
+            for (const std::uint64_t windows : {0u, 1u, 2u, 3u, 4u, 5u, 12u}) {
+                std::vector<Planning::Face> served;
+                std::uint64_t selected_interiors = 0;
+                const auto funded = std::min(count, windows == 0 ? 0 : (windows - 1) / 2);
+                for (std::uint64_t step = 0; step < 3 * count; ++step) {
+                    // Start near the tick limit to cover a large non-zero rotation offset.
+                    schedule.tick = WorldClock::kTickLimit - 3 * count + step;
+                    SCOPED_TRACE(::testing::Message() << seam_count << ',' << is_x << ',' << windows
+                                                      << ',' << schedule.tick);
+                    const Planning::Inputs inputs{.cell_budget = windows * kPlanningCapacity,
+                                                  .raining = true};
+                    const auto before = ledger.encode();
+                    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+                    EXPECT_EQ(plan.faces.size(), funded);
+                    EXPECT_EQ(plan.border_windows, 2 * funded);
+                    // The reserved interior budget credits owners fractionally;
+                    // selections consume whole Q32 units only after they accrue.
+                    ExpectInteriorCreditConserved(ledger, plan);
+                    selected_interiors += plan.allocated_windows;
+                    EXPECT_LE(plan.border_windows + plan.allocated_windows, windows);
+                    EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                    EXPECT_EQ(plan.residents_visited, residents.size());
+                    EXPECT_TRUE(std::is_sorted(plan.faces.begin(), plan.faces.end()));
+                    for (const auto& face : plan.faces) {
+                        EXPECT_NE(face.owner, face.neighbor);
+                        EXPECT_EQ(face.is_x, is_x);
+                        EXPECT_TRUE(std::binary_search(
+                            plan.participants.begin(), plan.participants.end(), face.positive));
+                        EXPECT_TRUE(std::binary_search(
+                            plan.participants.begin(), plan.participants.end(), face.other));
+                        served.push_back(face);
+                    }
+                    std::reverse(residents.begin(), residents.end());
+                    std::reverse(schedule.due.begin(), schedule.due.end());
+                    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+                    EXPECT_EQ(ledger.encode(), before);
+                    auto debts = ledger.water_debts();
+                    for (const auto& region : plan.regions) {
+                        if (region.debt == 0) {
+                            debts.erase(region.owner);
+                        } else {
+                            debts.insert_or_assign(region.owner, region.debt);
+                        }
+                        ledger.set_water_cursor(region.owner, region.next_cursor);
+                    }
+                    ASSERT_TRUE(ledger.set_water_debts(debts));
+                    if ((step + 1) % count == 0) {
+                        std::sort(served.begin(), served.end());
+                        served.erase(std::unique(served.begin(), served.end()), served.end());
+                        EXPECT_EQ(served.size(), funded == 0 ? 0 : count);
+                        served.clear();
+                    }
+                }
+                EXPECT_EQ(selected_interiors == 0, windows == 0);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, ReducedCadenceRotatesEverySeamAcrossServiceOpportunities) {
+    for (const int seam_count : {2, 3, 5}) {
+        for (const bool is_x : {false, true}) {
+            for (const std::uint8_t shift : {std::uint8_t{1}, std::uint8_t{2}, std::uint8_t{16}}) {
+                const auto period = std::uint64_t{1} << shift;
+                for (const auto phase : {std::uint64_t{0}, period - 1}) {
+                    auto ledger = PlanningLedger({});
+                    RegionSchedule schedule;
+                    std::vector<Planning::Resident> residents;
+                    for (int seam = 0; seam < seam_count; ++seam) {
+                        for (const int coordinate : {64 * seam + 31, 64 * seam + 32}) {
+                            const RegionKey owner = is_x ? RegionKey{coordinate / 32, 0}
+                                                         : RegionKey{0, coordinate / 32};
+                            ledger.mark_edited(owner, WorldClock{});
+                            schedule.due.push_back(owner);
+                            residents.push_back(is_x ? ResidentAt(coordinate)
+                                                     : ResidentAt(0, coordinate));
+                        }
+                    }
+                    auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(
+                        ledger.records());
+                    for (int seam = 0; seam < seam_count; ++seam) {
+                        auto& record = records.at(schedule.due[static_cast<std::size_t>(2 * seam)]);
+                        record.state = RegionState::Reduced;
+                        record.cadence_shift = shift;
+                        record.cadence_phase = static_cast<std::uint32_t>(phase);
+                    }
+                    const auto before = ledger.encode();
+                    const auto count = static_cast<std::uint64_t>(seam_count);
+                    for (const auto first :
+                         {std::uint64_t{0}, (WorldClock::kTickLimit >> shift) - count}) {
+                        std::vector<Planning::Face> served;
+                        for (std::uint64_t opportunity = first; opportunity < first + count;
+                             ++opportunity) {
+                            schedule.tick = (opportunity << shift) + phase;
+                            SCOPED_TRACE(::testing::Message()
+                                         << seam_count << ',' << is_x << ','
+                                         << static_cast<unsigned int>(shift) << ',' << phase << ','
+                                         << schedule.tick);
+                            const Planning::Inputs inputs{.cell_budget = 3 * kPlanningCapacity};
+                            const auto plan =
+                                Planning::Build(residents, {}, ledger, schedule, inputs);
+                            ASSERT_EQ(plan.faces.size(), 1u);
+                            EXPECT_EQ(plan.border_windows, 2u);
+                            EXPECT_EQ(plan.faces[0].common_shift, shift);
+                            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                            served.push_back(plan.faces[0]);
+                            std::reverse(residents.begin(), residents.end());
+                            std::reverse(schedule.due.begin(), schedule.due.end());
+                            EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs),
+                                      plan);
+                            schedule.tick ^= 1u;
+                            EXPECT_TRUE(Planning::Build(residents, {}, ledger, schedule, inputs)
+                                            .faces.empty());
+                        }
+                        std::sort(served.begin(), served.end());
+                        served.erase(std::unique(served.begin(), served.end()), served.end());
+                        EXPECT_EQ(served.size(), count);
+                    }
+                    EXPECT_EQ(ledger.encode(), before);
+                }
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, ReloadPreservesOddCadenceSeamRotation) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+    auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+    for (const RegionKey owner : {RegionKey{0, 0}, RegionKey{2, 0}}) {
+        auto& record = records.at(owner);
+        record.state = RegionState::Reduced;
+        record.cadence_shift = 1;
+        record.cadence_phase = ActiveRegionLedger::phase(owner, 1);
+        ASSERT_EQ(record.cadence_phase, 1u);
+    }
+    ActiveRegionLedger reloaded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error)) << error;
+    const std::vector residents{ResidentAt(31), ResidentAt(32), ResidentAt(95), ResidentAt(96)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}, {2, 0}, {3, 0}};
+    for (const auto first : {std::uint64_t{1}, WorldClock::kTickLimit - 3}) {
+        std::vector<Planning::Face> served;
+        for (const auto tick : {first, first + 2}) {
+            schedule.tick = tick;
+            const Planning::Inputs inputs{.cell_budget = 3 * kPlanningCapacity};
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            EXPECT_EQ(Planning::Build(residents, {}, reloaded, schedule, inputs), plan);
+            ASSERT_EQ(plan.faces.size(), 1u);
+            served.push_back(plan.faces[0]);
+        }
+        EXPECT_NE(served[0], served[1]);
+    }
+}
+
+TEST(RegionalWaterPlanning, IneligibleAndSameOwnerFacesDoNotConsumeBorderRotationSlots) {
+    const auto baseline_ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+    const std::vector baseline{ResidentAt(31), ResidentAt(32), ResidentAt(95), ResidentAt(96)};
+    for (int fault = 0; fault < 8; ++fault) {
+        SCOPED_TRACE(fault);
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}});
+        auto& records =
+            const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+        auto residents = baseline;
+        residents.push_back(ResidentAt(fault == 0 ? 160 : 159));
+        residents.push_back(ResidentAt(fault == 0 ? 161 : 160));
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}};
+        switch (fault) {
+            case 0: // One reserved window cannot select both same-owner interiors.
+                break;
+            case 1:
+                residents[4].initialized = false;
+                break;
+            case 2:
+                residents[4].awake = residents[5].awake = false;
+                break;
+            case 3:
+                schedule.due.pop_back();
+                break;
+            case 4:
+                records.at({5, 0}).state = RegionState::Frozen;
+                break;
+            case 5:
+                residents[4].initialized = false;
+                residents[4].preparation_ready = false;
+                break;
+            case 6:
+                residents[4].available = false;
+                break;
+            case 7:
+                records.erase({5, 0});
+                break;
+        }
+        for (std::uint64_t tick = 0; tick < 4; ++tick) {
+            schedule.tick = tick;
+            RegionSchedule baseline_schedule;
+            baseline_schedule.tick = tick;
+            baseline_schedule.due = {{0, 0}, {1, 0}, {2, 0}, {3, 0}};
+            const Planning::Inputs inputs{.cell_budget = 3 * kPlanningCapacity};
+            const auto expected =
+                Planning::Build(baseline, {}, baseline_ledger, baseline_schedule, inputs);
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            EXPECT_EQ(plan.faces, expected.faces);
+            EXPECT_EQ(plan.border_windows, 2u);
+            EXPECT_EQ(plan.allocated_windows, 0u);
+            const auto credited = std::accumulate(
+                plan.regions.begin(),
+                plan.regions.end(),
+                std::uint64_t{0},
+                [](std::uint64_t sum, const auto& region) { return sum + region.debt; });
+            EXPECT_EQ(credited, world::water_share::kQ32);
+            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+        }
+    }
 }
 
 TEST(RegionalWaterPlanning, PreparationAdmissionRefusesTheOwnerWithoutSpendingItsBudget) {
@@ -456,6 +1448,302 @@ TEST(RegionalWaterPlanning, FixedBudgetAndSavedCursorsServeEveryOwnerAndHighestC
     }
 }
 
+TEST(RegionalWaterPlanning, SameOwnerGridServesEveryFaceWithinTwiceItsFaceCountThroughReload) {
+    constexpr std::uint64_t face_count = 10, plan_bound = 2 * face_count;
+    for (const std::uint64_t windows : {2u, 4u}) {
+        for (const std::uint8_t shift : {std::uint8_t{0}, std::uint8_t{1}, std::uint8_t{16}}) {
+            for (const auto first :
+                 {std::uint64_t{0}, (WorldClock::kTickLimit >> shift) - plan_bound}) {
+                auto ledger =
+                    PlanningLedger({{0, 0}}, {.reduced_shift = std::max(std::uint8_t{1}, shift)});
+                auto& record =
+                    const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
+                        .at({0, 0});
+                record.state = shift == 0 ? RegionState::Active : RegionState::Reduced;
+                record.cadence_shift = shift;
+                record.cadence_phase = ActiveRegionLedger::phase({0, 0}, shift);
+                const auto phase = record.cadence_phase;
+                ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+                ActiveRegionLedger initial_reload;
+                std::string initial_error;
+                ASSERT_TRUE(
+                    ActiveRegionLedger::decode(ledger.encode(), initial_reload, initial_error))
+                    << initial_error;
+                std::vector<Planning::Resident> residents;
+                for (int z = 0; z < 2; ++z) {
+                    for (int x = 0; x < 4; ++x) {
+                        residents.push_back(ResidentAt(x, z));
+                    }
+                }
+                std::vector<Planning::Face> served;
+                RegionSchedule schedule;
+                schedule.due = {{0, 0}};
+                const Planning::Inputs inputs{.cell_budget = windows * kPlanningCapacity};
+                for (std::uint64_t step = 0; step < plan_bound; ++step) {
+                    schedule.tick = ((first + step) << shift) + phase;
+                    SCOPED_TRACE(::testing::Message()
+                                 << windows << ',' << static_cast<unsigned int>(shift) << ','
+                                 << schedule.tick);
+                    const auto before = ledger.encode();
+                    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+                    EXPECT_EQ(plan.border_windows, 0u);
+                    EXPECT_EQ(plan.interiors.size(), windows);
+                    EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                    ExpectInteriorCreditConserved(ledger, plan);
+                    for (const auto& face : plan.faces) {
+                        EXPECT_EQ(face.owner, face.neighbor);
+                        EXPECT_TRUE(std::binary_search(
+                            plan.interiors.begin(), plan.interiors.end(), face.positive));
+                        EXPECT_TRUE(std::binary_search(
+                            plan.interiors.begin(), plan.interiors.end(), face.other));
+                        served.push_back(face);
+                    }
+                    std::reverse(residents.begin(), residents.end());
+                    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+                    EXPECT_EQ(ledger.encode(), before);
+                    ASSERT_EQ(plan.regions.size(), 1u);
+                    ledger.set_water_cursor({0, 0}, plan.regions[0].next_cursor);
+                    ActiveRegionLedger::WaterDebts debts;
+                    if (plan.regions[0].debt != 0) {
+                        debts.emplace(RegionKey{0, 0}, plan.regions[0].debt);
+                    }
+                    ASSERT_TRUE(ledger.set_water_debts(debts));
+                    ActiveRegionLedger reloaded;
+                    std::string error;
+                    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error))
+                        << error;
+                    EXPECT_EQ(Planning::Build(residents, {}, reloaded, schedule, inputs),
+                              Planning::Build(residents, {}, ledger, schedule, inputs));
+                    ledger = std::move(reloaded);
+                }
+                std::sort(served.begin(), served.end());
+                served.erase(std::unique(served.begin(), served.end()), served.end());
+                EXPECT_EQ(served.size(), face_count);
+                EXPECT_EQ(std::count_if(served.begin(),
+                                        served.end(),
+                                        [](const auto& face) { return !face.is_x; }),
+                          4);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, ActivePairCannotStarveOddPhaseReducedOwnerThroughReload) {
+    constexpr auto unit = world::water_share::kQ32;
+    constexpr unsigned int due_bound = 2;
+    for (const auto saved :
+         {std::uint64_t{0}, unit / 2, 4 * unit, world::water_share::kMaxDebt - unit}) {
+        for (const auto first : {std::uint64_t{1}, WorldClock::kTickLimit - 5}) {
+            auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+            auto& record =
+                const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
+                    .at({0, 0});
+            record.state = RegionState::Reduced;
+            record.cadence_shift = 1;
+            record.cadence_phase = ActiveRegionLedger::phase({0, 0}, 1);
+            ASSERT_EQ(record.cadence_phase, 1u);
+            if (saved != 0) {
+                ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+            }
+            std::vector residents{ResidentAt(0), ResidentAt(34), ResidentAt(35)};
+            const auto reduced_chunk = residents[0].id;
+            RegionSchedule schedule;
+            schedule.due = {{0, 0}, {1, 0}};
+            unsigned int due_without_service = 0;
+            for (std::uint64_t step = 0; step < 5; ++step) {
+                schedule.tick = first + step;
+                SCOPED_TRACE(::testing::Message() << saved << ',' << schedule.tick);
+                const auto before = ledger.encode();
+                const Planning::Inputs inputs{.cell_budget = 2 * kPlanningCapacity};
+                const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+                EXPECT_EQ(plan.border_windows, 0u);
+                EXPECT_LE(plan.allocated_windows, 2u);
+                EXPECT_LE(plan.total_cells, inputs.cell_budget);
+                const bool served =
+                    std::binary_search(plan.interiors.begin(), plan.interiors.end(), reduced_chunk);
+                if (step % 2 == 0) {
+                    ASSERT_EQ(plan.regions.size(), 2u);
+                    ExpectInteriorCreditConserved(ledger, plan);
+                    due_without_service = served ? 0 : due_without_service + 1;
+                    EXPECT_LT(due_without_service, due_bound);
+                } else {
+                    EXPECT_FALSE(served);
+                    ASSERT_EQ(plan.regions.size(), 1u);
+                    EXPECT_EQ(plan.regions[0].owner, (RegionKey{1, 0}));
+                }
+                std::reverse(residents.begin(), residents.end());
+                std::reverse(schedule.due.begin(), schedule.due.end());
+                EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+                EXPECT_EQ(ledger.encode(), before);
+                auto debts = ledger.water_debts();
+                for (const auto& region : plan.regions) {
+                    if (region.debt == 0) {
+                        debts.erase(region.owner);
+                    } else {
+                        debts.insert_or_assign(region.owner, region.debt);
+                    }
+                    ledger.set_water_cursor(region.owner, region.next_cursor);
+                }
+                ASSERT_TRUE(ledger.set_water_debts(debts));
+                ActiveRegionLedger reloaded;
+                std::string error;
+                ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error)) << error;
+                EXPECT_EQ(Planning::Build(residents, {}, reloaded, schedule, inputs),
+                          Planning::Build(residents, {}, ledger, schedule, inputs));
+                ledger = std::move(reloaded);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterPlanning, EveryGrantedOwnerRotatesPairsOnItsOwnCadence) {
+    constexpr std::uint64_t face_count = 3, plan_bound = 2 * face_count;
+    for (const auto first : {std::uint64_t{1}, WorldClock::kTickLimit - 11}) {
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+        auto& record = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records())
+                           .at({0, 0});
+        record.state = RegionState::Reduced;
+        record.cadence_shift = 1;
+        record.cadence_phase = ActiveRegionLedger::phase({0, 0}, 1);
+        ASSERT_EQ(record.cadence_phase, 1u);
+        std::vector residents{ResidentAt(0),
+                              ResidentAt(1),
+                              ResidentAt(2),
+                              ResidentAt(3),
+                              ResidentAt(34),
+                              ResidentAt(35),
+                              ResidentAt(36),
+                              ResidentAt(37)};
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}};
+        std::vector<Planning::Face> served;
+        for (std::uint64_t step = 0; step < plan_bound; ++step) {
+            schedule.tick = first + 2 * step;
+            SCOPED_TRACE(schedule.tick);
+            const Planning::Inputs inputs{.cell_budget = 4 * kPlanningCapacity};
+            const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+            ASSERT_EQ(plan.regions.size(), 2u);
+            EXPECT_EQ(plan.border_windows, 0u);
+            EXPECT_EQ(plan.allocated_windows, 4u);
+            EXPECT_LE(plan.total_cells, inputs.cell_budget);
+            ExpectInteriorCreditConserved(ledger, plan);
+            for (const auto& region : plan.regions) {
+                EXPECT_EQ(region.windows, 2u);
+                EXPECT_EQ(region.debt, 0u);
+                ledger.set_water_cursor(region.owner, region.next_cursor);
+            }
+            for (const auto& face : plan.faces) {
+                EXPECT_EQ(face.owner, face.neighbor);
+                served.push_back(face);
+            }
+            std::reverse(residents.begin(), residents.end());
+            ActiveRegionLedger reloaded;
+            std::string error;
+            ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reloaded, error)) << error;
+            ledger = std::move(reloaded);
+        }
+        std::sort(served.begin(), served.end());
+        served.erase(std::unique(served.begin(), served.end()), served.end());
+        EXPECT_EQ(served.size(), 2 * face_count);
+    }
+}
+
+TEST(RegionalWaterPlanning, PairReservationsKeepIsolatedCandidatesAndFilterIneligibleEndpoints) {
+    auto ledger = PlanningLedger({{0, 0}});
+    std::vector residents{
+        ResidentAt(0), ResidentAt(1), ResidentAt(4), ResidentAt(5), ResidentAt(8)};
+    residents[2].awake = residents[3].awake = false;
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    std::map<ChunkID, unsigned int> visits;
+    for (std::uint64_t tick = 0; tick < 12; ++tick) {
+        schedule.tick = tick;
+        const auto plan = Planning::Build(
+            residents, {}, ledger, schedule, {.cell_budget = 2 * kPlanningCapacity});
+        ExpectInteriorCreditConserved(ledger, plan);
+        EXPECT_EQ(plan.interiors.size(), 2u);
+        if (tick % 2 != 0) {
+            ASSERT_EQ(plan.faces.size(), 1u);
+            EXPECT_EQ(plan.faces[0].positive, residents[0].id);
+            EXPECT_EQ(plan.faces[0].other, residents[1].id);
+        }
+        for (const auto id : plan.interiors) {
+            ++visits[id];
+        }
+        ASSERT_EQ(plan.regions.size(), 1u);
+        EXPECT_EQ(plan.regions[0].debt, 0u);
+        ledger.set_water_cursor({0, 0}, plan.regions[0].next_cursor);
+    }
+    EXPECT_GT(visits[residents[0].id], 0u);
+    EXPECT_GT(visits[residents[1].id], 0u);
+    EXPECT_GT(visits[residents[4].id], 0u);
+    EXPECT_EQ(visits[residents[2].id], 0u);
+    EXPECT_EQ(visits[residents[3].id], 0u);
+
+    schedule.tick = 1;
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, world::water_share::kMaxDebt}}));
+    const auto before = ledger.encode();
+    EXPECT_THROW(static_cast<void>(Planning::Build(
+                     residents, {}, ledger, schedule, {.cell_budget = 2 * kPlanningCapacity})),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, ZeroCandidateOwnerCannotSpendSavedDebtAheadOfEligibleOwner) {
+    constexpr auto saved = world::water_share::kMaxDebt;
+    for (const bool sleeping : {false, true}) {
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+        ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+        ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}};
+        std::vector residents{ResidentAt(34)};
+        if (sleeping) {
+            residents.push_back(ResidentAt(0));
+            residents.back().awake = false;
+        }
+        const auto before = ledger.encode();
+        const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+        const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+        EXPECT_EQ(plan.interiors, (std::vector<ChunkID>{residents[0].id}));
+        EXPECT_EQ(plan.allocated_windows, 1u);
+        ExpectInteriorCreditConserved(ledger, plan);
+        ASSERT_EQ(plan.regions.size(), 2u);
+        EXPECT_EQ(plan.regions[0].candidates, 0u);
+        EXPECT_EQ(plan.regions[0].windows, 0u);
+        EXPECT_EQ(plan.regions[0].debt, saved);
+        EXPECT_EQ(plan.regions[0].next_cursor, std::numeric_limits<std::uint64_t>::max());
+        EXPECT_EQ(plan.regions[1].debt, 0u);
+        std::reverse(residents.begin(), residents.end());
+        std::reverse(schedule.due.begin(), schedule.due.end());
+        EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+        EXPECT_EQ(ledger.encode(), before);
+    }
+}
+
+TEST(RegionalWaterPlanning, FundedPairSpendsOwnerGrantAndRetainsUnselectedCredit) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    constexpr auto saved = world::water_share::kMaxDebt - 2 * world::water_share::kQ32;
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+    const std::vector residents{ResidentAt(0), ResidentAt(1), ResidentAt(34), ResidentAt(36)};
+    RegionSchedule schedule;
+    schedule.tick = 1;
+    schedule.due = {{0, 0}, {1, 0}};
+    const auto before = ledger.encode();
+    const auto plan =
+        Planning::Build(residents, {}, ledger, schedule, {.cell_budget = 3 * kPlanningCapacity});
+    EXPECT_EQ(plan.border_windows, 0u);
+    EXPECT_EQ(plan.allocated_windows, 2u);
+    ASSERT_EQ(plan.faces.size(), 1u);
+    ASSERT_EQ(plan.regions.size(), 2u);
+    EXPECT_EQ(plan.regions[0].windows, 2u);
+    EXPECT_EQ(plan.regions[0].debt, saved - world::water_share::kQ32 / 2);
+    EXPECT_EQ(plan.regions[1].windows, 0u);
+    EXPECT_EQ(plan.regions[1].debt, 3 * world::water_share::kQ32 / 2);
+    ExpectInteriorCreditConserved(ledger, plan);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
 TEST(RegionalWaterPlanning, SourceResolutionUsesResidentColumnsAndCanonicalQuantization) {
     auto ledger = PlanningLedger({{-1, -1}, {0, 0}});
     std::vector<Planning::Resident> residents{ResidentAt(-1, -1), ResidentAt(0, 0, 1)};
@@ -476,6 +1764,57 @@ TEST(RegionalWaterPlanning, SourceResolutionUsesResidentColumnsAndCanonicalQuant
     const auto no_column = Planning::Build(
         residents, sources, ledger, schedule, {.cell_budget = 2 * kPlanningCapacity});
     EXPECT_EQ(no_column.sources.size(), 1u);
+}
+
+TEST(RegionalWaterPlanning, SourceCellsFloorWorldCoordinatesBeforeSubtractingChunkOrigins) {
+    struct AxisCase {
+        float position;
+        int chunk, local_metres; // -1 denotes the cell immediately below zero.
+    };
+    constexpr AxisCase cases[] = {{-1e-16f, -1, -1},
+                                  {-0.0f, 0, 0},
+                                  {0.0f, 0, 0},
+                                  {1e-16f, 0, 0},
+                                  {-16.0f, -1, 0},
+                                  {16.0f, 1, 0},
+                                  {-16777216.0f, -1048576, 0},
+                                  {16777215.0f, 1048575, 15}};
+    for (const int resolution : {4, 8, 16, 32}) {
+        for (const auto& x : cases) {
+            for (const auto& z : cases) {
+                SCOPED_TRACE(::testing::Message()
+                             << resolution << ',' << x.position << ',' << z.position);
+                const auto owner =
+                    ActiveRegionLedger::region_at({static_cast<float>(x.chunk * CHUNK_SIZE_X),
+                                                   0.0f,
+                                                   static_cast<float>(z.chunk * CHUNK_SIZE_Z)});
+                const auto ledger = PlanningLedger({owner});
+                auto resident = ResidentAt(x.chunk, z.chunk);
+                resident.resolution = resolution;
+                resident.awake = false;
+                const std::vector residents{resident};
+                const std::vector sources{SourceAt(1, {x.position, 0.0f, z.position})};
+                RegionSchedule schedule;
+                schedule.due = {owner};
+                const auto side = static_cast<std::uint64_t>(resolution);
+                const auto plan = Planning::Build(
+                    residents,
+                    sources,
+                    ledger,
+                    schedule,
+                    {.resolution = resolution, .cell_budget = 2 * side * side + 4 * side});
+                ASSERT_EQ(plan.sources.size(), 1u);
+                EXPECT_EQ(plan.sources[0].target, resident.id);
+                const int cell_x = x.local_metres < 0 ? resolution - 1
+                                                      : x.local_metres * resolution / CHUNK_SIZE_X;
+                const int cell_z = z.local_metres < 0 ? resolution - 1
+                                                      : z.local_metres * resolution / CHUNK_SIZE_Z;
+                EXPECT_EQ(plan.sources[0].cell,
+                          static_cast<std::size_t>(cell_z * resolution + cell_x));
+                EXPECT_EQ(plan.interiors, (std::vector<ChunkID>{resident.id}));
+            }
+        }
+    }
 }
 
 TEST(RegionalWaterPlanning, PriorAwakeFlagsWakeOnlyOneHopAndRainWakesSleepingResidents) {
@@ -513,11 +1852,26 @@ TEST(RegionalWaterPlanning, InvalidSourceRatesPositionsAndIdentitiesRefuseBefore
     for (const Vec3 invalid : {Vec3(std::numeric_limits<float>::infinity()),
                                Vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
                                Vec3(16777216, 0, 0),
-                               Vec3(0, 33554432, 0)}) {
+                               Vec3(0, 33554432, 0),
+                               Vec3(0, std::numeric_limits<float>::max(), 0),
+                               Vec3(0, -std::numeric_limits<float>::max(), 0)}) {
         const std::vector sources{SourceAt(1, invalid)};
         EXPECT_THROW(
             static_cast<void>(Planning::Build(residents, sources, ledger, schedule, inputs)),
             std::invalid_argument);
+    }
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                -std::numeric_limits<float>::infinity()}) {
+        for (const Vec3 position :
+             {Vec3(invalid, 0, 0), Vec3(0, invalid, 0), Vec3(0, 0, invalid)}) {
+            const std::vector sources{SourceAt(1, position)};
+            EXPECT_THROW(
+                static_cast<void>(Planning::Build(residents, sources, ledger, schedule, inputs)),
+                std::invalid_argument);
+            EXPECT_THROW(static_cast<void>(Planning::Build({}, sources, ledger, schedule, inputs)),
+                         std::invalid_argument);
+        }
     }
     const std::vector duplicate_sources{SourceAt(1, {0, 0, 0}), SourceAt(1, {1, 0, 1})};
     EXPECT_THROW(
@@ -647,12 +2001,159 @@ TEST(RegionalWaterPlanning, EmptyClaimsAndZeroBudgetPreserveCursorsAndServiceOnl
     const auto empty =
         Planning::Build({}, {}, ledger, schedule, {.cell_budget = kPlanningCapacity});
     ASSERT_EQ(empty.regions.size(), 1u);
-    EXPECT_EQ(empty.allocated_windows, 1u);
+    EXPECT_EQ(empty.allocated_windows, 0u);
+    EXPECT_EQ(empty.regions[0].windows, 0u);
     EXPECT_TRUE(empty.participants.empty());
     EXPECT_EQ(empty.regions[0].next_cursor, std::numeric_limits<std::uint64_t>::max());
-    EXPECT_EQ(empty.regions[0].debt, world::water_share::kQ32);
+    EXPECT_EQ(empty.regions[0].debt, 2 * world::water_share::kQ32);
     EXPECT_TRUE(Planning::Build(residents, {}, ledger, {}, {.cell_budget = kPlanningCapacity})
                     .interiors.empty());
+}
+
+TEST(RegionalWaterPlanning, DebtDrivenExcessGrantsRemainUnallocatedAndCarryUnservedDebt) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    constexpr auto unit = world::water_share::kQ32;
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 4 * unit}}));
+    const auto before = ledger.encode();
+    std::vector residents{ResidentAt(0), ResidentAt(32), ResidentAt(34), ResidentAt(36)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}};
+    const Planning::Inputs inputs{.cell_budget = 4 * kPlanningCapacity};
+    const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+    ASSERT_EQ(plan.regions.size(), 2u);
+    EXPECT_EQ(plan.regions[0].candidates, 1u);
+    EXPECT_EQ(plan.regions[0].windows, 1u);
+    EXPECT_EQ(plan.regions[0].debt, 4 * unit);
+    EXPECT_EQ(plan.regions[1].windows, 0u);
+    EXPECT_EQ(plan.regions[1].debt, 3 * unit);
+    for (const auto& region : plan.regions) {
+        const auto selected =
+            std::count_if(plan.interiors.begin(), plan.interiors.end(), [&region](ChunkID id) {
+                return Chunk::decode_id(id).x / 32 == region.owner.x;
+            });
+        EXPECT_EQ(region.windows, static_cast<std::uint64_t>(selected));
+    }
+    EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+    EXPECT_EQ(plan.global_windows - plan.border_windows - plan.allocated_windows, 3u);
+    EXPECT_EQ(plan.regions[0].debt + plan.regions[1].debt + plan.allocated_windows * unit,
+              4 * unit + plan.global_windows * unit);
+    std::reverse(residents.begin(), residents.end());
+    std::reverse(schedule.due.begin(), schedule.due.end());
+    EXPECT_EQ(Planning::Build(residents, {}, ledger, schedule, inputs), plan);
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(RegionalWaterPlanning, MaximumUnusedCapacityNeverAccumulatesDebtAcrossPublishedPlans) {
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector residents{ResidentAt(0)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    const Planning::Inputs inputs{.cell_budget =
+                                      world::water_share::kMaxWindowBudget * kPlanningCapacity};
+    for (unsigned int call = 0; call < 4096; ++call) {
+        SCOPED_TRACE(call);
+        const auto before = ledger.encode();
+        Planning::Plan plan;
+        ASSERT_NO_THROW(plan = Planning::Build(residents, {}, ledger, schedule, inputs));
+        EXPECT_EQ(ledger.encode(), before);
+        ASSERT_EQ(plan.regions.size(), 1u);
+        EXPECT_EQ(plan.interiors, (std::vector<ChunkID>{residents[0].id}));
+        EXPECT_EQ(plan.global_windows, world::water_share::kMaxWindowBudget);
+        EXPECT_EQ(plan.border_windows, 0u);
+        EXPECT_EQ(plan.regions[0].debt, 0u);
+        ExpectInteriorCreditConserved(ledger, plan);
+        ledger.set_water_cursor(plan.regions[0].owner, plan.regions[0].next_cursor);
+        ActiveRegionLedger::WaterDebts debts;
+        if (plan.regions[0].debt != 0) {
+            debts.emplace(plan.regions[0].owner, plan.regions[0].debt);
+        }
+        ASSERT_TRUE(ledger.set_water_debts(debts));
+    }
+}
+
+TEST(RegionalWaterPlanning, StarvedCandidateCarriesSavedDebtUntilItsWindowIsFunded) {
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    const std::vector residents{ResidentAt(0), ResidentAt(34)};
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}, {1, 0}};
+    constexpr auto unit = world::water_share::kQ32;
+    const Planning::Inputs inputs{.cell_budget = kPlanningCapacity};
+    for (unsigned int call = 0; call < 3; ++call) {
+        SCOPED_TRACE(call);
+        const auto before = ledger.encode();
+        const auto plan = Planning::Build(residents, {}, ledger, schedule, inputs);
+        ASSERT_EQ(plan.regions.size(), 2u);
+        ExpectInteriorCreditConserved(ledger, plan);
+        EXPECT_EQ(plan.regions[0].debt, call == 1 ? 0 : unit / 2);
+        EXPECT_EQ(plan.regions[1].debt, call == 1 ? unit : unit / 2);
+        if (call == 0) {
+            EXPECT_TRUE(plan.interiors.empty());
+        } else {
+            EXPECT_EQ(plan.interiors, (std::vector<ChunkID>{residents[call - 1].id}));
+        }
+        EXPECT_EQ(ledger.encode(), before);
+        ActiveRegionLedger::WaterDebts debts;
+        for (const auto& region : plan.regions) {
+            if (region.debt != 0) {
+                debts.emplace(region.owner, region.debt);
+            }
+            ledger.set_water_cursor(region.owner, region.next_cursor);
+        }
+        ASSERT_TRUE(ledger.set_water_debts(debts));
+        const auto encoded = ledger.encode();
+        ActiveRegionLedger reloaded;
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(encoded, reloaded, error)) << error;
+        ledger = std::move(reloaded);
+    }
+}
+
+TEST(RegionalWaterPlanning, CandidateCapsPreserveFractionalAndMaximumDebtAcrossBudgets) {
+    constexpr auto unit = world::water_share::kQ32;
+    for (const std::uint64_t count : {0u, 1u, 3u}) {
+        std::vector<Planning::Resident> residents;
+        for (std::uint64_t index = 0; index < count; ++index) {
+            residents.push_back(ResidentAt(static_cast<int>(2 * index)));
+        }
+        for (const std::uint64_t windows : {std::uint64_t{0},
+                                            std::uint64_t{1},
+                                            std::uint64_t{2},
+                                            std::uint64_t{4},
+                                            world::water_share::kMaxWindowBudget}) {
+            const auto credit = std::min(count, windows) * unit;
+            for (const auto saved :
+                 {std::uint64_t{0}, unit / 2, 4 * unit, world::water_share::kMaxDebt - credit}) {
+                SCOPED_TRACE(::testing::Message() << count << ',' << windows << ',' << saved);
+                auto ledger = PlanningLedger({{0, 0}});
+                if (saved != 0) {
+                    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}}));
+                }
+                ledger.set_water_cursor({0, 0}, std::numeric_limits<std::uint64_t>::max());
+                const auto before = ledger.encode();
+                RegionSchedule schedule;
+                schedule.due = {{0, 0}};
+                const auto plan = Planning::Build(
+                    residents, {}, ledger, schedule, {.cell_budget = windows * kPlanningCapacity});
+                ASSERT_EQ(plan.regions.size(), 1u);
+                const auto selected = std::min(count, windows);
+                EXPECT_EQ(plan.interiors.size(), selected);
+                EXPECT_EQ(plan.regions[0].windows, selected);
+                EXPECT_EQ(plan.allocated_windows, plan.interiors.size());
+                EXPECT_EQ(plan.regions[0].debt, saved + credit - selected * unit);
+                EXPECT_EQ(plan.global_windows - plan.border_windows - plan.allocated_windows,
+                          windows - selected);
+                if (selected == 0) {
+                    EXPECT_EQ(plan.regions[0].next_cursor,
+                              std::numeric_limits<std::uint64_t>::max());
+                } else {
+                    EXPECT_EQ(plan.regions[0].next_cursor,
+                              (std::numeric_limits<std::uint64_t>::max() % count + selected) %
+                                  count);
+                }
+                EXPECT_EQ(ledger.encode(), before);
+            }
+        }
+    }
 }
 
 TEST(RegionalWaterPlanning, InvalidCadenceTickOwnersAndDebtOverflowRefuseWithoutMutation) {
@@ -765,6 +2266,89 @@ std::string TransactionBytes(const Chunk& chunk, bool metadata = true) {
                                static_cast<std::uint64_t>(chunk.sdf_provenance())};
     append(revisions);
     return bytes;
+}
+
+TEST(RegionalWaterTransaction, GeneratedPlansPreserveCappedCreditAndZeroCandidateDebt) {
+    constexpr auto unit = world::water_share::kQ32;
+    for (const auto windows : {std::uint64_t{0},
+                               std::uint64_t{1},
+                               std::uint64_t{2},
+                               world::water_share::kMaxWindowBudget}) {
+        SCOPED_TRACE(windows);
+        auto ledger = PlanningLedger({{0, 0}, {1, 0}, {2, 0}});
+        ASSERT_TRUE(ledger.set_water_debts(
+            {{{0, 0}, unit / 2}, {{1, 0}, world::water_share::kMaxDebt}, {{2, 0}, 31}}));
+        ledger.set_water_cursor({1, 0}, std::numeric_limits<std::uint64_t>::max());
+        auto sleeping = ResidentAt(32);
+        sleeping.awake = false;
+        const std::vector residents{ResidentAt(0), ResidentAt(1), sleeping};
+        RegionSchedule schedule;
+        schedule.due = {{0, 0}, {1, 0}};
+        const auto plan = Planning::Build(
+            residents, {}, ledger, schedule, {.cell_budget = windows * kPlanningCapacity});
+        ASSERT_EQ(plan.regions.size(), 2u);
+        EXPECT_EQ(plan.regions[0].windows, std::min(windows, std::uint64_t{2}));
+        EXPECT_EQ(plan.regions[0].debt, unit / 2);
+        EXPECT_EQ(plan.regions[1].candidates, 0u);
+        EXPECT_EQ(plan.regions[1].debt, world::water_share::kMaxDebt);
+        const auto before = ledger.encode();
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        for (const auto id : plan.participants) {
+            chunks.push_back(TransactionChunk(Chunk::decode_id(id).x));
+        }
+        Planning::Transaction stage;
+        stage.Begin(ledger, schedule.tick, chunks, plan.regions);
+        EXPECT_EQ(stage.participants_visited(), plan.participants.size());
+        EXPECT_EQ(ledger.encode(), before);
+        stage.Publish();
+        for (const auto& region : plan.regions) {
+            EXPECT_EQ(ledger.records().at(region.owner).water_cursor, region.next_cursor);
+            EXPECT_EQ(ledger.water_debts().at(region.owner), region.debt);
+        }
+        EXPECT_EQ(ledger.water_debts().at({2, 0}), 31u);
+        EXPECT_EQ(ledger.records().at({1, 0}).water_cursor,
+                  std::numeric_limits<std::uint64_t>::max());
+    }
+}
+
+TEST(RegionalWaterTransaction, GeneratedCadencePlanPublishesFundedPairsAndBorders) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+    for (auto& [owner, record] : records) {
+        static_cast<void>(owner);
+        record.cadence_shift = 1;
+        record.cadence_phase = 1;
+    }
+    static_cast<void>(ledger.schedule(WorldClock(3)));
+    RegionSchedule schedule;
+    schedule.tick = 3;
+    schedule.due = {{0, 0}, {1, 0}};
+    const std::vector residents{ResidentAt(0), ResidentAt(1), ResidentAt(31), ResidentAt(32)};
+    const auto plan =
+        Planning::Build(residents, {}, ledger, schedule, {.cell_budget = 6 * kPlanningCapacity});
+    EXPECT_EQ(plan.border_windows, 2u);
+    EXPECT_EQ(plan.allocated_windows, 4u);
+    ASSERT_EQ(plan.interiors.size(), 4u);
+    ASSERT_EQ(plan.faces.size(), 2u);
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    for (const auto id : plan.participants) {
+        chunks.push_back(TransactionChunk(Chunk::decode_id(id).x));
+    }
+    Planning::Transaction stage;
+    stage.Begin(ledger, schedule.tick, chunks, plan.regions);
+    for (const auto id : plan.interiors) {
+        ASSERT_TRUE(stage.StepInterior(id, shield, {}).applied);
+    }
+    for (const auto& face : plan.faces) {
+        ASSERT_TRUE(stage.StepFace(face.positive, face.other, face.is_x).applied);
+    }
+    stage.Publish();
+    for (const auto& region : plan.regions) {
+        EXPECT_EQ(ledger.records().at(region.owner).water_cursor, region.next_cursor);
+        EXPECT_EQ(region.debt, 0u);
+        EXPECT_FALSE(ledger.water_debts().contains(region.owner));
+    }
 }
 
 TEST(RegionalWaterTransaction, LateKernelFailureDiscardsAllPartialWorkAndNotifications) {
@@ -914,11 +2498,14 @@ TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublis
                                    static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
                                    static_cast<std::size_t>(CHUNK_SIZE_Z + 1),
                                -1.0f);
+    // Adoption preserves Unloaded; explicitly admit this generated terrain for meshing.
+    chunks[0]->set_state(ChunkState::Idle);
     ASSERT_TRUE(shield.adopt_streamed_chunk(chunks[0]));
     entt::registry registry;
     TransactionMeshGate gate(jobs, shield);
     shield.begin_tick(0);
     shield.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_EQ(chunks[0]->get_state(), ChunkState::Meshing);
     ASSERT_EQ(chunks[0]->pending_lod.load(), 0);
     ASSERT_FALSE(chunks[0]->pending_mesh_ready.load());
     const auto live_before = TransactionBytes(*chunks[0]);
@@ -1189,6 +2776,44 @@ TEST(RegionalWaterTransaction, EveryResolutionAccountsRainEvaporationAndConserve
         EXPECT_EQ(Mass(*chunks[0]), before);
         stage.Publish();
         EXPECT_EQ(Mass(*chunks[0]), expected);
+    }
+}
+
+TEST(RegionalWaterTransaction, MaximumLegalDepthsConserveAcrossResolutionsAndAccountingSigns) {
+    constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+    constexpr auto footprint = std::int64_t{4} * CHUNK_SIZE_X * CHUNK_SIZE_Z;
+    constexpr auto max_chunk_volume = maximum * footprint;
+    // Even the participant cap at maximum depths stays representable. Check via
+    // division so this assertion cannot itself overflow if the caps change.
+    EXPECT_LE(
+        Planning::kMaxResidents,
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / max_chunk_volume));
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int resolution : {4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0, maximum, resolution),
+                                 TransactionChunk(1, maximum, resolution)};
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto ledger_before = ledger.encode();
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        const auto evaporated = stage.StepInterior(chunks[0]->get_id(), shield, {.evap_mm = 1});
+        ASSERT_TRUE(evaporated.applied);
+        const auto cells = static_cast<std::int64_t>(resolution) * resolution;
+        EXPECT_EQ(evaporated.depth_before, maximum * cells);
+        EXPECT_EQ(evaporated.depth_after, (maximum - 1) * cells);
+        EXPECT_EQ(evaporated.sink_mm, cells);
+        const auto rained = stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 1});
+        ASSERT_TRUE(rained.applied);
+        EXPECT_EQ(rained.source_mm, cells);
+        EXPECT_EQ(rained.depth_after, maximum * cells);
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), ledger_before);
+        ASSERT_NO_THROW(stage.Publish());
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(Mass(*chunks[0]) + Mass(*chunks[1]), std::int64_t{2} * maximum * cells);
+        EXPECT_EQ(ledger.encode(), ledger_before);
     }
 }
 

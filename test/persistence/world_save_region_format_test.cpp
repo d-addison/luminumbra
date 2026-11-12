@@ -2738,17 +2738,23 @@ TEST(WorldSaveRegionFormat, DigestAuthorityReusesReadsAndDecodesUntilPublication
     EXPECT_NE(changed, first);
     const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
     const auto timestamp = std::filesystem::last_write_time(region);
-    auto bytes = ReadFileBytes(region);
-    ASSERT_GT(bytes.size(), 28u);
-    bytes[26] = bytes[27] = bytes[28] = 0;
+    const auto size = std::filesystem::file_size(region);
     {
-        std::ofstream output(region, std::ios::binary | std::ios::trunc);
-        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        std::ofstream output(region, std::ios::binary | std::ios::app);
+        output.put('\0');
+        output.close();
         ASSERT_TRUE(output.good());
     }
+    ASSERT_GT(std::filesystem::file_size(region), size);
     std::filesystem::last_write_time(region, timestamp);
-    EXPECT_THROW((void)WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs),
-                 std::runtime_error);
+    try {
+        (void)WorldSaveService::region_simulation_digest(save.path, {0, 0}, inputs);
+        FAIL() << "Expected external region corruption to be refused";
+    } catch (const std::runtime_error& error) {
+        EXPECT_TRUE(std::string(error.what())
+                        .starts_with("region file payload lengths do not match file size: "))
+            << error.what();
+    }
 }
 
 TEST(WorldSaveRegionFormat, DigestAuthorityInvalidatesAfterRollback) {

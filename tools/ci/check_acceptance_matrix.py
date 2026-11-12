@@ -2928,6 +2928,11 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
         extra = [] if args.refresh_inventory else [matrix_path, inventory]
         if path != doc or path == args.execution_receipt:
             extra.append(doc)
+        # Document regeneration may replace the checked document intentionally;
+        # other outputs must preserve it just like every other input.
+        if (args.check_doc is not None and path != args.write_doc
+                and not (args.refresh_inventory and path == doc)):
+            extra.append(args.check_doc)
         if any(comparisons.same(path, source) for source in dict.fromkeys([*protected, *extra])):
             raise MatrixError(f"output path overlaps an input: {path}")
 

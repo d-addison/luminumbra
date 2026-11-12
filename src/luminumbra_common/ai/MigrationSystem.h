@@ -46,6 +46,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/MigratoryComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -130,7 +131,9 @@ struct MigrationStats {
 
 // RunMigrationOnTick: for each migratory creature, write a wish toward the current seasonal
 // target scaled by the seasonal drive. id-ordered, deterministic. season01 is a plain input.
-inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
+inline MigrationStats RunMigrationOnTick(entt::registry& reg,
+                                         float season01,
+                                         const CreatureTickAdmission* admission = nullptr) {
     MigrationStats stats;
 
     auto view = reg.view<Comp::MigratoryComponent, Comp::TransformComponent>();
@@ -148,12 +151,15 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
     const MigrationTarget target = MigrationTargetAt(season01);
     const float drive = MigrationDriveAt(season01);
 
-    stats.participants = static_cast<int>(ents.size());
     stats.target_x = target.x;
     stats.target_z = target.z;
     stats.drive = drive;
 
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
+        ++stats.participants;
         const auto& tf = view.get<Comp::TransformComponent>(e);
         auto& mig = view.get<Comp::MigratoryComponent>(e);
 

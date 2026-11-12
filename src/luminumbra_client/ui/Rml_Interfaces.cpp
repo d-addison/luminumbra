@@ -1,4 +1,5 @@
 #include "Rml_Interfaces.h"
+#include "TgaTexture.h"
 #include "app/FrameAttribution.h"
 #include "core/Profiler.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -107,7 +108,7 @@ size_t RmlFileInterface::Tell(Rml::FileHandle file) {
         input.clear();
         return static_cast<std::size_t>(input.tellg());
     }
-    return ftell((FILE*)file);
+    return static_cast<std::size_t>(ftell((FILE*)file));
 }
 
 // --- RmlRenderer Implementation ---
@@ -203,12 +204,16 @@ Rml::CompiledGeometryHandle RmlRenderer::CompileGeometry(Rml::Span<const Rml::Ve
     glBindVertexArray(geometry->vao);
     glGenBuffers(1, &geometry->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, geometry->vbo);
-    glBufferData(
-        GL_ARRAY_BUFFER, sizeof(Rml::Vertex) * vertices.size(), vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(sizeof(Rml::Vertex) * vertices.size()),
+                 vertices.data(),
+                 GL_STATIC_DRAW);
     glGenBuffers(1, &geometry->ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, geometry->ebo);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER, sizeof(int) * indices.size(), indices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(sizeof(int) * indices.size()),
+                 indices.data(),
+                 GL_STATIC_DRAW);
 
     geometry->num_indices = (int)indices.size();
 
@@ -246,8 +251,11 @@ void RmlRenderer::RenderGeometry(Rml::CompiledGeometryHandle handle,
     // the fill colour survives the texture multiply (otherwise every background renders black).
     glBindTexture(GL_TEXTURE_2D, texture ? (GLuint)texture : m_whiteTexture);
     glBindVertexArray(geometry->vao);
-    Luminumbra::Rendering::AttributedGl::Submit(
-        glDrawElements, GL_TRIANGLES, geometry->num_indices, GL_UNSIGNED_INT, nullptr);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                static_cast<GLenum>(GL_TRIANGLES),
+                                                geometry->num_indices,
+                                                static_cast<GLenum>(GL_UNSIGNED_INT),
+                                                nullptr);
     glBindVertexArray(0);
 }
 
@@ -325,6 +333,10 @@ Rml::TextureHandle RmlRenderer::GenerateTexture(Rml::Span<const Rml::byte> sourc
                                                 Rml::Vector2i source_dimensions) {
     const Luminumbra::Client::Attribution::PhaseScope texture_phase(
         Luminumbra::Client::Attribution::Phase::TextureLoad);
+    if (!UiTexture::ValidRgbaData(
+            source_data.data(), source_data.size(), source_dimensions.x, source_dimensions.y)) {
+        return {};
+    }
     GLuint tex_id = 0;
     glGenTextures(1, &tex_id);
     if (tex_id == 0)

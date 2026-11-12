@@ -37,6 +37,7 @@
 
 #include "../components/CircadianComponents.h"
 #include "../core/DeterministicMath.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -93,8 +94,10 @@ CircadianActivity(float time_of_day01, bool nocturnal, float amplitude = 1.0f) {
 // RunCircadianOnTick: write every participating creature's activity from the day clock.
 // id-ordered. `time_of_day01` is the caller-supplied solar phase in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
-inline CircadianStats
-RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1.0f) {
+inline CircadianStats RunCircadianOnTick(entt::registry& reg,
+                                         float time_of_day01,
+                                         float amplitude = 1.0f,
+                                         const CreatureTickAdmission* admission = nullptr) {
     CircadianStats stats;
 
     auto view = reg.view<Comp::CircadianComponent>();
@@ -110,6 +113,9 @@ RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1
         return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         auto& cc = view.get<Comp::CircadianComponent>(e);
         const bool nocturnal = cc.nocturnal != 0;
         cc.activity = CircadianActivity(time_of_day01, nocturnal, amplitude);

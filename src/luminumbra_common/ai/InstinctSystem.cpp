@@ -6,6 +6,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
+#include "CreatureTickAdmission.h"
 #include "InstinctPlanner.h"
 #include "PerceptionSubstrate.h"
 #include "StimulusChannels.h"
@@ -39,7 +40,8 @@ struct OpportunitySource {
 InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
                                                 std::uint64_t tick,
                                                 const StimulusChannelRegistry* stimulus,
-                                                bool use_perception_substrate) {
+                                                bool use_perception_substrate,
+                                                const CreatureTickAdmission* admission) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::InstinctAgentComponent;
     using Luminumbra::Components::NeedsComponent;
@@ -55,6 +57,9 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
     {
         auto opportunity_view = registry.view<const OpportunityComponent>();
         for (auto entity : opportunity_view) {
+            if (admission && !admission->Allows(entity)) {
+                continue;
+            }
             OpportunitySource source;
             source.entity = entity;
             source.component = &opportunity_view.get<const OpportunityComponent>(entity);
@@ -98,6 +103,9 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
 
     auto agent_view = registry.view<InstinctAgentComponent, NeedsComponent>();
     for (auto entity : agent_view) {
+        if (admission && !admission->Allows(entity)) {
+            continue;
+        }
         auto& agent = agent_view.get<InstinctAgentComponent>(entity);
         auto& needs = agent_view.get<NeedsComponent>(entity);
         ++stats.agents_seen;

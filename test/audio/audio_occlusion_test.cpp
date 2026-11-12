@@ -33,6 +33,7 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <memory>
 
 namespace {
@@ -64,7 +65,176 @@ const glm::vec3 kSourceBelow(8.0f, 2.0f, 8.0f);
 const glm::vec3 kListenerAbove(8.0f, 14.0f, 8.0f);
 constexpr float kFloorY = 8.0f;
 
+class DeferredAudioOcclusion : public ::testing::Test {
+protected:
+    void SetUp() override {
+        physics.startup();
+        ASSERT_TRUE(physics.is_started());
+        auto floor = MakeFlatFloorChunk(IVec3(0, 0, 0), kFloorY);
+        physics.add_chunk_collision(*floor);
+        cluster.SetPhysicsSystem(&physics);
+        cluster.SetClusteringEnabled(false);
+        cluster.SetPhysicsRaycastCallback(
+            [](const glm::vec3&, const glm::vec3&, float&) { return false; });
+        physics.GetBatchedQueries().SetMaxQueriesPerFrame(1);
+    }
+
+    void QueueDeferredSource(const glm::vec3& position = kSourceBelow) {
+        auto& queries = physics.GetBatchedQueries();
+        // Two higher-priority queries hold the audio result beyond one processing budget.
+        for (int index = 0; index < 2; ++index) {
+            queries.QueueRaycast(kSourceBelow, kListenerAbove, {}, 2.0f);
+        }
+        cluster.AddAudioSource(kHandle, position, 1.0f, 1.0f, 100.0f);
+        cluster.Update(kListenerAbove, 1.0f / 30.0f);
+        ASSERT_EQ(queries.GetQueuedQueryCount(), 3u);
+        queries.ProcessBatch(&physics);
+        EXPECT_EQ(queries.GetProcessedQueryCount(), 1u);
+        EXPECT_EQ(queries.GetQueuedQueryCount(), 2u);
+    }
+
+    void DeliverDeferredResult() {
+        auto& queries = physics.GetBatchedQueries();
+        queries.ProcessBatch(&physics);
+        EXPECT_EQ(queries.GetProcessedQueryCount(), 1u);
+        EXPECT_EQ(queries.GetQueuedQueryCount(), 1u);
+        queries.ProcessBatch(&physics);
+        EXPECT_EQ(queries.GetProcessedQueryCount(), 1u);
+        EXPECT_EQ(queries.GetQueuedQueryCount(), 0u);
+    }
+
+    static constexpr Luminumbra::u32 kHandle = 17;
+    PhysicsSystem physics;
+    AudioSpatialCluster cluster;
+};
+
 } // namespace
+
+TEST_F(DeferredAudioOcclusion, ReplacementWhileDeferredDoesNotReceiveOldResult) {
+    QueueDeferredSource();
+    cluster.AddAudioSource(kHandle, glm::vec3(14.0f, 2.0f, 8.0f), 1.0f, 1.0f, 100.0f);
+    ASSERT_EQ(cluster.GetSourceAttenuation(kHandle), 1.0f);
+
+    DeliverDeferredResult();
+    EXPECT_EQ(cluster.GetSourceAttenuation(kHandle), 1.0f);
+    EXPECT_EQ(cluster.GetActiveSourceCount(), 1u);
+}
+
+TEST_F(DeferredAudioOcclusion, RemovalRejectsDeferredResultBeforeRetirement) {
+    QueueDeferredSource();
+    const auto attenuation = cluster.GetSourceAttenuation(kHandle);
+    ASSERT_TRUE(attenuation.has_value());
+    cluster.UpdateSourcePosition(kHandle, glm::vec3(14.0f, 2.0f, 8.0f));
+    cluster.RemoveAudioSource(kHandle);
+
+    DeliverDeferredResult();
+    EXPECT_EQ(cluster.GetSourceAttenuation(kHandle), attenuation);
+    EXPECT_EQ(cluster.GetActiveSourceCount(), 1u);
+    cluster.Update(kListenerAbove, 1.0f / 30.0f);
+    EXPECT_FALSE(cluster.GetSourceAttenuation(kHandle).has_value());
+    EXPECT_EQ(cluster.GetActiveSourceCount(), 0u);
+}
+
+TEST_F(DeferredAudioOcclusion, RetiredSourceResultDoesNotReachReusedHandle) {
+    QueueDeferredSource();
+    cluster.RemoveAudioSource(kHandle);
+    cluster.Update(kListenerAbove, 1.0f / 30.0f);
+    ASSERT_FALSE(cluster.GetSourceAttenuation(kHandle).has_value());
+    ASSERT_EQ(cluster.GetActiveSourceCount(), 0u);
+    cluster.AddAudioSource(kHandle, glm::vec3(14.0f, 2.0f, 8.0f), 1.0f, 1.0f, 100.0f);
+
+    DeliverDeferredResult();
+    EXPECT_EQ(cluster.GetSourceAttenuation(kHandle), 1.0f);
+}
+
+TEST_F(DeferredAudioOcclusion, RemovedSourceCanRetireBeforeDeferredResult) {
+    QueueDeferredSource();
+    cluster.RemoveAudioSource(kHandle);
+    cluster.Update(kListenerAbove, 1.0f / 30.0f);
+    ASSERT_EQ(cluster.GetActiveSourceCount(), 0u);
+
+    DeliverDeferredResult();
+    EXPECT_FALSE(cluster.GetSourceAttenuation(kHandle).has_value());
+    EXPECT_EQ(cluster.GetActiveSourceCount(), 0u);
+}
+
+TEST_F(DeferredAudioOcclusion, LiveSourceStillReceivesDeferredResultAfterMoving) {
+    QueueDeferredSource();
+    const float attenuation = cluster.GetSourceAttenuation(kHandle).value_or(-1.0f);
+    ASSERT_GE(attenuation, 0.0f);
+    const auto hit = physics.audio_raycast(kSourceBelow, kListenerAbove);
+    ASSERT_TRUE(hit.hit);
+    const glm::vec3 moved_position(14.0f, 2.0f, 8.0f);
+    cluster.UpdateSourcePosition(kHandle, moved_position);
+    const float path_factor = (glm::distance(moved_position, hit.hit_point) +
+                               glm::distance(hit.hit_point, kListenerAbove)) /
+                              glm::distance(moved_position, kListenerAbove);
+    const float occlusion =
+        std::clamp(hit.material_absorption * std::min(path_factor - 1.0f, 1.0f), 0.0f, 0.95f);
+    ASSERT_GT(occlusion, 0.0f);
+
+    DeliverDeferredResult();
+    const float result = cluster.GetSourceAttenuation(kHandle).value_or(-1.0f);
+    EXPECT_NEAR(result, attenuation * (1.0f - occlusion), 1e-6f);
+    EXPECT_LT(result, attenuation);
+}
+
+TEST_F(DeferredAudioOcclusion, SourceMovedToListenerPreservesAttenuation) {
+    QueueDeferredSource();
+    const auto attenuation = cluster.GetSourceAttenuation(kHandle);
+    ASSERT_TRUE(attenuation.has_value());
+    cluster.UpdateSourcePosition(kHandle, kListenerAbove);
+
+    DeliverDeferredResult();
+    EXPECT_EQ(cluster.GetSourceAttenuation(kHandle), attenuation);
+}
+
+TEST_F(DeferredAudioOcclusion, DeferredMissPreservesAttenuation) {
+    const glm::vec3 outside_floor(40.0f, 2.0f, 8.0f);
+    ASSERT_FALSE(physics.audio_raycast(outside_floor, kListenerAbove).hit);
+    QueueDeferredSource(outside_floor);
+    const auto attenuation = cluster.GetSourceAttenuation(kHandle);
+    ASSERT_TRUE(attenuation.has_value());
+
+    DeliverDeferredResult();
+    EXPECT_EQ(cluster.GetSourceAttenuation(kHandle), attenuation);
+}
+
+TEST_F(DeferredAudioOcclusion, ClusterCanBeDestroyedBeforeDeferredResult) {
+    {
+        auto temporary_cluster = std::make_unique<AudioSpatialCluster>();
+        temporary_cluster->SetPhysicsSystem(&physics);
+        temporary_cluster->SetPhysicsRaycastCallback(
+            [](const glm::vec3&, const glm::vec3&, float&) { return false; });
+        temporary_cluster->AddAudioSource(kHandle, kSourceBelow, 1.0f, 1.0f, 100.0f);
+        temporary_cluster->Update(kListenerAbove, 1.0f / 30.0f);
+        ASSERT_EQ(physics.GetBatchedQueries().GetQueuedQueryCount(), 1u);
+    }
+
+    physics.GetBatchedQueries().ProcessBatch(&physics);
+    EXPECT_EQ(physics.GetBatchedQueries().GetProcessedQueryCount(), 1u);
+    EXPECT_EQ(physics.GetBatchedQueries().GetQueuedQueryCount(), 0u);
+}
+
+TEST_F(DeferredAudioOcclusion, UnownedSourcesAreNotQueued) {
+    Luminumbra::Client::AudioSource unowned{.position = kSourceBelow,
+                                            .volume = 1.0f,
+                                            .min_distance = 1.0f,
+                                            .max_distance = 100.0f,
+                                            .is_active = true,
+                                            .event_handle = kHandle,
+                                            .last_calculated_attenuation = 1.0f,
+                                            .cluster_id = -1};
+    cluster.CalculateBatchedOcclusion({&unowned}, kListenerAbove);
+    EXPECT_EQ(physics.GetBatchedQueries().GetQueuedQueryCount(), 0u);
+    cluster.AddAudioSource(kHandle, kSourceBelow, 1.0f, 1.0f, 100.0f);
+    cluster.CalculateBatchedOcclusion({&unowned}, kListenerAbove);
+    EXPECT_EQ(physics.GetBatchedQueries().GetQueuedQueryCount(), 0u);
+    cluster.CalculateBatchedOcclusion({}, kListenerAbove);
+    EXPECT_EQ(physics.GetBatchedQueries().GetQueuedQueryCount(), 0u);
+    EXPECT_EQ(unowned.last_calculated_attenuation, 1.0f);
+    EXPECT_FALSE(cluster.GetSourceAttenuation(kHandle + 1).has_value());
+}
 
 // Core proving_signal: a solid body placed between source and listener raises the
 // occlusion, while a clear line of sight reads ~0. Only the occluder changes.

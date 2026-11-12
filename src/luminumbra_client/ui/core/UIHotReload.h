@@ -1,11 +1,14 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Client::UI {
@@ -21,6 +24,12 @@ public:
 
     UIHotReload();
     ~UIHotReload();
+    // The callback target is shared with in-flight reloads, so copies would
+    // alias one mutable target. Watchers are owned and moved, never copied.
+    UIHotReload(const UIHotReload&) = delete;
+    UIHotReload& operator=(const UIHotReload&) = delete;
+    UIHotReload(UIHotReload&&) = default;
+    UIHotReload& operator=(UIHotReload&&) = default;
 
     // Configuration
     void SetEnabled(bool enabled) {
@@ -37,9 +46,15 @@ public:
     void StopWatching(const std::filesystem::path& path);
     void ClearAllWatches();
 
+    // Read-only storage diagnostic for observing watch-table growth.
+    std::size_t WatchedFileBucketCount() const {
+        return m_watchedFiles.bucket_count();
+    }
+
     // Callbacks
     void SetReloadCallback(ReloadCallback callback) {
-        m_reloadCallback = std::move(callback);
+        m_reloadCallback =
+            callback ? std::make_shared<ReloadCallback>(std::move(callback)) : nullptr;
     }
 
     // Update (call from main loop)
@@ -58,7 +73,7 @@ private:
     bool m_enabled = false;
     std::unordered_map<std::filesystem::path, WatchedFile> m_watchedFiles;
     std::unordered_map<std::filesystem::path, std::unordered_set<std::string>> m_watchedDirectories;
-    ReloadCallback m_reloadCallback;
+    std::shared_ptr<ReloadCallback> m_reloadCallback;
 
     std::chrono::steady_clock::time_point m_lastCheck;
     static constexpr std::chrono::milliseconds CHECK_INTERVAL{1000}; // Check every second

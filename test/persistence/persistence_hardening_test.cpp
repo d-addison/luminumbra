@@ -24,7 +24,9 @@
 #include "world/WorldStreamingState.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -315,6 +317,168 @@ TEST(PersistenceHardening, SnapshotRoundTripPreservesEveryFieldExactly) {
     ExpectChunkFieldExact(*expected, *loaded);
 }
 
+TEST(PersistenceHardening, WaterScalarsRefuseInvalidInputTransactionallyAcrossRecordReaders) {
+    WorldStreamingState original;
+    const auto first = AddCompleteWaterChunk(original, {0, 0, 0});
+    const auto second = AddCompleteWaterChunk(original, {1, 0, 0});
+    for (const auto& chunk : {first, second}) {
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->mark_water_data_dirty();
+    }
+    for (const bool encoded : {false, true}) {
+        for (const bool nested : {false, true}) {
+            SCOPED_TRACE(encoded);
+            SCOPED_TRACE(nested);
+            auto valid =
+                nlohmann::json::parse(encoded ? P::SerializeChunkRecordPayloadJson(*first)
+                                              : SerializeWorldStreamingStateSnapshotJson(original));
+            if (encoded) {
+                const auto next =
+                    nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*second));
+                valid["chunks"].push_back(next.at("chunks").at(0));
+                valid["chunk_count"] = 2;
+            }
+            if (!nested) {
+                for (auto& object : valid["chunks"])
+                    object.erase("water_state");
+            }
+            const auto refuse = [&](const char* field,
+                                    const nlohmann::json& invalid,
+                                    bool missing = false) {
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto document = valid;
+                auto& object = document["chunks"][1];
+                auto& state = nested && std::string_view(field) != "water_mesh_version"
+                                  ? object["water_state"]
+                                  : object;
+                if (missing)
+                    state.erase(field);
+                else
+                    state[field] = invalid;
+                // Exercise both ordinary snapshot loads and the authority-checked record path.
+                for (const bool authority_checked : {false, true}) {
+                    SCOPED_TRACE(authority_checked);
+                    WorldStreamingState loaded;
+                    AddCompleteWaterChunk(loaded, {9, 0, 0});
+                    std::vector<std::string> errors;
+                    const P::ChunkAuthorityLoadPolicy policy{.validate_record_authority =
+                                                                 authority_checked};
+                    EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(
+                        document.dump(), loaded, errors, policy));
+                    EXPECT_EQ(loaded.size(), 0u);
+                    ASSERT_FALSE(errors.empty());
+                    EXPECT_NE(errors.front().find("Saved water scalar"), std::string::npos);
+                }
+                if (!encoded && nested) {
+                    std::vector<std::string> errors;
+                    EXPECT_FALSE(P::ValidateWorldStreamingChunkFormatJson(object.dump(), errors));
+                    EXPECT_FALSE(errors.empty());
+                }
+            };
+            for (const nlohmann::json& invalid :
+                 {nlohmann::json(1e39),
+                  nlohmann::json(-1e39),
+                  nlohmann::json(
+                      std::nextafter(static_cast<double>(std::numeric_limits<float>::max()),
+                                     std::numeric_limits<double>::infinity()))})
+                refuse("max_water_delta_last_tick", invalid);
+            for (const char* field :
+                 {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"}) {
+                for (const nlohmann::json& invalid :
+                     {nlohmann::json(static_cast<std::int64_t>(std::numeric_limits<int>::max()) +
+                                     1),
+                      nlohmann::json(static_cast<std::int64_t>(std::numeric_limits<int>::min()) -
+                                     1),
+                      nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                      nlohmann::json(1e38),
+                      nlohmann::json(0.5),
+                      nlohmann::json(1.0)})
+                    refuse(field, invalid);
+            }
+            refuse("ticks_below_threshold", -1);
+            for (const nlohmann::json& invalid :
+                 {nlohmann::json(-1),
+                  nlohmann::json(
+                      static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1u),
+                  nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                  nlohmann::json(1e38),
+                  nlohmann::json(0.5),
+                  nlohmann::json(1.0)})
+                refuse("water_mesh_version", invalid);
+            for (const char* field : {"max_water_delta_last_tick",
+                                      "current_water_resolution",
+                                      "ticks_below_threshold",
+                                      "water_mesh_dirty_ticks",
+                                      "water_mesh_version"}) {
+                refuse(field, nullptr, true);
+                for (const nlohmann::json& invalid : {nlohmann::json(),
+                                                      nlohmann::json(true),
+                                                      nlohmann::json("NaN"),
+                                                      nlohmann::json("Infinity"),
+                                                      nlohmann::json("-Infinity"),
+                                                      nlohmann::json::array(),
+                                                      nlohmann::json::object()})
+                    refuse(field, invalid);
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, WaterScalarBoundariesStillRoundTripAcrossRecordReaders) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->mark_water_data_dirty();
+    for (const float delta : {std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::lowest(),
+                              0.0f,
+                              -0.0f,
+                              std::numeric_limits<float>::denorm_min()}) {
+        for (const int quiet_ticks : {0, std::numeric_limits<int>::max()}) {
+            chunk->max_water_delta_last_tick = delta;
+            chunk->ticks_below_threshold = quiet_ticks;
+            chunk->water_mesh_dirty_ticks = quiet_ticks == 0 ? std::numeric_limits<int>::min()
+                                                             : std::numeric_limits<int>::max();
+            chunk->water_mesh_version.store(
+                quiet_ticks == 0 ? 0u : std::numeric_limits<std::uint32_t>::max());
+            // These writer-produced values must load without changing the format or their bits.
+            for (const bool encoded : {false, true}) {
+                auto document = nlohmann::json::parse(
+                    encoded ? P::SerializeChunkRecordPayloadJson(*chunk)
+                            : SerializeWorldStreamingStateSnapshotJson(original));
+                for (const bool nested : {true, false}) {
+                    if (!nested)
+                        document["chunks"][0].erase("water_state");
+                    for (const bool authority_checked : {false, true}) {
+                        WorldStreamingState loaded;
+                        std::vector<std::string> errors;
+                        const P::ChunkAuthorityLoadPolicy policy{.validate_record_authority =
+                                                                     authority_checked};
+                        ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(
+                            document.dump(), loaded, errors, policy));
+                        const auto restored = loaded.find_chunk(chunk->get_id());
+                        ASSERT_NE(restored, nullptr);
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->max_water_delta_last_tick),
+                                  std::bit_cast<std::uint32_t>(delta));
+                        EXPECT_EQ(restored->ticks_below_threshold, quiet_ticks);
+                        EXPECT_EQ(restored->water_mesh_dirty_ticks, chunk->water_mesh_dirty_ticks);
+                        EXPECT_EQ(restored->water_mesh_version.load(),
+                                  chunk->water_mesh_version.load());
+                        EXPECT_TRUE(errors.empty());
+                    }
+                    if (!encoded && nested) {
+                        std::vector<std::string> errors;
+                        EXPECT_TRUE(P::ValidateWorldStreamingChunkFormatJson(
+                            document["chunks"][0].dump(), errors));
+                        EXPECT_TRUE(errors.empty());
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndependent) {
     Chunk chunk({0, 0, 0});
     const auto seed_generation = chunk.water_seed_edit_generation();
@@ -532,7 +696,7 @@ TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority
             }
             const auto depths = chunk->water_depth_mm;
             const auto flux = chunk->water_edge_flux;
-            P::RegionContentHasher before;
+            P::RegionContentHasher before(true);
             before.append(*chunk);
             chunk->mark_sdf_generated_current_params();
             chunk->clear_voxel_data_dirty_after_generation();
@@ -544,9 +708,11 @@ TEST(PersistenceHardening, RegeneratingTerrainPreservesInitializedWaterAuthority
             EXPECT_TRUE(chunk->is_voxel_data_dirty());
             EXPECT_EQ(chunk->water_depth_mm, depths);
             EXPECT_EQ(chunk->water_edge_flux, flux);
-            P::RegionContentHasher after;
+            P::RegionContentHasher after(true);
             after.append(*chunk);
             EXPECT_FALSE(after.empty());
+            ASSERT_TRUE(before.water_value().has_value());
+            ASSERT_TRUE(after.water_value().has_value());
             EXPECT_EQ(after.water_value(), before.water_value());
             const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
             const auto record = nlohmann::json::parse(snapshot)["chunks"][0];
@@ -1149,16 +1315,35 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
     const auto second = AddCompleteWaterChunk(original, {1, 0, 0});
     first->mark_voxel_data_dirty();
     second->mark_water_data_dirty();
-    P::RegionContentHasher hasher;
+    P::RegionContentHasher hasher(true);
+    P::RegionContentHasher without_diagnostics;
     EXPECT_TRUE(hasher.empty());
+    EXPECT_TRUE(without_diagnostics.empty());
+    constexpr std::array<std::array<std::uint64_t, 3>, 3> golden{{
+        {0x7dd62db149fe95e7ull, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
+        {0x3acf610d610e4f8cull, 0x6594214f1b72516full, 0x7239ec74bcb7a85aull},
+        {0x6b094f28f1f19fc6ull, 0x2c448894bf5db35eull, 0x296be0162168cbbcull},
+    }};
     auto contents = nlohmann::json::array();
     const auto verify = [&] {
+        const auto& expected = golden.at(contents.size());
+        EXPECT_EQ(hasher.value(), expected[0]);
+        EXPECT_EQ(without_diagnostics.value(), expected[0]);
+        EXPECT_EQ(hasher.terrain_value(), expected[1]);
+        EXPECT_EQ(hasher.water_value(), expected[2]);
+        EXPECT_FALSE(without_diagnostics.terrain_value().has_value());
+        EXPECT_FALSE(without_diagnostics.water_value().has_value());
+        EXPECT_EQ(without_diagnostics.empty(), hasher.empty());
         const auto canonical =
             nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", contents}};
         std::ostringstream digest;
         digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
         EXPECT_EQ(digest.str(), P::StableChecksum(canonical.dump(4) + '\n'));
     };
+    verify();
+    Chunk regenerable({2, 0, 0});
+    hasher.append(regenerable);
+    without_diagnostics.append(regenerable);
     verify();
     for (const auto& chunk : {first, second}) {
         const auto snapshot = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
@@ -1185,6 +1370,7 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
         }
         contents.push_back(std::move(projected));
         hasher.append(*chunk);
+        without_diagnostics.append(*chunk);
         verify();
     }
     EXPECT_FALSE(hasher.empty());
@@ -1192,23 +1378,30 @@ TEST(PersistenceHardening, RegionContentHasherMatchesCanonicalProjectionAndSepar
     digest << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
     EXPECT_EQ(P::ComputeRegionContentHash(original), digest.str());
     const auto base = hasher.value();
-    Chunk regenerable({2, 0, 0});
     hasher.append(regenerable);
+    without_diagnostics.append(regenerable);
     EXPECT_EQ(hasher.value(), base);
     EXPECT_THROW(hasher.append(*second), std::invalid_argument);
     EXPECT_THROW(hasher.append(*first), std::invalid_argument);
+    EXPECT_THROW(without_diagnostics.append(*second), std::invalid_argument);
+    EXPECT_THROW(without_diagnostics.append(*first), std::invalid_argument);
     EXPECT_EQ(hasher.value(), base);
+    verify();
     ++second->water_depth_mm[0];
-    P::RegionContentHasher changed_water;
+    P::RegionContentHasher changed_water(true);
     changed_water.append(*first);
     changed_water.append(*second);
+    ASSERT_TRUE(changed_water.terrain_value().has_value());
+    ASSERT_TRUE(changed_water.water_value().has_value());
     EXPECT_EQ(changed_water.terrain_value(), hasher.terrain_value());
     EXPECT_NE(changed_water.water_value(), hasher.water_value());
     EXPECT_NE(changed_water.value(), base);
     first->sdf_data[0] += 0.5f;
-    P::RegionContentHasher changed_terrain;
+    P::RegionContentHasher changed_terrain(true);
     changed_terrain.append(*first);
     changed_terrain.append(*second);
+    ASSERT_TRUE(changed_terrain.terrain_value().has_value());
+    ASSERT_TRUE(changed_terrain.water_value().has_value());
     EXPECT_NE(changed_terrain.terrain_value(), changed_water.terrain_value());
     EXPECT_EQ(changed_terrain.water_value(), changed_water.water_value());
 }

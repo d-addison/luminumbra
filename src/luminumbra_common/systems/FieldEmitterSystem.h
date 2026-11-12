@@ -24,6 +24,7 @@
 
 #include "entt/entt.hpp"
 
+#include "../ai/CreatureTickAdmission.h"
 #include "../components/CoreComponents.h"
 #include "../components/FieldEmitterComponents.h"
 #include "../fields/EnergyFieldState.h"
@@ -36,6 +37,18 @@ struct FieldEmitterGatherStats {
     std::uint64_t deposits = 0; // QueueDeposit calls issued this tick
 };
 
+// Registry-owned scratch follows the existing exclusive owner-thread gather contract.
+// The ordinary roster is bounded by live entities; regional buffers by kMaxRegionalBatchDeposits.
+struct FieldEmitterScratch {
+    std::vector<entt::entity> emitters, regional_emitters;
+    std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit> deposits;
+};
+
+inline FieldEmitterScratch& EmitterScratch(entt::registry& registry) {
+    auto* scratch = registry.ctx().find<FieldEmitterScratch>();
+    return scratch ? *scratch : registry.ctx().emplace<FieldEmitterScratch>();
+}
+
 // Queue this tick's emitter deposits into `field` (call right before the
 // layer's Tick, which sorts and applies them). Centre cell receives the full
 // rate; when radius_cells > 0 every cell within that Chebyshev radius receives
@@ -45,7 +58,8 @@ struct FieldEmitterGatherStats {
 inline FieldEmitterGatherStats
 GatherFieldEmitterDeposits(entt::registry& registry,
                            luminumbra::fields::EnergyFieldState& field,
-                           bool clip_to_world = false) {
+                           bool clip_to_world = false,
+                           const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
     using Luminumbra::Components::FieldEmitterComponent;
     using Luminumbra::Components::TransformComponent;
 
@@ -53,7 +67,8 @@ GatherFieldEmitterDeposits(entt::registry& registry,
 
     // id-ordered traversal (the EcologyHash rule) so the queue order is a pure
     // function of sim state, never of entt storage layout.
-    std::vector<entt::entity> emitters;
+    auto& emitters = EmitterScratch(registry).emitters;
+    emitters.clear();
     {
         auto view = registry.view<const TransformComponent, const FieldEmitterComponent>();
         for (auto e : view)
@@ -64,6 +79,9 @@ GatherFieldEmitterDeposits(entt::registry& registry,
     }
 
     for (auto e : emitters) {
+        if (admission && !admission->Allows(e)) {
+            continue;
+        }
         const auto& emitter = registry.get<const FieldEmitterComponent>(e);
         if (emitter.rate_raw_per_tick == 0u)
             continue; // zero-default = inert
@@ -74,7 +92,9 @@ GatherFieldEmitterDeposits(entt::registry& registry,
         const int cx = static_cast<int>(std::floor(tf.position.x / kAetherCellSizeM));
         const int cz = static_cast<int>(std::floor(tf.position.z / kAetherCellSizeM));
 
-        const auto emitter_id = static_cast<std::uint64_t>(entt::to_integral(e));
+        // Admitted deposits are additive integer input. A neutral key lets the field
+        // sort by cell/channel/amount without leaking runtime handles into ordering.
+        const auto emitter_id = admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(e));
         const int radius = emitter.radius_cells > 0 ? emitter.radius_cells : 0;
         bool queued = false;
         for (int dz = -radius; dz <= radius; ++dz) {
@@ -117,7 +137,11 @@ inline bool AppendRegionalEmitterFootprint(
     const Components::FieldEmitterComponent& emitter,
     int channels,
     const luminumbra::fields::EnergyFieldState::RegionRecords& records,
-    bool clip_to_owners) {
+    bool clip_to_owners,
+    const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
+    if (admission && !admission->Allows(entity)) {
+        return true;
+    }
     using luminumbra::fields::EnergyFieldState;
     if (!world::ActiveRegionLedger::valid_anchor(transform.position) || emitter.radius_cells < 0 ||
         emitter.radius_cells > 31 || emitter.channel < 0 || emitter.channel >= channels)
@@ -142,11 +166,12 @@ inline bool AppendRegionalEmitterFootprint(
             }
             if (deposits.size() >= EnergyFieldState::kMaxRegionalBatchDeposits)
                 return false;
-            deposits.push_back({static_cast<std::uint64_t>(entt::to_integral(entity)),
-                                cx + dx,
-                                cz + dz,
-                                emitter.channel,
-                                amount});
+            deposits.push_back(
+                {admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(entity)),
+                 cx + dx,
+                 cz + dz,
+                 emitter.channel,
+                 amount});
         }
     }
     return true;
@@ -160,19 +185,27 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
     luminumbra::fields::EnergyFieldState& field,
     const luminumbra::fields::EnergyFieldState::RegionRecords& records,
     bool clip_to_owners = false,
-    std::size_t available_slots = luminumbra::fields::EnergyFieldState::kMaxRegionalDeposits) {
+    std::size_t available_slots = luminumbra::fields::EnergyFieldState::kMaxRegionalDeposits,
+    const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
     using luminumbra::fields::EnergyFieldState;
     RegionalEmitterGatherStats stats;
     // Both scratch vectors are bounded by kMaxRegionalBatchDeposits, including
     // a roster of emitters whose footprints eventually clip to nothing. They grow
     // with the roster, so an ordinary tick with a few emitters allocates little.
-    std::vector<entt::entity> emitters;
+    auto& scratch = EmitterScratch(registry);
+    auto& emitters = scratch.regional_emitters;
+    auto& deposits = scratch.deposits;
+    emitters.clear();
+    deposits.clear();
     const auto view =
         registry
             .view<const Components::TransformComponent, const Components::FieldEmitterComponent>();
     emitters.reserve((std::min)(view.size_hint(), EnergyFieldState::kMaxRegionalBatchDeposits));
     for (auto entity : view) {
         ++stats.visited_emitters;
+        if (admission && !admission->Allows(entity)) {
+            continue;
+        }
         if (registry.get<const Components::FieldEmitterComponent>(entity).rate_raw_per_tick == 0)
             continue;
         if (emitters.size() == EnergyFieldState::kMaxRegionalBatchDeposits)
@@ -182,7 +215,6 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
     std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    std::vector<EnergyFieldState::RegionalDeposit> deposits;
     FieldEmitterGatherStats queued;
     for (auto entity : emitters) {
         const auto previous = deposits.size();
@@ -193,7 +225,8 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
                 registry.get<const Components::FieldEmitterComponent>(entity),
                 field.channels(),
                 records,
-                clip_to_owners))
+                clip_to_owners,
+                admission))
             return stats;
         queued.emitters += deposits.size() != previous ? 1u : 0u;
     }

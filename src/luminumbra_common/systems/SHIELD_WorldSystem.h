@@ -469,6 +469,23 @@ public:
                 PhysicsSystem* physics_system,
                 bool advance_simulation = true);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
+    // Owner-thread view, valid until the next renderability/residency mutation.
+    // Publishes completed generation then meshing jobs, just like the snapshot API.
+    const std::vector<::Luminumbra::Chunk*>& renderable_chunks_view();
+    // External mesh/state writers notify when changing resident renderability.
+    // May be called by workers; mesh bytes still require the existing publication fence.
+    void notify_renderable_chunks_changed() const {
+        m_renderable_chunks_dirty.store(true, std::memory_order_release);
+    }
+    struct RenderableViewWork {
+        std::uint64_t rebuilds = 0;
+        std::uint64_t chunk_visits = 0;
+        std::uint64_t allocations = 0;
+    };
+    // Owner-thread lifetime work counters for the cache and compatibility copies.
+    RenderableViewWork renderable_view_work() const {
+        return m_renderable_view_work;
+    }
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
 
@@ -682,7 +699,8 @@ public:
                                   PhysicsSystem* physics_system,
                                   int horizontal_radius = 1);
     // Synchronous admission: surface/collision radii <= 12, at most 625 columns
-    // and 8192 chunks including vertical margins; refusal precedes chunk changes.
+    // and 8192 chunks including vertical margins; budget refusal precedes chunk changes.
+    // Body-pool refusal returns false with collision work retained for retry.
     // Negative direct-API radii retain their historical zero normalization.
     // render_lod0_radius (default -1): the ring distance that renders at full-SDF
     // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
@@ -858,6 +876,8 @@ public:
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
     // Observers run under SaveOwnership and must not dispatch or wait for jobs.
+    // Owner-boundary render source binding; independent of durable residency.
+    bool set_far_world_authority_changes(std::shared_ptr<World::FarWorldAuthorityChanges> changes);
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
@@ -973,7 +993,7 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
-    // Lifetime count of pointer entries copied by streamed/renderable snapshots.
+    // Lifetime pointer entries written by snapshots and renderable-view rebuilds.
     // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
     [[nodiscard]] std::uint64_t snapshot_copies() const {
         return m_snapshot_copies.load(std::memory_order_relaxed);
@@ -1117,6 +1137,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> scratch;
             u32 mesh_version = 0;
             u32 water_mesh_version = 0;
+            u64 terrain_edit_generation = 0;
             u32 voxel_revision = 0;
         };
         struct MeshingBatch {
@@ -1184,6 +1205,12 @@ private:
     std::size_t m_last_meshing_snapshot_bytes = 0;
     bool m_meshing_snapshot_pass_active = false;
     mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
+    std::vector<Chunk*> m_renderable_chunks;
+    // Surface construction can publish Ready from workers; only the owner rebuilds.
+    mutable std::atomic<bool> m_renderable_chunks_dirty{true};
+    RenderableViewWork m_renderable_view_work;
+    void invalidate_renderable_chunks();
+    void set_renderable_chunk_state(Chunk& chunk, ChunkState state);
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1233,6 +1260,7 @@ private:
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
+    std::shared_ptr<World::FarWorldAuthorityChanges> m_far_world_changes;
     std::shared_ptr<ChunkWaterChanges> m_water_changes = std::make_shared<ChunkWaterChanges>();
     std::vector<ChunkID> m_pending_water_changes;
     u64 m_water_authority_input_items = 0;
@@ -1262,16 +1290,10 @@ private:
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
-    // Gate the O(N) per-tick collision-creation scan so
-    // a SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely
-    // instead of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic
-    // work signal: set true at exactly the two sites that reset has_collision=false (remesh / LOD0
-    // promotion in process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) —
-    // NOT job-activity state (cf. the attempt-#1 trap above). Cleared only when a scan visits every
-    // chunk without hitting the per-frame cap (i.e. it drained all eligible work). Starts true so
-    // the first tick scans. The scan body itself is byte-identical to before, so collision
-    // eligibility/order — and thus has_collision, which feeds world_hash — is unchanged; only
-    // redundant settled-tick scans go.
+    // Gate the O(N) collision eligibility scan so settled worlds skip it.
+    // Remesh/LOD0 promotion and synchronous surface-horizon rebuilds set this main-thread
+    // work signal. Frame-capped scans and body-pool refusals keep it set for later ticks;
+    // only a complete scan without refusals clears it. Starts true for the first scan.
     bool m_collision_pass_dirty = true;
 
     const std::vector<ChunkLOD> m_lod_levels = {

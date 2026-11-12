@@ -1594,7 +1594,7 @@ class FrameAttributionWiring(unittest.TestCase):
                            "first_vertex = 0u;", "base_instance = 0u;"):
             self.assertIn(assignment, prefix)
         dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
-        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1, 1, 1); "
+        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u); "
                       "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
                       "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
                       "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
@@ -1782,7 +1782,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_boot_settle_mode && m_job_system", boot)
         self.assertIn("std::min(kBootSeedBatch, pending.size() - begin)", boot)
         self.assertIn("pending.subspan(begin, count)", boot)
-        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot)", boot)
+        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot, terrain_seed)", boot)
         self.assertIn("[task = std::move(task)] { task->compute(); }", boot)
         self.assertLess(boot.index("dispatch_batch(jobs)"), boot.index("wait(handle)"))
         self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
@@ -1881,7 +1881,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("const bool parallel_boot = use_seed_inputs && "
                       "m_boot_settle_mode && m_job_system;", boot)
         self.assertIn("auto high_seed_inputs = use_seed_inputs ? "
-                      "prepare_high_water_seed_inputs(to_init, parallel_boot) : "
+                      "prepare_high_water_seed_inputs(to_init, parallel_boot, terrain_seed) : "
                       "std::vector<std::shared_ptr<HighWaterSeedInputs>>{};", boot)
         parallel = compact(block(water, "if (parallel_boot)"))
         self.assertIn("std::make_shared<HighWaterSeedInputs>()", parallel)

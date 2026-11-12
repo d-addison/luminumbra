@@ -1,9 +1,13 @@
 #pragma once
 #include "MiniaudioManager.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <glm/glm.hpp>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -138,10 +142,25 @@ public:
     };
 
     void SetSettings(const PropagationSettings& settings) {
+        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
         m_settings = settings;
+        ++m_settings_generation;
+        m_cache.entries.clear();
+        m_cache.insertion_order.clear();
     }
-    const PropagationSettings& GetSettings() const {
+    PropagationSettings GetSettings() const {
+        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
         return m_settings;
+    }
+
+    struct CacheDiagnostics {
+        size_t entries = 0;
+        size_t max_entries = 0;
+    };
+    // Retained storage, including entries awaiting retirement on the next cache access.
+    CacheDiagnostics GetCacheDiagnostics() const {
+        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+        return {.entries = m_cache.entries.size(), .max_entries = m_cache.max_entries};
     }
 
     // Performance monitoring
@@ -170,28 +189,46 @@ public:
 
 private:
     struct PropagationCache {
+        struct Key {
+            std::array<uint32_t, 8> inputs{};
+            uint64_t settings_generation = 0;
+            bool operator==(const Key&) const = default;
+        };
+        struct KeyHash {
+            size_t operator()(const Key& key) const;
+        };
         struct CacheEntry {
             AudioPropagationResult result;
             std::chrono::steady_clock::time_point timestamp;
-            glm::vec3 source_pos;
-            glm::vec3 listener_pos;
-            float hash_tolerance = 0.5f;
         };
 
-        std::unordered_map<uint64_t, CacheEntry> entries;
-        std::mutex cache_mutex;
+        std::unordered_map<Key, CacheEntry, KeyHash> entries;
+        std::list<Key> insertion_order;
+        mutable std::mutex cache_mutex;
         float max_age_seconds = 1.0f;
-        size_t max_entries = 1000;
+        // Retain at most 1000 entries, oldest insertion evicted first. Insertion stages
+        // one extra entry under cache_mutex so allocation failure preserves the old cache.
+        static constexpr size_t max_entries = 1000;
 
-        uint64_t
-        HashPositions(const glm::vec3& source, const glm::vec3& listener, float tolerance = 0.5f);
-        void CleanupOldEntries();
+        static Key MakeKey(const glm::vec3& source,
+                           const glm::vec3& listener,
+                           float max_distance,
+                           int max_reflections,
+                           uint64_t generation);
+        void CleanupOldEntries(std::chrono::steady_clock::time_point now);
+        void Store(const Key& key,
+                   const AudioPropagationResult& result,
+                   std::chrono::steady_clock::time_point now);
     };
 
     // Core calculation methods
-    AudioPropagationPath CalculateDirectPath(const glm::vec3& source, const glm::vec3& listener);
-    std::vector<AudioPropagationPath>
-    CalculateReflectionPaths(const glm::vec3& source, const glm::vec3& listener, int max_bounces);
+    AudioPropagationPath CalculateDirectPath(const glm::vec3& source,
+                                             const glm::vec3& listener,
+                                             const PropagationSettings& settings);
+    std::vector<AudioPropagationPath> CalculateReflectionPaths(const glm::vec3& source,
+                                                               const glm::vec3& listener,
+                                                               int max_bounces,
+                                                               const PropagationSettings& settings);
     AudioPropagationPath TraceReflectionPath(glm::vec3 current_pos,
                                              glm::vec3 direction,
                                              const glm::vec3& target,
@@ -212,11 +249,11 @@ private:
     bool IsPointInEnclosedSpace(const glm::vec3& point);
 
     // Performance optimization
-    bool ShouldUseCachedResult(const glm::vec3& source, const glm::vec3& listener);
     void UpdatePerformanceMetrics(float calculation_time_ms, bool cache_hit);
 
     Luminumbra::Systems::PhysicsSystem* m_physicsSystem;
     PropagationSettings m_settings;
+    uint64_t m_settings_generation = 0;
     PropagationCache m_cache;
     // Never held across audio work, callbacks, or acquisition of another lock.
     mutable std::mutex m_metrics_mutex;

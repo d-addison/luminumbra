@@ -270,7 +270,9 @@ void PlayerController::ProcessKeyInput(int key, int action) {
 void PlayerController::ProcessMouseScroll(double yoffset) {
     if (m_mode == MovementMode::Noclip) {
         // Increase or decrease the speed multiplier
-        m_noclipSpeedMultiplier += yoffset * 0.25f; // Adjust sensitivity as needed
+        m_noclipSpeedMultiplier =
+            static_cast<float>(static_cast<double>(m_noclipSpeedMultiplier) +
+                               yoffset * 0.25f); // Adjust sensitivity as needed
         // Clamp the multiplier to a reasonable range to prevent it from becoming zero or
         // excessively fast
         m_noclipSpeedMultiplier = glm::clamp(m_noclipSpeedMultiplier, 0.1f, 20.0f);

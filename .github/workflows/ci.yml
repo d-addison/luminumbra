@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -46,16 +46,11 @@ env:
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
-  # Only base edits enter normal CI routing. All jobs reject other edited events
-  # before allocating runners. Their distinct metadata-edit check names prevent
-  # skipped duplicates from satisfying or replacing required checks on this SHA.
-  # A pre-job/needs skip alone would still publish the original required names.
   # Required Linux/GCC jobs run native or standalone Python
   # tests on ready PRs. Other heavy jobs skip via this gate, with no needs chain.
   # !cancelled() and != false keep missing/failed classification on the build path.
   changes:
-    name: Classify changed paths${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
+    name: Classify changed paths
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -118,10 +113,10 @@ jobs:
   # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   linux:
-    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}
     # The required-name aggregate and the producer guard both reject drafts.
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled()) }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -348,9 +343,9 @@ jobs:
           retention-days: 30
 
   gns-compile-probe:
-    name: GNS transport / compile probe${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: GNS transport / compile probe
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     # Building GameNetworkingSockets from source (FetchContent + protobuf
     # codegen) is several minutes on top of the project build, well past the
@@ -398,9 +393,9 @@ jobs:
         run: ctest --test-dir build/gns-probe --no-tests=error -R '^ProfilerSourceContract$' --output-on-failure
 
   diligent-rhi:
-    name: Diligent RHI / software GL${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: Diligent RHI / software GL
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -505,11 +500,11 @@ jobs:
           retention-days: 14
 
   linux-result:
-    name: Linux / GCC${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: Linux / GCC
     needs: [changes, linux]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped')) }}
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -601,8 +596,7 @@ jobs:
           retention-days: 30
 
   lint:
-    name: Format changed files${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
+    name: Format changed files
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -619,8 +613,7 @@ jobs:
 
   fast-compile:
     # Advisory during warning and duration calibration; never a required gate.
-    name: Fast compile / GCC + clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
+    name: Fast compile / GCC + clang-tidy
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -732,9 +725,9 @@ jobs:
           fi
 
   tidy-shard:
-    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
     needs: changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && (!cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     # The gate analyses 458 translation units across src/, test/ and tools/ plus
     # their first-party headers. Three standard hosted runners partition that
@@ -793,11 +786,11 @@ jobs:
 
   tidy:
     # Report the required result on uncancelled ready runs, including routed skips.
-    name: Static analysis / clang-tidy${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
+    name: Static analysis / clang-tidy
     needs: [changes, tidy-shard]
     # Keep invalid dependencies on the explicit failure path during cancellation.
     # Otherwise cancellation must stop the job even after its first guard.
-    if: ${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base) && ((!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
+    if: ${{ (!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -823,8 +816,7 @@ jobs:
           fi
 
   public-tree:
-    name: Public tree / inventory honesty${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base && ' (metadata edit)' || '' }}
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base }}
+    name: Public tree / inventory honesty
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

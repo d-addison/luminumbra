@@ -33,6 +33,8 @@
 
 namespace luminumbra::ai {
 
+class CreatureTickAdmission;
+
 struct InstinctLocomotionTickStats {
     std::uint64_t agents_seen = 0;    // agents with profile + transform + plan considered
     std::uint64_t agents_steered = 0; // produced a non-zero wish toward a target this tick
@@ -49,6 +51,8 @@ struct InstinctLocomotionTickStats {
 // LocomotionProfile, compute the seek/arrival wish velocity toward the current
 // action's target and store it in LocomotionIntentComponent (created if absent).
 // On arrival the current action index is advanced so the plan can progress.
-InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry);
+InstinctLocomotionTickStats
+RunInstinctLocomotionOnTick(entt::registry& registry,
+                            const CreatureTickAdmission* admission = nullptr);
 
 } // namespace luminumbra::ai

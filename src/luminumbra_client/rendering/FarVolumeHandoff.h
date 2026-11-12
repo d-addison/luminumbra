@@ -1,6 +1,8 @@
 #pragma once
 
 #include "FarVolumeResidency.h"
+#include "FarWorldSelection.h"
+#include "world/FarWorldAuthorityProducer.h"
 
 namespace Luminumbra::Rendering {
 
@@ -19,6 +21,10 @@ struct FarHandoffManifest {
     World::FarCaveMode caves = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric = World::FarVolumeNumericProfile::RawFloat;
     std::span<const FarHandoffTileInput> tiles;
+};
+struct FarSessionHandoffTile {
+    FarVolumeWantedRequest wanted;
+    World::FarVolumeRequest capture;
 };
 enum class FarHandoffCoverageView {
     Serving,
@@ -85,6 +91,20 @@ public:
     FarVolumeHandoff(const FarVolumeHandoff&) = delete;
     FarVolumeHandoff& operator=(const FarVolumeHandoff&) = delete;
     bool StageTarget(const FarHandoffManifest&);
+    // Inactive synchronous publication seam. Compose every tile from one owned
+    // source serial in the handoff's owning pools, then admit the whole manifest.
+    // Any failure preserves both cohorts; AdmissionRefusal describes the attempt.
+    // Capture limits apply per tile; the manifest has at most 512 inputs.
+    bool StageSessionTarget(const World::FarWorldAuthorityProducer&,
+                            const Systems::SHIELD_WorldSystem&,
+                            std::uint64_t world_epoch,
+                            std::span<const FarSessionHandoffTile>,
+                            const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                            const World::FarFrozenCaptureLimits&,
+                            const std::shared_ptr<World::FarVolumeTierMemory>&);
+    // Last staging attempt only; None before an attempt or after success/drain.
+    // Uses selection refusal names without changing target/serving ownership.
+    FarWorldRefusal AdmissionRefusal() const;
     FarVolumeAdmissionWork AdmissionWork() const;
     FarVolumeFrameResult AdvanceFrame(double camera_x,
                                       double camera_z,
@@ -141,12 +161,12 @@ private:
     const Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr) const;
     const FarVolumeUploadedTile* Pair(const Entry&, FarHandoffCoverageView) const;
     bool Covers(const Entry&, FarHandoffCoverageView) const;
-    bool ValidateInput(const FarHandoffManifest&,
-                       const FarHandoffTileInput&,
-                       const Tier&,
-                       World::FarVolumeRequest&,
-                       bool duplicate,
-                       const Entry* old) const;
+    FarWorldRefusal ValidateInput(const FarHandoffManifest&,
+                                  const FarHandoffTileInput&,
+                                  const Tier&,
+                                  World::FarVolumeRequest&,
+                                  bool duplicate,
+                                  const Entry* old) const;
     FarHandoffTileObservation ObserveEntry(const Entry&) const;
     void Reject(Entry&, FarVolumeFrameResult&);
     World::FarVolumeTierMemory& memory_;
@@ -155,6 +175,7 @@ private:
     bool active_ = false;
     FarHandoffState state_;
     FarVolumeAdmissionWork admission_work_;
+    FarWorldRefusal admission_refusal_ = FarWorldRefusal::None;
     World::FarCaveMode caves_ = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric_ = World::FarVolumeNumericProfile::RawFloat;
     std::array<std::optional<Tier>, World::kFarTierCount> tiers_;

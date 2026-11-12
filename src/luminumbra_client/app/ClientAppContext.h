@@ -22,6 +22,7 @@
 #include "luminumbra_common/game/PhotoMode.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "rendering/LightningBolt.h"
+#include "rendering/LiveStrikeTracker.h"
 #include "rendering/ScentFieldRenderMirror.h"
 #include "rendering/SnowCoverModel.h"
 #include "rendering/passes/FoliagePass.h"
@@ -319,7 +320,7 @@ struct WorldDressingState {
 
 // Live weather presentation state: scheduled lightning and snow accumulation.
 struct LiveWeatherState {
-    std::uint64_t lastStrikeTickDone = 0;
+    Luminumbra::Rendering::LiveStrikeTracker consumedStrikes;
     int boltFramesLeft = 0;
     Luminumbra::Rendering::LightningRenderState liveBolt;
     Luminumbra::Rendering::SnowCover::State snow;

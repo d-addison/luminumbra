@@ -32,6 +32,11 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::World {
+class FarWorldAuthorityProducer;
+struct FarWorldAuthorityConfig;
+} // namespace Luminumbra::World
+
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
 }
@@ -199,6 +204,15 @@ public:
     std::uint64_t WorldRevision() const {
         return m_worldRevision;
     }
+
+    // Explicit owner-thread opt-in for bounded source capture. No play path
+    // enables this service. Attachment refuses unpublished streaming work;
+    // successful world replacement releases the binding.
+    bool EnableFarWorldAuthorityProducer(const World::FarWorldAuthorityConfig& config,
+                                         std::string& error);
+    World::FarWorldAuthorityProducer* GetFarWorldAuthorityProducer();
+    void PumpFarWorldAuthorityCapture();
+    void FenceFarWorldAuthorityReads(bool paused);
 
     // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
@@ -526,6 +540,13 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Observational foliage preparation/publication counts; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
+    [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Read-only diagnostics of the live legacy foliage grids.
+    [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
+    [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
+
     // Observational candidate size during a tick; never persisted or hashed.
     [[nodiscard]] std::size_t GetRegionalFieldCandidatePageCount() const {
         return m_regionalFieldView ? m_regionalFieldView->page_count() : 0;
@@ -646,8 +667,13 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    void DisableFarWorldAuthorityProducer();
+    std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
+    bool m_farWorldSourceNeedsRefresh = false;
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
+    struct FoliageStep;
+    std::unique_ptr<FoliageStep> m_foliageStep;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
         m_wildlifeFoliageTuning{}; // full-control: defaults preserved
@@ -729,8 +755,9 @@ private:
     struct RegionalEnergyStep;
     std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
     [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
-    void PublishRegionCompletedWork(std::optional<FieldPageState> fields,
-                                    RegionalEnergyStep* energy);
+    void PublishRegionCompletedWork(FieldPageState* fields,
+                                    RegionalEnergyStep* energy,
+                                    bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
@@ -740,7 +767,7 @@ private:
                                 const std::map<RegionKey, std::uint64_t>* work = nullptr);
     [[nodiscard]] std::map<RegionKey, std::uint64_t> AdvanceRegionalWeather(FieldPageState& fields,
                                                                             std::uint64_t tick);
-    void StepRegionalWeather(std::optional<FieldPageState>& fields, std::uint64_t tick);
+    void StepRegionalWeather(FieldPageState* fields, std::uint64_t tick);
     // Query-only view of this tick's candidate, cleared before publication or fault recovery.
     const FieldPageState* m_regionalFieldView = nullptr;
     bool m_regionalFieldsBound = false;
@@ -795,6 +822,7 @@ private:
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     std::vector<ScentCell> m_scentCapture;
     ScentChangeBuffers m_scentChangeBuffers;
+    std::unique_ptr<FieldPageState> m_scentCandidate;
     mutable luminumbra::ai::detail::NearScentDueCache<RegionKey> m_scentDueCache;
     mutable bool m_scentDueCacheValid = false;
     bool m_scentRecenterPending = false;
@@ -843,8 +871,8 @@ private:
     void RefreshScentDueCache() const;
     void RebaseForagingCells(int dx, int dz);
     void RestoreRegionalScent();
-    void CaptureRegionalScent(std::optional<FieldPageState>& fields);
-    bool AdvanceNearScent(std::optional<FieldPageState>& fields);
+    void CaptureRegionalScent(FieldPageState*& fields);
+    bool AdvanceNearScent(FieldPageState*& fields);
     bool HasScentBorderWork() const;
     bool HasScentParticipants(bool require_due = true) const;
     bool HasPlantParticipants() const; //  opt-in gate

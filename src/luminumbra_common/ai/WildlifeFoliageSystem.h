@@ -48,6 +48,7 @@
 #include "../core/DeterministicMath.h"        // Sqrt
 
 #include "../systems/RegionConsumerGate.h"
+#include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
@@ -103,7 +104,8 @@ inline WildlifeFoliageStats
 RunWildlifeFoliageOnTick(entt::registry& reg,
                          std::uint64_t tick,
                          const WildlifeFoliageTuning& tuning = {},
-                         const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                         const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                         const CreatureTickAdmission* admission = nullptr) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -117,7 +119,7 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
         std::vector<entt::entity> cents;
         for (auto e : cview) {
-            if (gate.Allows(e)) {
+            if (admission ? admission->Allows(e) : gate.Allows(e)) {
                 cents.push_back(e);
             }
         }

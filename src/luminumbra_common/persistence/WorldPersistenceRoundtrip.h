@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,12 +88,17 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
+    // Indexed admission checks JSON water arrays and encoded integer grids before insertion.
+    bool strict_water = false;
     bool terrain_edited = true;
     bool migrate_legacy_water = false;
     bool validate_record_authority = false;
     // With validation on: an unflagged header may still carry owned water (the loader's flag
     // repair keeps it), but it may not carry terrain ownership.
     bool allow_unflagged_water = false;
+    // Proof of the water array contract from this same decode, for either record encoding.
+    // False on failure, observational only when strict_water is false.
+    bool* strict_water_valid = nullptr;
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
@@ -100,7 +106,8 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 // Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
 // (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
 // below accepts this form and the plain-JSON form.
-std::string SerializeChunkRecordPayloadJson(const Chunk& chunk);
+// Optional process-local proof of the integer water grid contract, captured while encoding.
+std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid = nullptr);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
@@ -123,13 +130,20 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
 // JSON is materialized at a time, including when reading a large durable region.
 class RegionContentHasher {
 public:
-    RegionContentHasher();
+    explicit RegionContentHasher(bool diagnostics = false);
     void append(const Chunk& chunk);
     [[nodiscard]] std::uint64_t value() const;
-    [[nodiscard]] std::uint64_t terrain_value() const {
+    // Diagnostic sub-hashes are absent unless enabled at construction, even for an empty region.
+    [[nodiscard]] std::optional<std::uint64_t> terrain_value() const {
+        if (!m_diagnostics) {
+            return std::nullopt;
+        }
         return m_terrainHash;
     }
-    [[nodiscard]] std::uint64_t water_value() const {
+    [[nodiscard]] std::optional<std::uint64_t> water_value() const {
+        if (!m_diagnostics) {
+            return std::nullopt;
+        }
         return m_waterHash;
     }
     [[nodiscard]] bool empty() const {
@@ -143,6 +157,7 @@ private:
     std::uint64_t m_terrainHash = 14695981039346656037ull;
     ChunkID m_lastId = 0;
     bool m_hasChunks = false;
+    bool m_diagnostics = false;
 };
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
 

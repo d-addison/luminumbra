@@ -18,11 +18,13 @@ import argparse
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing
+from http.client import IncompleteRead
 from itertools import islice, product
 import fnmatch
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shlex
@@ -40,6 +42,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shell as shell
+import base_match
 import ctest_shards as shards
 
 
@@ -64,25 +67,22 @@ GUARDED = {
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
+REQUIRED_CONTEXT_JOBS = {
+    "ci.yml": {"linux-result": "Linux / GCC",
+               "public-tree": "Public tree / inventory honesty", "lint": "Format changed files",
+               "tidy": "Static analysis / clang-tidy", "gns-compile-probe": "GNS transport / compile probe",
+               "diligent-rhi": "Diligent RHI / software GL"},
+    "asan.yml": {"asan": "Linux / GCC ASan"},
+    "docs.yml": {"doxygen": "Build Doxygen reference"},
+    "performance.yml": {"runner-contract": "Runner contract / ${{ matrix.os }}",
+                        "preview-frame": "Preview frame / software OpenGL"},
+}
+
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
-CI_ACTIVE_EVENT = (
-    "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base"
-)
-CI_METADATA_SUFFIX = (
-    "${{ github.event_name == 'pull_request' && github.event.action == 'edited' && "
-    "!github.event.changes.base && ' (metadata edit)' || '' }}"
-)
 
 
 def ci_event_condition(condition=None):
-    return "${{ " + (f"({CI_ACTIVE_EVENT}) && ({condition})" if condition else CI_ACTIVE_EVENT) + " }}"
-
-
-def render_edit_context(expression, action="synchronize", changes=None):
-    # Actions treats objects (including {}) as truthy; missing properties are ''.
-    base = changes.get("base", "") if isinstance(changes, dict) else ""
-    return expression.replace("github.event.action", repr(action)).replace(
-        "github.event.changes.base", repr(True if isinstance(base, dict) else base))
+    return "${{ " + condition + " }}" if condition else None
 
 
 ASAN_MINIMUM_TESTS = 2320
@@ -765,7 +765,7 @@ def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None
     evaluation it is the current job's cancellation, which can still be false
     when a job condition kept it running during workflow cancellation.
     """
-    expression = render_edit_context(expression or "success()").removeprefix("${{ ").removesuffix(" }}")
+    expression = (expression or "success()").removeprefix("${{ ").removesuffix(" }}")
     if failed is None:
         failed = "failure" in dependencies.values()
     status = {"always": True, "cancelled": cancelled, "failure": failed,
@@ -1205,7 +1205,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
 
     def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
-        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy" + CI_METADATA_SUFFIX)
+        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
         self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
         self.assertEqual(value(fast, "timeout-minutes", 4), "20")
         self.assertEqual(value(fast, "if", 4), ci_event_condition())
@@ -1355,31 +1355,44 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                             self.assertIn("::warning::", result.stdout)
 
     def test_msvc_configure_keeps_dependency_compiles_cacheable(self):
-        # ccache cannot cache precompiled-header or /Zi compiles; the lane already
-        # embeds symbols through its own global flags.
+        # Keep dependency PCHs disabled on both cached Windows lanes without
+        # relaxing ccache's input checks. MSVC embeds symbols through /Z7 and
+        # disables Jolt's separate /Zi option.
         ci = jobs(self.workflows["ci.yml"])
-        msvc, = [step for step in steps(jobs(self.workflows["windows-build.yml"])["windows-msvc"])
+        windows = jobs(self.workflows["windows-build.yml"])
+        msvc, = [step for step in steps(windows["windows-msvc"])
                  if step.startswith("      - name: Configure, build, and test\n")]
         run = value(msvc, "run", 8)
-        self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n", run)
-        self.assertIn("-DCMAKE_C_FLAGS=/Z7 '-DCMAKE_CXX_FLAGS=/Z7 /EHsc' `\n", run)
-        self.assertIn("'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF'", run)
+        configure = run[run.index("cmake --preset release "):run.index("\ncmake --build")]
+        self.assertEqual(configure,
+                         'cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl '
+                         '"-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `\n'
+                         '  -DCMAKE_C_FLAGS=/Z7 \'-DCMAKE_CXX_FLAGS=/Z7 /EHsc\' `\n'
+                         '  -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF `\n'
+                         '  \'-DCMAKE_EXE_LINKER_FLAGS=/DEBUG /OPT:REF /OPT:ICF\' @compilerLaunchers')
+        for lane in ("windows-msvc", "windows-ucrt64"):
+            with self.subTest(lane=lane):
+                configure_step, = [step for step in steps(windows[lane])
+                                   if step.startswith("      - name: Configure, build, and test\n")
+                                   or step.startswith("      - name: Configure\n")]
+                self.assertIn("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON", value(configure_step, "run", 8))
+                self.assertNotRegex(windows[lane], r"(?i)CCACHE_SLOPPINESS|ccache\s+(?:--set-config|-o)\s+sloppiness")
         for name in ("linux", "tidy-shard", "fast-compile"):
             self.assertNotIn("DISABLE_PRECOMPILE_HEADERS", ci[name], name)
 
     def test_every_preexisting_ci_job_definition_is_unchanged(self):
-        # Pin base-edit admission and check names along with existing limits and gates.
+        # Pin literal check names and existing limits and gates.
         expected = {
-            "changes": "a0f410921dde3b73c324ac7a624eaf11a4fcab9537c200d72647d9ef8bf0fac9",
+            "changes": "ee44cbd3bd4de35af5c4fe902e02b3db0aaafdde796dfa739e30f22b4122e833",
             # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "e25d7604295d938fd64db26bd4ac357d1703a7789f4d854fc7a4c7b317a24327",
-            "gns-compile-probe": "7add7cbd1528a989a68922e779bf47e1bd867d8812e911ea6c0261dcf6762057",
-            "diligent-rhi": "dcd14e3c82e44abaa18c301cb39cad12a342fd23f13dbe2fef729ce1c46d73a8",
-            "linux-result": "71c786e40840265f992d2bb874c7edfee620914601469eb4f5a723b15e76f28b",
-            "lint": "b32b7f25c8c59c2cdc664382725f86838f8aef9328f8cee52fd0741ba41b86e0",
-            "tidy-shard": "53d7432d5fec3526d1f32296223f8a28541b584c3b3d5039ac8a2f9476a4a104",
-            "tidy": "771a907ee610dfff3fb01bf35c7a34fe5fdf8b5300ab92dbcbbe813ea6ebc949",
-            "public-tree": "3881fa6241605c5bb5b7cfe57b8edee404e08ca2451f7f252093d3cc668d9b70",
+            "linux": "d97f90f49ea0813f1b1c043a1511d9562a150f3b0d5fe632907820df04fe86fb",
+            "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
+            "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
+            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
+            "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
+            "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
+            "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
+            "public-tree": "d625a3d9f5d03c57814032ce196e253c17a52965209bdc08590e75547b4e6d24",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertTrue(all(not key.startswith("windows-") for key in actual))
@@ -1391,8 +1404,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
             "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
-            "windows-msvc": "3fdfaa2bee1bcd937ee43d5ec74166429c2d581f165d17f04cc859bbbe0b94fb",
-            "windows-ucrt64": "07ce40560092c19c83a9beffff552eb1176077b9a087faa3011b6d98742d3c58",
+            "windows-msvc": "d0e2abdce03da0f9a2338ba50914da691f98fda7a0905f2c027587de0ba98858",
+            "windows-ucrt64": "af838ea52445c3dec53b98dc2a2d4b8a97dd545a243490118b314f6d91e51329",
             "windows-msvc-result": "b7ac3a695046fb6674f05e8cade0ada71e6265cf38e6c50ed9a3dc9b17cf4871",
             "windows-ucrt64-result": "9a918a89c4b910387a63f276bfc917757c2c884147ac44dfa165994454fe3061",
         }
@@ -1437,7 +1450,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                     self.assertIn('& "${{ steps.python.outputs.python-path }}" -I -B', script)
                 configure = re.findall(r"(?m)^cmake (?:-S |--preset )[^\n]*", script)
                 commands = [line.strip() for line in script.splitlines()
-                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_EXECUTABLE" )',
+                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_BASH" )',
                                         line.strip())]
                 if not configure and not commands:
                     continue
@@ -1447,7 +1460,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(step, "CI_PYTHON_EXECUTABLE", 10), output)
                 if value(step, "shell", 8) == "bash":
                     executable = "$CI_PYTHON_EXECUTABLE"
-                    prefix = '"$CI_PYTHON_EXECUTABLE" '
+                    prefix = '"$CI_PYTHON_BASH" '
                 elif "Enter-VsDevShell " in script:
                     executable = "$env:CI_PYTHON_EXECUTABLE"
                     self.assertEqual(script.count("$pythonExecutable ="), 1)
@@ -1497,7 +1510,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 pr = re.split(r"\n  (?=\S)", workflow.split("  pull_request:\n", 1)[1], maxsplit=1)[0]
                 self.assertEqual(
                     value(pr, "types", 4),
-                    ("[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]"
+                    ("[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]"
                      if filename == "ci.yml" else
                      "[opened, synchronize, reopened, ready_for_review, converted_to_draft]"),
                 )
@@ -1506,7 +1519,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_guard_runs_first_under_existing_check_name_without_draft_job_skip(self):
         for filename, job_id, check_name, job in guarded_jobs(self.workflows):
             with self.subTest(workflow=filename, job=job_id):
-                self.assertEqual(value(job, "name", 4), check_name + (CI_METADATA_SUFFIX if filename == "ci.yml" and job_id != "linux" else ""))
+                self.assertEqual(value(job, "name", 4), check_name)
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
                 self.assertEqual(value(job, "needs", 4),
                                  "[changes, fast-lane, asan-shard]" if job_id == "asan" else
@@ -1718,22 +1731,12 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                                          cpp == "false" and fast in ("success", "skipped"), process.stderr)
 
     def test_required_check_names_stay_unchanged(self):
-        expected = {
-            "ci.yml": {"linux-result": "Linux / GCC",
-                       "public-tree": "Public tree / inventory honesty", "lint": "Format changed files",
-                       "tidy": "Static analysis / clang-tidy", "gns-compile-probe": "GNS transport / compile probe",
-                       "diligent-rhi": "Diligent RHI / software GL"},
-            "asan.yml": {"asan": "Linux / GCC ASan"},
-            "docs.yml": {"doxygen": "Build Doxygen reference"},
-            "performance.yml": {"runner-contract": "Runner contract / ${{ matrix.os }}",
-                                "preview-frame": "Preview frame / software OpenGL"},
-        }
-        for filename, names in expected.items():
+        for filename, names in REQUIRED_CONTEXT_JOBS.items():
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for job_id, name in names.items():
                 with self.subTest(workflow=filename, job=job_id):
                     self.assertEqual(value(jobs(workflow)[job_id], "name", 4),
-                                     name + (CI_METADATA_SUFFIX if filename == "ci.yml" else ""))
+                                     name)
 
     def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
         workflow = self.workflows["asan.yml"]
@@ -1853,13 +1856,13 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(producer, "runs-on", 4), runner)
                 self.assertIn(title + " full qualification", value(producer, "name", 4))
                 self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
-                self.assertEqual(value(aggregate, "name", 4), title + ("" if job_id.startswith("windows-") else CI_METADATA_SUFFIX))
+                self.assertEqual(value(aggregate, "name", 4), title)
                 self.assertEqual(windows_condition(value(aggregate, "if", 4)),
                                  "${{ (!cancelled() || " + aggregate_invalid_expression(job_id) + ") }}" if job_id.startswith("windows-") else
                                  ci_event_condition("!cancelled() || " + aggregate_invalid_expression(job_id)))
                 self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
                 self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
-                self.assertEqual(self.workflows["windows-build.yml" if job_id.startswith("windows-") else "ci.yml"].count("    name: " + title + ("" if job_id.startswith("windows-") else CI_METADATA_SUFFIX) + "\n"), 1)
+                self.assertEqual(self.workflows["windows-build.yml" if job_id.startswith("windows-") else "ci.yml"].count("    name: " + title + "\n"), 1)
                 self.assertIsNone(value(producer, "continue-on-error", 4))
                 self.assertIsNone(value(aggregate, "continue-on-error", 4))
                 for command in ("plan", "run"):
@@ -2653,14 +2656,15 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
 
-    def test_ucrt64_configure_changes_only_debug_information_level(self):
+    def test_ucrt64_configure_disables_pch_and_keeps_debug_information_level(self):
         job = native_jobs(self.workflows)["windows-ucrt64"]
         configure, = [step for step in steps(job) if step.startswith("      - name: Configure\n")]
         self.assertEqual(value(configure, "run", 8),
                          'cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache '
                          '"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE" '
                          '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache '
-                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1')
+                         '-DCMAKE_C_FLAGS=-g1 -DCMAKE_CXX_FLAGS=-g1 '
+                         '-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON')
 
     def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
         job = jobs(self.workflows["windows-build.yml"])["windows-ucrt64"]
@@ -2789,7 +2793,7 @@ class WorkflowRequiredAggregatePolicyTests(WorkflowPolicyFixture, unittest.TestC
 
     @staticmethod
     def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
-        expression = render_edit_context(windows_condition(expression)).removeprefix("${{ ").removesuffix(" }}")
+        expression = windows_condition(expression).removeprefix("${{ ").removesuffix(" }}")
         status = {"always": True, "cancelled": cancelled,
                   "success": not cancelled and (step or changes == shard == "success"),
                   "failure": not step and "failure" in (changes, shard)}
@@ -3155,47 +3159,514 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                                  [entry.lower() for entry in items]})
 
     @classmethod
-    def name(cls, job, context):
-        return re.sub(r"\$\{\{ .*? \}\}",
-                      lambda match: str(cls.expression(match[0], context)), value(job, "name", 4))
-
-    @classmethod
     def admitted(cls, job, context, cancelled=False):
         rendered = cls.render(value(job, "if", 4) or "success()", context)
         return evaluate_condition(rendered, {}, cancelled=cancelled)
 
-    def test_edited_without_base_change_skips_every_job_and_uses_distinct_names(self):
-        ignored = (None, {}, {"title": {"from": "old"}}, {"body": {"from": ""}},
-                   {"unknown": {}}, {"base": None}, {"base": ""}, {"base": False})
-        # At most 14 jobs x 8 payloads x 6 dependency results x 2 cancellations.
-        # Even failed/unknown dependencies must not revive an aggregate on edits.
-        normal = self.context(action="synchronize")
-        for changes, result, cancelled in product(
-                ignored, ("success", "failure", "cancelled", "skipped", "", "unknown"), (False, True)):
-            context = self.context(changes=changes, result=result)
-            for job_id, job in self.blocks.items():
-                with self.subTest(job=job_id, changes=changes, result=result, cancelled=cancelled):
-                    self.assertFalse(self.admitted(job, context, cancelled))
-                    self.assertNotEqual(self.name(job, context), self.name(job, normal))
-                    self.assertTrue(self.name(job, context).endswith(" (metadata edit)"))
-
-    def test_edited_base_change_preserves_normal_ready_draft_and_path_routing(self):
+    def test_pull_request_types_exclude_edited(self):
         pr = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
-        self.assertIn("edited", value(pr, "types", 4).strip("[]").split(", "))
-        # 14 jobs x 2 base payloads x 2 bases x 3 drafts x 3 path outputs x 2 cancellations.
-        for changes, base, draft, paths, cancelled in product(
-                ({"base": {}}, {"base": {"ref": {"from": "devel"}}}),
-                ("main", "devel"), (False, True, None), ("true", "false", ""), (False, True)):
-            context = self.context(changes=changes, base=base, draft=draft, paths=paths)
-            normal = {**context, "github.event.action": "synchronize"}
-            for job_id, job in self.blocks.items():
-                with self.subTest(job=job_id, changes=changes, base=base, draft=draft,
-                                  paths=paths, cancelled=cancelled):
-                    self.assertEqual(self.admitted(job, context, cancelled), self.admitted(job, normal, cancelled))
-                    self.assertEqual(self.name(job, context), self.name(job, normal))
-        context = self.context(changes={"base": {}}, paths="true")
-        self.assertEqual([job_id for job_id, job in self.blocks.items() if self.admitted(job, context)],
-                         list(self.blocks))
+        self.assertNotIn("edited", value(pr, "types", 4).strip("[]").split(", "))
+        for job_id, job in self.blocks.items():
+            with self.subTest(job=job_id):
+                self.assertNotIn("github.event.action", value(job, "if", 4) or "")
+                self.assertNotIn(" (metadata edit)", value(job, "name", 4) or "")
+
+    @staticmethod
+    def retarget_workflow():
+        return (ROOT / ".github/workflows/base-retarget.yml").read_text(encoding="utf-8")
+
+    def test_base_retarget_workflow_reports_every_ci_event_and_edit(self):
+        workflow = self.retarget_workflow()
+        trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        expected = ["opened", "synchronize", "reopened", "ready_for_review",
+                    "converted_to_draft", "labeled", "unlabeled", "edited"]
+        self.assertEqual(trigger.strip(), "pull_request:\n    types: [" + ", ".join(expected) + "]")
+        ci_trigger = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertEqual(set(value(ci_trigger, "types", 4).strip("[]").split(", ")),
+                         set(expected) - {"edited"})
+        self.assertEqual(base_match.CI_EVENTS, set(expected) - {"edited"})
+        self.assertNotIn("pull_request_target", workflow)
+        self.assertEqual(set(jobs(workflow)), {"base-retarget"})
+        self.assertEqual(value(workflow, "group", 2),
+                         "${{ github.workflow }}-${{ github.event.pull_request.number }}")
+        self.assertEqual(value(workflow, "cancel-in-progress", 2), "false")
+
+    def test_base_retarget_check_always_computes_with_static_context(self):
+        workflow = self.retarget_workflow()
+        job = jobs(workflow)["base-retarget"]
+        self.assertEqual(value(job, "name", 4), "Base retarget / fresh CI required")
+        for key in ("if", "needs", "strategy", "permissions", "continue-on-error"):
+            self.assertIsNone(value(job, key, 4))
+        self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
+        permissions = workflow.split("\npermissions:\n", 1)[1].split("\nconcurrency:", 1)[0]
+        self.assertEqual(permissions.strip(), "actions: read\n  contents: read\n  pull-requests: read")
+        checkout, check = steps(job)
+        for step in (checkout, check):
+            self.assertIsNone(value(step, "if", 8))
+            self.assertIsNone(value(step, "continue-on-error", 8))
+        self.assertEqual(value(checkout, "uses", 8),
+                         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1")
+        self.assertEqual(value(checkout, "ref", 10), "${{ github.event.pull_request.base.sha }}")
+        self.assertEqual(value(checkout, "sparse-checkout", 10), "tools/ci/base_match.py")
+        self.assertEqual(value(checkout, "sparse-checkout-cone-mode", 10), "false")
+        self.assertEqual(value(checkout, "persist-credentials", 10), "false")
+        self.assertEqual(value(check, "GH_TOKEN", 10), "${{ github.token }}")
+        self.assertEqual(value(check, "run", 8), "python3 -I -B tools/ci/base_match.py")
+        self.assertNotIn("${{", value(check, "run", 8))
+
+    @staticmethod
+    def base_event(action="edited", base="main", **extra):
+        return {"action": action, "pull_request": {"number": 17, "head": {"sha": "a" * 40},
+                "base": {"ref": base}, **extra}}
+
+    @staticmethod
+    def base_run(base="devel", run_id=2, number=17):
+        return {"id": run_id, "created_at": "2026-01-01T00:00:00Z", "event": "pull_request",
+                "head_sha": "a" * 40, "pull_requests": [{"number": number, "base": {"ref": base}}]}
+
+    def base_live_cli(self, event, payload, error=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(event), encoding="utf-8")
+            with patch.dict(os.environ, GITHUB_REPOSITORY="owner/repo", GH_TOKEN="token"), \
+                    patch.object(base_match, "urlopen", side_effect=error,
+                                 return_value=io.BytesIO(payload)) as request, \
+                    patch.object(base_match, "fetch_runs", return_value={"total_count": 1,
+                                 "workflow_runs": [self.base_run(event["pull_request"]["base"]["ref"])]}), \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                result = base_match.main(["--event", str(path)])
+                return result, output.getvalue(), request.call_args_list
+
+    def base_injected_cli(self, event, api, run_attempt=None, live=None):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path, api_path, pr_path = (Path(directory) / name for name in
+                                             ("event.json", "api.json", "pr.json"))
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            if api is not None:
+                api_path.write_text(api if isinstance(api, str) else json.dumps(api), encoding="utf-8")
+            pr_path.write_text(json.dumps(event["pull_request"] if live is None else live), encoding="utf-8")
+            argv = ["--event", str(event_path), "--api-json", str(api_path), "--pr-json", str(pr_path)]
+            if run_attempt is not None:
+                argv.extend(("--run-attempt", run_attempt))
+            with patch.object(base_match, "fetch_runs", side_effect=AssertionError("unexpected runs request")), \
+                    patch.object(base_match, "fetch_pull", side_effect=AssertionError("unexpected live request")), \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                result = base_match.main(argv)
+            return result, output.getvalue()
+
+    @patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1")
+    def test_base_match_rerun_after_round_trip_retarget_requires_newest_ci(self):
+        devel = self.base_run("devel", 2)
+        main = self.base_run("main", 3)
+        initial = {"total_count": 1, "workflow_runs": [devel]}
+        for action in sorted(base_match.CI_EVENTS):
+            opened = self.base_event(action, "devel")
+            with self.subTest(action=action):
+                result, output = self.base_injected_cli(opened, None)
+                self.assertEqual(result, 0, output)
+                result, output = self.base_injected_cli(self.base_event(base="main"), initial)
+                self.assertEqual(result, 1, output)
+                self.assertIn("BASEMISMATCH", output)
+                result, output = self.base_injected_cli(self.base_event(action, "main"), None)
+                self.assertEqual(result, 0, output)
+                for runs in ([devel, main], [main, devel]):
+                    latest = {"total_count": 2, "workflow_runs": runs}
+                    result, output = self.base_injected_cli(self.base_event(base="devel"), latest)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("BASEMISMATCH", output)
+                    with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="2"):
+                        result, output = self.base_injected_cli(opened, latest)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("BASEMISMATCH ci.yml run 3 base='main'", output)
+                    self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_rerun_accepts_newest_matching_ci(self):
+        for action, base, draft in product((*sorted(base_match.CI_EVENTS), "edited"),
+                                           ("main", "devel"), (True, False)):
+            event = self.base_event(action, base, draft=draft)
+            old_base = "main" if base == "devel" else "devel"
+            runs = [self.base_run(old_base, 2), self.base_run(base, 3), self.base_run(old_base, 4, 18)]
+            # Re-running the older CI cannot make its recorded base newer.
+            runs[0]["run_attempt"] = 99
+            with self.subTest(action=action, base=base, draft=draft):
+                result, output = self.base_injected_cli(event, {"total_count": 3, "workflow_runs": runs}, "2")
+                self.assertEqual(result, 0, output)
+                self.assertIn(f"BASEMATCH ci.yml run 3 base={base!r}", output)
+
+    def test_base_match_first_attempt_ignores_listing_and_attempt_override_wins(self):
+        for action in sorted(base_match.CI_EVENTS):
+            event = self.base_event(action, "devel")
+            for attempt in ("1", "01", "0001"):
+                with self.subTest(action=action, attempt=attempt), patch.dict(os.environ, GITHUB_RUN_ATTEMPT="x"):
+                    result, output = self.base_injected_cli(event, None, attempt)
+                    self.assertEqual(result, 0, output)
+                    self.assertIn(f"{action} starts CI", output)
+        with patch.dict(os.environ, {}, clear=True):
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None)
+        self.assertEqual(result, 0, output)
+        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1"):
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None, "2")
+        self.assertEqual(result, 1, output)
+        self.assertIn("failed closed", output)
+
+    def test_base_match_invalid_run_attempt_fails_closed(self):
+        invalid = ("0", "-1", "x", "", "00", "+1", "1.0", "1e2", " 1", "1 ", "1\n", "\u0661")
+        for action, attempt, source in product((*sorted(base_match.CI_EVENTS), "edited"), invalid, ("cli", "env")):
+            event = self.base_event(action)
+            api = {"total_count": 1, "workflow_runs": [self.base_run("main")]}
+            with self.subTest(action=action, attempt=attempt, source=source), \
+                    patch.dict(os.environ, GITHUB_RUN_ATTEMPT=attempt):
+                result, output = self.base_injected_cli(event, api, attempt if source == "cli" else None)
+                self.assertEqual(result, 1, output)
+                self.assertIn("invalid run attempt: expected a positive decimal integer", output)
+                self.assertNotIn("BASEMATCH", output)
+        for attempt in (*invalid, None, 0, 1, True):
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, "invalid run attempt"):
+                base_match.evaluate(self.base_event("opened"), None, attempt)
+        for attempt in ("2", "02", "9" * 5000):
+            with self.subTest(attempt=attempt[:20]):
+                self.assertIn("ci.yml run 2", base_match.evaluate(self.base_event("opened"),
+                              {"total_count": 1, "workflow_runs": [self.base_run("main")]}, attempt))
+
+    def test_base_match_rerun_missing_or_invalid_listing_fails_closed(self):
+        valid = self.base_run("main")
+        invalid = (None, "{", "null", "{}", {"total_count": 0, "workflow_runs": []},
+                   {"total_count": 1, "workflow_runs": []},
+                   {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": []}]},
+                   {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": [{"number": 17}]}]},
+                   {"total_count": 1, "workflow_runs": [self.base_run("main", 2, 18)]},
+                   {"total_count": 1, "workflow_runs": [{**valid, "head_sha": "b" * 40}]})
+        for action, api in product(sorted(base_match.CI_EVENTS), invalid):
+            with self.subTest(action=action, api=api):
+                result, output = self.base_injected_cli(self.base_event(action), api, "2")
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_rerun_fetches_evidence_before_final_live_check(self):
+        event = self.base_event("opened", "devel")
+        api = {"total_count": 1, "workflow_runs": [self.base_run("devel")]}
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            event["action"] = action
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "event.json"
+                path.write_text(json.dumps(event), encoding="utf-8")
+                for error in (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
+                              IncompleteRead(b"{", 10)):
+                    with self.subTest(action=action, error=error), \
+                            patch.object(base_match, "fetch_runs", side_effect=error) as runs, \
+                            patch.object(base_match, "fetch_pull") as pull, \
+                            patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                        self.assertEqual(base_match.main(["--event", str(path), "--run-attempt", "2"]), 1)
+                        runs.assert_called_once()
+                        pull.assert_not_called()
+                        self.assertIn("failed closed", output.getvalue())
+                        self.assertNotIn("BASEMATCH", output.getvalue())
+                for live in (event["pull_request"], self.base_event(base="main")["pull_request"],
+                             {**event["pull_request"], "head": {"sha": "b" * 40}}, {}):
+                    calls = MagicMock()
+                    with self.subTest(action=action, live=live), \
+                            patch.object(base_match, "fetch_runs", return_value=api) as runs, \
+                            patch.object(base_match, "fetch_pull", return_value=live) as pull, \
+                            patch.object(base_match, "require_live", wraps=base_match.require_live) as require, \
+                            patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                        calls.attach_mock(runs, "runs")
+                        calls.attach_mock(pull, "pull")
+                        calls.attach_mock(require, "require")
+                        result = base_match.main(["--event", str(path), "--run-attempt", "2"])
+                    self.assertEqual([call[0] for call in calls.mock_calls], ["runs", "pull", "require"])
+                    self.assertEqual(result, 0 if live == event["pull_request"] else 1, output.getvalue())
+                    if result:
+                        self.assertIn("failed closed", output.getvalue())
+                        self.assertNotIn("BASEMATCH", output.getvalue())
+
+    def test_base_match_stale_rerun_after_retarget_fails(self):
+        live = self.base_event(base="devel")["pull_request"]
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            with self.subTest(action=action):
+                result, output, _ = self.base_live_cli(self.base_event(action), json.dumps(live).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("stale event", output)
+                self.assertIn("re-trigger CI", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_stale_rerun_after_push_fails(self):
+        live = self.base_event()["pull_request"]
+        live["head"]["sha"] = "b" * 40
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            with self.subTest(action=action):
+                result, output, _ = self.base_live_cli(self.base_event(action), json.dumps(live).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("stale event", output)
+                self.assertIn("re-trigger CI", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_outside_ci_branch_filter_fails_closed(self):
+        for action, base in product((*sorted(base_match.CI_EVENTS), "edited"), ("release", "", "Main")):
+            event = self.base_event(action, base)
+            with self.subTest(action=action, base=base):
+                result, output, calls = self.base_live_cli(event, json.dumps(event["pull_request"]).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+                if base:
+                    self.assertIn("CI does not run for base", output)
+                self.assertNotIn("BASEMATCH", output)
+                self.assertEqual(calls, [])
+
+    def test_base_match_live_api_failure_and_malformed_response_fail_closed(self):
+        valid = self.base_event()["pull_request"]
+        invalid = [None, [], {}, {**valid, "number": True}, {**valid, "number": 0},
+                   {**valid, "number": "17"}, {**valid, "number": 18},
+                   {**valid, "head": None}, {**valid, "head": {}},
+                   {**valid, "base": []}, {**valid, "base": {}}]
+        invalid.extend({**valid, "head": {"sha": head}} for head in (None, "", "a" * 39, 42))
+        invalid.extend({**valid, "base": {"ref": base}} for base in (None, "", 42))
+        payloads = [json.dumps(data).encode() for data in invalid]
+        payloads.extend((b"", b"{", b"\xff", b"[" * 1100 + b"]" * 1100,
+                         b"x" * (base_match.MAX_PAGE_BYTES + 1)))
+        errors = (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
+                  IncompleteRead(b"{", 10))
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            for payload, error in [*((payload, None) for payload in payloads),
+                                   *((b"", error) for error in errors)]:
+                with self.subTest(action=action, payload=payload[:80], error=error):
+                    result, output, _ = self.base_live_cli(self.base_event(action), payload, error)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("failed closed", output)
+                    self.assertNotIn("BASEMATCH", output)
+            result, output, calls = self.base_live_cli(self.base_event(action), json.dumps(valid).encode())
+            self.assertEqual(result, 0, output)
+            self.assertEqual(len(calls), 1)
+            args, kwargs = calls[0]
+            self.assertEqual(args[0].full_url, "https://api.github.com/repos/owner/repo/pulls/17")
+            self.assertEqual(args[0].get_method(), "GET")
+            self.assertEqual(args[0].get_header("Authorization"), "Bearer token")
+            self.assertEqual(args[0].get_header("Accept"), "application/vnd.github+json")
+            self.assertEqual(args[0].get_header("X-github-api-version"), "2022-11-28")
+            self.assertEqual(kwargs, {"timeout": 20})
+        for repository, number, token in (("../repo", 17, "token"), ("owner/..", 17, "token"),
+                                          ("owner/repo", 17, ""), ("owner/repo", True, "token"),
+                                          ("owner/repo", 0, "token"), ("owner/repo", "17", "token")):
+            with self.subTest(repository=repository, number=number, token=token), self.assertRaises(ValueError):
+                base_match.fetch_pull(repository, number, token,
+                                      MagicMock(side_effect=AssertionError("unexpected request")))
+        response = MagicMock(wraps=io.BytesIO(json.dumps(valid).encode()))
+        with patch.object(base_match, "urlopen", return_value=closing(response)):
+            self.assertEqual(base_match.fetch_pull("owner/repo", 17, "token"), valid)
+        response.read.assert_called_once_with(base_match.MAX_PAGE_BYTES + 1)
+
+    def test_base_match_ci_branch_filter_matches_workflow(self):
+        trigger = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        branches = value(trigger, "branches", 4)
+        self.assertRegex(branches, r"^\[[A-Za-z0-9_-]+(?:, [A-Za-z0-9_-]+)*\]$")
+        self.assertEqual(base_match.CI_BASES, frozenset(branches[1:-1].split(", ")))
+        self.assertIsNone(value(trigger, "branches-ignore", 4))
+
+    def test_base_retarget_concurrency_never_cancels_running_guard(self):
+        workflow = self.retarget_workflow()
+        self.assertEqual(value(workflow, "group", 2),
+                         "${{ github.workflow }}-${{ github.event.pull_request.number }}")
+        self.assertEqual(value(workflow, "cancel-in-progress", 2), "false")
+
+    def test_base_match_retarget_and_title_edit_require_new_ci(self):
+        old = self.base_run()
+        api = {"total_count": 1, "workflow_runs": [old]}
+        for changes in ({"base": {"ref": {"from": "devel"}}}, {"title": {"from": "old"}},
+                        {"body": {"from": "old"}}, {}, None):
+            event = {**self.base_event(), "changes": changes}
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "BASEMISMATCH"):
+                base_match.evaluate(event, api)
+        new = self.base_run("main", 3)
+        for runs in ([old, new], [new, old]):
+            self.assertIn("run 3 base='main'", base_match.evaluate(
+                self.base_event(), {"total_count": 2, "workflow_runs": runs}))
+        # A later attempt of an older run does not create newer base evidence.
+        old["run_attempt"] = 99
+        self.assertIn("run 3", base_match.evaluate(self.base_event(),
+                      {"total_count": 2, "workflow_runs": [old, new]}))
+        new["created_at"] = "2025-12-31T23:59:59Z"
+        with self.assertRaisesRegex(ValueError, "BASEMISMATCH"):
+            base_match.evaluate(self.base_event(), {"total_count": 2, "workflow_runs": [old, new]})
+
+    def test_base_match_never_retargeted_on_every_event_including_drafts(self):
+        for action, draft, base in product((*sorted(base_match.CI_EVENTS), "edited"), (True, False), ("main", "devel")):
+            event = self.base_event(action, base, draft=draft)
+            api = {"total_count": 1, "workflow_runs": [self.base_run(base)]} if action == "edited" else None
+            with self.subTest(action=action, draft=draft, base=base):
+                self.assertIn("BASEMATCH", base_match.evaluate(event, api))
+                self.assertIn(f"base={base!r}", base_match.evaluate(event, api))
+
+    def test_base_match_missing_invalid_and_unrelated_evidence_fails_closed(self):
+        mutations = ({"pull_requests": []}, {"pull_requests": None}, {"pull_requests": [{}]},
+                     {"pull_requests": [{"number": 17}]},
+                     {"pull_requests": [{"number": 17, "base": {}}]},
+                     {"pull_requests": [{"number": 17, "base": None}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": ""}}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": None}}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": 42}}]},
+                     {"pull_requests": [{"number": 18, "base": {"ref": "main"}}]},
+                     {"pull_requests": [*self.base_run()["pull_requests"]] * 2},
+                     {"event": "push"}, {"head_sha": "b" * 40}, {"id": True},
+                     {"created_at": "unknown"})
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError, TypeError)):
+                base_match.evaluate(self.base_event(), {"total_count": 1,
+                                    "workflow_runs": [{**self.base_run("main"), **mutation}]})
+        for api in ({"total_count": 0, "workflow_runs": []}, {"total_count": 1, "workflow_runs": []},
+                    {"total_count": True, "workflow_runs": []}, {"total_count": 0, "workflow_runs": {}},
+                    {"total_count": 2, "workflow_runs": [self.base_run()] * 2}):
+            with self.subTest(api=api), self.assertRaises(ValueError):
+                base_match.evaluate(self.base_event(), api)
+        unknown = {**self.base_run("main", 4), "pull_requests": []}
+        with self.assertRaisesRegex(ValueError, "no usable"):
+            base_match.evaluate(self.base_event(), {"total_count": 2,
+                                "workflow_runs": [self.base_run("main"), unknown]})
+        # Runs for another PR sharing the head must not mask this PR's newest run.
+        self.assertIn("run 2", base_match.evaluate(self.base_event(), {"total_count": 2,
+                      "workflow_runs": [self.base_run("devel", 3, 18), self.base_run("main")]}))
+        for mutation in ({"action": "closed"}, {"pull_request": {}},
+                         {"pull_request": {**self.base_event()["pull_request"], "number": True}}):
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError)):
+                base_match.evaluate({**self.base_event(), **mutation}, None)
+
+    def test_base_match_api_reads_all_pages_and_refuses_partial_data(self):
+        requests = []
+        def opener(request, timeout):
+            requests.append(request)
+            self.assertEqual(timeout, 20)
+            self.assertIn("head_sha=" + "a" * 40, request.full_url)
+            self.assertIn("event=pull_request", request.full_url)
+            self.assertIn("/actions/workflows/ci.yml/runs?", request.full_url)
+            self.assertEqual(request.get_header("Authorization"), "Bearer token")
+            runs = [self.base_run("devel", i + 1) for i in range(100)] if len(requests) == 1 else [self.base_run("main", 101)]
+            return io.BytesIO(json.dumps({"total_count": 101, "workflow_runs": runs}).encode())
+        api = base_match.fetch_runs("owner/repo", "a" * 40, "token", opener)
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[1].full_url.endswith("page=2"))
+        self.assertIn("run 101", base_match.evaluate(self.base_event(), api))
+        for data in ({"total_count": 1001, "workflow_runs": []},
+                     {"total_count": 1, "workflow_runs": []},
+                     {"total_count": 0, "workflow_runs": [self.base_run()]},
+                     {"total_count": True, "workflow_runs": []},
+                     {"total_count": 0, "workflow_runs": None},
+                     {"total_count": 101, "workflow_runs": [self.base_run()] * 101}):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                      lambda *args, **kwargs: io.BytesIO(json.dumps(data).encode()))
+        pages = [{"total_count": 101, "workflow_runs": [self.base_run()] * 100},
+                 {"total_count": 102, "workflow_runs": [self.base_run()]}]
+        with self.assertRaisesRegex(ValueError, "changed during pagination"):
+            base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                  lambda *args, **kwargs: io.BytesIO(json.dumps(pages.pop(0)).encode()))
+        for count, batch_size, expected in ((0, 0, 0), (1000, 100, 1000), (1000, 1, None)):
+            calls = []
+            def bounded_opener(*args, **kwargs):
+                calls.append(1)
+                runs = [self.base_run("main", (len(calls) - 1) * batch_size + index + 1)
+                        for index in range(batch_size)]
+                return io.BytesIO(json.dumps({"total_count": count, "workflow_runs": runs}).encode())
+            with self.subTest(count=count, batch_size=batch_size):
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "pagination limit"):
+                        base_match.fetch_runs("owner/repo", "a" * 40, "token", bounded_opener)
+                else:
+                    complete = base_match.fetch_runs("owner/repo", "a" * 40, "token", bounded_opener)
+                    self.assertEqual(len(complete["workflow_runs"]), expected)
+                self.assertEqual(len(calls), 1 if count == 0 else 10)
+        for repository, head, token in (("../repo", "a" * 40, "token"),
+                                        ("owner/repo", "bad", "token"), ("owner/repo", "a" * 40, "")):
+            with self.subTest(repository=repository, head=head, token=token), self.assertRaises(ValueError):
+                base_match.fetch_runs(repository, head, token, MagicMock(side_effect=AssertionError("unexpected request")))
+        for payload in (b"{", b"x" * (base_match.MAX_PAGE_BYTES + 1)):
+            with self.subTest(size=len(payload)), self.assertRaises(ValueError):
+                base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                      lambda *args, **kwargs: io.BytesIO(payload))
+        with self.assertRaises(TimeoutError):
+            base_match.fetch_runs("owner/repo", "a" * 40, "token", MagicMock(side_effect=TimeoutError("deadline")))
+
+    def test_base_match_cli_injected_json_and_error_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path, api_path = Path(directory) / "event.json", Path(directory) / "api.json"
+            pr_path = Path(directory) / "pr.json"
+            pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
+            event_path.write_text(json.dumps(self.base_event()), encoding="utf-8")
+            api_path.write_text(json.dumps({"total_count": 1, "workflow_runs": [self.base_run()]}), encoding="utf-8")
+            argv = ["--event", str(event_path), "--api-json", str(api_path), "--pr-json", str(pr_path)]
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("BASEMISMATCH", output.getvalue())
+                for action in base_match.CI_EVENTS:
+                    self.assertIn(action, output.getvalue())
+            api_path.write_text(json.dumps({"total_count": 1, "workflow_runs": [self.base_run("main")]}), encoding="utf-8")
+            process = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "tools/ci/base_match.py"), *argv],
+                                     capture_output=True, text=True, timeout=5)
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            for payload in ("{", "null", "{}", json.dumps(self.base_event(base="devel")["pull_request"])):
+                pr_path.write_text(payload, encoding="utf-8")
+                with self.subTest(live=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(argv), 1)
+                    self.assertIn("failed closed", output.getvalue())
+                    self.assertNotIn("BASEMATCH", output.getvalue())
+            pr_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("failed closed", output.getvalue())
+            pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
+            for action in sorted(base_match.CI_EVENTS):
+                event_path.write_text(json.dumps(self.base_event(action)), encoding="utf-8")
+                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path)}), \
+                        patch.object(base_match, "fetch_runs", side_effect=AssertionError("unexpected runs request")), \
+                        patch.object(base_match, "fetch_pull", return_value=self.base_event()["pull_request"]) as live, \
+                        patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main([]), 0)
+                    live.assert_called_once()
+                    self.assertIn("Checking base='main'", output.getvalue())
+                    self.assertIn("BASEMATCH", output.getvalue())
+            event_path.write_text(json.dumps(self.base_event()), encoding="utf-8")
+            for payload in ("{", "null", "{}"):
+                api_path.write_text(payload, encoding="utf-8")
+                with self.subTest(payload=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(argv), 1)
+                    self.assertIn("failed closed", output.getvalue())
+            api_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("failed closed", output.getvalue())
+            for error in (TimeoutError("deadline"), base_match.URLError("denied")):
+                with patch.object(base_match, "fetch_runs", side_effect=error), \
+                        patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                    self.assertIn("failed closed", output.getvalue())
+
+            for payload in ("{", "null", "{}"):
+                event_path.write_text(payload, encoding="utf-8")
+                with self.subTest(event=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                    self.assertIn("failed closed", output.getvalue())
+            event_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                self.assertIn("failed closed", output.getvalue())
+            with patch.dict(os.environ, {}, clear=True), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main([]), 1)
+                self.assertIn("missing event JSON", output.getvalue())
+
+    def test_required_context_job_names_are_literal_and_produced_on_pull_requests(self):
+        for filename, required in REQUIRED_CONTEXT_JOBS.items():
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            self.assertIn("  pull_request:\n", workflow)
+            blocks = jobs(workflow)
+            for job_id, context in required.items():
+                # Matrix producers have separate expanded contexts; fixed required
+                # contexts must remain literal even when a job is skipped.
+                if "${{" in context:
+                    continue
+                with self.subTest(workflow=filename, job=job_id, context=context):
+                    name = value(blocks[job_id], "name", 4)
+                    self.assertNotIn("${{", name)
+                    self.assertEqual(name, context)
+                    if filename == "ci.yml":
+                        self.assertTrue(self.admitted(blocks[job_id], self.context(action="synchronize")))
 
     def test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation(self):
         group = value(self.workflow, "group", 2)
@@ -3313,14 +3784,10 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
             workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             classifier = jobs(workflow)["changes"]
             with self.subTest(workflow=filename):
-                # CI guards metadata edits; its shared trusted classifier
-                # must still match every sibling exactly.
                 if filename == "ci.yml":
                     self.assertNotIn("      - name: Classify UCRT64 paths\n", classifier)
-                    self.assertEqual(value(classifier, "name", 4), "Classify changed paths" + CI_METADATA_SUFFIX)
-                    self.assertEqual(value(classifier, "if", 4), ci_event_condition())
-                    classifier = classifier.replace(CI_METADATA_SUFFIX, "", 1).replace(
-                        "    if: " + ci_event_condition() + "\n", "", 1)
+                    self.assertEqual(value(classifier, "name", 4), "Classify changed paths")
+                    self.assertIsNone(value(classifier, "if", 4))
                 # The layout reader includes comments preceding the next job.
                 self.assertEqual(classifier.split("\n  #", 1)[0].strip(), reference.strip())
                 for output in ("needs_cpp", "needs_python"):
@@ -3928,8 +4395,8 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
                 "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
             ),
             "WorkflowBaseEditPolicyTests": (
-                "test_edited_without_base_change_skips_every_job_and_uses_distinct_names",
-                "test_edited_base_change_preserves_normal_ready_draft_and_path_routing",
+                "test_pull_request_types_exclude_edited",
+                "test_required_context_job_names_are_literal_and_produced_on_pull_requests",
                 "test_metadata_edit_concurrency_is_unique_and_cannot_cancel_validation",
             ),
             "WorkflowCacheCleanupPolicyTests": (

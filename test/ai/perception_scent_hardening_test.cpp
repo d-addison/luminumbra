@@ -99,7 +99,8 @@ MakeSensable(entt::registry& r, float x, float z, std::uint32_t faction, float l
 // Flatten a whole ScentField to a vector for byte-exact run==replay comparison.
 std::vector<double> FlattenField(const ScentField& f) {
     std::vector<double> out;
-    out.reserve(static_cast<std::size_t>(f.channels()) * f.width() * f.height());
+    out.reserve(static_cast<std::size_t>(f.channels()) * static_cast<std::size_t>(f.width()) *
+                static_cast<std::size_t>(f.height()));
     for (int c = 0; c < f.channels(); ++c)
         for (int z = 0; z < f.height(); ++z)
             for (int x = 0; x < f.width(); ++x)

@@ -131,7 +131,7 @@ class FixtureReferenceTests(unittest.TestCase):
             # without introducing a new limit for the generic containment API.
             parts = ("m",) * 65
             selected = root.joinpath(*parts)
-            original = Path.resolve
+            original = Path.lstat
             original_relative_to = Path.relative_to
             relatives = []
 
@@ -163,14 +163,14 @@ class FixtureReferenceTests(unittest.TestCase):
                 return relative
             depths = []
 
-            def resolve(path, *args, **kwargs):
-                depth = len(depths)
+            def lstat(path, *args, **kwargs):
+                depth = len(depths) + 1
                 self.assertEqual(path, root.joinpath(*parts[:depth]))
                 depths.append(depth)
                 return original(path, *args, **kwargs)
 
             with mock.patch.object(Path, "relative_to", relative_to), \
-                    mock.patch.object(Path, "resolve", resolve):
+                    mock.patch.object(Path, "lstat", lstat):
                 self.assertEqual(root.relative_to(root), Path())
                 self.assertEqual(root.joinpath(*parts).relative_to(root), Path(*parts))
                 self.assertTrue(root.joinpath(*parts).is_relative_to(root))
@@ -180,7 +180,207 @@ class FixtureReferenceTests(unittest.TestCase):
                 self.assertEqual(fixture_paths.contain_path(root, selected),
                                  root.joinpath(*parts))
             self.assertEqual(relatives, [Path(*parts)])
-            self.assertEqual(depths, list(range(len(parts) + 1)))
+            self.assertEqual(depths, list(range(1, len(parts) + 1)))
+
+    def test_link_targets_are_checked_before_resolution_for_every_consumer(self):
+        import prepare_server_comparison as comparison
+
+        for consumer in ("reference", "native", "read", "hash", "copy"):
+            with self.subTest(consumer=consumer), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                root, outside = parent / "root", parent / "outside"
+                write(root, "common/table.json", "{}")
+                outside.mkdir()
+                alias = root / "alias"
+
+                def consume():
+                    path = alias / "table.json"
+                    if consumer == "reference":
+                        self.assertEqual(resolve_reference(root, "alias/table.json"), path)
+                    elif consumer == "native":
+                        self.assertEqual(fixture_paths.contain_path(root, path), path)
+                    elif consumer == "read":
+                        self.assertEqual(fixture_paths.read_bytes(root, path), b"{}")
+                    elif consumer == "hash":
+                        return module.fixture_hash(root)
+                    else:
+                        # Retain a validated copy plan across the alias change.
+                        with tempfile.TemporaryDirectory() as destination:
+                            target = Path(destination) / "copy"
+                            comparison.copy_fixture_tree(root, target, entries)
+                            self.assertEqual((target / "alias/table.json").read_bytes(), b"{}")
+
+                with contextlib.ExitStack() as cleanup:
+                    for link, target in ((outside / "back", root / "common"),
+                                         (root / "chain", root / "common")):
+                        directory_link(link, target)
+                        cleanup.callback(remove_directory_link, link)
+                    before = None
+                    for target in (root / "common", root / "chain",
+                                   root / "chain/../chain", outside / "back"):
+                        directory_link(alias, target)
+                        try:
+                            if target == root / "common":
+                                entries = list(module.fixture_entries(root))
+                            if target == outside / "back":
+                                with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                                    consume()
+                            else:
+                                result = consume()
+                                if before is not None:
+                                    self.assertEqual(result, before)
+                                before = result
+                        finally:
+                            remove_directory_link(alias)
+
+    def test_link_target_expansion_refuses_errors_and_cycles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            alias = root / "alias"
+            directory_link(alias, root / "missing")
+            try:
+                self.assertEqual(resolve_reference(root, "alias/table.json"), alias / "table.json")
+                original_lstat = Path.lstat
+                for reparse in (False, True):
+                    def status(path, *args, **kwargs):
+                        if path == alias and reparse:
+                            return types.SimpleNamespace(st_mode=stat.S_IFDIR,
+                                                         st_file_attributes=0x400,
+                                                         st_reparse_tag=0xFFFF)
+                        return original_lstat(path, *args, **kwargs)
+
+                    for failure in (PermissionError("unreadable link"), OSError(errno.EIO, "partial link")):
+                        with self.subTest(reparse=reparse, failure=failure), \
+                                mock.patch.object(Path, "lstat", status), \
+                                mock.patch.object(os, "readlink", side_effect=failure), \
+                                self.assertRaisesRegex(ValueError, "cannot resolve fixture reference"):
+                            resolve_reference(root, "alias/table.json")
+            finally:
+                remove_directory_link(alias)
+            directory_link(alias, alias)
+            try:
+                with self.assertRaisesRegex(ValueError, "cannot resolve fixture reference"):
+                    resolve_reference(root, "alias/table.json")
+                with mock.patch.object(os, "readlink", return_value=str(root / ".." / root.name / "missing")), \
+                        self.assertRaisesRegex(ValueError, "resolves outside root"):
+                    resolve_reference(root, "alias/table.json")
+            finally:
+                remove_directory_link(alias)
+
+    def test_absolute_link_targets_can_use_the_selected_root_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            root, selected, outside = parent / "root", parent / "selected", parent / "outside"
+            write(root, "common/table.json", "{}")
+            outside.mkdir()
+            with contextlib.ExitStack() as cleanup:
+                for link, target in ((selected, root), (outside / "back", root / "common")):
+                    directory_link(link, target)
+                    cleanup.callback(remove_directory_link, link)
+                alias = root / "alias"
+                for target in (selected / "common", outside / "back"):
+                    directory_link(alias, target)
+                    try:
+                        if target == selected / "common":
+                            self.assertEqual(resolve_reference(selected, "alias/table.json"), alias / "table.json")
+                            self.assertEqual(fixture_paths.read_bytes(selected, selected / "alias/table.json"), b"{}")
+                        else:
+                            with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                                resolve_reference(selected, "alias/table.json")
+                    finally:
+                        remove_directory_link(alias)
+
+    def test_link_target_parent_components_cannot_leave_and_reenter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve() / "root"
+            write(root, "common/table.json", "{}")
+            (root / "sub").mkdir()
+            alias = root / "sub/alias"
+            directory_link(alias, root / "common")
+            try:
+                for target, allowed in (("../common", True),
+                                        (str(root / "common/../common"), True),
+                                        ("../../root/common", False),
+                                        (str(root / "../root/common"), False),
+                                        ("C:common", os.name != "nt"),
+                                        ("\\common", os.name != "nt")):
+                    with self.subTest(target=target), \
+                            mock.patch.object(os, "readlink", return_value=target):
+                        if allowed:
+                            self.assertEqual(resolve_reference(root, "sub/alias/table.json"),
+                                             alias / "table.json")
+                        else:
+                            with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                                resolve_reference(root, "sub/alias/table.json")
+            finally:
+                remove_directory_link(alias)
+
+    def test_windows_short_link_target_expands_names_before_containment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve() / "root"
+            write(root, "common/table.json", "{}")
+            alias = root / "alias"
+            directory_link(alias, root / "common")
+            windows_os = types.SimpleNamespace(**(vars(os) | {"name": "nt"}))
+            short_root = root.with_name("ROOT~1")
+            try:
+                for expanded, allowed in ((root, True), (root.parent / "outside", False)):
+                    with self.subTest(expanded=expanded), \
+                            mock.patch.object(fixture_paths, "os", windows_os), \
+                            mock.patch.object(windows_os, "readlink", return_value=str(short_root / "common")), \
+                            mock.patch.object(fixture_paths, "_windows_long_path", return_value=expanded) as long_path:
+                        if allowed:
+                            self.assertEqual(resolve_reference(root, "alias/table.json"), alias / "table.json")
+                        else:
+                            with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                                resolve_reference(root, "alias/table.json")
+                        long_path.assert_called_once_with(short_root)
+            finally:
+                remove_directory_link(alias)
+
+    def test_repeated_link_targets_are_expanded_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            write(root, "common/table.json", "{}")
+            alias, chain = root / "alias", root / "chain"
+            original_readlink = os.readlink
+
+            def readlink(path, *args, **kwargs):
+                if path == alias:
+                    return str(root / "chain/../chain")
+                return original_readlink(path, *args, **kwargs)
+
+            with contextlib.ExitStack() as cleanup:
+                for link in (alias, chain):
+                    directory_link(link, root / "common")
+                    cleanup.callback(remove_directory_link, link)
+                with mock.patch.object(os, "readlink", side_effect=readlink) as expanded:
+                    self.assertEqual(resolve_reference(root, "alias/table.json"), alias / "table.json")
+                walked = [call for call in expanded.call_args_list if isinstance(call.args[0], Path)]
+                self.assertEqual(walked, [mock.call(alias), mock.call(chain)])
+
+    def test_windows_long_names_preserve_links_and_refuse_partial_results(self):
+        import ctypes
+
+        short = PureWindowsPath("C:/ROOT~1")
+        for spelling, length in (("\\\\?\\C:\\Root Directory", 21), ("", 0), ("", 32768)):
+            def expand(name, buffer, size):
+                self.assertEqual(name, str(short))
+                self.assertEqual(size, 32768)
+                buffer.value = spelling
+                return length
+
+            library = mock.Mock()
+            library.GetLongPathNameW.side_effect = expand
+            with self.subTest(length=length), \
+                    mock.patch.object(ctypes, "WinDLL", return_value=library, create=True), \
+                    mock.patch.object(fixture_paths, "Path", PureWindowsPath):
+                if length >= 32768:
+                    with self.assertRaisesRegex(ValueError, "platform bound"):
+                        fixture_paths._windows_long_path(short)
+                else:
+                    self.assertEqual(fixture_paths._windows_long_path(short),
+                                     PureWindowsPath("C:/Root Directory") if length else short)
 
     def test_reference_depth_budget_uses_normalized_native_parts(self):
         for grammar in (PurePosixPath, PureWindowsPath):

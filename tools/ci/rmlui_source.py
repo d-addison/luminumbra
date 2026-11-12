@@ -551,6 +551,7 @@ def owned_command(source: Path, argv: list[str], environment: dict[str, str],
         deadline = time.monotonic() + 120
         next_scan = time.monotonic() + 0.1
         eof = False
+        drain_deadline = None
         while True:
             cancellation.check()
             now = time.monotonic()
@@ -559,16 +560,6 @@ def owned_command(source: Path, argv: list[str], environment: dict[str, str],
             if now >= next_scan:
                 scan()
                 next_scan = now + 0.1
-            # WNOWAIT retains the session leader's PID until tree termination:
-            # an exited parent cannot cause an unrelated reused PGID to be killed.
-            if job is not None:
-                exited = process.poll() is not None
-            else:
-                info = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                # WNOHANG may report no exit as either None or a zero PID.
-                exited = info is not None and info.si_pid == process.pid
-            # Observe exit before reading: an earlier empty read cannot prove
-            # that an exited leader left a writer, or omit its final bytes.
             data = None
             if not eof:
                 data = read_output()
@@ -577,10 +568,27 @@ def owned_command(source: Path, argv: list[str], environment: dict[str, str],
                 elif data:
                     require(len(data) <= OUTPUT_BYTES - len(output), "Git output bound exceeded")
                     output.extend(data)
-                    continue
+            # WNOWAIT retains the session leader's PID until tree termination:
+            # an exited parent cannot cause an unrelated reused PGID to be killed.
+            if job is not None:
+                exited = process.poll() is not None
+            else:
+                info = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                # WNOHANG may report no exit as either None or a zero PID.
+                exited = info is not None and info.si_pid == process.pid
             if exited:
-                require(eof, "Git descendant retained output")
-                break
+                if eof:
+                    break
+                # An empty observation before exit is not EOF. Drain final
+                # bytes within the output cap; an open, idle writer gets the
+                # same two-second bound as the shutdown drain.
+                if drain_deadline is None:
+                    drain_deadline = time.monotonic() + 2
+                if data is None:
+                    # Refuse only an empty pipe observed after the deadline.
+                    require(now < drain_deadline, "Git descendant retained output")
+            if data:
+                continue
             time.sleep(0.01)
     finally:
         primary_error = sys.exc_info()[1]

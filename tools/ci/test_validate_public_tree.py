@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import random
 import re
 import sys
 import unittest
@@ -15,6 +16,64 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+
+def legacy_c_family_mask(text, *, cpp=False, comments_only=False):
+    """Frozen pre-issue #293 C/C++ branches, used only as a differential oracle."""
+    masked = list(text if not comments_only else re.sub(
+        r"[^\n]+", lambda match: " " * len(match[0]), text))
+    token_start = re.compile(r"['\"/#<@`R\[]|(?<!\w)[0-9]" if cpp else r"['\"/#<@`R\[]")
+    index, size = 0, len(text)
+    while index < size:
+        token = token_start.search(text, index)
+        if token is None:
+            break
+        start = index = token.start()
+        is_comment = False
+        if cpp and text[index].isdigit() and (index == 0 or not re.match(r"\w", text[index - 1])):
+            index = re.compile(r"[0-9][\w'.]*").match(text, index).end()
+            continue
+        if text.startswith("//", index):
+            is_comment = True
+            end = text.find("\n", index)
+            while end != -1 and text[index:end].rstrip("\r").endswith("\\"):
+                end = text.find("\n", end + 1)
+            index = size if end == -1 else end
+        elif text.startswith("/*", index):
+            is_comment = True
+            end = text.find("*/", index + 2)
+            index = size if end == -1 else end + 2
+        elif text.startswith('R"', index):
+            raw = re.match(r'R"([^\s()\\]{0,16})\(', text[index:])
+            if raw is None:
+                index += 1
+                continue
+            close = ")" + raw.group(1) + '"'
+            end = text.find(close, index + raw.end())
+            index = size if end == -1 else end + len(close)
+        elif text[index] in "'\"":
+            quote = text[index]
+            index += 1
+            while index < size:
+                if text[index] == "\\":
+                    index += 2
+                elif text[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            index = min(index, size)
+        else:
+            index += 1
+            continue
+        if comments_only:
+            if is_comment:
+                masked[start:index] = text[start:index]
+        else:
+            for offset in range(start, index):
+                if masked[offset] != "\n":
+                    masked[offset] = " "
+    return "".join(masked)
 
 
 class PublicTreeValidatorTests(unittest.TestCase):
@@ -365,6 +424,330 @@ class PublicTreeValidatorTests(unittest.TestCase):
             self.assertTrue(MODULE.inspect_text("src/example.cpp", text))
         self.assertEqual(MODULE.inspect_text("src/example.cpp",
             'constexpr auto budget = 65\'536; auto s = "// review of deadbee";'), [])
+
+    def assert_cpp_comments(self, text, comments):
+        expected = ["\n" if char == "\n" else " " for char in text]
+        for start, end in comments:
+            expected[start:end] = text[start:end]
+        mask = MODULE.code_mask(text, False, cpp=True, comments_only=True)
+        self.assertEqual(mask, "".join(expected))
+        for suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".inl"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(MODULE.candidate_prose("src/example" + suffix, text), mask)
+                expected_findings = [
+                    ("candidate-provenance", text.count("\n", 0, start + match.start()) + 1)
+                    for start, end in comments
+                    for match in re.finditer("candidate deadbee", text[start:end])]
+                findings = MODULE.inspect_text("src/example" + suffix, text)
+                self.assertEqual([(finding.rule, finding.line) for finding in findings], expected_findings)
+
+    def test_issue_293_reproductions_on_every_cpp_suffix(self):
+        cases = (
+            ("auto x = 1'000; // candidate deadbee", True),
+            ('auto x=1\'000; char c=\'"\'; auto s="// candidate deadbee";', False),
+            ('1\'a b\'; const char* text = "player\'s // candidate deadbee";', False),
+            ('auto c = \'a"b\'; auto s = "// candidate deadbee";', False),
+            ('auto x = ²; // candidate deadbee', True),
+            ('auto x = ٢; auto s = "// candidate deadbee";', False),
+        )
+        for source, found in cases:
+            text = "\n" + source + "\n"
+            with self.subTest(source=source):
+                comments = [(text.index("//"), len(text) - 1)] if found else []
+                self.assert_cpp_comments(text, comments)
+
+    def test_cpp_number_boundaries_and_character_literals(self):
+        numbers = ("0", "1'000", "0xAB'CDull", "0X1.A'Bp+1'2L", "0b10'01u", "0B1'0",
+                   ".1'25e-2f", "1.0'25E+2'0_tag", "1e+2", "42_suffix", "42ULL", "1.")
+        characters = (r"'\''", r"'\\'", r"'\"'", "'ab'", "'a\"b'", r"'\x27'",
+                      "u8'a'", "u'a'", "U'abc'", "L'a\"b'")
+        for token in numbers + characters:
+            text = token + '; auto s = "// candidate deadbee"; /* candidate deadbee */\n'
+            with self.subTest(token=token):
+                self.assert_cpp_comments(text, [(text.index("/*"), len(text) - 1)])
+                code = MODULE.code_mask(text, False, cpp=True)
+                self.assertEqual(code.index(";"), text.index(";"))
+                self.assertNotIn("deadbee", code)
+        for token in ("1'a b'", "1'", "0x", "0b", "1e", "1e+", "1e'", ".", "²", "٢", ""):
+            text = token + '\n// candidate deadbee\n'
+            with self.subTest(partial=token):
+                self.assert_cpp_comments(text, [(text.index("//"), len(text) - 1)])
+
+    def test_cpp_prefixed_and_raw_strings(self):
+        for prefix in ("", "u8", "u", "U", "L"):
+            for body in ('"// candidate deadbee"', r'"escaped \" // candidate deadbee"',
+                         'R"(// candidate deadbee)"',
+                         'R"tag(\n" \' // candidate deadbee )wrong"\n)tag"',
+                         'R"abcdefghijklmnop(/* candidate deadbee */)abcdefghijklmnop"'):
+                text = prefix + body + '; // candidate deadbee\n'
+                with self.subTest(prefix=prefix, body=body):
+                    self.assert_cpp_comments(text, [(text.rindex("//"), len(text) - 1)])
+        # A prefix must be a complete identifier; literal suffixes cannot open raw strings.
+        for text in ('nameR"(ordinary"; // candidate deadbee\n',
+                     '"ordinary"R"(ordinary"; // candidate deadbee\n'):
+            self.assert_cpp_comments(text, [(text.index("//"), len(text) - 1)])
+        for delimiter in ("a" * 17, "bad space", "bad\\", "bad\t", "é"):
+            text = 'R"' + delimiter + '(unterminated\n// candidate deadbee\n'
+            with self.subTest(invalid_delimiter=delimiter):
+                self.assert_cpp_comments(text, [(text.index("//"), len(text) - 1)])
+
+    def test_cpp_comments_continuations_and_malformed_input(self):
+        for newline in ("\n", "\r\n"):
+            for body in ('// continued \\' + newline + 'candidate deadbee',
+                         '// continued \\\\' + newline + 'candidate deadbee',
+                         '/* first' + newline + 'candidate deadbee */'):
+                text = body + newline + 'auto s = "// candidate deadbee";'
+                with self.subTest(newline=newline, body=body):
+                    end = len(body) + (len(newline) - 1 if body.startswith("//") else 0)
+                    self.assert_cpp_comments(text, [(0, end)])
+            for opener in ('"', "'", 'u8"', "L'", 'R"bad space('):
+                for tail in ("", "unterminated", "escaped\\"):
+                    # The escaped newline is part of the literal; the next bare newline recovers.
+                    text = opener + tail + newline
+                    if tail.endswith("\\"):
+                        text += "still literal" + newline
+                    text += "// candidate deadbee" + newline
+                    with self.subTest(opener=opener, tail=tail, newline=newline):
+                        self.assert_cpp_comments(text, [(text.index("//"), len(text) - 1)])
+        for text, is_comment in (('/* candidate deadbee\n// candidate deadbee', True),
+                                 ('R"tag(\n// candidate deadbee', False),
+                                 ('u8R"(\n/* candidate deadbee */', False),
+                                 ('"unterminated', False), ("'unterminated\\", False),
+                                 ('// candidate deadbee', True), ("/*", True),
+                                 ('R"(', False), ("", False)):
+            with self.subTest(eof=text):
+                comments = [(0, len(text))] if is_comment else []
+                self.assert_cpp_comments(text, comments)
+                code = MODULE.code_mask(text, False, cpp=True)
+                self.assertNotIn("deadbee", code)
+                self.assertEqual(len(code), len(text))
+                self.assertEqual([i for i, char in enumerate(code) if char == "\n"],
+                                 [i for i, char in enumerate(text) if char == "\n"])
+
+    def test_cpp_offsets_and_exemption_consumers(self):
+        for suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".inl"):
+            text = ('// café 🦊\r\nconst char* s = "² // candidate deadbee";\r\n'
+                    "auto x = counts[\x70hase - 1]; // candidate deadbee\r\n")
+            with self.subTest(suffix=suffix):
+                findings = MODULE.inspect_text("src/example" + suffix, text)
+                self.assertEqual([(finding.rule, finding.detail, finding.line) for finding in findings],
+                                 [("candidate-provenance", "candidate deadbee", 3)])
+                spans = MODULE.code_token_exemptions("src/example" + suffix, text)
+                start = text.index("\x70hase")
+                self.assertEqual(spans, {(start, start + len("\x70hase - 1"))})
+                for begin, end in spans:
+                    byte_start = len(text[:begin].encode("utf-8"))
+                    self.assertEqual(text.encode("utf-8")[byte_start:byte_start + end - begin],
+                                     b"\x70hase - 1")
+                for literal in ('"counts[\x70hase - 1]"', 'R"(counts[\x70hase - 1])"',
+                                '// counts[\x70hase - 1]', '/* counts[\x70hase - 1] */'):
+                    self.assertEqual(MODULE.code_token_exemptions("src/example" + suffix, literal), set())
+
+    def test_cpp_splices_before_string_escapes(self):
+        for newline in ("\n", "\r\n"):
+            for backslashes in range(1, 6):
+                text = ('auto s = "path' + "\\" * backslashes + newline
+                        + 'n // candidate deadbee"; // candidate deadbee' + newline)
+                with self.subTest(newline=newline, backslashes=backslashes):
+                    self.assert_cpp_comments(text, [(text.rindex("//"), len(text) - 1)])
+                    code = MODULE.code_mask(text, False, cpp=True)
+                    self.assertNotIn("deadbee", code)
+                    self.assertEqual(len(code), len(text))
+                    self.assertEqual([i for i, ch in enumerate(code) if ch == "\n"],
+                                     [i for i, ch in enumerate(text) if ch == "\n"])
+            # Removing a splice can expose another backslash/newline pair.
+            # That pair is not spliced again and cannot escape a bare newline.
+            text = ('auto s = "path' + "\\\\" + newline + newline
+                    + '// candidate deadbee' + newline)
+            with self.subTest(nonrecursive=newline):
+                self.assert_cpp_comments(text, [(text.index("//"), len(text) - 1)])
+
+    def test_cpp_spliced_comment_delimiters(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            for gap in (splice, splice * 3):
+                for comment in ("/" + gap + "/ candidate deadbee",
+                                "/" + gap + "* candidate deadbee */",
+                                "/* candidate deadbee *" + gap + "/",
+                                "/" + gap + "* candidate deadbee *" + gap + "/"):
+                    text = (comment + newline + 'auto s = "// candidate deadbee"; '
+                            '// candidate deadbee' + newline)
+                    with self.subTest(newline=newline, comment=comment):
+                        end = len(comment) + (len(newline) - 1 if comment.endswith("deadbee") else 0)
+                        self.assert_cpp_comments(text, [(0, end), (text.rindex("//"), len(text) - 1)])
+                        code = MODULE.code_mask(text, False, cpp=True)
+                        self.assertEqual(code[:end], "".join(
+                            "\n" if ch == "\n" else " " for ch in text[:end]))
+
+    def test_cpp_spliced_line_comment_continuation(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            for backslashes in (1, 2, 3):
+                for tail in ("", newline + 'auto s = "// candidate deadbee";'):
+                    comment = ("/" + splice + "/ continued " + "\\" * backslashes
+                               + newline + splice + '"candidate deadbee"')
+                    text = comment + tail
+                    end = len(comment) + (len(newline) - 1 if tail else 0)
+                    with self.subTest(newline=newline, backslashes=backslashes, tail=tail):
+                        self.assert_cpp_comments(text, [(0, end)])
+
+    def test_cpp_raw_strings_restore_physical_splices(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            for prefix in ("R", "u8R", "uR", "UR", "LR"):
+                for split in range(len(prefix) + 1):
+                    opening = prefix[:split] + splice + prefix[split:] + '"tag('
+                    # Splicing would create a false closing delimiter inside the body.
+                    text = (opening + 'body' + splice + ')ta' + splice + 'g" // candidate deadbee'
+                            + newline + ')tag"; // candidate deadbee' + newline)
+                    with self.subTest(newline=newline, prefix=prefix, split=split):
+                        self.assert_cpp_comments(text, [(text.rindex("//"), len(text) - 1)])
+                        self.assertNotIn("deadbee", MODULE.code_mask(text, False, cpp=True))
+
+    def test_cpp_spliced_token_boundaries(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            tokens = ("0" + splice + "xAB'CD", "0b1" + splice + "0'01",
+                      "1" + splice + "'000", "1'" + splice + "000",
+                      "." + splice + "1'25e-2", "1e" + splice + "+1'2",
+                      "0x1p+" + splice + "1'2", "'\\" + splice + "n'",
+                      "u" + splice + "8'\\n'", 'name' + splice + 'R"(ordinary"',
+                      '42_suffix' + splice + 'R"(ordinary"',
+                      '"ordinary"_suffix' + splice + 'R"(ordinary"',
+                      'u' + splice + '8R"(raw " // candidate deadbee)"')
+            for token in tokens:
+                text = token + '; // candidate deadbee' + newline
+                with self.subTest(newline=newline, token=token):
+                    self.assert_cpp_comments(text, [(text.rindex("//"), len(text) - 1)])
+
+    def test_cpp_splice_eof_and_invalid_raw_delimiters(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            for text, comments in ((splice, []), (splice * 3, []),
+                                   ('"unterminated' + splice, []),
+                                   ('u8R' + splice + '"(unterminated' + splice, []),
+                                   ('/* candidate deadbee' + splice, [(0, None)]),
+                                   ('// candidate deadbee' + splice, [(0, None)]),
+                                   ('/* candidate deadbee */' + splice,
+                                    [(0, len('/* candidate deadbee */'))])):
+                with self.subTest(eof=text):
+                    self.assert_cpp_comments(text, [(start, len(text) if end is None else end)
+                                                    for start, end in comments])
+                    code = MODULE.code_mask(text, False, cpp=True)
+                    self.assertNotIn("deadbee", code)
+                    self.assertEqual(len(code), len(text))
+                    self.assertEqual([i for i, ch in enumerate(code) if ch == "\n"],
+                                     [i for i, ch in enumerate(text) if ch == "\n"])
+            for delimiter in ("", "a" * 16, "a" * 17, "bad " + splice, "ta" + splice + "g"):
+                # Only a physically valid delimiter starts a raw literal.
+                text = 'R' + splice + '"' + delimiter + '(body' + newline + '// candidate deadbee' + newline
+                valid = delimiter in ("", "a" * 16)
+                with self.subTest(delimiter=delimiter):
+                    comments = [] if valid else [(text.index("//"), len(text) - 1)]
+                    self.assert_cpp_comments(text, comments)
+            for partial in ("\\", "\\\r", 'R' + splice + '"', 'R' + splice + '"tag'):
+                with self.subTest(partial=partial):
+                    self.assert_cpp_comments(partial, [])
+
+    def test_cpp_physical_offsets_after_splices(self):
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            text = ('// café 🦊' + newline + 'auto n = 1' + splice + "'000; /" + splice
+                    + '/   candidate deadbee; \x70hase 2' + newline
+                    + 'auto x = counts[\x70hase - 1];' + newline)
+            start = text.index("candidate deadbee")
+            expected_line = text.count("\n", 0, start) + 1
+            expected_column = start - text.rfind("\n", 0, start)
+            byte_start = len(text[:start].encode("utf-8"))
+            for suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".inl"):
+                path = "src/example" + suffix
+                with self.subTest(newline=newline, suffix=suffix):
+                    findings = MODULE.inspect_text(path, text)
+                    self.assertEqual([(f.rule, f.detail, f.line) for f in findings],
+                                     [("candidate-provenance", "candidate deadbee", expected_line),
+                                      ("implementation-history-reference", "\x70hase 2", expected_line)])
+                    mask = MODULE.candidate_prose(path, text)
+                    match = re.search("candidate deadbee", mask)
+                    self.assertIsNotNone(match)
+                    self.assertEqual(match.span(), (start, start + len("candidate deadbee")))
+                    self.assertEqual(match.start() - mask.rfind("\n", 0, match.start()), expected_column)
+                    code = MODULE.code_mask(text, False, cpp=True)
+                    self.assertEqual(len(mask), len(text))
+                    self.assertEqual(len(code), len(text))
+                    self.assertEqual([i for i, ch in enumerate(code) if ch == "\n"],
+                                     [i for i, ch in enumerate(text) if ch == "\n"])
+                    self.assertEqual(len(mask[:match.start()].encode("utf-8")), byte_start)
+                    token_start = text.index("\x70hase - 1")
+                    self.assertEqual(MODULE.code_token_exemptions(path, text),
+                                     {(token_start, token_start + len("\x70hase - 1"))})
+
+    def test_c_masks_are_byte_identical_to_legacy_scanner(self):
+        rng = random.Random(293)
+        alphabet = "abcRu8UL019xep'\"/*\\\n\r\t .;_+-()é²🦊"
+        cases = ["", "char c = '\\''; // comment\n", '"unterminated\n// still literal',
+                 'R"tag(raw // text)tag"; /* comment */', "1'a b'; // comment\n"]
+        for newline in ("\n", "\r\n"):
+            splice = "\\" + newline
+            cases.extend(('"path\\' + splice + 'n // text"; // comment' + newline,
+                          '/' + splice + '/ comment' + splice + 'continued' + newline,
+                          '/' + splice + '* comment *' + splice + '/',
+                          'R"tag(body' + splice + ')ta' + splice + 'g" still raw)tag"'))
+        cases.extend("".join(rng.choice(alphabet) for _ in range(128)) for _ in range(64))
+        for text in cases:
+            for comments_only in (False, True):
+                with self.subTest(text=text, comments_only=comments_only):
+                    expected = legacy_c_family_mask(text, comments_only=comments_only)
+                    actual = MODULE.code_mask(text, False, comments_only=comments_only)
+                    self.assertEqual(actual.encode("utf-8"), expected.encode("utf-8"))
+                    if comments_only:
+                        self.assertEqual(MODULE.candidate_prose("src/example.c", text), expected)
+
+    def test_seeded_cpp_differential_corpus(self):
+        rng = random.Random(293)
+        paths = ("src/startup/RuntimeEntry.cpp", "src/startup/CommonLibraryIsa.h",
+                 "src/luminumbra_client/app/RuntimeRoot.cpp",
+                 "src/luminumbra_client/app/MenuSceneSchedule.h",
+                 "test/net/tcp_frame_bounds_test.cpp", "test/fixtures/smoke_artifact/FixedInputs.h")
+        ordinary = ("auto x = 1'000; // candidate deadbee\n",
+                    'auto x=1\'000; char c=\'"\'; auto s="// candidate deadbee";\n',
+                    'auto c=\'a"b\'; auto s="// candidate deadbee";\n',
+                    'auto s=u8R"tag(\n// candidate deadbee\n)tag";\n',
+                    '// continued \\\ncandidate deadbee\n',
+                    'auto n=0xAB\'CDull; /* candidate deadbee */\n')
+        false_comment = "// candidate deadbee"
+        false_finding = '1\'a b\'; const char* text = "player\'s ' + false_comment + '";\n'
+        changed = 0
+        for path in paths:
+            original = (MODULE_PATH.parents[2] / path).read_text(encoding="utf-8")
+            self.assertTrue(original)
+            for comments_only in (False, True):
+                self.assertEqual(MODULE.code_mask(original, False, cpp=True, comments_only=comments_only),
+                                 legacy_c_family_mask(original, cpp=True, comments_only=comments_only), path)
+            for sample in range(8):
+                fragments = [rng.choice(ordinary + (false_finding,)) for _ in range(12)]
+                text = original + "\n" + "".join(fragments)
+                old = legacy_c_family_mask(text, cpp=True, comments_only=True)
+                new = MODULE.code_mask(text, False, cpp=True, comments_only=True)
+                expected_old = list(new)
+                offset = len(original) + 1
+                for fragment in fragments:
+                    if fragment == false_finding:
+                        # The old number regex eats the opening quote in 'a b',
+                        # then mistakes the slash text inside the string for a comment.
+                        start = offset + fragment.index(false_comment)
+                        end = offset + len(fragment) - 1
+                        expected_old[start:end] = text[start:end]
+                        changed += 1
+                    offset += len(fragment)
+                with self.subTest(path=path, sample=sample):
+                    self.assertEqual(old, "".join(expected_old))
+                    # An independent per-fragment oracle also prevents shared omissions.
+                    expected_new = legacy_c_family_mask(original, cpp=True, comments_only=True) + "\n"
+                    for fragment in fragments:
+                        expected_new += (" " * (len(fragment) - 1) + "\n" if fragment == false_finding
+                                         else legacy_c_family_mask(fragment, cpp=True, comments_only=True))
+                    self.assertEqual(new, expected_new)
+        self.assertGreater(changed, 0)
 
     def test_candidate_hash_after_yaml_plain_scalar_apostrophes(self):
         for suffix in (".yaml", ".yml"):

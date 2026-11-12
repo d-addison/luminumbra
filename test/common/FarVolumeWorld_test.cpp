@@ -1,9 +1,11 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/FarFrozenObservation.h"
 #include "luminumbra_common/world/FarVolume.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <optional>
 
 namespace {
@@ -40,6 +42,93 @@ FarVolumeCompilationLimits PristinePlaneLimits() {
             {32 * 32 * 64, 300'000, 129 * 129, 128 * 128 * 6}};
 }
 } // namespace
+
+TEST(FarVolumeWorld, SessionIdentityCoversResolvedInputsAndRefusesStaleCapture) {
+    auto dependencies = std::make_shared<WorldgenDependencySnapshot>();
+    dependencies->manifest = {{"table", "content-a", "accepted"}};
+    auto params = PristinePlaneParams();
+    params.worldgen_dependencies = dependencies;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 17);
+    const auto identity = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4);
+    ASSERT_NE(identity, 0u);
+    auto equal_inputs = std::make_shared<WorldgenDependencySnapshot>(*dependencies);
+    params.worldgen_dependencies = equal_inputs;
+    world.set_params(params);
+    EXPECT_EQ(WorldFarVolumeIdentity(
+                  world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4),
+              identity);
+    std::array<std::uint64_t, 7> variants{};
+    variants[0] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BoxFiltered, FarVolumeNumericProfile::RawFloat, 4);
+    variants[1] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::LegacySigned16, 4);
+    variants[2] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 8);
+    world.set_seed(18);
+    variants[3] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4);
+    world.set_seed(17);
+    params.surface_sampling_revision = 2;
+    world.set_params(params);
+    variants[4] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4);
+    params.surface_sampling_revision = 1;
+    auto replacement = std::make_shared<WorldgenDependencySnapshot>(*dependencies);
+    replacement->manifest[0][1] = "content-b";
+    params.worldgen_dependencies = replacement;
+    world.set_params(params);
+    variants[5] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4);
+    params.height_offset = 1;
+    params.worldgen_dependencies = dependencies;
+    world.set_params(params);
+    variants[6] = WorldFarVolumeIdentity(
+        world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4);
+    params.height_offset = 0.25f;
+    params.worldgen_dependencies = replacement;
+    world.set_params(params);
+    for (const auto value : variants) {
+        EXPECT_NE(value, identity);
+    }
+    EXPECT_EQ(WorldFarVolumeIdentity(
+                  world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 0),
+              0u);
+    FarFrozenCaptureSource source;
+    source.pristine.field_identity = source.content_identity = identity;
+    source.use = FarFrozenUse::SessionRender;
+    source.session_water_resolution = 4;
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        return std::optional{FarFrozenWaterSample{false, 0}};
+    };
+    auto pool = std::make_shared<FarVolumeMemoryPool>(32u * 1024u * 1024u);
+    const FarVolumeRequest request{{1, 0, 0}, {-16, 16}, identity};
+    const FarFrozenCaptureLimits limits{1, 100'000, 1'000'000, 100'000, 32u * 1024u * 1024u};
+    std::shared_ptr<const FarFrozenObservation> output;
+    EXPECT_EQ(CaptureWorldFarVolumeObservation(world, request, source, limits, pool, output),
+              FarFrozenCaptureError::IdentityMismatch);
+    EXPECT_FALSE(output);
+    EXPECT_EQ(pool->attempts(), 0u);
+    params.worldgen_dependencies = dependencies;
+    world.set_params(params);
+    EXPECT_EQ(CaptureWorldFarVolumeObservation(world, request, source, limits, pool, output),
+              FarFrozenCaptureError::None);
+    ASSERT_TRUE(output);
+    const auto accepted = output;
+    world.set_seed(19);
+    EXPECT_EQ(CaptureWorldFarVolumeObservation(world, request, source, limits, pool, output),
+              FarFrozenCaptureError::IdentityMismatch);
+    EXPECT_EQ(output, accepted);
+    params.worldgen_dependencies.reset();
+    params.biomes_enabled = true;
+    world.set_params(params);
+    EXPECT_EQ(WorldFarVolumeIdentity(
+                  world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4),
+              0u);
+}
 
 TEST(FarVolumeWorld, RejectsMissingRetainedBinding) {
     const Luminumbra::Systems::SHIELD_WorldSystem world(

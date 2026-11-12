@@ -1,5 +1,11 @@
 {
   "schema": "luminumbra.render_benchmark.v3",
+  "settings": {
+    "effective_render": {
+      "window_mode": "windowed",
+      "window_visible": true
+    }
+  },
   "frames": 4,
   "warmup_frames": 2,
   "width": 1280,

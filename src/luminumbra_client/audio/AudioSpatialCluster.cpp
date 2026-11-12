@@ -86,7 +86,7 @@ void AudioSpatialCluster::AddAudioSource(u32 event_handle,
                                          float volume,
                                          float min_distance,
                                          float max_distance) {
-    auto source = std::make_unique<AudioSource>();
+    auto source = std::make_shared<AudioSource>();
     source->position = position;
     source->volume = volume;
     source->min_distance = min_distance;
@@ -117,6 +117,14 @@ void AudioSpatialCluster::UpdateSourceVolume(u32 event_handle, float volume) {
     if (it != m_active_sources.end()) {
         it->second->volume = volume;
     }
+}
+
+std::optional<float> AudioSpatialCluster::GetSourceAttenuation(u32 event_handle) const {
+    const auto source_it = m_active_sources.find(event_handle);
+    if (source_it == m_active_sources.end()) {
+        return std::nullopt;
+    }
+    return source_it->second->last_calculated_attenuation;
 }
 
 void AudioSpatialCluster::BuildClusters() {
@@ -373,13 +381,14 @@ void AudioSpatialCluster::CalculateBatchedOcclusion(const std::vector<AudioSourc
                                                     const glm::vec3& listener_pos) {
     // Use new batched physics system if available, otherwise fallback to old system
     if (m_physics_system) {
-        // Clear previous pending queries
-        m_pending_occlusion_queries.clear();
-
         // Queue all occlusion queries in the physics system's batch
         auto& batch_queries = m_physics_system->GetBatchedQueries();
 
         for (auto* source : sources) {
+            const auto source_it = m_active_sources.find(source->event_handle);
+            if (source_it == m_active_sources.end() || source_it->second.get() != source) {
+                continue;
+            }
             float distance = glm::distance(source->position, listener_pos);
 
             // Only calculate occlusion for close sources
@@ -392,18 +401,24 @@ void AudioSpatialCluster::CalculateBatchedOcclusion(const std::vector<AudioSourc
                 float priority =
                     1.0f / (1.0f + distance * 0.01f); // Closer sources get higher priority
 
-                int query_id = batch_queries.QueueRaycast(
+                batch_queries.QueueRaycast(
                     source->position,
                     listener_pos,
-                    [source, listener_pos](
+                    [source_identity = std::weak_ptr<AudioSource>(source_it->second), listener_pos](
                         const ::Luminumbra::Systems::PhysicsSystem::AudioRaycastResult& result) {
-                        // Callback when the raycast completes
+                        // Lock the queued identity, never a replacement at the same handle.
+                        // Removal rejects results immediately, before update retires storage.
+                        const auto live_source = source_identity.lock();
+                        if (!live_source || !live_source->is_active) {
+                            return;
+                        }
                         float occlusion = 0.0f;
-                        if (result.hit) {
+                        const float direct_distance =
+                            glm::distance(live_source->position, listener_pos);
+                        if (result.hit && direct_distance > 0.0f) {
                             float total_distance =
-                                glm::distance(source->position, result.hit_point) +
+                                glm::distance(live_source->position, result.hit_point) +
                                 glm::distance(result.hit_point, listener_pos);
-                            float direct_distance = glm::distance(source->position, listener_pos);
                             float path_factor = total_distance / direct_distance;
 
                             occlusion =
@@ -411,13 +426,10 @@ void AudioSpatialCluster::CalculateBatchedOcclusion(const std::vector<AudioSourc
                         }
 
                         // Apply the calculated occlusion to the source's attenuation
-                        source->last_calculated_attenuation *=
+                        live_source->last_calculated_attenuation *=
                             (1.0f - std::clamp(occlusion, 0.0f, 0.95f));
                     },
                     priority);
-
-                // Store the query for fallback handling
-                m_pending_occlusion_queries.push_back({source, query_id, fallback_occlusion});
 
                 // Apply fallback occlusion immediately for this frame
                 source->last_calculated_attenuation *=

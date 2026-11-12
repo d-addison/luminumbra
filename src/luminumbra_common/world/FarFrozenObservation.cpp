@@ -190,7 +190,8 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             std::shared_ptr<const FarFrozenObservation>& output) {
     if (!pool || !source.pristine.height || !source.pristine.density || !source.committed ||
         !source.water ||
-        (source.use != FarFrozenUse::Committed && source.use != FarFrozenUse::Preview) ||
+        (source.use != FarFrozenUse::Committed && source.use != FarFrozenUse::Preview &&
+         source.use != FarFrozenUse::SessionRender) ||
         (source.durable.state != FarEditedImageState::Committed &&
          source.durable.state != FarEditedImageState::Prepared) ||
         (source.pristine.caves != FarCaveMode::BandLimited &&
@@ -199,19 +200,21 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
          source.pristine.numeric != FarVolumeNumericProfile::LegacySigned16))
         return Error::InvalidSource;
     // Prepared authority is bake-only; it cannot become render authority here.
-    if (source.use == FarFrozenUse::Preview &&
+    if (source.use != FarFrozenUse::Committed &&
         source.durable.state != FarEditedImageState::Committed)
         return Error::IdentityMismatch;
     if (regions.empty() || regions.size() > limits.max_regions)
         return Error::WorkLimit;
     std::uint64_t columns = 0, samples = 0, water_samples = 0, bytes = 0;
+    const bool session_edits = source.use != FarFrozenUse::Committed;
     const auto terrain_calls =
-        std::uint64_t{1} + bool(source.committed) +
-        (source.use == FarFrozenUse::Preview ? bool(source.live) + bool(source.parked) : 0);
+        std::uint64_t{1} + std::uint64_t{bool(source.committed)} +
+        (session_edits ? std::uint64_t{bool(source.live)} + std::uint64_t{bool(source.parked)}
+                       : std::uint64_t{0});
     const auto water_calls =
-        std::uint64_t{1} + (source.use == FarFrozenUse::Preview
-                                ? bool(source.live_water) + bool(source.parked_water)
-                                : 0);
+        std::uint64_t{1} + (session_edits ? std::uint64_t{bool(source.live_water)} +
+                                                std::uint64_t{bool(source.parked_water)}
+                                          : std::uint64_t{0});
     for (const auto& region : regions) {
         std::array<std::size_t, 3> side{};
         const auto error = Dimensions(region, side);
@@ -301,7 +304,7 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                     image->heights_.push_back(*height);
                     FarFrozenWaterSample observed_water;
                     bool selected = false;
-                    if (source.use == FarFrozenUse::Preview) {
+                    if (session_edits) {
                         for (const auto* callback : {&source.live_water, &source.parked_water}) {
                             if (!*callback)
                                 continue;
@@ -350,14 +353,13 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             return Error::NonFiniteSample;
                         image->pristine_.push_back(*sample);
                         const auto error =
-                            source.use == FarFrozenUse::Preview
-                                ? Resolve<FarVolumeSample>(
-                                      {&source.live, &source.parked, &source.committed},
-                                      *sample,
-                                      grid.region.tier,
-                                      p)
-                                : Resolve<FarVolumeSample>(
-                                      {&source.committed}, *sample, grid.region.tier, p);
+                            session_edits ? Resolve<FarVolumeSample>(
+                                                {&source.live, &source.parked, &source.committed},
+                                                *sample,
+                                                grid.region.tier,
+                                                p)
+                                          : Resolve<FarVolumeSample>(
+                                                {&source.committed}, *sample, grid.region.tier, p);
                         if (error != Error::None)
                             return error;
                         if (!std::isfinite(sample->density))
@@ -494,6 +496,8 @@ FarEditedBakeError BakeFarEditedTilesFrozen(const FarEditedSourceView& source,
                                             const FarFrozenObservation& frozen,
                                             const FarEditedBakeLimits& limits,
                                             FarEditedBakeResult& output) {
+    if (frozen.use() == FarFrozenUse::SessionRender)
+        return FarEditedBakeError::IdentityMismatch;
     try {
         const auto identity = source.Identity(), captured = frozen.durable_identity();
         if (identity.generation != captured.generation || identity.state != captured.state ||

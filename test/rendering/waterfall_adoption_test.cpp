@@ -7,7 +7,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
@@ -16,6 +18,11 @@
 namespace {
 using Luminumbra::Rendering::ParticlePass;
 using Luminumbra::Rendering::WaterfallPass;
+
+template<typename Result, typename... Args>
+Result GLAPIENTRY IgnoreParticleCall(Args...) {
+    return Result();
+}
 
 template<typename Function>
 class ReplaceEntryPoint {
@@ -41,10 +48,10 @@ private:
 class UploadCapture {
 public:
     UploadCapture() {
-        active = this;
+        Active() = this;
     }
     ~UploadCapture() {
-        active = nullptr;
+        Active() = nullptr;
     }
     UploadCapture(const UploadCapture&) = delete;
     UploadCapture& operator=(const UploadCapture&) = delete;
@@ -57,10 +64,29 @@ public:
     bool fail_generation = false;
 
 private:
-    static inline UploadCapture* active = nullptr;
+    static UploadCapture*& Active() {
+        static UploadCapture* capture = nullptr;
+        return capture;
+    }
+    // Intercept persistent particle mappings too, using the existing
+    // context-free fixture pattern. One fixed-capacity mapping serves both rings;
+    // update writes only one ring at a time and these tests never submit a draw.
+    std::vector<ParticlePass::InstanceRecord> m_instances;
+    static void* GLAPIENTRY MapInstances(GLenum, GLintptr offset, GLsizeiptr bytes, GLbitfield) {
+        EXPECT_EQ(offset, 0);
+        EXPECT_EQ(bytes,
+                  static_cast<GLsizeiptr>(ParticlePass::kMaxInstances *
+                                          sizeof(ParticlePass::InstanceRecord)));
+        if (offset != 0 || bytes != static_cast<GLsizeiptr>(ParticlePass::kMaxInstances *
+                                                            sizeof(ParticlePass::InstanceRecord))) {
+            return nullptr;
+        }
+        Active()->m_instances.resize(ParticlePass::kMaxInstances);
+        return Active()->m_instances.data();
+    }
     static void GLAPIENTRY Gen(GLsizei count, GLuint* names) {
         for (GLsizei index = 0; index < count; ++index)
-            names[index] = active->fail_generation ? 0u : static_cast<GLuint>(index + 1);
+            names[index] = Active()->fail_generation ? 0u : static_cast<GLuint>(index + 1);
     }
     static void GLAPIENTRY BindArray(GLuint) {}
     static void GLAPIENTRY BindBuffer(GLenum, GLuint) {}
@@ -70,31 +96,31 @@ private:
         return GL_FALSE;
     }
     static void GLAPIENTRY Data(GLenum, GLsizeiptr bytes, const void* source, GLenum) {
-        ++active->allocations;
+        ++Active()->allocations;
         EXPECT_EQ(source, nullptr);
         ASSERT_GE(bytes, 0);
         ASSERT_LE(bytes, static_cast<GLsizeiptr>(64 * 1024));
-        active->current_page_base = active->received.size();
+        Active()->current_page_base = Active()->received.size();
         const auto count = static_cast<std::size_t>(bytes) / sizeof(float);
-        ASSERT_LE(active->received.size(), 1000u * 72u - count);
-        active->received.resize(active->received.size() + count);
+        ASSERT_LE(Active()->received.size(), 1000u * 72u - count);
+        Active()->received.resize(Active()->received.size() + count);
     }
     static void GLAPIENTRY SubData(GLenum, GLintptr offset, GLsizeiptr bytes, const void* source) {
         ASSERT_GE(offset, 0);
         ASSERT_GE(bytes, 0);
         const auto first =
-            active->current_page_base + static_cast<std::size_t>(offset) / sizeof(float);
+            Active()->current_page_base + static_cast<std::size_t>(offset) / sizeof(float);
         const auto count = static_cast<std::size_t>(bytes) / sizeof(float);
-        ASSERT_LE(first, active->received.size());
-        ASSERT_LE(count, active->received.size() - first);
-        active->writes.push_back(static_cast<std::size_t>(bytes));
-        std::copy_n(static_cast<const float*>(source), count, active->received.data() + first);
+        ASSERT_LE(first, Active()->received.size());
+        ASSERT_LE(count, Active()->received.size() - first);
+        Active()->writes.push_back(static_cast<std::size_t>(bytes));
+        std::copy_n(static_cast<const float*>(source), count, Active()->received.data() + first);
     }
     static void GLAPIENTRY DeleteBuffer(GLsizei count, const GLuint*) {
-        active->deleted_buffers += static_cast<unsigned>(count);
+        Active()->deleted_buffers += static_cast<unsigned>(count);
     }
     static void GLAPIENTRY DeleteArray(GLsizei count, const GLuint*) {
-        active->deleted_arrays += static_cast<unsigned>(count);
+        Active()->deleted_arrays += static_cast<unsigned>(count);
     }
     ReplaceEntryPoint<PFNGLGENVERTEXARRAYSPROC> m_gen_arrays{glad_glGenVertexArrays, Gen};
     ReplaceEntryPoint<PFNGLGENBUFFERSPROC> m_gen_buffers{glad_glGenBuffers, Gen};
@@ -111,6 +137,19 @@ private:
     ReplaceEntryPoint<PFNGLDELETEBUFFERSPROC> m_delete_buffers{glad_glDeleteBuffers, DeleteBuffer};
     ReplaceEntryPoint<PFNGLDELETEVERTEXARRAYSPROC> m_delete_arrays{glad_glDeleteVertexArrays,
                                                                    DeleteArray};
+    ReplaceEntryPoint<PFNGLBUFFERSTORAGEPROC> m_storage{glad_glBufferStorage, IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLMAPBUFFERRANGEPROC> m_mapping{glad_glMapBufferRange, MapInstances};
+    ReplaceEntryPoint<PFNGLUNMAPBUFFERPROC> m_unmap{glad_glUnmapBuffer, IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLVERTEXBINDINGDIVISORPROC> m_divisor{glad_glVertexBindingDivisor,
+                                                               IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLVERTEXATTRIBFORMATPROC> m_format{glad_glVertexAttribFormat,
+                                                            IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLVERTEXATTRIBIFORMATPROC> m_integer_format{glad_glVertexAttribIFormat,
+                                                                     IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLVERTEXATTRIBBINDINGPROC> m_binding{glad_glVertexAttribBinding,
+                                                              IgnoreParticleCall};
+    ReplaceEntryPoint<PFNGLBINDVERTEXBUFFERPROC> m_vertex_buffer{glad_glBindVertexBuffer,
+                                                                 IgnoreParticleCall};
 };
 
 WaterfallPass::PreparedGeometry Geometry(std::size_t sites) {
@@ -291,6 +330,170 @@ TEST(WaterfallAdoption, RepeatedLoadCyclesReplaceSprayAndKeepOtherEmitters) {
     EXPECT_EQ(particles.emitter_descriptors().size(), 4u);
     pass.destroy_geometry();
 }
+
+// Exercise adoption with live CPU particles and bounded intercepted GL
+// storage. No hidden window/context is needed by the existing CI executable.
+class WaterfallLiveAdoption : public testing::TestWithParam<unsigned> {
+protected:
+    void SetUp() override {
+        particles.init_buffers();
+    }
+    void TearDown() override {
+        waterfall.destroy_geometry();
+        particles.destroy_buffers();
+    }
+
+    void ExpectSurvivors(const std::vector<ParticlePass::LiveParticleState>& expected) const {
+        const auto actual = particles.live_particle_states();
+        ASSERT_EQ(actual.size(), expected.size());
+        EXPECT_EQ(particles.live_particle_count(), expected.size());
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            SCOPED_TRACE(index);
+            EXPECT_EQ(actual[index].pos, expected[index].pos);
+            EXPECT_EQ(actual[index].vel, expected[index].vel);
+            EXPECT_EQ(actual[index].age, expected[index].age);
+            EXPECT_EQ(actual[index].lifetime, expected[index].lifetime);
+            EXPECT_EQ(actual[index].emitter_index, expected[index].emitter_index);
+        }
+    }
+
+    void ReplaceLiveSpray(std::size_t replacement_sites) {
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+        const auto particle_root = root / "data/common/particles";
+        std::array<uint32_t, 2> mist_ids{};
+        // First, middle and last removal, including consecutive mist emitters.
+        // Fixture bound: exactly seven emitters and two short spawn steps.
+        for (unsigned group = 0; group < 3; ++group) {
+            if (group == GetParam()) {
+                mist_ids[0] = particles.add_waterfall_spray(
+                    particle_root / "waterfall_spray.json", glm::vec3(20.0f), 8.0f, 4.0f);
+                ASSERT_NE(mist_ids[0], ParticlePass::kInvalidEmitter);
+            }
+            if (group == 1) {
+                ASSERT_NE(particles.add_splash_emitter(particle_root / "precip_splash.json"),
+                          ParticlePass::kInvalidEmitter);
+                particles.set_precipitation(
+                    particle_root, glm::vec3(0.0f, -100.0f, 0.0f), 1.0f, 1.0f);
+            } else {
+                ASSERT_NE(particles.add_emitter(particle_root / "fixture_sparkle.json",
+                                                glm::vec3(-50.0f)),
+                          ParticlePass::kInvalidEmitter);
+            }
+        }
+        mist_ids[1] = particles.add_waterfall_spray(
+            particle_root / "waterfall_spray.json", glm::vec3(40.0f), 8.0f, 4.0f);
+        ASSERT_NE(mist_ids[1], ParticlePass::kInvalidEmitter);
+        particles.rebuild_emitter_descriptors(123, 0);
+        const auto descriptors = particles.emitter_descriptors();
+        ASSERT_EQ(descriptors.size(), 7u);
+        particles.update(0.125f); // Low rain impacts create live splashes.
+        particles.set_precipitation(particle_root, glm::vec3(0.0f, 100.0f, 0.0f), 1.0f, 1.0f);
+        particles.update(0.125f); // High rain leaves live drops as well.
+        particles.update(0.0f);   // Include newly spawned bursts in instance/count diagnostics.
+        const auto before = particles.live_particle_states();
+        ASSERT_EQ(particles.live_particle_count(), before.size());
+        ASSERT_EQ(particles.frame_instance_count(), before.size());
+
+        std::array<uint32_t, 7> remap{};
+        std::vector<ParticlePass::EmitterDescriptor> retained;
+        for (std::size_t index = 0; index < descriptors.size(); ++index) {
+            const auto& descriptor = descriptors[index];
+            if (descriptor.id == mist_ids[0] || descriptor.id == mist_ids[1]) {
+                remap[index] = ParticlePass::kInvalidEmitter;
+            } else {
+                remap[index] = static_cast<uint32_t>(retained.size());
+                retained.push_back(descriptor);
+            }
+        }
+        ASSERT_EQ(retained.size(), 5u);
+        std::array<std::size_t, 7> owned{};
+        std::vector<ParticlePass::LiveParticleState> survivors;
+        for (auto particle : before) {
+            ASSERT_LT(particle.emitter_index, remap.size());
+            ++owned[particle.emitter_index];
+            const auto mapped = remap[particle.emitter_index];
+            if (mapped != ParticlePass::kInvalidEmitter) {
+                particle.emitter_index = mapped;
+                survivors.push_back(particle);
+            }
+        }
+        for (const auto count : owned) {
+            ASSERT_GT(count, 0u); // Both mist, sparkle, weather and splash emitters are live.
+        }
+        ASSERT_LT(survivors.size(), before.size());
+
+        waterfall.begin_adoption(Geometry(replacement_sites));
+        ASSERT_TRUE(waterfall.adopt_next(&particles, root));
+        EXPECT_EQ(particles.frame_instance_count(), 0u); // Old mist cannot still be drawn.
+        ASSERT_NO_FATAL_FAILURE(ExpectSurvivors(survivors));
+        ASSERT_TRUE(waterfall.adopt_next(&particles, root));
+        ASSERT_NO_FATAL_FAILURE(ExpectSurvivors(survivors));
+        particles.rebuild_emitter_descriptors(123, 0);
+        ASSERT_EQ(particles.emitter_descriptors().size(), retained.size() + replacement_sites);
+        for (std::size_t index = 0; index < retained.size(); ++index) {
+            EXPECT_EQ(particles.emitter_descriptors()[index].id, retained[index].id);
+        }
+
+        // Cached weather handles must still control the compacted rain/snow.
+        particles.set_precipitation(particle_root, glm::vec3(9.0f, 100.0f, 9.0f), 0.0f, 0.0f);
+        particles.rebuild_emitter_descriptors(123, 0);
+        particles.update(0.03125f);
+        const auto disabled_weather = particles.live_particle_states();
+        for (std::size_t index = 0; index < descriptors.size(); ++index) {
+            if (descriptors[index].type == 1u || descriptors[index].type == 2u) {
+                const auto mapped = remap[index];
+                ASSERT_LT(mapped, particles.emitter_descriptors().size());
+                EXPECT_EQ(particles.emitter_descriptors()[mapped].origin_region[0], 9000);
+                EXPECT_EQ(static_cast<std::size_t>(
+                              std::count_if(disabled_weather.begin(),
+                                            disabled_weather.end(),
+                                            [mapped](const auto& particle) {
+                                                return particle.emitter_index == mapped;
+                                            })),
+                          owned[index]); // Existing drops survive; disabled weather adds none.
+            }
+        }
+
+        // New impacts must address the surviving template after index compaction.
+        particles.set_precipitation(particle_root, glm::vec3(0.0f, -100.0f, 0.0f), 1.0f, 0.0f);
+        particles.update(0.03125f);
+        particles.update(0.0f);
+        const auto after_impact = particles.live_particle_states();
+        EXPECT_EQ(particles.live_particle_count(), after_impact.size());
+        EXPECT_EQ(particles.frame_instance_count(), after_impact.size());
+        const auto splash = std::find_if(retained.begin(), retained.end(), [](const auto& emitter) {
+            return emitter.spawn_rate_milli == 0u;
+        });
+        ASSERT_NE(splash, retained.end());
+        const auto splash_index = static_cast<uint32_t>(splash - retained.begin());
+        EXPECT_GT(std::count_if(after_impact.begin(),
+                                after_impact.end(),
+                                [splash_index](const auto& particle) {
+                                    return particle.emitter_index == splash_index &&
+                                           particle.age == 0.0f && particle.lifetime == 0.28f &&
+                                           particle.pos.y == 0.02f;
+                                }),
+                  0);
+        for (const auto& particle : after_impact) {
+            EXPECT_LT(particle.emitter_index, particles.emitter_descriptors().size());
+        }
+    }
+
+private:
+    UploadCapture capture;
+    ParticlePass particles;
+    WaterfallPass waterfall;
+};
+
+TEST_P(WaterfallLiveAdoption, ReplacementKeepsLiveParticlesAndSpawnsSplashesAfterCompaction) {
+    ReplaceLiveSpray(1);
+}
+
+TEST_P(WaterfallLiveAdoption, EmptyReplacementKeepsLiveParticlesAndSpawnsSplashesAfterCompaction) {
+    ReplaceLiveSpray(0);
+}
+
+INSTANTIATE_TEST_SUITE_P(EmitterOrders, WaterfallLiveAdoption, testing::Values(0u, 1u, 2u));
 
 TEST(WaterfallAdoption, CancellationBeforeAdoptionPreservesOldSpray) {
     UploadCapture capture;
