@@ -620,13 +620,7 @@ void StepChunkWaterFixed(Chunk& c,
     out_depth_after += sum_after;
     c.max_water_delta_last_tick = static_cast<float>(max_delta) / static_cast<float>(MM_PER_M);
     if (max_delta > 1) {
-        if (c.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL - 1) {
-            c.water_mesh_generated.store(false);
-            c.water_mesh_dirty_ticks = 0;
-            result.water_mesh_invalidated = true;
-        } else {
-            ++c.water_mesh_dirty_ticks;
-        }
+        result.water_mesh_invalidated = WaterKernels::AdvanceWaterMeshCadence(c);
     }
     if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {
         MarkRuntimeWaterMutation(c);
@@ -634,6 +628,16 @@ void StepChunkWaterFixed(Chunk& c,
 }
 
 } // namespace
+
+bool WaterKernels::AdvanceWaterMeshCadence(Chunk& chunk) noexcept {
+    if (chunk.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL - 1) {
+        chunk.water_mesh_generated.store(false);
+        chunk.water_mesh_dirty_ticks = 0;
+        return true;
+    }
+    ++chunk.water_mesh_dirty_ticks;
+    return false;
+}
 
 WaterKernels::Result WaterKernels::StepInterior(Chunk& chunk,
                                                 SHIELD_WorldSystem& shield,
@@ -1322,6 +1326,10 @@ void WaterSystem::inject_water_sources(entt::registry& registry, bool determinis
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
                          bool deterministic_authority) {
+    if (m_regional_scheduling) {
+        m_active_chunks = &active_chunks;
+        return;
+    }
     m_cells_stepped_last_update = 0;
     m_grid_candidates_visited_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
