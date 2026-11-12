@@ -444,7 +444,7 @@ bool FarVolumeHandoff::StageSessionTarget(
     FarHandoffManifest manifest;
     const auto* source = producer.capture();
     World::FarFrozenCaptureWork work(transaction_samples,
-                                     nullptr,
+                                     limits.work,
                                      limits.deadline,
                                      source ? source->deadline : World::FarFrozenCaptureDeadline{});
     {

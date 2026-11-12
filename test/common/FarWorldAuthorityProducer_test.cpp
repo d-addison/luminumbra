@@ -1681,3 +1681,218 @@ TEST_F(FarWorldSourceCaptureTest,
     producer.pump_capture();
     EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
 }
+
+namespace {
+using namespace Luminumbra::World;
+using Error = FarFrozenCaptureError;
+
+FarFrozenCaptureLimits FrozenSamplingLimits() {
+    return {64, 2'000'000, 8'000'000, 6'000'000, 64ULL * 1024 * 1024};
+}
+FarFrozenCaptureSource FrozenSamplingSource() {
+    FarFrozenCaptureSource source;
+    source.pristine.field_identity = 41;
+    source.content_identity = 42;
+    source.durable = {7, FarEditedImageState::Committed};
+    source.pristine.numeric = FarVolumeNumericProfile::LegacySigned16;
+    source.pristine.height = [](std::int64_t, std::int64_t) {
+        return 0.25f;
+    };
+    source.pristine.density = [](const FarVolumePosition& p, float h, std::uint32_t, FarCaveMode) {
+        return FarVolumeSample{float(p.y) - h, 3};
+    };
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{false, 0};
+    };
+    return source;
+}
+std::shared_ptr<FarVolumeMemoryPool> FrozenSamplingPool() {
+    return std::make_shared<FarVolumeMemoryPool>(64ULL * 1024 * 1024);
+}
+FarFrozenTerrainOverride FrozenSamplingConstant(float value) {
+    return [value](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Present, {value, 9}};
+    };
+}
+
+TEST(FarFrozenObservation, TransactionCapsChargeActualLayersAcrossImagesBeforeCallbacks) {
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    for (const auto use :
+         {FarFrozenUse::Committed, FarFrozenUse::Preview, FarFrozenUse::SessionRender}) {
+        for (unsigned cap = 0; cap < 3; ++cap) {
+            auto source = FrozenSamplingSource();
+            source.use = use;
+            FarFrozenCaptureWork::Counts observed;
+            source.pristine.height = [&](std::int64_t, std::int64_t) {
+                ++observed.height;
+                return 0.25f;
+            };
+            source.pristine.density =
+                [&](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
+                    ++observed.density;
+                    return FarVolumeSample{1, 3};
+                };
+            source.committed = source.live =
+                source.parked = [&](std::uint8_t, const FarVolumePosition&) {
+                    ++observed.density;
+                    return FarFrozenOverride<FarVolumeSample>{};
+                };
+            source.water = [&](std::int64_t, std::int64_t) {
+                ++observed.water;
+                return FarFrozenWaterSample{};
+            };
+            source.live_water = source.parked_water = [&](std::int64_t, std::int64_t) {
+                ++observed.water;
+                return FarFrozenOverride<FarFrozenWaterSample>{};
+            };
+            const FarFrozenCaptureWork::Counts per_image{
+                9,
+                27u * (use == FarFrozenUse::Committed ? 2u : 4u),
+                9u * (use == FarFrozenUse::Committed ? 1u : 3u)};
+            FarFrozenCaptureWork::Counts caps{
+                2 * per_image.height, 2 * per_image.density, 2 * per_image.water};
+            if (cap == 0) {
+                --caps.height;
+            } else if (cap == 1) {
+                --caps.density;
+            } else {
+                --caps.water;
+            }
+            FarFrozenCaptureWork work(caps);
+            auto limits = FrozenSamplingLimits();
+            limits.work = &work;
+            auto pool = FrozenSamplingPool();
+            std::shared_ptr<const FarFrozenObservation> image;
+            ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                      Error::None);
+            const auto accepted = image;
+            const auto held = pool->used();
+            EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                      Error::WorkLimit);
+            EXPECT_EQ(image, accepted);
+            EXPECT_EQ(pool->used(), held);
+            const auto charged = work.counts();
+            EXPECT_EQ(charged.height, observed.height);
+            EXPECT_EQ(charged.density, observed.density);
+            EXPECT_EQ(charged.water, observed.water);
+            EXPECT_LE(observed.height, caps.height);
+            EXPECT_LE(observed.density, caps.density);
+            EXPECT_LE(observed.water, caps.water);
+            EXPECT_EQ(cap == 0   ? observed.height
+                      : cap == 1 ? observed.density
+                                 : observed.water,
+                      cap == 0   ? caps.height
+                      : cap == 1 ? caps.density
+                                 : caps.water);
+        }
+    }
+}
+
+TEST(FarFrozenObservation, SelectedLayersChargeOnlyCallbacksActuallyInvoked) {
+    auto source = FrozenSamplingSource();
+    source.use = FarFrozenUse::SessionRender;
+    source.live = FrozenSamplingConstant(-1);
+    source.live_water = [](std::int64_t, std::int64_t) {
+        return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Present, {false, 0}};
+    };
+    source.parked = source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        ADD_FAILURE() << "Selected live terrain must stop resolution";
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.parked_water = [](std::int64_t, std::int64_t) {
+        ADD_FAILURE() << "Selected live water must stop resolution";
+        return FarFrozenOverride<FarFrozenWaterSample>{};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        ADD_FAILURE() << "Selected live water must stop base sampling";
+        return FarFrozenWaterSample{};
+    };
+    FarFrozenCaptureWork work({18, 108, 18});
+    auto limits = FrozenSamplingLimits();
+    limits.work = &work;
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    std::shared_ptr<const FarFrozenObservation> image;
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        ASSERT_EQ(
+            CaptureFarFrozenObservation({&region, 1}, source, limits, FrozenSamplingPool(), image),
+            Error::None);
+    }
+    EXPECT_EQ(work.counts().height, 18u);
+    EXPECT_EQ(work.counts().density, 108u);
+    EXPECT_EQ(work.counts().water, 18u);
+}
+
+TEST(FarFrozenObservation, SamplingDeadlineChecksEveryLayerAndPreservesAcceptedImage) {
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    const auto clock = [](const void* context) noexcept {
+        return *static_cast<const std::uint64_t*>(context);
+    };
+    for (unsigned layer = 0; layer < 8; ++layer) {
+        auto source = FrozenSamplingSource();
+        source.use = FarFrozenUse::SessionRender;
+        std::uint64_t ticks = 0;
+        const auto terrain = [&](std::uint8_t, const FarVolumePosition&) {
+            return FarFrozenOverride<FarVolumeSample>{};
+        };
+        source.live = source.parked = terrain;
+        const auto water = [&](std::int64_t, std::int64_t) {
+            return FarFrozenOverride<FarFrozenWaterSample>{};
+        };
+        source.live_water = source.parked_water = water;
+        std::shared_ptr<const FarFrozenObservation> image;
+        auto pool = FrozenSamplingPool();
+        ASSERT_EQ(
+            CaptureFarFrozenObservation({&region, 1}, source, FrozenSamplingLimits(), pool, image),
+            Error::None);
+        const auto accepted = image;
+        const auto held = pool->used();
+        if (layer == 0) {
+            source.pristine.height = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return 0.25f;
+            };
+        } else if (layer == 1) {
+            source.pristine.density =
+                [&](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
+                    ++ticks;
+                    return FarVolumeSample{1, 3};
+                };
+        } else if (layer < 5) {
+            auto& callback = layer == 2   ? source.live
+                             : layer == 3 ? source.parked
+                                          : source.committed;
+            callback = [&](std::uint8_t, const FarVolumePosition&) {
+                ++ticks;
+                return FarFrozenOverride<FarVolumeSample>{};
+            };
+        } else if (layer < 7) {
+            auto& callback = layer == 5 ? source.live_water : source.parked_water;
+            callback = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return FarFrozenOverride<FarFrozenWaterSample>{};
+            };
+        } else {
+            source.water = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return FarFrozenWaterSample{};
+            };
+        }
+        auto limits = FrozenSamplingLimits();
+        limits.deadline = {clock, &ticks, 1};
+        EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                  Error::DeadlineExceeded);
+        EXPECT_EQ(ticks, 1u);
+        EXPECT_EQ(image, accepted);
+        EXPECT_EQ(pool->used(), held);
+        const auto attempts = pool->attempts();
+        EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                  Error::DeadlineExceeded);
+        EXPECT_EQ(pool->attempts(), attempts);
+        EXPECT_EQ(ticks, 1u);
+    }
+}
+
+} // namespace

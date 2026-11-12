@@ -1022,10 +1022,13 @@ TEST(StreamingHardening, SessionSaveDigestFreezeAndFarCaptureNeverOpenFilesOnOwn
     EXPECT_GT(probe.reads(), 0);
     EXPECT_EQ(probe.owner_reads(), 0);
 
+    // Source capture requires caller-owned storage and an explicit clock in
+    // addition to frame/read bounds. A fixed clock isolates the frame deadline.
     World::FarWorldAuthorityConfig config{
-        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
-    // Source capture admits its storage through a caller-owned memory domain.
-    config.source.memory = std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+        {512, 1048576, 64, std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
+        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072},
+         4,
+         {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1}}};
     std::string error;
     probe.reset();
     ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;

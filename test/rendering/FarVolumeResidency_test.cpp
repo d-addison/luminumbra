@@ -3208,6 +3208,89 @@ TEST_F(FarSessionPublicationTest, AggregateSamplingCapsRefuseWithoutReplacingCoh
     EXPECT_EQ(owner.State().target_serial, 2u);
 }
 
+TEST_F(FarSessionPublicationTest, ParentSamplingCapsRefuseWithoutReplacingCohorts) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    const std::array accepted{Tile(0), Fallback()};
+    ASSERT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, accepted, policy, capture_limits, transaction_samples, memory));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture()->serial, 2u);
+    const auto before = owner.Memory();
+    const auto tier = FarTierAt(5);
+    ASSERT_TRUE(tier.has_value());
+    if (!tier.has_value()) {
+        return;
+    }
+    const std::uint64_t side = tier->tile_edge_meters / tier->sample_spacing_meters + 3;
+    const auto columns = side * side;
+    const std::uint64_t vertical = 1024 / tier->sample_spacing_meters + 3;
+    const FarFrozenCaptureWork::Counts first_tile{2 * columns, 4 * columns * vertical, 4 * columns};
+    const std::array replacement{Fallback(), Tile(1)};
+    // The caller's transaction can already have spent its allowance before
+    // this manifest, or have enough remaining for only the first tile.
+    for (unsigned cap = 0; cap < 3; ++cap) {
+        for (const bool exhausted : {true, false}) {
+            auto parent_caps = transaction_samples;
+            const auto remaining = cap == 0   ? first_tile.height
+                                   : cap == 1 ? first_tile.density
+                                              : first_tile.water;
+            if (cap == 0) {
+                parent_caps.height = exhausted ? 1 : remaining;
+            } else if (cap == 1) {
+                parent_caps.density = exhausted ? 1 : remaining;
+            } else {
+                parent_caps.water = exhausted ? 1 : remaining;
+            }
+            FarFrozenCaptureWork parent(parent_caps);
+            if (exhausted) {
+                ASSERT_TRUE(cap == 0   ? parent.ChargeHeight()
+                            : cap == 1 ? parent.ChargeDensity()
+                                       : parent.ChargeWater());
+            }
+            auto bounded = capture_limits;
+            bounded.work = &parent;
+            EXPECT_FALSE(owner.StageSessionTarget(
+                producer, *world, 7, replacement, policy, bounded, transaction_samples, memory));
+            EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+            EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+            EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::WorkLimit);
+            const auto charged = parent.counts();
+            EXPECT_EQ(cap == 0   ? charged.height
+                      : cap == 1 ? charged.density
+                                 : charged.water,
+                      exhausted ? 1 : remaining);
+            EXPECT_EQ(owner.State().target_serial, 1u);
+            EXPECT_EQ(owner.State().serving_serial, 0u);
+            EXPECT_FALSE(owner.Observe({1, 1, 0}).has_value());
+            const auto retained = HandoffObserve(owner, {1, 0, 0});
+            ASSERT_TRUE(retained.target.has_value());
+            if (retained.target.has_value()) {
+                EXPECT_EQ(retained.target->identity.key, accepted[0].wanted.identity.key);
+            }
+            const auto after = owner.Memory();
+            for (std::size_t tier_index = 0; tier_index < before.size(); ++tier_index) {
+                EXPECT_EQ(after[tier_index].bytes_cpu, before[tier_index].bytes_cpu);
+                EXPECT_EQ(after[tier_index].bytes_gpu, before[tier_index].bytes_gpu);
+            }
+        }
+    }
+    FarFrozenCaptureWork parent(transaction_samples);
+    auto bounded = capture_limits;
+    bounded.work = &parent;
+    EXPECT_TRUE(owner.StageSessionTarget(
+        producer, *world, 7, replacement, policy, bounded, transaction_samples, memory));
+    EXPECT_GT(parent.counts().height, 2 * first_tile.height);
+    EXPECT_GT(parent.counts().density, 0u);
+    EXPECT_GT(parent.counts().water, 0u);
+    EXPECT_TRUE(owner.SessionCaptureFailure().ok());
+    EXPECT_EQ(owner.State().target_serial, 2u);
+}
+
 TEST_F(FarSessionPublicationTest, SamplingExpiryRemainsAdmissionFailureWithPreciseDetail) {
     JobSystem jobs;
     auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
@@ -3234,6 +3317,40 @@ TEST_F(FarSessionPublicationTest, SamplingExpiryRemainsAdmissionFailureWithPreci
     for (std::size_t tier_index = 0; tier_index < before.size(); ++tier_index) {
         EXPECT_EQ(after[tier_index].bytes_cpu, before[tier_index].bytes_cpu);
         EXPECT_EQ(after[tier_index].bytes_gpu, before[tier_index].bytes_gpu);
+    }
+    // A caller deadline remains binding even when the per-image deadline
+    // allows more time. Cover expiry before sampling and during sampling.
+    for (const std::uint64_t expiry : {0u, 100u}) {
+        Clock parent_clock;
+        FarFrozenCaptureWork parent(
+            transaction_samples, nullptr, {Clock::Now, &parent_clock, expiry});
+        bounded.work = &parent;
+        bounded.deadline.expires_at = std::numeric_limits<std::uint64_t>::max();
+        EXPECT_FALSE(owner.StageSessionTarget(
+            producer, *world, 7, tiles, policy, bounded, transaction_samples, memory));
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+        EXPECT_EQ(owner.SessionCaptureFailure().source, Producer::Error::None);
+        EXPECT_EQ(owner.SessionCaptureFailure().capture, FarFrozenCaptureError::DeadlineExceeded);
+        EXPECT_TRUE(parent.deadline_exceeded());
+        EXPECT_EQ(owner.State().target_serial, 1u);
+        EXPECT_EQ(owner.State().serving_serial, 0u);
+        const auto retained = HandoffObserve(owner, {1, 0, 0});
+        ASSERT_TRUE(retained.target.has_value());
+        if (retained.target.has_value()) {
+            EXPECT_EQ(retained.target->identity.key, tiles[0].wanted.identity.key);
+        }
+        const auto unchanged = owner.Memory();
+        for (std::size_t tier_index = 0; tier_index < before.size(); ++tier_index) {
+            EXPECT_EQ(unchanged[tier_index].bytes_cpu, before[tier_index].bytes_cpu);
+            EXPECT_EQ(unchanged[tier_index].bytes_gpu, before[tier_index].bytes_gpu);
+        }
+        if (expiry == 0) {
+            EXPECT_EQ(parent.counts().height, 0u);
+            EXPECT_EQ(parent.counts().density, 0u);
+            EXPECT_EQ(parent.counts().water, 0u);
+        } else {
+            EXPECT_GT(parent.counts().height, 0u);
+        }
     }
     const Save::AuthorityReadLimits reads{
         512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
