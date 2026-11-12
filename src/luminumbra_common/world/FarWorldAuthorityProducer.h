@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FarFrozenObservation.h"
+#include "FarVolumeMemory.h"
 #include "FarWorldAuthorityChanges.h"
 #include "persistence/WorldSaveService.h"
 #include <bitset>
@@ -8,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luminumbra::World {
@@ -21,6 +23,8 @@ public:
         std::size_t index_records = 0;
         std::uint64_t copy_bytes = 0;
         std::uint64_t query_columns = 0;
+        // Required shared admission domain; may alias a handoff tier pool.
+        std::shared_ptr<FarVolumeMemoryPool> memory;
     };
     enum class Error {
         None,
@@ -38,10 +42,11 @@ public:
         IVec3 coords{};
         bool parked = false, terrain_authority = false, water_authority = false;
         int water_resolution = 0;
-        std::vector<float> sdf;
-        std::vector<std::uint8_t> material;
-        std::vector<std::int32_t> bed, depth;
+        std::vector<float, FarVolumePoolAllocator<float>> sdf;
+        std::vector<std::uint8_t, FarVolumePoolAllocator<std::uint8_t>> material;
+        std::vector<std::int32_t, FarVolumePoolAllocator<std::int32_t>> bed, depth;
     };
+    using Images = std::vector<Image, FarVolumePoolAllocator<Image>>;
     struct DirtyTiles {
         std::bitset<kSlots> tiles;
         std::uint64_t visited = 0, terrain = 0, water = 0;
@@ -60,7 +65,7 @@ public:
     struct SourceCapture {
         std::uint64_t serial = 0;
         Persistence::WorldSaveService::AuthorityWindow window;
-        std::vector<Image> published;
+        Images published;
         Persistence::WorldSaveService::AuthorityWindowResult committed;
     };
     struct CaptureStatus {
@@ -82,6 +87,9 @@ public:
         }
     };
     explicit FarWorldAuthorityProducer(const Limits& limits);
+    // Heap owners admit the object before allocation and transfer this same-pool
+    // token. Stack construction admits its control storage in the convenience form.
+    FarWorldAuthorityProducer(const Limits& limits, FarVolumeMemoryLease&& control);
     ~FarWorldAuthorityProducer();
     FarWorldAuthorityProducer(const FarWorldAuthorityProducer&) = delete;
     FarWorldAuthorityProducer& operator=(const FarWorldAuthorityProducer&) = delete;
@@ -94,7 +102,7 @@ public:
     // Refusal preserves output. Only published owned terrain and integer water
     // are copied; resident generation and staged arrays never become authority.
     Error copy_published(const Persistence::WorldSaveService::AuthorityWindow& window,
-                         std::vector<Image>& output);
+                         Images& output);
     bool admit_saved_source(const std::filesystem::path& root,
                             const Persistence::WorldSaveService::AuthorityReadLimits& limits,
                             std::string& error);
@@ -113,7 +121,8 @@ public:
     bool refresh_saved_source(const std::filesystem::path& root, std::string& error);
     const SourceCapture* capture() const;
     CaptureStatus capture_status() const;
-    const std::string& capture_read_error() const;
+    // Bounded to 255 bytes, independent of hostile member/path diagnostics.
+    std::string_view capture_read_error() const;
     // Synchronous composition from the accepted owned source capture. The world
     // is used only for pristine terrain/base water under its sampling scope.
     // The complete rectangular halo must lie in that capture's source window.
@@ -127,7 +136,9 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<FarVolumeMemoryPool> memory_;
+    FarVolumeMemoryLease control_;
+    std::shared_ptr<Impl> impl_;
 };
 struct FarWorldAuthorityConfig {
     FarWorldAuthorityProducer::Limits source;
