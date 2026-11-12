@@ -356,6 +356,7 @@ add_executable(common_tests
     sim/steering_consumer_test.cpp
     sim/ecology_pipeline_test.cpp
     sim/ecology_hash_test.cpp
+    sim/participant_projection_test.cpp
     sim/crop_lifecycle_test.cpp
     sim/foliage_drift_integration_test.cpp
     sim/species_registry_test.cpp
