@@ -52,6 +52,31 @@ private:
     std::string_view m_bytes;
     std::size_t m_offset = 0;
 };
+bool ReadFoliageCompletions(std::string_view value,
+                            const std::map<RegionKey, ActiveRegionRecord>& records,
+                            std::uint64_t ceiling,
+                            std::map<RegionKey, std::uint64_t>& completions) {
+    if (value.size() < 4)
+        return false;
+    Reader stamps(value);
+    const auto owners = stamps.read(4);
+    // Check the <= 2^20 owner bound before size arithmetic or node allocation.
+    if (owners == 0 || owners > records.size() || value.size() != 4 + 16 * owners)
+        return false;
+    std::optional<RegionKey> prior;
+    for (std::uint64_t entry = 0; entry < owners; ++entry) {
+        const RegionKey key{
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(stamps.read(4))),
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(stamps.read(4)))};
+        const auto stamp = stamps.read(8);
+        if (!records.contains(key) || (prior && key <= *prior) || stamp >= WorldClock::kTickLimit ||
+            stamp > ceiling)
+            return false;
+        completions.emplace(key, stamp);
+        prior = key;
+    }
+    return true;
+}
 } // namespace
 
 ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const WorldClock& clock)
@@ -63,6 +88,7 @@ ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const World
 }
 ActiveRegionLedger::ActiveRegionLedger(const ActiveRegionLedger& other)
     : m_completedWork(other.completed_work())
+    , m_foliageCompletions(other.m_foliageCompletions)
     , m_energyAges(other.energy_ages())
     , m_waterDebts(other.m_waterDebts)
     , m_config(other.m_config)
@@ -131,15 +157,29 @@ void ActiveRegionLedger::activate_owned(RegionKey key, const WorldClock& clock) 
 void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
     auto& record = activate(key, clock);
     record.edited = true;
-    // While a resume is pending, matching stamps identify completed field
-    // materialization. An ordinary edit must not erase that persisted evidence.
+    // Preserve historical record bookkeeping while a resume is pending.
+    // These matching stamps are not foliage completion evidence.
     if (record.frozen_at == 0 || record.last_edit == 0 || record.last_edit != record.last_ticked) {
         record.last_edit = clock.tick();
     }
     record.wake_pending = true;
 }
 void ActiveRegionLedger::mark_materialized_edit(RegionKey key, const WorldClock& clock) {
+    if (!ValidKey(key) || clock.tick() < m_headerTick)
+        throw std::invalid_argument("Invalid region activation");
+    const auto records = m_records.size() + (m_records.contains(key) ? 0u : 1u);
+    const auto completions =
+        m_foliageCompletions.size() + (m_foliageCompletions.contains(key) ? 0u : 1u);
+    if (!encodable_with_counts(
+            m_energyAges.size(), m_waterDebts.size(), std::nullopt, false, records, completions))
+        throw std::length_error("Active-region ledger file capacity reached");
+    // Prepare the single bounded node before activation can change any live state.
+    std::map<RegionKey, std::uint64_t> prepared;
+    if (!m_foliageCompletions.contains(key))
+        prepared.emplace(key, clock.tick());
     mark_edited(key, clock);
+    m_foliageCompletions.merge(prepared);
+    m_foliageCompletions.find(key)->second = clock.tick();
     auto& record = m_records.at(key);
     record.last_edit = clock.tick();
     record.last_ticked = clock.tick();
@@ -404,7 +444,8 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
             !energy_ages().contains(it->first) && !m_waterDebts.contains(it->first) &&
-            !completed_work().contains(it->first) && !owned(it->first)) {
+            !completed_work().contains(it->first) && !m_foliageCompletions.contains(it->first) &&
+            !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
         } else
@@ -519,7 +560,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
             clock.tick() >= proximity && clock.tick() - proximity >= kIdleEvictionTicks;
         const bool evict = !r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
                            !m_energyAges.contains(key) && !m_waterDebts.contains(key) &&
-                           !m_completedWork.contains(key);
+                           !m_completedWork.contains(key) && !m_foliageCompletions.contains(key);
         if (evict)
             scratch.evictions.push_back(key);
         rows.push_back({key, &r, proximity});
@@ -765,6 +806,15 @@ std::string ActiveRegionLedger::canonical_bytes() const {
             Append(bytes, debt, 8);
         }
     }
+    if (!m_foliageCompletions.empty()) {
+        bytes += "|foliage_completion:";
+        Append(bytes, m_foliageCompletions.size(), 4);
+        for (const auto& [key, stamp] : m_foliageCompletions) {
+            Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+            Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+            Append(bytes, stamp, 8);
+        }
+    }
     return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
@@ -779,15 +829,22 @@ bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
                                                std::size_t debts,
                                                std::optional<std::size_t> completed_owners,
                                                bool allocator_advanced,
-                                               std::optional<std::size_t> record_count) const {
+                                               std::optional<std::size_t> record_count,
+                                               std::optional<std::size_t> foliage_owners) const {
     // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
     // already counts a projection declaration; only a ledger near the cap needs the exact scan.
     const std::size_t completed_count = completed_owners.value_or(completed_work().size());
+    const auto foliage_count = foliage_owners.value_or(m_foliageCompletions.size());
+    const auto records = record_count.value_or(m_records.size());
+    if (records > kMaxRegions || owners > records || debts > records || completed_count > records ||
+        foliage_count > records)
+        return false;
+    // All counts are now <= 2^20; the combined envelope fits 32-bit size_t.
+    const std::size_t foliage = foliage_count == 0 ? 0u : 10u + 16u * foliage_count;
     const std::size_t completed = completed_count == 0 ? 0u : 10u + 16u * completed_count;
     const std::size_t allocator = (allocator_advanced || m_nextPersistentId != 1) ? 14u : 0u;
-    const std::size_t base =
-        kHeaderBytes + record_count.value_or(m_records.size()) * kRecordBytes + 8;
-    const std::size_t extension_payload = completed + allocator +
+    const std::size_t base = kHeaderBytes + records * kRecordBytes + 8;
+    const std::size_t extension_payload = completed + foliage + allocator +
                                           (owners == 0 ? 0u : 10u + 16u * owners) +
                                           (debts == 0 ? 0u : 10u + 16u * debts);
     if (base + 4u + 7u + extension_payload <= kMaxFileBytes)
@@ -802,7 +859,8 @@ std::string ActiveRegionLedger::encode() const {
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
     const bool extended_contract = allocator_advanced || !m_energyAges.empty() ||
-                                   !m_waterDebts.empty() || !m_completedWork.empty();
+                                   !m_waterDebts.empty() || !m_completedWork.empty() ||
+                                   !m_foliageCompletions.empty();
     const bool extension = declare_projection || extended_contract;
     if (!encodable_with_counts(m_energyAges.size(), m_waterDebts.size()))
         throw std::length_error("Active-region ledger file capacity reached");
@@ -851,6 +909,16 @@ std::string ActiveRegionLedger::encode() const {
                 Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
                 Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
                 Append(tlvs, total, 8);
+            }
+        }
+        if (!m_foliageCompletions.empty()) {
+            Append(tlvs, 7, 2);
+            Append(tlvs, 4 + 16 * m_foliageCompletions.size(), 4);
+            Append(tlvs, m_foliageCompletions.size(), 4);
+            for (const auto& [key, stamp] : m_foliageCompletions) {
+                Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
+                Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
+                Append(tlvs, stamp, 8);
             }
         }
         Append(bytes, tlvs.size(), 4);
@@ -983,7 +1051,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 at += length;
                 // Strictly ascending types refuse duplicates; unsupported types refuse.
                 if ((have_previous && type <= previous_type) ||
-                    (type != 1 && type != 2 && type != 4 && type != 5 && type != 6))
+                    (type != 1 && type != 2 && type != 4 && type != 5 && type != 6 &&
+                     !(type == 7 && version == 3)))
                     return false;
                 have_previous = true;
                 previous_type = type;
@@ -996,6 +1065,14 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     if (next < 2 || next > kPersistentIdLimit)
                         return false;
                     result.m_nextPersistentId = next;
+                    continue;
+                }
+                if (type == 7) {
+                    if (!ReadFoliageCompletions(value,
+                                                result.m_records,
+                                                result.m_headerTick,
+                                                result.m_foliageCompletions))
+                        return false;
                     continue;
                 }
                 if (type == 6) {
@@ -1084,7 +1161,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     result.m_legacyFrozenDigests.insert(key);
         }
         // An envelope without a projection TLV preserves historical digests verbatim, even
-        // when allocator, completed work, energy ages or water debt require version 3. Do not
+        // when allocator or consumer registers require version 3. Do not
         // label them projection 2 until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         auto canonical = result.encode();

@@ -128,7 +128,8 @@ public:
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
     // type 2 digest projection (7 bytes), type 4 energy ages, type 5 water debt and
-    // type 6 completed work (each 10 + 16 bytes per owner). The original file cap is
+    // type 6 completed work, and v3 type 7 foliage completion stamps
+    // (each 10 + 16 bytes per owner). The original file cap is
     // unchanged; encode refuses when the records and extensions together exceed it.
     static constexpr std::size_t kMaxFileBytes =
         kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
@@ -220,7 +221,8 @@ public:
         const auto bytes = kHeaderBytes + m_records.size() * kRecordBytes + 8u + 4u + 7u +
                            (m_nextPersistentId == 1 ? 0u : 14u) +
                            extension_bytes(energy_ages().size()) + extension_bytes(count) +
-                           extension_bytes(completed_work().size());
+                           extension_bytes(completed_work().size()) +
+                           extension_bytes(m_foliageCompletions.size());
         if (count > kMaxRegions || bytes > kMaxFileBytes) {
             return false;
         }
@@ -283,13 +285,20 @@ public:
     // Activate and wake a consumer-owned region without a persistent terrain edit.
     // The consumer must retain it through the scheduler's ownership probe.
     void activate_owned(RegionKey key, const WorldClock& clock);
-    // Wake an edited owner, retaining matching materialized-completion stamps
-    // while frozen_at still identifies an unacknowledged resume.
+    // Wake an edited owner without publishing foliage completion.
     void mark_edited(RegionKey key, const WorldClock& clock);
-    // A materialized field edit advances last_ticked as well as last_edit.
+    // Only call after foliage materialization completes. Publishes its exclusive
+    // completion stamp (including tick zero), and advances last_ticked and last_edit.
+    // Validation/capacity/allocation failure leaves all live registers unchanged.
     // Thaw immediately so this stamp remains encodable; retain frozen_at until
     // the remaining resume consumers acknowledge their historical window.
     void mark_materialized_edit(RegionKey key, const WorldClock& clock);
+    [[nodiscard]] std::optional<std::uint64_t> foliage_completion(RegionKey key) const noexcept {
+        const auto found = m_foliageCompletions.find(key);
+        if (found == m_foliageCompletions.end())
+            return std::nullopt;
+        return found->second;
+    }
     // Wakes an existing Frozen record whose authority changed; never creates or alters others.
     void wake_frozen(RegionKey key) noexcept;
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
@@ -336,7 +345,7 @@ public:
 
 private:
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
-    // energy age, water debt or completed work, including records due in the current schedule.
+    // energy age, water debt, completed work or foliage completion, including due records.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
@@ -344,18 +353,20 @@ private:
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
     // Whether the combined envelope fits kMaxFileBytes with the proposed owner counts.
-    // Omitted completed owners and the allocator flag retain their current registers.
+    // Omitted completed/foliage owners and the allocator flag retain current registers.
     bool encodable_with_counts(std::size_t energy_owners,
                                std::size_t water_debts,
                                std::optional<std::size_t> completed_owners = std::nullopt,
                                bool allocator_advanced = false,
-                               std::optional<std::size_t> record_count = std::nullopt) const;
+                               std::optional<std::size_t> record_count = std::nullopt,
+                               std::optional<std::size_t> foliage_owners = std::nullopt) const;
     struct ScheduleScratch;
     std::shared_ptr<ScheduleScratch> m_scheduleScratch;
     struct EnergyPublication;
     // Derived scratch for sparse transactional energy publication.
     std::shared_ptr<EnergyPublication> m_energyPublication;
     std::map<RegionKey, std::uint64_t> m_completedWork;
+    std::map<RegionKey, std::uint64_t> m_foliageCompletions;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;

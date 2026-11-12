@@ -490,14 +490,11 @@ private:
     std::map<RegionKey, Owner> m_owners;
     Work m_work;
 };
-// Materialized edits publish matching persisted stamps. Ordinary edits retain
-// that completion evidence while the owner still has a pending resume.
-inline std::uint64_t FoliagePriorTick(const ::Luminumbra::world::ActiveRegionRecord& record) {
-    if (record.frozen_at != 0 &&
-        !(record.last_edit != 0 && record.last_ticked == record.last_edit)) {
-        return record.frozen_at;
-    }
-    return record.last_ticked;
+// Only the exclusive materialization register can advance a pending foliage resume.
+inline std::uint64_t FoliagePriorTick(const ::Luminumbra::world::ActiveRegionRecord& record,
+                                      std::optional<std::uint64_t> completion) {
+    return std::max(record.frozen_at != 0 ? record.frozen_at : record.last_ticked,
+                    completion.value_or(0));
 }
 struct RegionalFoliageWindows {
     std::map<RegionKey, std::uint32_t> elapsed;
@@ -518,7 +515,9 @@ BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
         }
         const auto& record = found->second;
         const auto old = previous.find(key);
-        auto prior = old == previous.end() ? FoliagePriorTick(record) : old->second;
+        const auto completion = ledger.foliage_completion(key);
+        auto prior = old == previous.end() ? FoliagePriorTick(record, completion)
+                                           : std::max(old->second, completion.value_or(0));
         if (record.frozen_at == 0) {
             prior = std::max(prior, record.first_active);
         }
@@ -531,10 +530,9 @@ BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
                                        .elapsed_ticks
                                  : std::min<std::uint64_t>(clock.tick() - prior, 65536);
         // Scheduling stamps last_ticked before foliage sees a new owner.
-        // Its first due tick still runs once. Only materialization can advance
-        // last_ticked beyond the canonical scheduler tick; an ordinary edit at
-        // that scheduled tick must not suppress the unconsumed first tick.
-        const bool materialized = record.last_ticked > ledger.tick();
+        // Its first due tick still runs once unless materialization completed
+        // this exact tick, including when the scheduler has already stamped it.
+        const bool materialized = completion && completion.value_or(0) == clock.tick();
         result.elapsed[key] = static_cast<std::uint32_t>(
             elapsed == 0 && old == previous.end() && record.frozen_at == 0 && !materialized
                 ? 1
