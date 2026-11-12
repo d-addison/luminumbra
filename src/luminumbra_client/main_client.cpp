@@ -5769,12 +5769,18 @@ int main(int argc, char* argv[]) {
                                 }
                                 std::vector<Luminumbra::Rendering::ProjectedLiveStrike>
                                     frame_strikes;
+                                constexpr float bolt_width = 0.010f;
+                                constexpr float bolt_glow = 0.034f;
+                                glm::vec2 view_margin{0.0f};
                                 if (!consumed.empty()) {
                                     int fbw = 0, fbh = 0;
                                     glfwGetFramebufferSize(window, &fbw, &fbh);
-                                    const float aspect = (fbh > 0) ? static_cast<float>(fbw) /
-                                                                         static_cast<float>(fbh)
-                                                                   : 1.0f;
+                                    const float aspect =
+                                        (fbw > 0 && fbh > 0)
+                                            ? static_cast<float>(fbw) / static_cast<float>(fbh)
+                                            : 1.0f;
+                                    view_margin = Luminumbra::Rendering::LiveBoltViewMargin(
+                                        bolt_width, bolt_glow, aspect);
                                     const glm::mat4 vp =
                                         glm::perspective(
                                             glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
@@ -5794,16 +5800,7 @@ int main(int argc, char* argv[]) {
                                             }
                                             return points;
                                         };
-                                    // A drawn stroke needs at least two points, so no more than
-                                    // half the budget's strikes can ever contribute geometry.
-                                    const auto selected =
-                                        Luminumbra::Rendering::SelectLiveStrikeGeometry(
-                                            pulses,
-                                            static_cast<std::size_t>(
-                                                Luminumbra::Rendering::kMaxBoltSegmentPoints) /
-                                                2);
-                                    frame_strikes.reserve(selected.size());
-                                    for (const std::size_t index : selected) {
+                                    const auto project_strike = [&](std::size_t index) {
                                         const auto& strike = *consumed[index].event;
                                         const float gy = consumed[index].ground_y;
                                         const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
@@ -5813,7 +5810,7 @@ int main(int argc, char* argv[]) {
                                             strike.magnitude,
                                             (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
                                                 strike.strike_tick);
-                                        auto& projected = frame_strikes.emplace_back();
+                                        Luminumbra::Rendering::ProjectedLiveStrike projected;
                                         projected.main_channel = project_stroke(bolt.main_channel);
                                         projected.branches.reserve(bolt.branches.size());
                                         for (const auto& br : bolt.branches) {
@@ -5822,21 +5819,52 @@ int main(int argc, char* argv[]) {
                                         projected.pulse = pulses[index];
                                         projected.strike_ndc =
                                             project(glm::vec3(strike.world_x, gy, strike.world_z));
+                                        return projected;
+                                    };
+                                    // Each candidate has 33 channel points and at most three
+                                    // 4-point branches. Test visibility before the 48-strike cap;
+                                    // only those retained candidates are projected a second time.
+                                    const auto selected =
+                                        Luminumbra::Rendering::SelectLiveStrikeGeometry(
+                                            pulses,
+                                            static_cast<std::size_t>(
+                                                Luminumbra::Rendering::kMaxBoltSegmentPoints) /
+                                                2,
+                                            [&](std::size_t index) {
+                                                return Luminumbra::Rendering::
+                                                    LiveStrikeMayBeVisible(project_strike(index),
+                                                                           view_margin);
+                                            });
+                                    // At most 48 geometry candidates plus one flash-only entry.
+                                    frame_strikes.reserve(selected.size() + 1);
+                                    const auto strongest = static_cast<std::size_t>(
+                                        std::max_element(pulses.begin(), pulses.end()) -
+                                        pulses.begin());
+                                    const auto& flash = *consumed[strongest].event;
+                                    auto& flash_only = frame_strikes.emplace_back();
+                                    flash_only.pulse = pulses[strongest];
+                                    flash_only.strike_ndc =
+                                        project(glm::vec3(flash.world_x,
+                                                          consumed[strongest].ground_y,
+                                                          flash.world_z));
+                                    for (const std::size_t index : selected) {
+                                        frame_strikes.push_back(project_strike(index));
                                     }
                                 }
                                 if (!frame_strikes.empty()) {
                                     auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
                                         frame_strikes,
                                         static_cast<std::size_t>(
-                                            Luminumbra::Rendering::kMaxBoltSegmentPoints));
+                                            Luminumbra::Rendering::kMaxBoltSegmentPoints),
+                                        view_margin);
                                     g_app.weather.liveBolt = {};
                                     g_app.weather.liveBolt.active = true;
                                     g_app.weather.liveBolt.bolt_points_ndc =
                                         std::move(composed.points);
                                     g_app.weather.liveBolt.pulse_intensity = composed.pulse;
                                     g_app.weather.liveBolt.strike_ndc = composed.strike_ndc;
-                                    g_app.weather.liveBolt.bolt_width_ndc = 0.010f;
-                                    g_app.weather.liveBolt.bolt_glow_ndc = 0.034f;
+                                    g_app.weather.liveBolt.bolt_width_ndc = bolt_width;
+                                    g_app.weather.liveBolt.bolt_glow_ndc = bolt_glow;
                                     g_app.weather.boltFramesLeft = 3; // a few frames of flash
                                 }
                                 if (g_app.weather.boltFramesLeft > 0) {

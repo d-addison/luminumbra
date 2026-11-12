@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 
+#include "luminumbra_client/audio/IAudioManager.h"
 #include "luminumbra_client/rendering/LiveStrikeComposer.h"
 #include "luminumbra_client/rendering/LiveStrikeTracker.h"
 
@@ -349,6 +350,131 @@ TEST(LiveStrikeComposer, GeometrySelectionKeepsTheStrongestStrikesInOrder) {
     EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 9), (std::vector<std::size_t>{0, 1, 2, 3, 4}));
     EXPECT_TRUE(SelectLiveStrikeGeometry(pulses, 0).empty());
     EXPECT_TRUE(SelectLiveStrikeGeometry({}, 4).empty());
+}
+
+TEST(LiveStrikeComposer, OffscreenCandidatesCannotExhaustTheGeometryCap) {
+    std::vector<ProjectedLiveStrike> strikes(48, Strike({2.5f, 0.5f}, 3, 0.8f));
+    strikes.push_back(Strike({-0.5f, 0.5f}, 0, 0.4f));
+    strikes.push_back(Strike({0.5f, 0.5f}, 0, 0.4f));
+    std::vector<float> pulses;
+    for (const auto& strike : strikes) {
+        pulses.push_back(strike.pulse);
+    }
+    std::size_t visits = 0;
+    const auto visible = [&](std::size_t index) {
+        ++visits;
+        return Luminumbra::Rendering::LiveStrikeMayBeVisible(strikes[index], {});
+    };
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 48, visible), (std::vector<std::size_t>{48, 49}));
+    EXPECT_EQ(visits, pulses.size());
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 1, visible), (std::vector<std::size_t>{48}));
+    // A visible branch qualifies even when its stronger main channel is offscreen.
+    strikes[0].branches[0] = Stroke({0.0f, 0.5f}, {0.2f, 0.0f}, 4);
+    EXPECT_EQ(SelectLiveStrikeGeometry(pulses, 2, visible), (std::vector<std::size_t>{0, 48}));
+    visits = 0;
+    EXPECT_TRUE(SelectLiveStrikeGeometry(pulses, 0, visible).empty());
+    EXPECT_TRUE(SelectLiveStrikeGeometry({}, 48, visible).empty());
+    EXPECT_EQ(visits, 0u);
+    strikes.resize(48);
+    strikes[0].branches.clear();
+    pulses.resize(48);
+    EXPECT_TRUE(SelectLiveStrikeGeometry(pulses, 48, visible).empty());
+}
+
+TEST(LiveStrikeComposer, GlowOutsideEveryEdgeSurvivesSelectionAndClipping) {
+    for (const float aspect : {0.5f, 1.0f, 2.0f}) {
+        const auto margin = Luminumbra::Rendering::LiveBoltViewMargin(0.010f, 0.034f, aspect);
+        EXPECT_NEAR(margin.y, 0.0318f, 0.000001f);
+        EXPECT_NEAR(margin.x, margin.y / aspect, 0.000001f);
+        for (const float sign : {-1.0f, 1.0f}) {
+            for (const bool horizontal : {false, true}) {
+                const float edge = sign * (1.0f + (horizontal ? margin.y : margin.x) * 0.5f);
+                ProjectedLiveStrike strike;
+                strike.main_channel = horizontal ? Stroke({-2.0f, edge}, {2.0f, edge}, 2)
+                                                 : Stroke({edge, -2.0f}, {edge, 2.0f}, 2);
+                const auto span = std::span(&strike, 1);
+                EXPECT_TRUE(ComposeLiveStrikes(span, 2).points.empty());
+                EXPECT_TRUE(Luminumbra::Rendering::LiveStrikeMayBeVisible(strike, margin));
+                const auto composed = ComposeLiveStrikes(span, 2, margin);
+                ASSERT_EQ(composed.points.size(), 2u);
+                for (const auto point : composed.points) {
+                    EXPECT_LE(std::abs(point.x), 1.0f + margin.x);
+                    EXPECT_LE(std::abs(point.y), 1.0f + margin.y);
+                    EXPECT_FALSE(IsLiveBoltPenUp(point));
+                }
+                EXPECT_TRUE(ComposeLiveStrikes(span, 1, margin).points.empty());
+                const float outside = sign * (1.0f + (horizontal ? margin.y : margin.x) * 2.0f);
+                strike.main_channel = horizontal ? Stroke({-0.5f, outside}, {0.5f, outside}, 2)
+                                                 : Stroke({outside, -0.5f}, {outside, 0.5f}, 2);
+                EXPECT_FALSE(Luminumbra::Rendering::LiveStrikeMayBeVisible(strike, margin));
+                EXPECT_TRUE(ComposeLiveStrikes(span, 2, margin).points.empty());
+            }
+        }
+    }
+}
+
+TEST(LiveStrikeComposer, ExpandedBoundsNeverReachThePenUpMarker) {
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const auto margin : {glm::vec2(1.0f),
+                              glm::vec2(infinity),
+                              glm::vec2(-1.0f),
+                              glm::vec2(nan),
+                              glm::vec2(1000.0f, 0.0f)}) {
+        ProjectedLiveStrike strike;
+        strike.main_channel = {{-4.0f, -4.0f}, {4.0f, 4.0f}};
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 2, margin);
+        ASSERT_EQ(composed.points.size(), 2u);
+        for (const auto point : composed.points) {
+            EXPECT_GT(point.x, kLiveBoltPenUp.x);
+            EXPECT_GT(point.y, kLiveBoltPenUp.y);
+            EXPECT_LE(std::abs(point.x), 2.0f);
+            EXPECT_LE(std::abs(point.y), 2.0f);
+        }
+        strike.main_channel = {kLiveBoltPenUp, {0.0f, 0.0f}};
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 2, margin).points.empty());
+    }
+    for (const float aspect : {0.0f, -1.0f, std::numeric_limits<float>::min(), infinity, nan}) {
+        const auto margin = Luminumbra::Rendering::LiveBoltViewMargin(infinity, infinity, aspect);
+        EXPECT_GE(margin.x, 0.0f);
+        EXPECT_LE(margin.x, 1.0f);
+        EXPECT_GE(margin.y, 0.0f);
+        EXPECT_LE(margin.y, 1.0f);
+    }
+    EXPECT_GT(Luminumbra::Rendering::LiveBoltViewMargin(0.0f, 0.0f, 1.0f).y, 0.0f);
+    glm::vec2 a{0.0f, 0.0f};
+    glm::vec2 b{infinity, 0.0f};
+    EXPECT_FALSE(Luminumbra::Rendering::ClipLiveSegmentToView(a, b, {1.0f, 1.0f}));
+    EXPECT_EQ(a, glm::vec2(0.0f));
+    EXPECT_EQ(b.x, infinity);
+}
+
+TEST(LiveStrikeThunder, CueGainIsBoundedDeterministicAndMonotonic) {
+    using Luminumbra::Client::ThunderCueGain;
+    EXPECT_FLOAT_EQ(ThunderCueGain(1.0f, 0.0f), 1.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(0.5f, 600.0f), 0.25f);
+    EXPECT_LT(ThunderCueGain(0.5f, 600.0f), ThunderCueGain(1.0f, 0.0f));
+    for (const float magnitude : {-1.0f, 0.0f, 0.2f, 0.5f, 1.0f, 2.0f}) {
+        float previous = 1.0f;
+        for (const float distance :
+             {-1.0f, 0.0f, 100.0f, 600.0f, 10000.0f, std::numeric_limits<float>::max()}) {
+            const float gain = ThunderCueGain(magnitude, distance);
+            EXPECT_GE(gain, 0.0f);
+            EXPECT_LE(gain, 1.0f);
+            EXPECT_LE(gain, previous);
+            EXPECT_EQ(gain, ThunderCueGain(magnitude, distance));
+            EXPECT_LE(gain, ThunderCueGain(magnitude + 0.1f, distance));
+            previous = gain;
+        }
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    EXPECT_FLOAT_EQ(ThunderCueGain(nan, 0.0f), 0.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(1.0f, nan), 0.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(1.0f, infinity), 0.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(infinity, 0.0f), 1.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(-infinity, 0.0f), 0.0f);
+    EXPECT_FLOAT_EQ(ThunderCueGain(1.0f, -infinity), 1.0f);
 }
 
 TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
