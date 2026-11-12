@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -271,6 +272,118 @@ TEST(Pollination, WindExtendsDownwindReach) {
         << "6.5m apart exceeds the still-air pollination radius";
     EXPECT_EQ(crossedWith(::Luminumbra::Vec2(1.0f, 0.0f)), 1) // downwind: in reach
         << "downwind pollen should reach further";
+}
+
+// Candidate identity is independent of ownership and of recycled handle generations.
+TEST(Pollination, SimulationDonorTiesUseAllIdentityBitsInBothRegionModes) {
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    for (const bool regional : {false, true}) {
+        entt::registry registry;
+        const auto recycled = registry.create();
+        registry.destroy(recycled);
+        const auto low =
+            spawnPlant(registry, 99, 100, uniformGenome(0.2f), Comp::PlantStage::Flowering);
+        const auto high =
+            spawnPlant(registry, 101, 100, uniformGenome(0.8f), Comp::PlantStage::Flowering);
+        const auto receiver =
+            spawnPlant(registry, 100, 100, uniformGenome(0.5f), Comp::PlantStage::Juvenile);
+        ASSERT_GT(entt::to_integral(low), entt::to_integral(high));
+        constexpr auto low_id = std::uint64_t{1} << 40;
+        constexpr auto high_id = std::uint64_t{1} << 48;
+        registry.emplace<Comp::SimulationIdentityComponent>(low, low_id);
+        registry.emplace<Comp::SimulationIdentityComponent>(high, high_id);
+        registry.emplace<Comp::SimulationIdentityComponent>(receiver, 7u);
+        const std::array due{Luminumbra::world::RegionKey{0, 0}};
+        std::vector<std::uint64_t> owners;
+        const auto gate = regional ? Gate(registry, due, owners, Gate::PlantIdentity::Simulation)
+                                   : Gate(Gate::PlantIdentity::Simulation);
+        const auto stats = RunPollinationOnTick(registry, 13, {}, 99, 0.0f, gate);
+        EXPECT_EQ(stats.crossed, 3);
+        EXPECT_EQ(registry.get<Comp::PollinationComponent>(receiver).next_genome.genes,
+                  PollinateCross(uniformGenome(0.5f), uniformGenome(0.2f), 7, low_id, 13, 99, 0.0f)
+                      .genes);
+        // A closer donor still beats a smaller identity.
+        registry.get<Comp::TransformComponent>(high).position.x = 100.5f;
+        RunPollinationOnTick(registry, 14, {}, 99, 0.0f, gate);
+        EXPECT_EQ(registry.get<Comp::PollinationComponent>(receiver).next_genome.genes,
+                  PollinateCross(uniformGenome(0.5f), uniformGenome(0.8f), 7, high_id, 14, 99, 0.0f)
+                      .genes);
+    }
+}
+
+TEST(Pollination, SimulationCrossPreservesCanonicalParentArgumentOrder) {
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    entt::registry registry;
+    const auto high = spawnPlant(registry, 0, 0, uniformGenome(0.8f), Comp::PlantStage::Flowering);
+    const auto low = spawnPlant(registry, 1, 0, uniformGenome(0.2f), Comp::PlantStage::Flowering);
+    constexpr auto high_id = std::uint64_t{1} << 50;
+    registry.emplace<Comp::SimulationIdentityComponent>(high, high_id);
+    registry.emplace<Comp::SimulationIdentityComponent>(low, 17u);
+    const auto gate = Gate(Gate::PlantIdentity::Simulation);
+    // Independent oracle: both the seed and genome argument order use stable IDs.
+    auto rng = luminumbra::core::DeterministicRng::seeded(
+        luminumbra::foliage::kPollinationSeedOffset ^ 99u ^ 7u, 17u, high_id);
+    const auto expected =
+        luminumbra::foliage::BreedPlants(uniformGenome(0.2f), uniformGenome(0.8f), rng);
+    ASSERT_EQ(RunPollinationOnTick(registry, 7, {}, 99, 0.05f, gate).crossed, 2);
+    EXPECT_EQ(registry.get<Comp::PollinationComponent>(high).next_genome.genes, expected.genes);
+    EXPECT_EQ(registry.get<Comp::PollinationComponent>(low).next_genome.genes, expected.genes);
+}
+
+TEST(Pollination, SimulationAdmissionRefusesInvalidIdentitiesBeforeAnyCross) {
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    for (const int failure : {0, 1, 2, 3}) {
+        entt::registry registry;
+        const auto first =
+            spawnPlant(registry, 0, 0, uniformGenome(0.2f), Comp::PlantStage::Flowering);
+        const auto second =
+            spawnPlant(registry, 1, 0, uniformGenome(0.8f), Comp::PlantStage::Flowering);
+        registry.emplace<Comp::SimulationIdentityComponent>(first, 1u);
+        if (failure != 0) {
+            const auto id =
+                failure == 1
+                    ? 0u
+                    : (failure == 2 ? 1u
+                                    : Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit);
+            registry.emplace<Comp::SimulationIdentityComponent>(second, id);
+        }
+        const auto gate = Gate(Gate::PlantIdentity::Simulation);
+        EXPECT_THROW(RunPollinationOnTick(registry, 7, {}, 0, 0.05f, gate), std::runtime_error);
+        for (const auto entity : {first, second}) {
+            const auto& pollen = registry.get<Comp::PollinationComponent>(entity);
+            EXPECT_FALSE(pollen.pollinated);
+            EXPECT_EQ(pollen.crosses, 0u);
+            EXPECT_EQ(pollen.last_pollen_tick, 0u);
+        }
+    }
+}
+
+TEST(Pollination, SimulationVisitCountExcludesUnrelatedResidentsAndNoDonorsIsNoOp) {
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    entt::registry registry;
+    const auto first =
+        spawnPlant(registry, 100, 100, uniformGenome(0.2f), Comp::PlantStage::Juvenile);
+    const auto second =
+        spawnPlant(registry, 101, 100, uniformGenome(0.8f), Comp::PlantStage::Juvenile);
+    registry.emplace<Comp::SimulationIdentityComponent>(first, 1u);
+    registry.emplace<Comp::SimulationIdentityComponent>(second, 2u);
+    const std::array due{Luminumbra::world::RegionKey{0, 0}};
+    std::vector<std::uint64_t> owners;
+    const Gate before(registry, due, owners, Gate::PlantIdentity::Simulation);
+    EXPECT_EQ(RunPollinationOnTick(registry, 1, {}, 0, 0.05f, before).crossed, 0);
+    const auto visits = before.owner_visits();
+    EXPECT_EQ(visits, 3u); // One due owner, two participating plants.
+    for (int index = 0; index < 4096; ++index)
+        registry.emplace<Comp::TransformComponent>(registry.create());
+    const Gate after(registry, due, owners, Gate::PlantIdentity::Simulation);
+    EXPECT_EQ(RunPollinationOnTick(registry, 2, {}, 0, 0.05f, after).crossed, 0);
+    EXPECT_EQ(after.owner_visits(), visits);
+    const Gate none_due(registry, {}, owners, Gate::PlantIdentity::Simulation);
+    EXPECT_EQ(RunPollinationOnTick(registry, 3, {}, 0, 0.05f, none_due).considered, 0);
+    entt::registry empty;
+    EXPECT_EQ(RunPollinationOnTick(empty, 4, {}, 0, 0.05f, Gate(Gate::PlantIdentity::Simulation))
+                  .considered,
+              0);
 }
 
 } // namespace
