@@ -13,21 +13,25 @@
 #include "../components/SoilComponents.h" // SoilFeederComponent — soil-nutrient draw opt-in
 #include "../core/DeterministicRng.h"
 #include "../foliage/SpeciesRegistry.h" // SpeciesTemplate, SampleGenome, SpeciesId16
-#include "PlantGrowthSystem.h"          // ExpressGenome, BreedPlants, Comp alias, namespace
+#include "../simulation/SimulationIdentity.h"
+#include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace luminumbra::foliage {
 // `Comp` (=::Luminumbra::Components) is already aliased in PlantGrowthSystem.h.
 
-// Plant a seed: spawn a PlantTag plant at the Seed stage with the given genome.
-// The growth system (once ticking) advances it from here.
-inline entt::entity PlantSeed(entt::registry& reg,
-                              const ::Luminumbra::Vec3& pos,
-                              const Comp::PlantGenomeComponent& genome,
-                              std::uint16_t species_id,
-                              std::uint64_t tick) {
+namespace farming_detail {
+inline entt::entity CreateSeed(entt::registry& reg,
+                               const ::Luminumbra::Vec3& pos,
+                               const Comp::PlantGenomeComponent& genome,
+                               std::uint16_t species_id,
+                               std::uint64_t tick,
+                               const Comp::SimulationIdentityComponent* identity) {
     const auto e = reg.create();
+    if (identity)
+        reg.emplace<Comp::SimulationIdentityComponent>(e, *identity);
     auto& tf = reg.emplace<Comp::TransformComponent>(e);
     tf.position = pos;
     reg.emplace<Comp::PlantTag>(e);
@@ -38,6 +42,30 @@ inline entt::entity PlantSeed(entt::registry& reg,
     g.last_tick = tick;
     return e;
 }
+} // namespace farming_detail
+
+// Legacy factory remains selected by shipping callers until identity activation.
+inline entt::entity PlantSeed(entt::registry& reg,
+                              const ::Luminumbra::Vec3& pos,
+                              const Comp::PlantGenomeComponent& genome,
+                              std::uint16_t species_id,
+                              std::uint64_t tick) {
+    return farming_detail::CreateSeed(reg, pos, genome, species_id, tick, nullptr);
+}
+
+// Authoritative candidate factory, also used for births. Allocate before creating any
+// plant state. Exhaustion returns null; capacity refusal propagates without plant mutation.
+inline entt::entity PlantSeed(entt::registry& reg,
+                              const ::Luminumbra::Vec3& pos,
+                              const Comp::PlantGenomeComponent& genome,
+                              std::uint16_t species_id,
+                              std::uint64_t tick,
+                              ::Luminumbra::world::ActiveRegionLedger& allocator) {
+    const auto identity = ::Luminumbra::simulation::AllocateSimulationIdentity(allocator);
+    if (!identity.has_value())
+        return entt::null;
+    return farming_detail::CreateSeed(reg, pos, genome, species_id, tick, &identity.value());
+}
 
 // Spawn a plant FROM A SPECIES TEMPLATE: sample an in-bounds, heritable genome from the species'
 // per-gene ranges (seeded), plant the seed, and stamp the crop lifecycle (annual/perennial +
@@ -46,14 +74,25 @@ inline entt::entity PlantSeed(entt::registry& reg,
 // species_id is the stable hash of the template id (round-trips through persistence + the plant
 // sub-hash). Geometry stays visual-only; world_hash is unaffected until this is actually called
 // (plants are opt-in via PlantTag).
-inline entt::entity MakePlantFromSpecies(entt::registry& reg,
-                                         const ::Luminumbra::Vec3& pos,
-                                         const SpeciesTemplate& tmpl,
-                                         luminumbra::core::DeterministicRng& rng,
-                                         std::uint64_t tick) {
+inline entt::entity
+MakePlantFromSpecies(entt::registry& reg,
+                     const ::Luminumbra::Vec3& pos,
+                     const SpeciesTemplate& tmpl,
+                     luminumbra::core::DeterministicRng& rng,
+                     std::uint64_t tick,
+                     ::Luminumbra::world::ActiveRegionLedger* allocator = nullptr) {
+    // Reserve before sampling: allocator refusal preserves the caller's RNG as well.
+    Comp::SimulationIdentityComponent identity;
+    if (allocator) {
+        const auto allocated = ::Luminumbra::simulation::AllocateSimulationIdentity(*allocator);
+        if (!allocated.has_value())
+            return entt::null;
+        identity = allocated.value();
+    }
     const std::uint16_t sid = SpeciesId16(tmpl.id);
     const Comp::PlantGenomeComponent genome = SpeciesRegistry::SampleGenome(tmpl, rng);
-    const entt::entity e = PlantSeed(reg, pos, genome, sid, tick);
+    const entt::entity e =
+        farming_detail::CreateSeed(reg, pos, genome, sid, tick, allocator ? &identity : nullptr);
     auto& cl = reg.emplace<Comp::CropLifecycleComponent>(e);
     cl.perennial = tmpl.perennial;
     cl.lifespan_ticks = tmpl.lifespan_ticks;
@@ -169,6 +208,21 @@ struct FarmingController {
             return entt::null;
         --seeds;
         return MakePlantFromSpecies(reg, pos, tmpl, rng, tick);
+    }
+
+    // Dormant authoritative lane: seed inventory changes only after successful creation.
+    entt::entity Seed(entt::registry& reg,
+                      const ::Luminumbra::Vec3& pos,
+                      const SpeciesTemplate& tmpl,
+                      luminumbra::core::DeterministicRng& rng,
+                      std::uint64_t tick,
+                      ::Luminumbra::world::ActiveRegionLedger& allocator) {
+        if (seeds <= 0)
+            return entt::null;
+        const auto entity = MakePlantFromSpecies(reg, pos, tmpl, rng, tick, &allocator);
+        if (entity != entt::null)
+            --seeds;
+        return entity;
     }
 
     bool Water(entt::registry& reg, entt::entity e) {

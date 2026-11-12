@@ -292,6 +292,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
     common/SimulationIdentityAllocator_test.cpp
+    common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
     common/WaterShare_test.cpp
     common/FieldPageState_test.cpp
