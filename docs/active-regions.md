@@ -16,6 +16,16 @@ as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consu
 are outside the shipping scheduler foundation. The dedicated server autosaves
 every five minutes; this does not implement those continuation consumers.
 
+## Planned shared simulation identity
+
+PLANNED for v0.3.3 (in preparation), issue #629: the ledger will own one shared allocator for plants, creatures, ground objects and other authoritative participants even when `sim.active_regions` is disabled; no shipping behavior changes in this contract-only preparation.
+PLANNED IDs occupy `[1, 2^63)` with next cursor `[1, 2^63]`, zero invalid and `2^63` exhausted; allocation/reservation stays O(1) and extinction never resets the cursor.
+PLANNED: a mandatory `luminumbra.plants.v2` envelope persists that cursor even for zero plants, replaces the v1 payload and sidecar entirely, and refuses pre-v2 saves rather than converting them; a truly absent world bootstraps normally.
+PLANNED: the envelope cursor and saved ledger allocator TLV must agree, while in-session adoption retains the greater live/saved cursor and checks incoming IDs against preserved authoritative residents before mutation.
+PLANNED creature IDs remain stable only within the current session until issue #137 adds creature persistence; reopening creates new wildlife incarnations with new IDs from the restored cursor.
+The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness; the earlier region-gated identity/hash plan is superseded only at activation in both region modes.
+PLANNED activation changes seeds, ordering, hashes and session persistence together with a then-current authority revision increment; this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity.
+
 ## Activation and ordering
 
 Keys are signed persistence region coordinates: floor(world X / 512),

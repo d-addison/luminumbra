@@ -1107,8 +1107,8 @@
     {
       "id": "dw.persistence.002",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message.",
-      "text": "no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message."
+      "quote": "no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the currently shipped plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message.",
+      "text": "no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the currently shipped plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message."
     },
     {
       "id": "dw.persistence.003",
@@ -1173,14 +1173,14 @@
     {
       "id": "dw.persistence.013",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "| `plant-entities.json` (existing;",
-      "text": "| `plant-entities.json` (existing;"
+      "quote": "| `plant-entities.json` (PLANNED replacement: `luminumbra.plants.v2`;",
+      "text": "| `plant-entities.json` (PLANNED replacement: `luminumbra.plants.v2`;"
     },
     {
       "id": "dw.persistence.014",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "persistent identities are recorded in a versioned sibling identity map, the plant payload bytes are unchanged) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |",
-      "text": "persistent identities are recorded in a versioned sibling identity map, the plant payload bytes are unchanged) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |"
+      "quote": "the shipped payload and identity sidecar remain until activation) | `<save>/chunks/region/` unchanged | PLANNED: refuse an existing save without the v2 envelope;",
+      "text": "the shipped payload and identity sidecar remain until activation) | `<save>/chunks/region/` unchanged | PLANNED: refuse an existing save without the v2 envelope;"
     },
     {
       "id": "dw.persistence.015",
@@ -4583,6 +4583,612 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks.",
       "text": "Region digest operations copy only each region's inputs and admit the index once per operation, invalidating that admission on publication while checking actual region bytes on every read, and water authority synchronization visits only queued dirty chunks."
+    },
+    {
+      "id": "sim.identity.001",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "absent world bootstraps normally | refuse | refuse as future format |",
+      "text": "absent world bootstraps normally | refuse | refuse as future format |"
+    },
+    {
+      "id": "sim.identity.002",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED for v0.3.3 (in preparation), issue #629: the following identity and plant-format contracts supersede the earlier plant sidecar and region-only identity/hash plan at activation;",
+      "text": "PLANNED for v0.3.3 (in preparation), issue #629: the following identity and plant-format contracts supersede the earlier plant sidecar and region-only identity/hash plan at activation;"
+    },
+    {
+      "id": "sim.identity.003",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "none is shipped by this declaration.",
+      "text": "none is shipped by this declaration."
+    },
+    {
+      "id": "sim.identity.004",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "Preparatory work leaves shipping sessions, saved bytes, hashes, fixtures, `kAuthorityRulesRevision` and effective configuration identity unchanged until activation.",
+      "text": "Preparatory work leaves shipping sessions, saved bytes, hashes, fixtures, `kAuthorityRulesRevision` and effective configuration identity unchanged until activation."
+    },
+    {
+      "id": "sim.identity.005",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: every authoritative ECS participant has one immutable `SimulationIdentityComponent::id` before participation, shared across all its simulation roles;",
+      "text": "PLANNED: every authoritative ECS participant has one immutable `SimulationIdentityComponent::id` before participation, shared across all its simulation roles;"
+    },
+    {
+      "id": "sim.identity.006",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "ground objects retain `GroundObject::id` from the same allocator without an ECS wrapper.",
+      "text": "ground objects retain `GroundObject::id` from the same allocator without an ECS wrapper."
+    },
+    {
+      "id": "sim.identity.007",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "The sole cursor belongs to `ActiveRegionLedger` in both region modes: IDs are in `[1, 2^63)`, next cursor in `[1, 2^63]`, zero is invalid and `2^63` means exhausted;",
+      "text": "The sole cursor belongs to `ActiveRegionLedger` in both region modes: IDs are in `[1, 2^63)`, next cursor in `[1, 2^63]`, zero is invalid and `2^63` means exhausted;"
+    },
+    {
+      "id": "sim.identity.008",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "issued IDs are never recycled, including after extinction.",
+      "text": "issued IDs are never recycled, including after extinction."
+    },
+    {
+      "id": "sim.identity.009",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: missing or duplicate identities refuse participant admission without runtime-handle fallback;",
+      "text": "PLANNED: missing or duplicate identities refuse participant admission without runtime-handle fallback;"
+    },
+    {
+      "id": "sim.identity.010",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "render-only dressing consumes no IDs, births use ascending parent identity then child ordinal, and boot or asynchronous sources publish in deterministic source order at an authoritative tick boundary.",
+      "text": "render-only dressing consumes no IDs, births use ascending parent identity then child ordinal, and boot or asynchronous sources publish in deterministic source order at an authoritative tick boundary."
+    },
+    {
+      "id": "sim.identity.011",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "Species IDs, network client IDs, chunk coordinates, rendering handles and replication's `uint32_t` session aliases remain separate identifiers;",
+      "text": "Species IDs, network client IDs, chunk coordinates, rendering handles and replication's `uint32_t` session aliases remain separate identifiers;"
+    },
+    {
+      "id": "sim.identity.012",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "simulation IDs are never narrowed into replication aliases.",
+      "text": "simulation IDs are never narrowed into replication aliases."
+    },
+    {
+      "id": "sim.identity.013",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: one mandatory `luminumbra.plants.v2` envelope replaces the v1 plant payload, identity sidecar and legacy selection lane entirely, including an empty roster with the consumed shared cursor.",
+      "text": "PLANNED: one mandatory `luminumbra.plants.v2` envelope replaces the v1 plant payload, identity sidecar and legacy selection lane entirely, including an empty roster with the consumed shared cursor."
+    },
+    {
+      "id": "sim.identity.014",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "Existing saves with v1, a sidecar, an unknown version or no v2 envelope refuse before publication with an unsupported-format diagnostic;",
+      "text": "Existing saves with v1, a sidecar, an unknown version or no v2 envelope refuse before publication with an unsupported-format diagnostic;"
+    },
+    {
+      "id": "sim.identity.015",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "no converter exists, while a genuinely absent world remains a clean bootstrap.",
+      "text": "no converter exists, while a genuinely absent world remains a clean bootstrap."
+    },
+    {
+      "id": "sim.identity.016",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: the envelope declares schema/order identifiers, authority revision, next-ID cursor, counts and ascending-ID records with fixed versioned component tags and explicit absence;",
+      "text": "PLANNED: the envelope declares schema/order identifiers, authority revision, next-ID cursor, counts and ascending-ID records with fixed versioned component tags and explicit absence;"
+    },
+    {
+      "id": "sim.identity.017",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "any saved ledger allocator TLV must equal the envelope cursor.",
+      "text": "any saved ledger allocator TLV must equal the envelope cursor."
+    },
+    {
+      "id": "sim.identity.018",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED admission retains the 256 MiB file, 1 MiB component and 128 MiB aggregate component limits and JSON depth admission, with at most `2^20` plant records and 17 component kinds per record;",
+      "text": "PLANNED admission retains the 256 MiB file, 1 MiB component and 128 MiB aggregate component limits and JSON depth admission, with at most `2^20` plant records and 17 component kinds per record;"
+    },
+    {
+      "id": "sim.identity.019",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "exact fields, unsigned representations, duplicates, finite/domain values, ownership, stamps and aggregate sizes are checked before proportional allocation or conversion.",
+      "text": "exact fields, unsigned representations, duplicates, finite/domain values, ownership, stamps and aggregate sizes are checked before proportional allocation or conversion."
+    },
+    {
+      "id": "sim.identity.020",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: mixed owned/unowned plants are valid, full opening validates detached saved state without comparing runtime handles to unrelated residents, and in-session adoption replaces even an empty roster while preserving unrelated residents, checking collisions and retaining the greater live/saved cursor.",
+      "text": "PLANNED: mixed owned/unowned plants are valid, full opening validates detached saved state without comparing runtime handles to unrelated residents, and in-session adoption replaces even an empty roster while preserving unrelated residents, checking collisions and retaining the greater live/saved cursor."
+    },
+    {
+      "id": "sim.identity.021",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED: both region modes use the indexed transaction, validating all payloads and consistency before writes, publishing metadata/index last and retiring the sidecar transactionally;",
+      "text": "PLANNED: both region modes use the indexed transaction, validating all payloads and consistency before writes, publishing metadata/index last and retiring the sidecar transactionally;"
+    },
+    {
+      "id": "sim.identity.022",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "refusal preserves live state, prior committed bytes and dirty acknowledgements.",
+      "text": "refusal preserves live state, prior committed bytes and dirty acknowledgements."
+    },
+    {
+      "id": "sim.identity.023",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "PLANNED creature scope is session-only until issue #137: creatures keep their ID through movement, reproduction, mortality and carcass decay, but this work adds no creature save records or distant creature simulation.",
+      "text": "PLANNED creature scope is session-only until issue #137: creatures keep their ID through movement, reproduction, mortality and carcass decay, but this work adds no creature save records or distant creature simulation."
+    },
+    {
+      "id": "sim.identity.024",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "Saving preserves the cursor consumed by creatures and other sources even with no surviving plants;",
+      "text": "Saving preserves the cursor consumed by creatures and other sources even with no surviving plants;"
+    },
+    {
+      "id": "sim.identity.025",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "wildlife recreated after reopening is a new incarnation with new IDs, without inferred old identities.",
+      "text": "wildlife recreated after reopening is a new incarnation with new IDs, without inferred old identities."
+    },
+    {
+      "id": "sim.identity.026",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "Issue #137 must persist existing creature IDs, complete evolution-relevant state, references and promotion/coarse state, restoring IDs before components and resolving references after record admission;",
+      "text": "Issue #137 must persist existing creature IDs, complete evolution-relevant state, references and promotion/coarse state, restoring IDs before components and resolving references after record admission;"
+    },
+    {
+      "id": "sim.identity.027",
+      "source": "docs/distant-world.md#planned-stable-simulation-identity",
+      "quote": "plant continuation comparisons hold external wildlife inputs equivalent until then.",
+      "text": "plant continuation comparisons hold external wildlife inputs equivalent until then."
+    },
+    {
+      "id": "sim.identity.028",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "PLANNED: this inventory is the independent completeness oracle for the later v2 codec and `plant:v2` projection, with a separate mutation regression for every field and component presence;",
+      "text": "PLANNED: this inventory is the independent completeness oracle for the later v2 codec and `plant:v2` projection, with a separate mutation regression for every field and component presence;"
+    },
+    {
+      "id": "sim.identity.029",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "the envelope's cursor/count and every ascending stable ID also enter the projection, including after extinction.",
+      "text": "the envelope's cursor/count and every ascending stable ID also enter the projection, including after extinction."
+    },
+    {
+      "id": "sim.identity.030",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "Plant participation is implicit in a plant record (`PlantTag`), identity is a record field, and the following 17 component kinds define the admitted plant state;",
+      "text": "Plant participation is implicit in a plant record (`PlantTag`), identity is a record field, and the following 17 component kinds define the admitted plant state;"
+    },
+    {
+      "id": "sim.identity.031",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "optional absence stays absent, including exact grazing biomass and `uint32_t last_grazed_tick`, with issue #760 offspring defaults preserved.",
+      "text": "optional absence stays absent, including exact grazing biomass and `uint32_t last_grazed_tick`, with issue #760 offspring defaults preserved."
+    },
+    {
+      "id": "sim.identity.032",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `TransformComponent` | `position.x`, `position.y`, `position.z` |",
+      "text": "| `TransformComponent` | `position.x`, `position.y`, `position.z` |"
+    },
+    {
+      "id": "sim.identity.033",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PlantGenomeComponent` | `genes[0..7]` in `PlantGene` order |",
+      "text": "| `PlantGenomeComponent` | `genes[0..7]` in `PlantGene` order |"
+    },
+    {
+      "id": "sim.identity.034",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PlantGrowthComponent` | `species_id`, `stage`, `quality`, `growth_points`, `stress_points`, `tended`, `planted_tick`, `last_tick` |",
+      "text": "| `PlantGrowthComponent` | `species_id`, `stage`, `quality`, `growth_points`, `stress_points`, `tended`, `planted_tick`, `last_tick` |"
+    },
+    {
+      "id": "sim.identity.035",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `SoilFeederComponent` | `uptake`, `absorbed` |",
+      "text": "| `SoilFeederComponent` | `uptake`, `absorbed` |"
+    },
+    {
+      "id": "sim.identity.036",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PlantHealthComponent` | `infection`, `resistance`, `state`, `infected_ticks` |",
+      "text": "| `PlantHealthComponent` | `infection`, `resistance`, `state`, `infected_ticks` |"
+    },
+    {
+      "id": "sim.identity.037",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PollinationComponent` | `pollinated`, `last_pollen_tick`, `crosses`, `next_genome.genes[0..7]` |",
+      "text": "| `PollinationComponent` | `pollinated`, `last_pollen_tick`, `crosses`, `next_genome.genes[0..7]` |"
+    },
+    {
+      "id": "sim.identity.038",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `CropLifecycleComponent` | `perennial`, `ripe_ticks`, `lifespan_ticks`, `generations`, `species_id` |",
+      "text": "| `CropLifecycleComponent` | `perennial`, `ripe_ticks`, `lifespan_ticks`, `generations`, `species_id` |"
+    },
+    {
+      "id": "sim.identity.039",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PlantRegionComponent` | `owner_x`, `owner_z`, `region_stamp`;",
+      "text": "| `PlantRegionComponent` | `owner_x`, `owner_z`, `region_stamp`;"
+    },
+    {
+      "id": "sim.identity.040",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "identity moves to the common record field |",
+      "text": "identity moves to the common record field |"
+    },
+    {
+      "id": "sim.identity.041",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `PollinationTag` | presence only |",
+      "text": "| `PollinationTag` | presence only |"
+    },
+    {
+      "id": "sim.identity.042",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `CombustibleComponent` | `fuel_milli`, `moisture_milli`, `burn_state`, `burn_ticks_remaining`, `ignition_radius` |",
+      "text": "| `CombustibleComponent` | `fuel_milli`, `moisture_milli`, `burn_state`, `burn_ticks_remaining`, `ignition_radius` |"
+    },
+    {
+      "id": "sim.identity.043",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `MortalComponent` | `age_ticks`, `lifespan_ticks`, `dead` |",
+      "text": "| `MortalComponent` | `age_ticks`, `lifespan_ticks`, `dead` |"
+    },
+    {
+      "id": "sim.identity.044",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `GrazeableComponent` | `biomass`, `last_grazed_tick` |",
+      "text": "| `GrazeableComponent` | `biomass`, `last_grazed_tick` |"
+    },
+    {
+      "id": "sim.identity.045",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `WaterSourceComponent` | `output` |",
+      "text": "| `WaterSourceComponent` | `output` |"
+    },
+    {
+      "id": "sim.identity.046",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `IgnitionSourceComponent` | `radius`, `intensity` |",
+      "text": "| `IgnitionSourceComponent` | `radius`, `intensity` |"
+    },
+    {
+      "id": "sim.identity.047",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `FlowingWaterSourceComponent` | `flow_rate` |",
+      "text": "| `FlowingWaterSourceComponent` | `flow_rate` |"
+    },
+    {
+      "id": "sim.identity.048",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `DecayComponent` | `decay_ticks`, `decay_duration`, `nutrient_released_milli`, `fully_decomposed` |",
+      "text": "| `DecayComponent` | `decay_ticks`, `decay_duration`, `nutrient_released_milli`, `fully_decomposed` |"
+    },
+    {
+      "id": "sim.identity.049",
+      "source": "docs/distant-world.md#planned-independent-plant-field-inventory",
+      "quote": "| `FieldEmitterComponent` | `channel`, `rate_raw_per_tick`, `radius_cells` |",
+      "text": "| `FieldEmitterComponent` | `channel`, `rate_raw_per_tick`, `radius_cells` |"
+    },
+    {
+      "id": "sim.identity.050",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "PLANNED `ecology:v3` covers ascending stable IDs, presence/version tags and the complete creature and other non-plant participant state below;",
+      "text": "PLANNED `ecology:v3` covers ascending stable IDs, presence/version tags and the complete creature and other non-plant participant state below;"
+    },
+    {
+      "id": "sim.identity.051",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "this hash inventory does not implement creature persistence.",
+      "text": "this hash inventory does not implement creature persistence."
+    },
+    {
+      "id": "sim.identity.052",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| Creature and genome | position;",
+      "text": "| Creature and genome | position;"
+    },
+    {
+      "id": "sim.identity.053",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "predator/species, hunger, stamina, energy, move speed, last action, wish velocity, eaten;",
+      "text": "predator/species, hunger, stamina, energy, move speed, last action, wish velocity, eaten;"
+    },
+    {
+      "id": "sim.identity.054",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "every genome trait, sensory gene, age, cooldown, generation, sex and courtship counter |",
+      "text": "every genome trait, sensory gene, age, cooldown, generation, sex and courtship counter |"
+    },
+    {
+      "id": "sim.identity.055",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| Mortality, decay and needs | all mortal/decay fields above;",
+      "text": "| Mortality, decay and needs | all mortal/decay fields above;"
+    },
+    {
+      "id": "sim.identity.056",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "each need's name, pressure and growth rate;",
+      "text": "each need's name, pressure and growth rate;"
+    },
+    {
+      "id": "sim.identity.057",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "thirst, wish velocity, drinking and water proximity;",
+      "text": "thirst, wish velocity, drinking and water proximity;"
+    },
+    {
+      "id": "sim.identity.058",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "nocturnal flag and circadian activity |",
+      "text": "nocturnal flag and circadian activity |"
+    },
+    {
+      "id": "sim.identity.059",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| Social and movement state | alarm level/flag;",
+      "text": "| Social and movement state | alarm level/flag;"
+    },
+    {
+      "id": "sim.identity.060",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "pack coordinates/flag;",
+      "text": "pack coordinates/flag;"
+    },
+    {
+      "id": "sim.identity.061",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "territory home/radius/established and bias;",
+      "text": "territory home/radius/established and bias;"
+    },
+    {
+      "id": "sim.identity.062",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "migration drive/wish;",
+      "text": "migration drive/wish;"
+    },
+    {
+      "id": "sim.identity.063",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "scavenging wish/feeding;",
+      "text": "scavenging wish/feeding;"
+    },
+    {
+      "id": "sim.identity.064",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "locomotion profile, intent, path waypoints and cursor |",
+      "text": "locomotion profile, intent, path waypoints and cursor |"
+    },
+    {
+      "id": "sim.identity.065",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| Perception and planning | sensable scent/noise/faction;",
+      "text": "| Perception and planning | sensable scent/noise/faction;"
+    },
+    {
+      "id": "sim.identity.066",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "perception FOV/range/facing, complete hearing profile/faction;",
+      "text": "perception FOV/range/facing, complete hearing profile/faction;"
+    },
+    {
+      "id": "sim.identity.067",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "awareness and parameters;",
+      "text": "awareness and parameters;"
+    },
+    {
+      "id": "sim.identity.068",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "senses references/distance;",
+      "text": "senses references/distance;"
+    },
+    {
+      "id": "sim.identity.069",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "ordered actions, targets, duration/flee, current index/time;",
+      "text": "ordered actions, targets, duration/flee, current index/time;"
+    },
+    {
+      "id": "sim.identity.070",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "instinct actor/archetype, replan counters and complete current plan;",
+      "text": "instinct actor/archetype, replan counters and complete current plan;"
+    },
+    {
+      "id": "sim.identity.071",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "stimulus subscriptions |",
+      "text": "stimulus subscriptions |"
+    },
+    {
+      "id": "sim.identity.072",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| Sources and participation | opportunities including names, actions, targets, needs, scores, costs and radius;",
+      "text": "| Sources and participation | opportunities including names, actions, targets, needs, scores, costs and radius;"
+    },
+    {
+      "id": "sim.identity.073",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "forager cell/home/carry/deliveries and food-source cell/amount;",
+      "text": "forager cell/home/carry/deliveries and food-source cell/amount;"
+    },
+    {
+      "id": "sim.identity.074",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "water-hole radius;",
+      "text": "water-hole radius;"
+    },
+    {
+      "id": "sim.identity.075",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "scent steering parameters;",
+      "text": "scent steering parameters;"
+    },
+    {
+      "id": "sim.identity.076",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "all applicable plant-inventory source/emitter fields;",
+      "text": "all applicable plant-inventory source/emitter fields;"
+    },
+    {
+      "id": "sim.identity.077",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "opt-in flags and resolved behavior inputs |",
+      "text": "opt-in flags and resolved behavior inputs |"
+    },
+    {
+      "id": "sim.identity.078",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "| References and exclusions | valid entity references encode stable target IDs with distinct null/invalid markers;",
+      "text": "| References and exclusions | valid entity references encode stable target IDs with distinct null/invalid markers;"
+    },
+    {
+      "id": "sim.identity.079",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "raw handles, struct padding, render data and physics/avatar pool indices are excluded |",
+      "text": "raw handles, struct padding, render data and physics/avatar pool indices are excluded |"
+    },
+    {
+      "id": "sim.identity.080",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "PLANNED canonical encodings use explicit widths, little-endian integers, finite binary32 float bits, counted UTF-8 strings and ordered collections, with signed-zero treatment specified consistently with simulation equality;",
+      "text": "PLANNED canonical encodings use explicit widths, little-endian integers, finite binary32 float bits, counted UTF-8 strings and ordered collections, with signed-zero treatment specified consistently with simulation equality;"
+    },
+    {
+      "id": "sim.identity.081",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "no locale text or `std::hash` enters identity.",
+      "text": "no locale text or `std::hash` enters identity."
+    },
+    {
+      "id": "sim.identity.082",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "Ground-object durable IDs/fields retain their regional projection with cross-kind uniqueness checked on admission;",
+      "text": "Ground-object durable IDs/fields retain their regional projection with cross-kind uniqueness checked on admission;"
+    },
+    {
+      "id": "sim.identity.083",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "`plant:v2` carries the shared cursor in the existing plants hash slot rather than the earlier allocator-in-ecology plan.",
+      "text": "`plant:v2` carries the shared cursor in the existing plants hash slot rather than the earlier allocator-in-ecology plan."
+    },
+    {
+      "id": "sim.identity.084",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "PLANNED: identity lookup and reservation are O(1), ordering uses fixed-pass 64-bit radix work where needed, and checkpoint projections read participants once with reused scratch, without identity repair or chunk/page scans.",
+      "text": "PLANNED: identity lookup and reservation are O(1), ordering uses fixed-pass 64-bit radix work where needed, and checkpoint projections read participants once with reused scratch, without identity repair or chunk/page scans."
+    },
+    {
+      "id": "sim.identity.085",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "PLANNED activation selects stable seeds, ordering, complete projections and v2 session paths together under the then-current authority revision plus one;",
+      "text": "PLANNED activation selects stable seeds, ordering, complete projections and v2 session paths together under the then-current authority revision plus one;"
+    },
+    {
+      "id": "sim.identity.086",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "existing Hello/checkpoint/LREC layouts remain unchanged and old configuration identities refuse before advancement across TCP on Windows/POSIX, loopback, Steam, GNS and replay.",
+      "text": "existing Hello/checkpoint/LREC layouts remain unchanged and old configuration identities refuse before advancement across TCP on Windows/POSIX, loopback, Steam, GNS and replay."
+    },
+    {
+      "id": "sim.identity.087",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "Fresh-boot replay uses deterministic spawn requests;",
+      "text": "Fresh-boot replay uses deterministic spawn requests;"
+    },
+    {
+      "id": "sim.identity.088",
+      "source": "docs/distant-world.md#planned-ecology-projection-inventory",
+      "quote": "replay from a resumed snapshot remains unsupported without a boot contract supplying that snapshot's IDs and cursor.",
+      "text": "replay from a resumed snapshot remains unsupported without a boot contract supplying that snapshot's IDs and cursor."
+    },
+    {
+      "id": "sim.identity.089",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED for v0.3.3 (in preparation), issue #629: the ledger will own one shared allocator for plants, creatures, ground objects and other authoritative participants even when `sim.active_regions` is disabled;",
+      "text": "PLANNED for v0.3.3 (in preparation), issue #629: the ledger will own one shared allocator for plants, creatures, ground objects and other authoritative participants even when `sim.active_regions` is disabled;"
+    },
+    {
+      "id": "sim.identity.090",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "no shipping behavior changes in this contract-only preparation.",
+      "text": "no shipping behavior changes in this contract-only preparation."
+    },
+    {
+      "id": "sim.identity.091",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED IDs occupy `[1, 2^63)` with next cursor `[1, 2^63]`, zero invalid and `2^63` exhausted;",
+      "text": "PLANNED IDs occupy `[1, 2^63)` with next cursor `[1, 2^63]`, zero invalid and `2^63` exhausted;"
+    },
+    {
+      "id": "sim.identity.092",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "allocation/reservation stays O(1) and extinction never resets the cursor.",
+      "text": "allocation/reservation stays O(1) and extinction never resets the cursor."
+    },
+    {
+      "id": "sim.identity.093",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED: a mandatory `luminumbra.plants.v2` envelope persists that cursor even for zero plants, replaces the v1 payload and sidecar entirely, and refuses pre-v2 saves rather than converting them;",
+      "text": "PLANNED: a mandatory `luminumbra.plants.v2` envelope persists that cursor even for zero plants, replaces the v1 payload and sidecar entirely, and refuses pre-v2 saves rather than converting them;"
+    },
+    {
+      "id": "sim.identity.094",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "a truly absent world bootstraps normally.",
+      "text": "a truly absent world bootstraps normally."
+    },
+    {
+      "id": "sim.identity.095",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED: the envelope cursor and saved ledger allocator TLV must agree, while in-session adoption retains the greater live/saved cursor and checks incoming IDs against preserved authoritative residents before mutation.",
+      "text": "PLANNED: the envelope cursor and saved ledger allocator TLV must agree, while in-session adoption retains the greater live/saved cursor and checks incoming IDs against preserved authoritative residents before mutation."
+    },
+    {
+      "id": "sim.identity.096",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED creature IDs remain stable only within the current session until issue #137 adds creature persistence;",
+      "text": "PLANNED creature IDs remain stable only within the current session until issue #137 adds creature persistence;"
+    },
+    {
+      "id": "sim.identity.097",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "reopening creates new wildlife incarnations with new IDs from the restored cursor.",
+      "text": "reopening creates new wildlife incarnations with new IDs from the restored cursor."
+    },
+    {
+      "id": "sim.identity.098",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness;",
+      "text": "The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness;"
+    },
+    {
+      "id": "sim.identity.099",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "the earlier region-gated identity/hash plan is superseded only at activation in both region modes.",
+      "text": "the earlier region-gated identity/hash plan is superseded only at activation in both region modes."
+    },
+    {
+      "id": "sim.identity.100",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "PLANNED activation changes seeds, ordering, hashes and session persistence together with a then-current authority revision increment;",
+      "text": "PLANNED activation changes seeds, ordering, hashes and session persistence together with a then-current authority revision increment;"
+    },
+    {
+      "id": "sim.identity.101",
+      "source": "docs/active-regions.md#planned-shared-simulation-identity",
+      "quote": "this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity.",
+      "text": "this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity."
     }
   ],
   "exclusions": [
