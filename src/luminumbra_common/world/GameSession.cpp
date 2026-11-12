@@ -357,6 +357,10 @@ struct GameSession::FoliageStep {
                 step.border_owners[record.cadence_shift].insert(transition.key);
             }
         }
+        if (session.m_regionSchedule.due.empty()) {
+            step.windows = {};
+            return nullptr;
+        }
         step.windows =
             luminumbra::foliage::BuildRegionalFoliageWindows(ledger,
                                                              session.m_regionSchedule.due,
@@ -392,15 +396,29 @@ struct GameSession::FoliageStep {
         };
         index_borders.template operator()<Components::PlantTag>();
         index_borders.template operator()<Components::WaterSourceComponent>();
+        // At most kMaxRegions admitted owners; dormant index entries are not traversed.
         std::vector<RegionKey> owners;
-        for (const auto& [shift, members] : step.border_owners) {
-            if (shift <= 16 &&
-                (session.m_worldClock.tick() & ((std::uint64_t{1} << shift) - 1)) == 0) {
-                owners.insert(owners.end(), members.begin(), members.end());
+        for (const auto& [key, elapsed] : step.windows.elapsed) {
+            const auto indexed = step.border_owners.find(ledger.records().at(key).cadence_shift);
+            if (elapsed != 0 && indexed != step.border_owners.end() &&
+                indexed->second.contains(key)) {
+                owners.push_back(key);
             }
         }
+        // Windows already admit the scheduled phases and one-shot resumes.
+        // Discover boundary candidates at phase zero, then require both endpoints.
         step.borders = luminumbra::foliage::FoliageBorderEdges(
-            session.m_fieldPages, ledger.records(), owners, session.m_worldClock.tick());
+            session.m_fieldPages, ledger.records(), owners, 0);
+        std::erase_if(step.borders, [&](const auto& edge) {
+            for (const auto endpoint : {edge.first, edge.second}) {
+                const auto window =
+                    step.windows.elapsed.find(FieldPageState::region_of_scent_cell(endpoint));
+                if (window == step.windows.elapsed.end() || window->second == 0) {
+                    return true;
+                }
+            }
+            return false;
+        });
         step.pages = {};
         std::set<RegionKey> staged;
         for (const auto& [key, elapsed] : step.windows.elapsed) {
@@ -1438,7 +1456,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
                 budget.Next(Stage::Irrigation, [&] {
-                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
+                    return (!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                                   SimParticipantCount<TelemetryComp::WaterSourceComponent>(
+                                       m_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
@@ -1451,10 +1471,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                              *m_irrigationGrid,
                                              foliageOriginX,
                                              foliageOriginZ,
-                                             kFoliageFieldCell);
+                                             kFoliageFieldCell,
+                                             foliage_gate);
                 }
                 budget.Next(Stage::Soil, [&] {
-                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
+                    return (!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                                   SimParticipantCount<TelemetryComp::SoilFeederComponent>(
+                                       m_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
@@ -1706,7 +1729,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!living_registry.view<Comp::DecayComponent>().empty())
                     luminumbra::ai::RunDecompositionOnTick(
-                        living_registry, current_tick, creature_admission);
+                        living_registry, current_tick, creature_admission, foliage_gate);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
