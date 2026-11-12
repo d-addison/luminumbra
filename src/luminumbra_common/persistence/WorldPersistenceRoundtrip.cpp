@@ -734,8 +734,10 @@ WaterScalarIntegerFromJson(const nlohmann::json& state, const char* field, Integ
          value.get<std::uint64_t>() >
              static_cast<std::uint64_t>(std::numeric_limits<Integer>::max())) ||
         (!value.is_number_unsigned() &&
-         (value.get<std::int64_t>() < minimum ||
-          value.get<std::int64_t>() > std::numeric_limits<Integer>::max())))
+         // Compare in int64: a negative value must not convert to an unsigned minimum.
+         (value.get<std::int64_t>() < static_cast<std::int64_t>(minimum) ||
+          value.get<std::int64_t>() >
+              static_cast<std::int64_t>(std::numeric_limits<Integer>::max()))))
         throw std::invalid_argument(std::string("Saved water scalar integer range refused: ") +
                                     field);
     return value.get<Integer>();
