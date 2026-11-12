@@ -14,6 +14,7 @@
 #include "ai/CreatureBrainSystem.h"
 #include "ai/CreatureReproductionSystem.h"
 #include "ai/DecompositionSystem.h"
+#include "ai/EcologyHash.h"
 #include "ai/HerdAlarmSystem.h"
 #include "ai/LifespanSystem.h"
 #include "ai/MigrationSystem.h"
@@ -138,6 +139,24 @@ std::vector<float> RunPipeline(int ticks) {
 // The whole composed ecology stack is byte-exact run == replay over a long horizon.
 TEST(EcologyPipeline, DeterministicOverManyTicks) {
     EXPECT_EQ(RunPipeline(400), RunPipeline(400));
+}
+
+TEST(EcologyPipeline, CompleteProjectionIncludesMortalityAndSocialInputs) {
+    namespace Sim = ::Luminumbra::simulation;
+    entt::registry registry;
+    Populate(registry);
+    std::uint64_t id = 1;
+    for (const auto entity : registry.view<Comp::CreatureComponent>())
+        registry.emplace<Comp::SimulationIdentityComponent>(entity, id++);
+    Sim::ParticipantProjectionScratch scratch;
+    const auto complete = Sim::ComputeEcologyProjection(registry, scratch);
+    const auto legacy = luminumbra::ai::ComputeLegacyEcologySubHash(registry);
+    auto& mortality = registry.view<Comp::MortalComponent>().get<Comp::MortalComponent>(
+        registry.view<Comp::MortalComponent>().front());
+    ++mortality.lifespan_ticks;
+    EXPECT_NE(complete, Sim::ComputeEcologyProjection(registry, scratch));
+    EXPECT_EQ(legacy, luminumbra::ai::ComputeLegacyEcologySubHash(registry));
+    EXPECT_EQ(scratch.participant_visits, 8u);
 }
 
 //  ( scent tracking): SCENT HUNTING. With wind advection ON, a predator

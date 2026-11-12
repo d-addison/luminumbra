@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,22 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
+
+TEST(EcologyHash, CompleteProjectionAddsRoleStateWithoutChangingLegacyBytes) {
+    namespace Sim = ::Luminumbra::simulation;
+    entt::registry registry;
+    const auto entity = registry.create();
+    registry.emplace<Comp::TransformComponent>(entity);
+    registry.emplace<Comp::CreatureComponent>(entity);
+    const auto legacy = luminumbra::ai::ComputeLegacyEcologySubHash(registry);
+    Sim::ParticipantProjectionScratch scratch;
+    EXPECT_THROW((void)Sim::ComputeEcologyProjection(registry, scratch), std::domain_error);
+    registry.emplace<Comp::SimulationIdentityComponent>(entity, 1u);
+    const auto complete = Sim::ComputeEcologyProjection(registry, scratch);
+    registry.get<Comp::CreatureComponent>(entity).is_predator = true;
+    EXPECT_NE(complete, Sim::ComputeEcologyProjection(registry, scratch));
+    EXPECT_EQ(legacy, luminumbra::ai::ComputeLegacyEcologySubHash(registry));
+}
 
 // A small mixed roster: one predator (pack) + two prey (genome + alarm), with
 // distinct state so the projection is non-trivial.
@@ -79,8 +96,8 @@ TEST(EcologyHash, DeterministicAcrossIdenticalRosters) {
     entt::registry a, b;
     PopulateRoster(a);
     PopulateRoster(b);
-    const std::string ha = luminumbra::ai::ComputeEcologySubHash(a);
-    const std::string hb = luminumbra::ai::ComputeEcologySubHash(b);
+    const std::string ha = luminumbra::ai::ComputeLegacyEcologySubHash(a);
+    const std::string hb = luminumbra::ai::ComputeLegacyEcologySubHash(b);
     EXPECT_FALSE(ha.empty());
     EXPECT_EQ(ha, hb);
 }
@@ -92,7 +109,7 @@ TEST(EcologyHash, V2CoversEnergySpeciesSensoryThirstCircadian) {
     const auto base_hash = [] {
         entt::registry r;
         PopulateRoster(r);
-        return luminumbra::ai::ComputeEcologySubHash(r);
+        return luminumbra::ai::ComputeLegacyEcologySubHash(r);
     }();
     // Helper: rebuild the SAME roster, apply one mutation to the FIRST creature
     // (id-ordered), and expect the hash to move.
@@ -106,7 +123,7 @@ TEST(EcologyHash, V2CoversEnergySpeciesSensoryThirstCircadian) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
         mutate(r, es.front());
-        return luminumbra::ai::ComputeEcologySubHash(r);
+        return luminumbra::ai::ComputeLegacyEcologySubHash(r);
     };
     EXPECT_NE(base_hash, mutated([](entt::registry& r, entt::entity e) {
                   r.get<Comp::CreatureComponent>(e).energy = 0.123f;
@@ -136,12 +153,12 @@ TEST(EcologyHash, V2CoversEnergySpeciesSensoryThirstCircadian) {
 //  / additivity: an empty roster hashes to the EMPTY string (neutral value).
 TEST(EcologyHash, EmptyRosterIsNeutral) {
     entt::registry r;
-    EXPECT_EQ(luminumbra::ai::ComputeEcologySubHash(r), std::string());
+    EXPECT_EQ(luminumbra::ai::ComputeLegacyEcologySubHash(r), std::string());
     // A registry carrying NON-creature entities is still neutral (gating is on
     // CreatureComponent, like the scent/plant participant gates).
     auto e = r.create();
     r.emplace<Comp::TransformComponent>(e);
-    EXPECT_EQ(luminumbra::ai::ComputeEcologySubHash(r), std::string());
+    EXPECT_EQ(luminumbra::ai::ComputeLegacyEcologySubHash(r), std::string());
 }
 
 //  the hash commits to the id-ordered STATE projection, not iteration order.
@@ -170,7 +187,7 @@ TEST(EcologyHash, OrderIndependentOverIdSortedState) {
             mk(true, -6.0f);
             mk(false, 4.0f);
         }
-        return luminumbra::ai::ComputeEcologySubHash(r);
+        return luminumbra::ai::ComputeLegacyEcologySubHash(r);
     };
     EXPECT_EQ(build(true), build(false));
 }
@@ -185,7 +202,7 @@ TEST(EcologyHash, AppendingEmptyEcologyAddsOnlyTheSuffix) {
     const std::string prefix = "chunkHASH|wind:WINDH|weather:WEATHERH|aether:AETHERH|scents:SCENTH";
 
     entt::registry empty;
-    const std::string ecology_neutral = luminumbra::ai::ComputeEcologySubHash(empty);
+    const std::string ecology_neutral = luminumbra::ai::ComputeLegacyEcologySubHash(empty);
     ASSERT_EQ(ecology_neutral, std::string()) << "empty roster must be neutral";
 
     // The post-fold composite is the checksum of (prefix + "|ecology:" + ecology).
@@ -205,7 +222,7 @@ TEST(EcologyHash, AppendingEmptyEcologyAddsOnlyTheSuffix) {
     // vestigial) — same prefix, different suffix bytes => different composite.
     entt::registry populated;
     PopulateRoster(populated);
-    const std::string ecology_live = luminumbra::ai::ComputeEcologySubHash(populated);
+    const std::string ecology_live = luminumbra::ai::ComputeLegacyEcologySubHash(populated);
     EXPECT_FALSE(ecology_live.empty());
     EXPECT_NE(P::StableChecksum(prefix + "|ecology:" + ecology_live), composite_expected);
 }
