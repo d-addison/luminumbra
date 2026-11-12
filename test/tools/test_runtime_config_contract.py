@@ -927,8 +927,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertNotIn("work();", refusal)
         update = cpp_block(world, "SHIELD_WorldSystem::update(entt::registry&registry,"
                            "conststd::vector<Vec3>&anchor_positions,")
+        # An update without anchors keeps the first-update restoration pending.
         self.assertIn("initial_durable_activation=m_first_update&&m_durable_residency&&"
-                      "!m_durable_chunks.empty();m_first_update=false;", update)
+                      "!m_durable_chunks.empty()&&!anchor_positions.empty();"
+                      "if(!anchor_positions.empty()){m_first_update=false;}", update)
         self.assertIn("m_update_tick_counter++;constboolinterval_activation="
                       "m_update_tick_counter>=STREAMING_ACTIVATION_INTERVAL_FRAMES;", update)
         activation = cpp_block(update, "if(initial_durable_activation||interval_activation)")

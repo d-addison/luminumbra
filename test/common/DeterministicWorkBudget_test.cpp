@@ -533,8 +533,9 @@ TEST(DeterministicWorkBudget, DurableRestorationRunsOnFirstUpdateAndExistingInte
                 restoration_updates.push_back(update_index);
             world.quiesce_streaming_jobs_for_save();
         }
+        // An empty first update restores nothing; the first anchored update restores instead.
         const std::vector<int> expected =
-            empty_first_anchors ? std::vector<int>{4, 8, 12} : std::vector<int>{1, 4, 8, 12};
+            empty_first_anchors ? std::vector<int>{2, 4, 8, 12} : std::vector<int>{1, 4, 8, 12};
         EXPECT_EQ(restoration_updates, expected);
     }
 }
