@@ -3074,8 +3074,9 @@ public:
     bool matches_serialized(const ChunkRecordKey& key, const std::string& inputs) {
         const std::lock_guard lock(m_mutex);
         const auto found = m_facts.find(key.id);
+        // Legacy JSON admission may be permissive; reuse must satisfy the strict writer.
         return found != m_facts.end() && ChunkRecordKeyOf(found->second.record) == key &&
-               found->second.serialization_inputs == inputs;
+               found->second.facts.strict_water && found->second.serialization_inputs == inputs;
     }
     std::shared_ptr<Chunk> take_decoded(const ChunkRecordKey& key) {
         const std::lock_guard lock(m_mutex);

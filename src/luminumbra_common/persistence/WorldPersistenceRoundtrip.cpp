@@ -697,7 +697,6 @@ struct JsonChunkArrays {
 // The encoded format always writes every array, so every array is required.
 struct EncodedChunkArrays {
     const nlohmann::json& value;
-    bool strict_water = false;
     std::vector<float> floats(const char* key) const {
         return EncodedArrayFromJson<float>(value.at(key), key);
     }
@@ -720,10 +719,8 @@ struct EncodedChunkArrays {
         try {
             return EncodedArrayFromJson<std::int32_t>(value.at(key), key);
         } catch (const std::exception& error) {
-            if (strict_water)
-                throw std::invalid_argument(std::string("Saved water integer array refused: ") +
-                                            error.what());
-            throw;
+            throw std::invalid_argument(std::string("Saved water integer array refused: ") +
+                                        error.what());
         }
     }
 };
@@ -1635,6 +1632,8 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk) {
 }
 
 std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid) {
+    if (strict_water_valid)
+        *strict_water_valid = false;
     nlohmann::json object = ChunkToJson(chunk, false, true);
     object["sdf_data"] = EncodedArrayToJson(chunk.sdf_data);
     object["heightmap_data"] = EncodedArrayToJson(chunk.heightmap_data);
@@ -1653,8 +1652,11 @@ std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_wat
     object["water_depth_mm"] = EncodedArrayToJson(chunk.water_depth_mm);
     object["water_bed_mm"] = EncodedArrayToJson(chunk.water_bed_mm);
     object["water_edge_flux"] = EncodedArrayToJson(chunk.water_edge_flux);
+    RequireWaterArrays(object, true);
+    if (!WaterDepthValid(chunk))
+        throw std::invalid_argument("Saved water integer range refused");
     if (strict_water_valid)
-        *strict_water_valid = WaterArraysValid(object, true) && WaterDepthValid(chunk);
+        *strict_water_valid = true;
     nlohmann::json chunks = nlohmann::json::array();
     chunks.push_back(std::move(object));
     const nlohmann::json snapshot{{"schema", kSnapshotSchema},
@@ -1770,28 +1772,22 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         };
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
-            if (authority.strict_water)
+            // Encoded water is always strict. Check counts and cross-field shapes before
+            // allocating any chunk arrays: at most 32 * 32 cells, two fluxes per cell.
+            if (encoded_arrays || authority.strict_water)
                 RequireWaterArrays(chunk_json, encoded_arrays);
             else if (authority.strict_water_valid && !WaterArraysValid(chunk_json, encoded_arrays))
                 water_valid = false;
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             if (encoded_arrays)
-                ApplyChunkFields(chunk_json,
-                                 EncodedChunkArrays{chunk_json, authority.strict_water},
-                                 *chunk,
-                                 authority);
+                ApplyChunkFields(chunk_json, EncodedChunkArrays{chunk_json}, *chunk, authority);
             else
                 ApplyChunkJson(chunk_json, *chunk, authority);
             // Encoded i32 decoding enforces width; depth additionally excludes negative
             // values. Reuse these decoded cells for both admission and its cached proof.
-            if (encoded_arrays && water_valid &&
-                (authority.strict_water || authority.strict_water_valid) &&
-                !WaterDepthValid(*chunk)) {
-                if (authority.strict_water)
-                    throw std::invalid_argument("Saved water integer range refused");
-                water_valid = false;
-            }
+            if (encoded_arrays && !WaterDepthValid(*chunk))
+                throw std::invalid_argument("Saved water integer range refused");
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();

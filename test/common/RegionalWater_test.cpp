@@ -16,6 +16,7 @@
 #include <map>
 #include <numeric>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -26,6 +27,31 @@
 namespace {
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
+
+// Independent encoder for deliberately invalid integer grids. Production serialization
+// must refuse these inputs, so refusal tests cannot use it to manufacture corrupt records.
+nlohmann::json EncodedWaterIntegers(std::span<const std::int32_t> values) {
+    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string data;
+    std::uint32_t group = 0;
+    unsigned bits = 0;
+    for (const auto value : values) {
+        const auto word = std::bit_cast<std::uint32_t>(value);
+        for (unsigned shift = 0; shift < 32; shift += 8) {
+            group = (group << 8u) | ((word >> shift) & 255u);
+            bits += 8;
+            while (bits >= 6) {
+                bits -= 6;
+                data.push_back(alphabet[(group >> bits) & 63u]);
+            }
+        }
+    }
+    if (bits != 0)
+        data.push_back(alphabet[(group << (6u - bits)) & 63u]);
+    while (data.size() % 4u != 0u)
+        data.push_back('=');
+    return {{"enc", "le-b64"}, {"type", "i32"}, {"count", values.size()}, {"data", data}};
+}
 
 void FillWater(Chunk& chunk, int resolution, std::int32_t depth = 1000) {
     chunk.has_water_sim.store(true);
@@ -590,20 +616,37 @@ TEST(RegionalWaterPersistence, StrictWaterRequiresCompletePopulatedActiveGrid) {
                     WorldStreamingState original;
                     const auto chunk = original.get_or_create_chunk({0, 0, 0});
                     FillWater(*chunk, resolution);
+                    auto encoded =
+                        nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
                     chunk->has_water_sim.store(active);
                     chunk->water_depth_mm.assign(count, 123);
                     chunk->water_bed_mm.assign(count, -100);
                     chunk->water_edge_flux.assign(empty_flux ? 0u : 2u * count, -10);
                     chunk->mark_water_data_dirty();
                     const bool expected = count <= 1024u && (!active || count == cells);
+                    auto& water = encoded["chunks"][0];
+                    water["water_state"]["has_water_sim"] = active;
+                    water["water_state"]["terrain_authoritative"] = chunk->has_terrain_authority();
+                    water["has_water_sim"] = active;
+                    water["water_depth_mm"] = EncodedWaterIntegers(chunk->water_depth_mm);
+                    water["water_bed_mm"] = EncodedWaterIntegers(chunk->water_bed_mm);
+                    water["water_edge_flux"] = EncodedWaterIntegers(chunk->water_edge_flux);
+                    if (!expected)
+                        EXPECT_THROW(P::SerializeChunkRecordPayloadJson(*chunk),
+                                     std::invalid_argument);
+                    else
+                        EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*chunk), encoded.dump());
                     for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
                                               P::SerializeChunkAuthoritySnapshotJson(*chunk),
-                                              P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                                              encoded.dump()}) {
                         bool observed = !expected;
                         WorldStreamingState restored;
                         std::vector<std::string> errors;
-                        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
-                            bytes, restored, errors, {.strict_water_valid = &observed}));
+                        const bool is_encoded =
+                            nlohmann::json::parse(bytes).contains("record_format");
+                        EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
+                                      bytes, restored, errors, {.strict_water_valid = &observed}),
+                                  !is_encoded || expected);
                         EXPECT_EQ(observed, expected);
                         EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
                                       bytes,
@@ -643,12 +686,18 @@ TEST(RegionalWaterPersistence, StrictWaterRequiresExactSizesForEachPopulatedActi
                 SCOPED_TRACE(field);
                 SCOPED_TRACE(count);
                 FillWater(*chunk, resolution);
+                auto encoded = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
                 auto& grid = name == "water_depth_mm" ? chunk->water_depth_mm
                              : name == "water_bed_mm" ? chunk->water_bed_mm
                                                       : chunk->water_edge_flux;
                 grid.assign(count, 0);
-                for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
-                                          P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                encoded["chunks"][0][field] = EncodedWaterIntegers(grid);
+                if (count != required)
+                    EXPECT_THROW(P::SerializeChunkRecordPayloadJson(*chunk), std::invalid_argument);
+                else
+                    EXPECT_EQ(P::SerializeChunkRecordPayloadJson(*chunk), encoded.dump());
+                for (const auto& bytes :
+                     {P::SerializeWorldStreamingStateSnapshotJson(original), encoded.dump()}) {
                     WorldStreamingState restored;
                     std::vector<std::string> errors;
                     EXPECT_EQ(P::LoadWorldStreamingStateSnapshotJson(
@@ -737,12 +786,12 @@ TEST(RegionalWaterPersistence, StrictEncodedWaterRefusesMalformedIntegersAndEnve
     for (const auto depth : {-1, std::numeric_limits<std::int32_t>::min()}) {
         FillWater(chunk, 4, depth);
         auto malformed = snapshot;
-        malformed["chunks"][1]["water_depth_mm"] = nlohmann::json::parse(
-            P::SerializeChunkRecordPayloadJson(chunk))["chunks"][0]["water_depth_mm"];
+        EXPECT_THROW(P::SerializeChunkRecordPayloadJson(chunk), std::invalid_argument);
+        malformed["chunks"][1]["water_depth_mm"] = EncodedWaterIntegers(chunk.water_depth_mm);
         WorldStreamingState restored;
         std::vector<std::string> errors;
         bool valid = true;
-        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
             malformed.dump(), restored, errors, {.strict_water_valid = &valid}));
         EXPECT_FALSE(valid);
         EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
@@ -803,21 +852,23 @@ TEST(RegionalWaterPersistence, StrictEncodedWaterChecksMirrorCountsBeforeDecodin
             }
             // The earlier SDF array must never be decoded before water counts are checked.
             malformed["chunks"][0]["sdf_data"] = nullptr;
-            WorldStreamingState restored;
-            restored.get_or_create_chunk({1, 0, 0});
-            std::vector<std::string> errors;
-            bool valid = true;
-            EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
-                malformed.dump(),
-                restored,
-                errors,
-                {.strict_water = true, .strict_water_valid = &valid}));
-            EXPECT_FALSE(valid);
-            EXPECT_TRUE(restored.empty());
-            ASSERT_FALSE(errors.empty());
-            EXPECT_NE(errors.front().find(fault < 6 ? "Saved water grid shape refused"
-                                                    : "Saved water structure refused"),
-                      std::string::npos);
+            for (const bool strict : {false, true}) {
+                WorldStreamingState restored;
+                restored.get_or_create_chunk({1, 0, 0});
+                std::vector<std::string> errors;
+                bool valid = true;
+                EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
+                    malformed.dump(),
+                    restored,
+                    errors,
+                    {.strict_water = strict, .strict_water_valid = &valid}));
+                EXPECT_FALSE(valid);
+                EXPECT_TRUE(restored.empty());
+                ASSERT_FALSE(errors.empty());
+                EXPECT_NE(errors.front().find(fault < 6 ? "Saved water grid shape refused"
+                                                        : "Saved water structure refused"),
+                          std::string::npos);
+            }
         }
     }
 }
@@ -942,6 +993,7 @@ TEST(RegionalWaterPersistence, StrictWaterRefusesPartialRetainedPairsRegardlessO
                 WorldStreamingState original;
                 const auto chunk = original.get_or_create_chunk({0, 0, 0});
                 FillWater(*chunk, 4);
+                auto encoded = nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*chunk));
                 chunk->has_water_sim.store(active);
                 chunk->current_water_resolution.store(resolution);
                 chunk->water_depth_mm.pop_back();
@@ -949,8 +1001,17 @@ TEST(RegionalWaterPersistence, StrictWaterRefusesPartialRetainedPairsRegardlessO
                     chunk->water_bed_mm.clear();
                     chunk->water_edge_flux = {2, 3, 4};
                 }
-                for (const auto& bytes : {P::SerializeWorldStreamingStateSnapshotJson(original),
-                                          P::SerializeChunkRecordPayloadJson(*chunk)}) {
+                auto& water = encoded["chunks"][0];
+                water["has_water_sim"] = active;
+                water["water_state"]["has_water_sim"] = active;
+                water["current_water_resolution"] = resolution;
+                water["water_state"]["current_water_resolution"] = resolution;
+                water["water_depth_mm"] = EncodedWaterIntegers(chunk->water_depth_mm);
+                water["water_bed_mm"] = EncodedWaterIntegers(chunk->water_bed_mm);
+                water["water_edge_flux"] = EncodedWaterIntegers(chunk->water_edge_flux);
+                EXPECT_THROW(P::SerializeChunkRecordPayloadJson(*chunk), std::invalid_argument);
+                for (const auto& bytes :
+                     {P::SerializeWorldStreamingStateSnapshotJson(original), encoded.dump()}) {
                     WorldStreamingState restored;
                     std::vector<std::string> errors;
                     EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(
