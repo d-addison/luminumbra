@@ -1608,6 +1608,7 @@ add_executable(frontier_gates_test
     ai/creature_divergence_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp
+    ai/perception_identity_order_test.cpp
     ai/perception_substrate_test.cpp
     ai/creature_brain_substrate_test.cpp
     ai/scent_steering_system_test.cpp
