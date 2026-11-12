@@ -1115,7 +1115,10 @@ protected:
     using Producer = FarWorldAuthorityProducer;
     using Save = Persistence::WorldSaveService;
     std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("session_handoff_");
-    Producer producer{{512, 4u * 1024u * 1024u, 300'000}};
+    Producer producer{{512,
+                       4u * 1024u * 1024u,
+                       300'000,
+                       std::make_shared<FarVolumeMemoryPool>(64u * 1024u * 1024u)}};
     std::unique_ptr<Systems::SHIELD_WorldSystem> world;
     Producer::FrozenPolicy policy;
     FarFrozenCaptureLimits capture_limits{1, 100'000, 20'000'000, 200'000, 64u * 1024u * 1024u};
@@ -1365,7 +1368,10 @@ TEST_F(FarSessionPublicationTest, RefusalMatrixPreservesTargetAndClassifiesResou
     EXPECT_FALSE(owner.StageSessionTarget(
         producer, *world, 1, tiles, invalid_policy, capture_limits, memory));
     check(FarWorldRefusal::InvalidRequests);
-    Producer cold({512, 4u * 1024u * 1024u, 300'000});
+    Producer cold({512,
+                   4u * 1024u * 1024u,
+                   300'000,
+                   std::make_shared<FarVolumeMemoryPool>(64u * 1024u * 1024u)});
     EXPECT_FALSE(owner.StageSessionTarget(cold, *world, 1, tiles, policy, capture_limits, memory));
     check(FarWorldRefusal::ImmutableAuthorityUnavailable);
     auto other = std::make_shared<FarVolumeTierMemory>(Budgets());
@@ -1437,7 +1443,10 @@ TEST_F(FarSessionPublicationTest, ServingSerialBridgesSuccessfulTargetAndSurvive
     ASSERT_TRUE(HandoffSettle(owner, original, backend));
     ASSERT_TRUE(owner.TryPromote());
     ASSERT_EQ(owner.State().serving_serial, 1u);
-    Producer wide({512, 4u * 1024u * 1024u, 300'000});
+    Producer wide({512,
+                   4u * 1024u * 1024u,
+                   300'000,
+                   std::make_shared<FarVolumeMemoryPool>(64u * 1024u * 1024u)});
     const Save::AuthorityReadLimits reads{
         512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
     std::string error;

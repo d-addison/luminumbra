@@ -7471,7 +7471,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "b439df88e7c3623a");
+    EXPECT_EQ(baseline, "bf3da613768a50cb");
     EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
@@ -13338,6 +13338,35 @@ TEST(GameSessionHeadlessWorldTest, EnergyRegistersStayTransactionalAcrossSchedul
     ASSERT_NO_FATAL_FAILURE(CheckEnergyRegistersSurviveSchedulerRefusal());
 }
 
+namespace {
+void CheckSourceCaptureAdmissionFailures(GameSession& session,
+                                         const Luminumbra::World::FarWorldAuthorityConfig& config) {
+    auto* producer = session.GetFarWorldAuthorityProducer();
+    ASSERT_NE(producer, nullptr);
+    std::string error;
+    auto invalid = config;
+    invalid.capture.deadline_frames = 0;
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    invalid = config;
+    invalid.source.memory.reset();
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    invalid.source.memory = std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(0);
+    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+    EXPECT_EQ(invalid.source.memory->used(), 0u);
+    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    for (const std::uint64_t point : {1u, 2u, 3u, 4u, 515u}) {
+        invalid.source.memory =
+            std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+        invalid.source.memory->RefuseAttemptsFrom(point);
+        EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
+        EXPECT_EQ(invalid.source.memory->used(), 0u);
+        EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    }
+}
+} // namespace
+
 TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndOpenFences) {
     GameSession session;
     Configure(session);
@@ -13352,7 +13381,11 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
     session.GetWorldSystem()->SetWaterSimWindowCursor(7);
     EXPECT_EQ(session.GetFarWorldAuthorityProducer(), nullptr);
     const Luminumbra::World::FarWorldAuthorityConfig config{
-        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+        {512,
+         1048576,
+         64,
+         std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
+        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
     std::string error;
     GameSession cold;
     EXPECT_FALSE(cold.EnableFarWorldAuthorityProducer(config, error));
@@ -13361,10 +13394,7 @@ TEST_P(SavedWorldPresetTest, InactiveSourceCapturePreservesSessionAcrossSaveAndO
     ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
     auto* producer = session.GetFarWorldAuthorityProducer();
     ASSERT_NE(producer, nullptr);
-    auto invalid = config;
-    invalid.capture.deadline_frames = 0;
-    EXPECT_FALSE(session.EnableFarWorldAuthorityProducer(invalid, error));
-    EXPECT_EQ(session.GetFarWorldAuthorityProducer(), producer);
+    ASSERT_NO_FATAL_FAILURE(CheckSourceCaptureAdmissionFailures(session, config));
     const std::array<P::WorldSaveService::AuthorityWindow, 1> windows{{{0, 0, 0, 0}}};
     ASSERT_TRUE(producer->request_capture(windows));
     const auto hashes = SessionWorldSubHashes(session);
@@ -13480,7 +13510,11 @@ TEST_P(SavedWorldPresetTest, SourceCaptureRetriesRefusedRefreshAfterRollback) {
     Configure(session);
     ASSERT_TRUE(session.CreateWorld("Source rollback", "1337", "default"));
     const Luminumbra::World::FarWorldAuthorityConfig config{
-        {512, 1048576, 64}, {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
+        {512,
+         1048576,
+         64,
+         std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(64u * 1024u * 1024u)},
+        {{64, 128, 256, 256, 4194304, 16777216, 4194304, 16777216, 131072}, 4}};
     std::string error;
     ASSERT_TRUE(session.EnableFarWorldAuthorityProducer(config, error)) << error;
     auto* producer = session.GetFarWorldAuthorityProducer();

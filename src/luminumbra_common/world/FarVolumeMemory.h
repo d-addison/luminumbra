@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <new>
 #include <type_traits>
@@ -112,6 +113,57 @@ private:
     const std::uint64_t limit_;
     std::atomic<std::uint64_t> used_{0}, peak_{0}, attempts_{0}, refusals_{0};
     std::atomic<std::uint64_t> fail_after_{std::numeric_limits<std::uint64_t>::max()};
+};
+
+// Exact allocation admission, including allocator-rebound shared control blocks
+// and container capacities. The allocator keeps the pool alive through deallocation.
+// Null selects the existing uncharged persistence path; producers require a pool.
+template<class T>
+class FarVolumePoolAllocator {
+public:
+    using value_type = T;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    FarVolumePoolAllocator() noexcept = default;
+    explicit FarVolumePoolAllocator(std::shared_ptr<FarVolumeMemoryPool> pool) noexcept
+        : pool_(std::move(pool)) {}
+    template<class U>
+    FarVolumePoolAllocator(const FarVolumePoolAllocator<U>& other) noexcept
+        : pool_(other.pool()) {}
+    const std::shared_ptr<FarVolumeMemoryPool>& pool() const noexcept {
+        return pool_;
+    }
+    T* allocate(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T) ||
+            count > std::numeric_limits<std::uint64_t>::max() / sizeof(T)) {
+            throw FarVolumeMemoryRefused();
+        }
+        const auto bytes = count * sizeof(T);
+        if (pool_ && !pool_->TryReserve(bytes)) {
+            throw FarVolumeMemoryRefused();
+        }
+        try {
+            return std::allocator<T>{}.allocate(count);
+        } catch (...) {
+            if (pool_) {
+                pool_->Release(bytes);
+            }
+            throw;
+        }
+    }
+    void deallocate(T* pointer, std::size_t count) noexcept {
+        std::allocator<T>{}.deallocate(pointer, count);
+        if (pool_) {
+            pool_->Release(count * sizeof(T));
+        }
+    }
+    template<class U>
+    bool operator==(const FarVolumePoolAllocator<U>& other) const noexcept {
+        return pool_ == other.pool();
+    }
+
+private:
+    std::shared_ptr<FarVolumeMemoryPool> pool_;
 };
 
 class FarVolumeMemoryLease {

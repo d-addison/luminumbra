@@ -3392,11 +3392,24 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     bool activation_ran_this_tick = false;
+    // An update without anchors restores nothing, so the first-update restoration waits for the
+    // first anchored update instead of falling back to the four-update cadence.
+    const bool initial_durable_activation = m_first_update && m_durable_residency &&
+                                            !m_durable_chunks.empty() && !anchor_positions.empty();
+    if (!anchor_positions.empty()) {
+        m_first_update = false;
+    }
     m_update_tick_counter++;
-    if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
+    const bool interval_activation = m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES;
+    if (initial_durable_activation || interval_activation) {
         // activation may elide itself (return false) when the residency set is provably unchanged;
         // only count it as "ran" when it actually did work, so the meshing gate stays accurate.
-        activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);
+        // The initial pass restores only authority; generation and eviction retain updates 4, 8,
+        // ...
+        activation_ran_this_tick =
+            update_chunk_activation(anchor_positions, physics_system, !interval_activation);
+    }
+    if (interval_activation) {
         m_update_tick_counter = 0;
     }
     _dbg_split(m_dbg_stream.activation); // runtime telemetry
@@ -3951,7 +3964,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,
-                                                 PhysicsSystem* physics_system) {
+                                                 PhysicsSystem* physics_system,
+                                                 bool restorations_only) {
     if (anchors.empty() || m_durable_read_failed) {
         return false; // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
     }
@@ -4232,6 +4246,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     return false;
                 ++restored;
             } else {
+                if (restorations_only)
+                    continue;
                 generate_now.push_back({item.coords, generation_step(item.coords)});
             }
             if (item.surface)
@@ -4248,6 +4264,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_streaming_budget_stats.generation_candidates -
         m_last_streaming_budget_stats.scheduled_generation;
     m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
+    if (restorations_only)
+        return restored != 0;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         if (m_durable_read_failed)
@@ -7307,6 +7325,55 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     note_digest_chunk(chunk, true, false);
     m_parked.erase(it);
     return true;
+}
+
+SHIELD_WorldSystem::WaterAuthorityPublication
+SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> chunks) {
+    if (chunks.size() > (std::size_t{1} << 20)) {
+        throw std::invalid_argument("Water authority participant cap exceeded");
+    }
+    WaterAuthorityPublication publication;
+    publication.lock = std::unique_lock<std::mutex>(m_far_lod_region_revision_mutex);
+    publication.revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
+    constexpr int per_region = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    for (const auto* chunk : chunks) {
+        if (!chunk) {
+            throw std::invalid_argument("Missing water authority participant");
+        }
+        if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+            continue;
+        }
+        if (publication.revision == std::numeric_limits<u64>::max()) {
+            throw std::invalid_argument("Water authority revision overflow");
+        }
+        ++publication.revision;
+        const auto coords = chunk->get_coords();
+        const int rx = static_cast<int>(std::floor(static_cast<double>(coords.x) / per_region));
+        const int rz = static_cast<int>(std::floor(static_cast<double>(coords.z) / per_region));
+        const auto local_x =
+            static_cast<std::int64_t>(coords.x) - static_cast<std::int64_t>(rx) * per_region;
+        const auto local_z =
+            static_cast<std::int64_t>(coords.z) - static_cast<std::int64_t>(rz) * per_region;
+        const int adjacent_x = local_x == 0 ? rx - 1 : local_x == per_region - 1 ? rx + 1 : rx;
+        const int adjacent_z = local_z == 0 ? rz - 1 : local_z == per_region - 1 ? rz + 1 : rz;
+        for (const int x : {rx, adjacent_x}) {
+            for (const int z : {rz, adjacent_z}) {
+                publication.revisions[{x, z}] = publication.revision;
+            }
+        }
+    }
+    return publication;
+}
+
+void SHIELD_WorldSystem::publish_water_authority(WaterAuthorityPublication&& publication) noexcept {
+    for (const auto& [key, revision] : publication.revisions) {
+        const auto found = m_far_lod_region_revisions.find(key);
+        if (found != m_far_lod_region_revisions.end()) {
+            found->second = revision;
+        }
+    }
+    m_far_lod_region_revisions.merge(publication.revisions);
+    m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {

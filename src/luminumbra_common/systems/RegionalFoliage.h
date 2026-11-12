@@ -531,9 +531,14 @@ BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
                                        .elapsed_ticks
                                  : std::min<std::uint64_t>(clock.tick() - prior, 65536);
         // Scheduling stamps last_ticked before foliage sees a new owner.
-        // Its first due tick still runs once; known edit ticks remain consumed.
+        // Its first due tick still runs once. Only materialization can advance
+        // last_ticked beyond the canonical scheduler tick; an ordinary edit at
+        // that scheduled tick must not suppress the unconsumed first tick.
+        const bool materialized = record.last_ticked > ledger.tick();
         result.elapsed[key] = static_cast<std::uint32_t>(
-            elapsed == 0 && old == previous.end() && record.frozen_at == 0 ? 1 : elapsed);
+            elapsed == 0 && old == previous.end() && record.frozen_at == 0 && !materialized
+                ? 1
+                : elapsed);
         if (record.frozen_at != 0) {
             result.resumes[key] = record.frozen_at;
         }
@@ -633,8 +638,8 @@ FoliageBorderEdges(const FieldPageState& pages,
                    const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
                    std::span<const RegionKey> owners) {
     FoliageEdges edges;
-    // At most 2048 boundary cells per selected 512 m owner. Either initialized
-    // endpoint can select an edge; storage caps endpoints at kMaxPages * 256.
+    // At most 2048 boundary cells per selected 512 m owner. Both endpoints
+    // must exist, as in continuous diffusion; storage caps cells at kMaxPages * 256.
     for (const auto owner : owners) {
         const auto a = records.find(owner);
         if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
@@ -659,7 +664,7 @@ FoliageBorderEdges(const FieldPageState& pages,
                     static_cast<std::int32_t>(z) + (along_x ? offset : (sign > 0 ? 511 : 0))};
                 const ScentCellKey next{cell.x + (along_x ? sign : 0),
                                         cell.z + (along_x ? 0 : sign)};
-                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) ||
+                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) &&
                                                             pages.irrigation().initialized(next))) {
                     edges.emplace_back(sign > 0 ? cell : next, sign > 0 ? next : cell);
                 }

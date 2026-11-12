@@ -23,12 +23,28 @@ struct FarWorldAuthorityState {
         FarWorldAuthorityChange kind{};
     };
     explicit FarWorldAuthorityState(const Producer::Limits& source_limits)
-        : limits(source_limits) {}
+        : limits(source_limits)
+        , index(FarVolumePoolAllocator<IndexEntry>(source_limits.memory)) {
+        // Attachment replaces the world's old change sink. Admit every index
+        // node before that boundary so membership cannot allocate afterwards.
+        if (limits.index_records <= Producer::kSlots) {
+            for (std::size_t i = 0; i < limits.index_records; ++i) {
+                const auto entry = index.emplace(std::tuple{0, 0, 0}, Members{}).first;
+                spare_nodes[spare_count++] = index.extract(entry);
+            }
+        }
+    }
     Producer::Limits limits;
     mutable std::mutex mutex;
     // At most limits.index_records nodes, capped at the fixed 512-slot envelope.
     // Column lookup probes bounded coordinates and visits only participating Y layers.
-    std::map<std::tuple<int, int, int>, Members> index;
+    using IndexEntry = std::pair<const std::tuple<int, int, int>, Members>;
+    std::map<std::tuple<int, int, int>, Members, std::less<>, FarVolumePoolAllocator<IndexEntry>>
+        index;
+    // At most index_records nodes, including unused capacity. Extraction and
+    // reinsertion preserve their allocator and require no further allocation.
+    std::array<decltype(index)::node_type, Producer::kSlots> spare_nodes{};
+    std::size_t spare_count = 0;
     std::array<Save::AuthorityWindow, Producer::kSlots> wanted{};
     std::array<Change, Producer::kSlots> pending{};
     std::size_t wanted_count = 0, pending_count = 0;
@@ -36,9 +52,19 @@ struct FarWorldAuthorityState {
     Producer::Counters counters;
 };
 namespace {
+FarVolumeMemoryLease AdmitProducerControl(const Producer::Limits& limits) {
+    if (!limits.memory) {
+        throw FarVolumeMemoryRefused();
+    }
+    FarVolumeMemoryLease control(*limits.memory);
+    if (!control.TryCharge(sizeof(Producer))) {
+        throw FarVolumeMemoryRefused();
+    }
+    return control;
+}
 bool ValidLimits(const Producer::Limits& limits) {
     return limits.index_records > 0 && limits.index_records <= Producer::kSlots &&
-           limits.copy_bytes > 0 && limits.query_columns > 0;
+           limits.copy_bytes > 0 && limits.query_columns > 0 && limits.memory;
 }
 bool ValidWindow(const Save::AuthorityWindow& window, std::uint64_t columns) {
     if (window.min_chunk_x < Chunk::kPackedMinXz || window.max_chunk_x > Chunk::kPackedMaxXz ||
@@ -330,13 +356,9 @@ void FarWorldAuthorityChanges::membership(const std::shared_ptr<Chunk>& chunk,
                 state_->all_dirty = true;
                 return;
             }
-            try {
-                member = state_->index.emplace(key, FarWorldAuthorityState::Members{}).first;
-            } catch (const std::bad_alloc&) {
-                state_->index_failed = true;
-                state_->all_dirty = true;
-                return;
-            }
+            auto node = std::move(state_->spare_nodes[--state_->spare_count]);
+            node.key() = key;
+            member = state_->index.insert(std::move(node)).position;
         }
         auto& destination = parked ? member->second.parked : member->second.live;
         if (destination == chunk) {
@@ -360,7 +382,7 @@ void FarWorldAuthorityChanges::membership(const std::shared_ptr<Chunk>& chunk,
             chunk->bind_far_world_authority_changes({});
         }
         if (!member->second.live && !member->second.parked) {
-            state_->index.erase(member);
+            state_->spare_nodes[state_->spare_count++] = state_->index.extract(member);
         }
     }
     NotifyLocked(*state_, coords, FarWorldAuthorityChange::Membership);
@@ -376,7 +398,11 @@ void FarWorldAuthorityChanges::clear() {
             members.parked->bind_far_world_authority_changes({});
         }
     }
-    state_->index.clear();
+    for (auto entry = state_->index.begin(); entry != state_->index.end();) {
+        auto node = state_->index.extract(entry++);
+        node.mapped() = {};
+        state_->spare_nodes[state_->spare_count++] = std::move(node);
+    }
     state_->index_failed = false;
     state_->pending_count = 0;
     state_->overflow = false;
@@ -384,8 +410,11 @@ void FarWorldAuthorityChanges::clear() {
 }
 struct FarWorldAuthorityProducer::Impl {
     explicit Impl(const Limits& limits)
-        : state(std::make_shared<FarWorldAuthorityState>(limits))
-        , changes(std::make_shared<FarWorldAuthorityChanges>(state)) {}
+        : state(std::allocate_shared<FarWorldAuthorityState>(
+              FarVolumePoolAllocator<FarWorldAuthorityState>(limits.memory), limits))
+        , changes(std::allocate_shared<FarWorldAuthorityChanges>(
+              FarVolumePoolAllocator<FarWorldAuthorityChanges>(limits.memory), state))
+        , reader(limits.memory) {}
     std::shared_ptr<FarWorldAuthorityState> state;
     std::shared_ptr<FarWorldAuthorityChanges> changes;
     Save::AuthorityWindowReader reader;
@@ -394,16 +423,31 @@ struct FarWorldAuthorityProducer::Impl {
     // At most one active and one serving capture. Volatile arrays in each are
     // bounded by copy_bytes; committed arrays and parser scratch by read limits.
     // The successor retains only the fixed wanted descriptors, never source data.
-    std::unique_ptr<SourceCapture> active, serving;
+    std::shared_ptr<SourceCapture> active, serving;
     std::uint64_t serial = 0;
     std::uint32_t age = 0;
     Error error = Error::None;
-    std::string read_error;
+    // Diagnostic storage is included in the admitted Impl allocation.
+    std::array<char, 256> read_error{};
+    std::size_t read_error_size = 0;
+    void set_read_error(std::string_view value) {
+        read_error_size = std::min(value.size(), read_error.size() - 1);
+        std::copy_n(value.begin(), read_error_size, read_error.begin());
+    }
     bool configured = false, source_ready = false, queued = false, paused = false,
          requested = false;
 };
 FarWorldAuthorityProducer::FarWorldAuthorityProducer(const Limits& limits)
-    : impl_(std::make_unique<Impl>(limits)) {}
+    : FarWorldAuthorityProducer(limits, AdmitProducerControl(limits)) {}
+FarWorldAuthorityProducer::FarWorldAuthorityProducer(const Limits& limits,
+                                                     FarVolumeMemoryLease&& control)
+    : memory_(limits.memory)
+    , control_(std::move(control)) {
+    if (!memory_ || control_.pool() != memory_.get() || control_.bytes() != sizeof(Producer)) {
+        throw FarVolumeMemoryRefused();
+    }
+    impl_ = std::allocate_shared<Impl>(FarVolumePoolAllocator<Impl>(memory_), limits);
+}
 FarWorldAuthorityProducer::~FarWorldAuthorityProducer() = default;
 std::shared_ptr<FarWorldAuthorityChanges> FarWorldAuthorityProducer::changes() const {
     return impl_->changes;
@@ -456,8 +500,7 @@ FarWorldAuthorityProducer::Counters FarWorldAuthorityProducer::counters() const 
     return impl_->state->counters;
 }
 FarWorldAuthorityProducer::Error
-FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window,
-                                          std::vector<Image>& output) {
+FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window, Images& output) {
     auto& state = *impl_->state;
     const std::lock_guard lock(state.mutex);
     if (!ValidLimits(state.limits)) {
@@ -473,6 +516,10 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window,
         std::shared_ptr<Chunk> chunk;
         bool parked = false, terrain = false, water = false;
     };
+    FarVolumeMemoryLease scratch(*state.limits.memory);
+    if (!scratch.TryCharge(sizeof(std::array<Selected, 2u * kSlots>))) {
+        return Error::AllocationFailure;
+    }
     // Each indexed coordinate can contribute distinct terrain and water owners.
     std::array<Selected, 2u * kSlots> selected{};
     std::size_t count = 0;
@@ -521,28 +568,32 @@ FarWorldAuthorityProducer::copy_published(const Save::AuthorityWindow& window,
         }
     }
     try {
-        std::vector<Image> images;
+        Images images{FarVolumePoolAllocator<Image>(state.limits.memory)};
         images.reserve(count);
         for (std::size_t item = 0; item < count; ++item) {
             const auto& source = selected[item];
             const auto& chunk = *source.chunk;
-            Image image{.coords = chunk.get_coords(),
-                        .parked = source.parked,
-                        .terrain_authority = source.terrain,
-                        .water_authority = source.water,
-                        .water_resolution = 0,
-                        .sdf = {},
-                        .material = {},
-                        .bed = {},
-                        .depth = {}};
+            Image image{
+                .coords = chunk.get_coords(),
+                .parked = source.parked,
+                .terrain_authority = source.terrain,
+                .water_authority = source.water,
+                .water_resolution = 0,
+                .sdf = decltype(Image::sdf)(FarVolumePoolAllocator<float>(state.limits.memory)),
+                .material = decltype(Image::material)(
+                    FarVolumePoolAllocator<std::uint8_t>(state.limits.memory)),
+                .bed =
+                    decltype(Image::bed)(FarVolumePoolAllocator<std::int32_t>(state.limits.memory)),
+                .depth = decltype(Image::depth)(
+                    FarVolumePoolAllocator<std::int32_t>(state.limits.memory))};
             if (image.terrain_authority) {
-                image.sdf = chunk.sdf_data;
-                image.material = chunk.material_data;
+                image.sdf.assign(chunk.sdf_data.begin(), chunk.sdf_data.end());
+                image.material.assign(chunk.material_data.begin(), chunk.material_data.end());
             }
             if (image.water_authority) {
                 image.water_resolution = chunk.current_water_resolution.load();
-                image.bed = chunk.water_bed_mm;
-                image.depth = chunk.water_depth_mm;
+                image.bed.assign(chunk.water_bed_mm.begin(), chunk.water_bed_mm.end());
+                image.depth.assign(chunk.water_depth_mm.begin(), chunk.water_depth_mm.end());
             }
             images.push_back(std::move(image));
         }
@@ -562,6 +613,8 @@ bool FarWorldAuthorityProducer::admit_saved_source(const std::filesystem::path& 
         return false;
     }
     if (!impl_->reader.admit(root, limits, error)) {
+        impl_->error = Error::CommittedReadRefused;
+        impl_->set_read_error(error);
         return false;
     }
     impl_->source_ready = true;
@@ -576,7 +629,9 @@ FarWorldAuthorityProducer::read_committed(const Save::AuthorityWindow& window,
                                           const Save::AuthorityReadLimits& limits) const {
     if (impl_->paused || !impl_->source_ready) {
         Save::AuthorityWindowResult refused;
-        refused.error = impl_->paused ? "Source reads are paused." : "Source is unavailable.";
+        // Fits inline storage on supported standard libraries, including after
+        // the source memory domain has refused all further allocations.
+        refused.error = impl_->paused ? "source paused" : "no source";
         return refused;
     }
     return impl_->reader.read(window, limits);
@@ -649,7 +704,7 @@ void FarWorldAuthorityProducer::pump_capture() {
         if (committed.membership == Save::AuthorityMembership::Unavailable) {
             impl_->active.reset();
             impl_->error = Error::CommittedReadRefused;
-            impl_->read_error = std::move(committed.error);
+            impl_->set_read_error(committed.error);
             return;
         }
         impl_->active->committed = std::move(committed);
@@ -666,7 +721,8 @@ void FarWorldAuthorityProducer::pump_capture() {
         return;
     }
     try {
-        auto candidate = std::make_unique<SourceCapture>();
+        auto candidate = std::allocate_shared<SourceCapture>(
+            FarVolumePoolAllocator<SourceCapture>(impl_->state->limits.memory));
         candidate->window = impl_->capture_window;
         const auto error = copy_published(candidate->window, candidate->published);
         if (error != Error::None) {
@@ -677,7 +733,7 @@ void FarWorldAuthorityProducer::pump_capture() {
         impl_->active = std::move(candidate);
         impl_->age = 1;
         impl_->error = Error::None;
-        impl_->read_error.clear();
+        impl_->read_error_size = 0;
     } catch (const std::bad_alloc&) {
         impl_->error = Error::AllocationFailure;
     }
@@ -703,7 +759,7 @@ bool FarWorldAuthorityProducer::refresh_saved_source(const std::filesystem::path
     invalidate_source();
     const bool admitted = admit_saved_source(root, impl_->capture_limits.read, error);
     if (!admitted) {
-        impl_->read_error = error;
+        impl_->set_read_error(error);
     }
     return admitted;
 }
@@ -724,8 +780,8 @@ FarWorldAuthorityProducer::CaptureStatus FarWorldAuthorityProducer::capture_stat
             .latest_ready = serving != 0 && !impl_->active && !impl_->queued &&
                             impl_->source_ready && impl_->error == Error::None};
 }
-const std::string& FarWorldAuthorityProducer::capture_read_error() const {
-    return impl_->read_error;
+std::string_view FarWorldAuthorityProducer::capture_read_error() const {
+    return {impl_->read_error.data(), impl_->read_error_size};
 }
 
 FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_frozen(
@@ -768,6 +824,11 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_froze
         return {Error::None, FarFrozenCaptureError::WorkLimit};
     }
     // Fixed scratch: two published owners per index slot plus 512 committed records.
+    FarVolumeMemoryLease scratch(*impl_->state->limits.memory);
+    if (!scratch.TryCharge(sizeof(std::array<FrozenRecord, 3u * kSlots>) +
+                           sizeof(std::array<const FrozenRecord*, 3u * kSlots>))) {
+        return {Error::AllocationFailure, FarFrozenCaptureError::None};
+    }
     std::array<FrozenRecord, 3u * kSlots> storage{};
     std::array<const FrozenRecord*, 3u * kSlots> water_storage{};
     std::size_t count = 0, water_count = 0;
