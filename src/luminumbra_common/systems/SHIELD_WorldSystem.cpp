@@ -721,7 +721,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
         if (chunk->pending_generation_ready.load(std::memory_order_acquire)) {
             chunk->pending_generation_ready.store(false, std::memory_order_release);
             if (chunk->get_state() == Luminumbra::ChunkState::Loading) {
-                chunk->set_state(Luminumbra::ChunkState::Idle);
+                set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
             }
             if (m_far_world_changes) {
                 m_far_world_changes->notify(chunk->get_coords(),
@@ -1067,9 +1067,9 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // meshing lane's failure reversion, verbatim) so the chunk
                 // re-candidates on a later pass.
                 if (!HasRenderableGeometry(*chunk)) {
-                    chunk->set_state(Luminumbra::ChunkState::Idle);
+                    set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
                 } else {
-                    chunk->set_state(Luminumbra::ChunkState::Ready);
+                    set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Ready);
                 }
                 chunk->pending_lod.store(-1, std::memory_order_release);
             }
@@ -1151,7 +1151,7 @@ SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& 
         const bool has_active_mesh =
             chunk->get_state() == Luminumbra::ChunkState::Ready && HasRenderableGeometry(*chunk);
         if (!has_active_mesh) {
-            chunk->set_state(Luminumbra::ChunkState::Meshing);
+            set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Meshing);
         }
         chunk->pending_sdf_data.clear();
         chunk->pending_heightmap_data.clear();
@@ -4394,6 +4394,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                             physics_system->remove_chunk_collision(id);
                         m_activation_index.erase(*chunk);
                         note_digest_chunk(it->second, false, false);
+                        invalidate_renderable_chunks();
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4428,6 +4429,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     m_parked_bytes += bytes;
                     m_activation_index.erase(*chunk);
                     note_digest_chunk(it->second, false, false);
+                    invalidate_renderable_chunks();
                     it = m_streaming_state.chunks.erase(it);
                     shadow_note_evicted(id);
                     continue;
@@ -4437,6 +4439,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 physics_system->remove_chunk_collision(id);
             m_activation_index.erase(*it->second);
             note_digest_chunk(it->second, false, false);
+            invalidate_renderable_chunks();
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -4579,6 +4582,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                     return false;
                 if (it == m_streaming_state.chunks.end()) {
                     auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+                    invalidate_renderable_chunks();
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
                     m_activation_index.insert(it->second);
                     note_digest_chunk(it->second, false, true);
@@ -4590,7 +4594,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 chunks_to_consider_for_collision.push_back(surface_chunk);
                 if (chunk->get_state() != ChunkState::Ready || chunk->current_lod.load() != lod ||
                     chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
-                    chunk->set_state(ChunkState::Loading);
+                    set_renderable_chunk_state(*chunk, ChunkState::Loading);
                     chunks_to_build.push_back(surface_chunk);
                 }
             }
@@ -4668,7 +4672,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
                 ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
             }
-            chunk->set_state(ChunkState::Meshing);
+            set_renderable_chunk_state(*chunk, ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
                 *this, *chunk, 0.0f, build_chunk.step);
             chunk->applied_transition_faces.store(0, std::memory_order_release);
@@ -4678,7 +4682,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             chunk->current_lod.store(build_chunk.lod);
             chunk->mesh_version++;
             chunk->has_collision.store(false);
-            chunk->set_state(ChunkState::Ready);
+            set_renderable_chunk_state(*chunk, ChunkState::Ready);
         });
     }
 
@@ -5262,6 +5266,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                 const ChunkID id = Chunk::calculate_id(coords);
                 auto iterator = m_streaming_state.chunks.find(id);
                 if (iterator == m_streaming_state.chunks.end()) {
+                    invalidate_renderable_chunks();
                     iterator = m_streaming_state.chunks
                                    .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
                                    .first;
@@ -5279,7 +5284,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                     publish_generated_column_span(*chunk);
                     ++m_dirty_generation;
                     chunk->current_lod.store(-1, std::memory_order_release);
-                    chunk->set_state(ChunkState::Idle);
+                    set_renderable_chunk_state(*chunk, ChunkState::Idle);
                 }
                 if (chunk->sdf_data.size() != kFullSdfLattice)
                     return false;
@@ -5508,29 +5513,55 @@ float SHIELD_WorldSystem::get_density_at(const Vec3& world_pos) const {
     return SampleWorldGenLayers(world_pos).final_density;
 }
 
+void SHIELD_WorldSystem::invalidate_renderable_chunks() {
+    // Owner-thread residency changes clear borrowed pointers before releasing ownership.
+    m_renderable_chunks.clear();
+    m_renderable_chunks_dirty.store(true, std::memory_order_release);
+}
+
+void SHIELD_WorldSystem::set_renderable_chunk_state(Chunk& chunk, ChunkState state) {
+    const bool was_ready = chunk.get_state() == ChunkState::Ready;
+    chunk.set_state(state);
+    if (was_ready != (state == ChunkState::Ready)) {
+        m_renderable_chunks_dirty.store(true, std::memory_order_release);
+    }
+}
+
 std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
-    // Client render-path observation: publish drained-and-due front batches
-    // (main-thread, idempotent; non-force — see the 5b regime note).
+    const auto& renderable = renderable_chunks_view();
+    std::vector<Luminumbra::Chunk*> snapshot(renderable);
+    m_snapshot_copies.fetch_add(snapshot.size(), std::memory_order_relaxed);
+    if (!snapshot.empty()) {
+        ++m_renderable_view_work.allocations;
+    }
+    return snapshot;
+}
+
+const std::vector<Luminumbra::Chunk*>& SHIELD_WorldSystem::renderable_chunks_view() {
+    // Client render-path observation: retain publication order and non-force semantics.
     publish_completed_generation_jobs(/*force=*/false);
     process_completed_meshing_jobs(/*force=*/false);
 
-    std::vector<Luminumbra::Chunk*> renderable;
-    renderable.reserve(m_streaming_state.chunks.size());
-
-    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-        if (chunk_ptr->get_state() == Luminumbra::ChunkState::Ready) {
-            if (!chunk_ptr->mesh_vertices.empty()) {
-                renderable.push_back(chunk_ptr.get());
-
-                // Debug logging disabled to prevent segfault from static atomics
-            }
+    if (!m_renderable_chunks_dirty.load(std::memory_order_acquire)) {
+        return m_renderable_chunks;
+    }
+    // Reserve before acknowledging invalidation: allocation failure keeps it dirty.
+    // Capacity is bounded by peak residency; unchanged frames do no allocation or visits.
+    if (m_renderable_chunks.capacity() < m_streaming_state.chunks.size()) {
+        m_renderable_chunks.reserve(m_streaming_state.chunks.size());
+        ++m_renderable_view_work.allocations;
+    }
+    m_renderable_chunks_dirty.exchange(false, std::memory_order_acq_rel);
+    m_renderable_chunks.clear();
+    ++m_renderable_view_work.rebuilds;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        ++m_renderable_view_work.chunk_visits;
+        if (chunk->get_state() == ChunkState::Ready && !chunk->mesh_vertices.empty()) {
+            m_renderable_chunks.push_back(chunk.get());
         }
     }
-
-    // Performance logging removed from hot path - use profiler instead
-
-    m_snapshot_copies.fetch_add(renderable.size(), std::memory_order_relaxed);
-    return renderable;
+    m_snapshot_copies.fetch_add(m_renderable_chunks.size(), std::memory_order_relaxed);
+    return m_renderable_chunks;
 }
 
 SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stats() const {
@@ -6049,7 +6080,8 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         }
 
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
-        chunk->set_state(Luminumbra::ChunkState::Loading);
+        set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Loading);
+        invalidate_renderable_chunks();
         m_streaming_state.chunks[chunk->get_id()] = chunk;
         m_activation_index.insert(chunk);
         note_digest_chunk(chunk, false, true);
@@ -6240,7 +6272,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
             chunk->get_state() == Luminumbra::ChunkState::Ready && HasRenderableGeometry(*chunk);
 
         if (!has_active_mesh) {
-            chunk->set_state(Luminumbra::ChunkState::Meshing);
+            set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Meshing);
         }
         chunk->pending_mesh_vertices.clear();
         chunk->pending_mesh_indices.clear();
@@ -6453,6 +6485,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 // publish that used to live here moved to
                 // process_completed_promotion_jobs — the meshing lane is
                 // render-only and never writes sim truth.
+                m_renderable_chunks_dirty.store(true, std::memory_order_release);
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
                 chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
                 chunk->current_lod.store(completed_lod, std::memory_order_release);
@@ -6519,9 +6552,9 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             ((job_chunk.terrain_mesh_required && terrain_current) ||
              (water_current && (!job_chunk.terrain_mesh_required || terrain_current)));
         if (published || HasRenderableGeometry(*chunk)) {
-            chunk->set_state(Luminumbra::ChunkState::Ready);
+            set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Ready);
         } else {
-            chunk->set_state(Luminumbra::ChunkState::Idle);
+            set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
         }
         if (chunk->get_state() == Luminumbra::ChunkState::Ready) {
             shadow_note_ready(chunk->get_id()); //  shadow: first-activation latency
@@ -6609,6 +6642,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
             physics_system->remove_chunk_collision(id);
         }
     }
+    invalidate_renderable_chunks();
     m_streaming_state.chunks.clear();
     m_parked.clear();
     m_durable_chunks.clear();
@@ -7190,6 +7224,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
             m_activation_index.erase(*resident->second);
             note_digest_chunk(resident->second, false, false);
         }
+        invalidate_renderable_chunks();
         m_streaming_state.chunks.erase(resident);
     };
     if (m_parked.contains(id)) {
@@ -7258,9 +7293,10 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
     }
     if (chunk) {
         chunk->current_lod.store(-1, std::memory_order_release);
-        chunk->set_state(Luminumbra::ChunkState::Idle);
+        set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
         m_activation_index.insert(chunk);
         note_digest_chunk(chunk, false, true);
+        invalidate_renderable_chunks();
         m_streaming_state.chunks.emplace(id, chunk);
         ++m_dirty_generation;
     }
@@ -7313,7 +7349,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     // stuck-Loading adoptee would never re-candidate for anything.
     if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
-        chunk->set_state(Luminumbra::ChunkState::Idle);
+        set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
     }
     if (!m_parked.empty()) {
         const auto parked = m_parked.find(chunk->get_id());
@@ -7330,6 +7366,10 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         // Saved terrain authority that also carries water remains sticky across backfills.
         // Water-only records already restore their separate authority from water_state.
         chunk->set_water_authority();
+    }
+    // Even an insertion that rehashes changes the reference scan's iteration order.
+    if (!m_streaming_state.chunks.contains(chunk->get_id())) {
+        invalidate_renderable_chunks();
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {

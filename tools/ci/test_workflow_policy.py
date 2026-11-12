@@ -18,11 +18,13 @@ import argparse
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing
+from http.client import IncompleteRead
 from itertools import islice, product
 import fnmatch
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shlex
@@ -40,6 +42,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shell as shell
+import base_match
 import ctest_shards as shards
 
 
@@ -3172,74 +3175,481 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
     def retarget_workflow():
         return (ROOT / ".github/workflows/base-retarget.yml").read_text(encoding="utf-8")
 
-    def test_base_retarget_workflow_subscribes_only_to_edited(self):
+    def test_base_retarget_workflow_reports_every_ci_event_and_edit(self):
         workflow = self.retarget_workflow()
         trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(trigger.strip(), "pull_request:\n    types: [edited]")
+        expected = ["opened", "synchronize", "reopened", "ready_for_review",
+                    "converted_to_draft", "labeled", "unlabeled", "edited"]
+        self.assertEqual(trigger.strip(), "pull_request:\n    types: [" + ", ".join(expected) + "]")
+        ci_trigger = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertEqual(set(value(ci_trigger, "types", 4).strip("[]").split(", ")),
+                         set(expected) - {"edited"})
+        self.assertEqual(base_match.CI_EVENTS, set(expected) - {"edited"})
+        self.assertNotIn("pull_request_target", workflow)
         self.assertEqual(set(jobs(workflow)), {"base-retarget"})
-        self.assertIsNone(value(workflow, "concurrency", 0))
+        self.assertEqual(value(workflow, "group", 2),
+                         "${{ github.workflow }}-${{ github.event.pull_request.number }}")
+        self.assertEqual(value(workflow, "cancel-in-progress", 2), "false")
 
-    def test_base_retarget_check_is_static_and_only_admits_base_changes(self):
-        job = jobs(self.retarget_workflow())["base-retarget"]
-        name = value(job, "name", 4)
-        self.assertEqual(name, "Base retarget / fresh CI required")
-        self.assertNotIn("${{", name)
-        required = {context for contexts in REQUIRED_CONTEXT_JOBS.values() for context in contexts.values()}
-        required.update(("Windows / MSVC", "Windows / MSYS2 UCRT64"))
-        self.assertNotIn(name, required)
-        self.assertEqual(value(job, "if", 4), "${{ github.event.changes.base }}")
-        self.assertIsNone(value(job, "needs", 4))
-        self.assertIsNone(value(job, "strategy", 4))
-        ignored = (None, {}, {"title": {"from": "old"}}, {"body": {"from": ""}},
-                   {"unknown": {}}, {"base": None}, {"base": ""}, {"base": False})
-        changed = ({"base": {}}, {"base": {"ref": {}}},
-                   {"base": {"ref": {"from": "devel"}}})
-        # 11 payloads x 2 bases x 3 draft states x 2 label sets x 3 path states.
-        for changes, base, draft, labels, paths in product(
-                (*ignored, *changed), ("main", "devel"), (False, True, None),
-                ((), ("windows-proof",)), ("true", "false", "")):
-            with self.subTest(changes=changes, base=base, draft=draft, labels=labels, paths=paths):
-                self.assertEqual(bool(self.admitted(job, self.context(
-                    changes=changes, base=base, draft=draft, labels=labels, paths=paths))),
-                    changes in changed)
-
-    def test_base_retarget_fails_safely_with_refs_and_retrigger_instructions(self):
+    def test_base_retarget_check_always_computes_with_static_context(self):
         workflow = self.retarget_workflow()
-        permissions = workflow.split("\npermissions:\n", 1)[1].split("\njobs:", 1)[0]
-        self.assertEqual(permissions.strip(), "contents: read")
         job = jobs(workflow)["base-retarget"]
-        self.assertIsNone(value(job, "permissions", 4))
-        self.assertIsNone(value(job, "continue-on-error", 4))
+        self.assertEqual(value(job, "name", 4), "Base retarget / fresh CI required")
+        for key in ("if", "needs", "strategy", "permissions", "continue-on-error"):
+            self.assertIsNone(value(job, key, 4))
         self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
-        self.assertNotIn("uses:", job)
-        job_steps = steps(job)
-        self.assertEqual(len(job_steps), 1)
-        step = job_steps[0]
-        self.assertIsNone(value(step, "if", 8))
-        self.assertIsNone(value(step, "continue-on-error", 8))
-        self.assertEqual(value(step, "shell", 8), "bash")
-        self.assertEqual(value(step, "PREVIOUS_BASE", 10), "${{ github.event.changes.base.ref.from }}")
-        self.assertEqual(value(step, "CURRENT_BASE", 10), "${{ github.event.pull_request.base.ref }}")
-        script = value(step, "run", 8)
-        self.assertNotIn("${{", script)
-        instructions = ("Re-trigger CI on the new base: push a new head, toggle ready for review, "
-                        "or change a label. Land only with a CI run whose base matches the current PR base.")
+        permissions = workflow.split("\npermissions:\n", 1)[1].split("\nconcurrency:", 1)[0]
+        self.assertEqual(permissions.strip(), "actions: read\n  contents: read\n  pull-requests: read")
+        checkout, check = steps(job)
+        for step in (checkout, check):
+            self.assertIsNone(value(step, "if", 8))
+            self.assertIsNone(value(step, "continue-on-error", 8))
+        self.assertEqual(value(checkout, "uses", 8),
+                         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1")
+        self.assertEqual(value(checkout, "ref", 10), "${{ github.event.pull_request.base.sha }}")
+        self.assertEqual(value(checkout, "sparse-checkout", 10), "tools/ci/base_match.py")
+        self.assertEqual(value(checkout, "sparse-checkout-cone-mode", 10), "false")
+        self.assertEqual(value(checkout, "persist-credentials", 10), "false")
+        self.assertEqual(value(check, "GH_TOKEN", 10), "${{ github.token }}")
+        self.assertEqual(value(check, "run", 8), "python3 -I -B tools/ci/base_match.py")
+        self.assertNotIn("${{", value(check, "run", 8))
+
+    @staticmethod
+    def base_event(action="edited", base="main", **extra):
+        return {"action": action, "pull_request": {"number": 17, "head": {"sha": "a" * 40},
+                "base": {"ref": base}, **extra}}
+
+    @staticmethod
+    def base_run(base="devel", run_id=2, number=17):
+        return {"id": run_id, "created_at": "2026-01-01T00:00:00Z", "event": "pull_request",
+                "head_sha": "a" * 40, "pull_requests": [{"number": number, "base": {"ref": base}}]}
+
+    def base_live_cli(self, event, payload, error=None):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            # Empty/partial metadata and shell metacharacters must still fail safely.
-            for previous, current in (("devel", "main"), ("main", "devel"), ("", "main"),
-                                      ("devel", ""), ("", ""),
-                                      ('$(touch injected);`touch injected`', '"; touch injected; #')):
-                with self.subTest(previous=previous, current=current):
-                    process = run_bash_script(script, cwd=root, env={**os.environ,
-                        "PREVIOUS_BASE": previous, "CURRENT_BASE": current},
-                        capture_output=True, text=True, timeout=5)
-                    self.assertEqual(process.returncode, 1, process.stderr)
-                    self.assertEqual(process.stdout,
-                                     f'Base retargeted from "{previous}" to "{current}". Fresh CI required.\n'
-                                     + instructions + "\n")
-                    self.assertEqual(process.stderr, "")
-                    self.assertEqual(list(root.iterdir()), [])
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(event), encoding="utf-8")
+            with patch.dict(os.environ, GITHUB_REPOSITORY="owner/repo", GH_TOKEN="token"), \
+                    patch.object(base_match, "urlopen", side_effect=error,
+                                 return_value=io.BytesIO(payload)) as request, \
+                    patch.object(base_match, "fetch_runs", return_value={"total_count": 1,
+                                 "workflow_runs": [self.base_run(event["pull_request"]["base"]["ref"])]}), \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                result = base_match.main(["--event", str(path)])
+                return result, output.getvalue(), request.call_args_list
+
+    def base_injected_cli(self, event, api, run_attempt=None, live=None):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path, api_path, pr_path = (Path(directory) / name for name in
+                                             ("event.json", "api.json", "pr.json"))
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            if api is not None:
+                api_path.write_text(api if isinstance(api, str) else json.dumps(api), encoding="utf-8")
+            pr_path.write_text(json.dumps(event["pull_request"] if live is None else live), encoding="utf-8")
+            argv = ["--event", str(event_path), "--api-json", str(api_path), "--pr-json", str(pr_path)]
+            if run_attempt is not None:
+                argv.extend(("--run-attempt", run_attempt))
+            with patch.object(base_match, "fetch_runs", side_effect=AssertionError("unexpected runs request")), \
+                    patch.object(base_match, "fetch_pull", side_effect=AssertionError("unexpected live request")), \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                result = base_match.main(argv)
+            return result, output.getvalue()
+
+    @patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1")
+    def test_base_match_rerun_after_round_trip_retarget_requires_newest_ci(self):
+        devel = self.base_run("devel", 2)
+        main = self.base_run("main", 3)
+        initial = {"total_count": 1, "workflow_runs": [devel]}
+        for action in sorted(base_match.CI_EVENTS):
+            opened = self.base_event(action, "devel")
+            with self.subTest(action=action):
+                result, output = self.base_injected_cli(opened, None)
+                self.assertEqual(result, 0, output)
+                result, output = self.base_injected_cli(self.base_event(base="main"), initial)
+                self.assertEqual(result, 1, output)
+                self.assertIn("BASEMISMATCH", output)
+                result, output = self.base_injected_cli(self.base_event(action, "main"), None)
+                self.assertEqual(result, 0, output)
+                for runs in ([devel, main], [main, devel]):
+                    latest = {"total_count": 2, "workflow_runs": runs}
+                    result, output = self.base_injected_cli(self.base_event(base="devel"), latest)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("BASEMISMATCH", output)
+                    with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="2"):
+                        result, output = self.base_injected_cli(opened, latest)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("BASEMISMATCH ci.yml run 3 base='main'", output)
+                    self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_rerun_accepts_newest_matching_ci(self):
+        for action, base, draft in product((*sorted(base_match.CI_EVENTS), "edited"),
+                                           ("main", "devel"), (True, False)):
+            event = self.base_event(action, base, draft=draft)
+            old_base = "main" if base == "devel" else "devel"
+            runs = [self.base_run(old_base, 2), self.base_run(base, 3), self.base_run(old_base, 4, 18)]
+            # Re-running the older CI cannot make its recorded base newer.
+            runs[0]["run_attempt"] = 99
+            with self.subTest(action=action, base=base, draft=draft):
+                result, output = self.base_injected_cli(event, {"total_count": 3, "workflow_runs": runs}, "2")
+                self.assertEqual(result, 0, output)
+                self.assertIn(f"BASEMATCH ci.yml run 3 base={base!r}", output)
+
+    def test_base_match_first_attempt_ignores_listing_and_attempt_override_wins(self):
+        for action in sorted(base_match.CI_EVENTS):
+            event = self.base_event(action, "devel")
+            for attempt in ("1", "01", "0001"):
+                with self.subTest(action=action, attempt=attempt), patch.dict(os.environ, GITHUB_RUN_ATTEMPT="x"):
+                    result, output = self.base_injected_cli(event, None, attempt)
+                    self.assertEqual(result, 0, output)
+                    self.assertIn(f"{action} starts CI", output)
+        with patch.dict(os.environ, {}, clear=True):
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None)
+        self.assertEqual(result, 0, output)
+        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1"):
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None, "2")
+        self.assertEqual(result, 1, output)
+        self.assertIn("failed closed", output)
+
+    def test_base_match_invalid_run_attempt_fails_closed(self):
+        invalid = ("0", "-1", "x", "", "00", "+1", "1.0", "1e2", " 1", "1 ", "1\n", "\u0661")
+        for action, attempt, source in product((*sorted(base_match.CI_EVENTS), "edited"), invalid, ("cli", "env")):
+            event = self.base_event(action)
+            api = {"total_count": 1, "workflow_runs": [self.base_run("main")]}
+            with self.subTest(action=action, attempt=attempt, source=source), \
+                    patch.dict(os.environ, GITHUB_RUN_ATTEMPT=attempt):
+                result, output = self.base_injected_cli(event, api, attempt if source == "cli" else None)
+                self.assertEqual(result, 1, output)
+                self.assertIn("invalid run attempt: expected a positive decimal integer", output)
+                self.assertNotIn("BASEMATCH", output)
+        for attempt in (*invalid, None, 0, 1, True):
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, "invalid run attempt"):
+                base_match.evaluate(self.base_event("opened"), None, attempt)
+        for attempt in ("2", "02", "9" * 5000):
+            with self.subTest(attempt=attempt[:20]):
+                self.assertIn("ci.yml run 2", base_match.evaluate(self.base_event("opened"),
+                              {"total_count": 1, "workflow_runs": [self.base_run("main")]}, attempt))
+
+    def test_base_match_rerun_missing_or_invalid_listing_fails_closed(self):
+        valid = self.base_run("main")
+        invalid = (None, "{", "null", "{}", {"total_count": 0, "workflow_runs": []},
+                   {"total_count": 1, "workflow_runs": []},
+                   {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": []}]},
+                   {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": [{"number": 17}]}]},
+                   {"total_count": 1, "workflow_runs": [self.base_run("main", 2, 18)]},
+                   {"total_count": 1, "workflow_runs": [{**valid, "head_sha": "b" * 40}]})
+        for action, api in product(sorted(base_match.CI_EVENTS), invalid):
+            with self.subTest(action=action, api=api):
+                result, output = self.base_injected_cli(self.base_event(action), api, "2")
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_rerun_fetches_evidence_before_final_live_check(self):
+        event = self.base_event("opened", "devel")
+        api = {"total_count": 1, "workflow_runs": [self.base_run("devel")]}
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            event["action"] = action
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "event.json"
+                path.write_text(json.dumps(event), encoding="utf-8")
+                for error in (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
+                              IncompleteRead(b"{", 10)):
+                    with self.subTest(action=action, error=error), \
+                            patch.object(base_match, "fetch_runs", side_effect=error) as runs, \
+                            patch.object(base_match, "fetch_pull") as pull, \
+                            patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                        self.assertEqual(base_match.main(["--event", str(path), "--run-attempt", "2"]), 1)
+                        runs.assert_called_once()
+                        pull.assert_not_called()
+                        self.assertIn("failed closed", output.getvalue())
+                        self.assertNotIn("BASEMATCH", output.getvalue())
+                for live in (event["pull_request"], self.base_event(base="main")["pull_request"],
+                             {**event["pull_request"], "head": {"sha": "b" * 40}}, {}):
+                    calls = MagicMock()
+                    with self.subTest(action=action, live=live), \
+                            patch.object(base_match, "fetch_runs", return_value=api) as runs, \
+                            patch.object(base_match, "fetch_pull", return_value=live) as pull, \
+                            patch.object(base_match, "require_live", wraps=base_match.require_live) as require, \
+                            patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                        calls.attach_mock(runs, "runs")
+                        calls.attach_mock(pull, "pull")
+                        calls.attach_mock(require, "require")
+                        result = base_match.main(["--event", str(path), "--run-attempt", "2"])
+                    self.assertEqual([call[0] for call in calls.mock_calls], ["runs", "pull", "require"])
+                    self.assertEqual(result, 0 if live == event["pull_request"] else 1, output.getvalue())
+                    if result:
+                        self.assertIn("failed closed", output.getvalue())
+                        self.assertNotIn("BASEMATCH", output.getvalue())
+
+    def test_base_match_stale_rerun_after_retarget_fails(self):
+        live = self.base_event(base="devel")["pull_request"]
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            with self.subTest(action=action):
+                result, output, _ = self.base_live_cli(self.base_event(action), json.dumps(live).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("stale event", output)
+                self.assertIn("re-trigger CI", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_stale_rerun_after_push_fails(self):
+        live = self.base_event()["pull_request"]
+        live["head"]["sha"] = "b" * 40
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            with self.subTest(action=action):
+                result, output, _ = self.base_live_cli(self.base_event(action), json.dumps(live).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("stale event", output)
+                self.assertIn("re-trigger CI", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_outside_ci_branch_filter_fails_closed(self):
+        for action, base in product((*sorted(base_match.CI_EVENTS), "edited"), ("release", "", "Main")):
+            event = self.base_event(action, base)
+            with self.subTest(action=action, base=base):
+                result, output, calls = self.base_live_cli(event, json.dumps(event["pull_request"]).encode())
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+                if base:
+                    self.assertIn("CI does not run for base", output)
+                self.assertNotIn("BASEMATCH", output)
+                self.assertEqual(calls, [])
+
+    def test_base_match_live_api_failure_and_malformed_response_fail_closed(self):
+        valid = self.base_event()["pull_request"]
+        invalid = [None, [], {}, {**valid, "number": True}, {**valid, "number": 0},
+                   {**valid, "number": "17"}, {**valid, "number": 18},
+                   {**valid, "head": None}, {**valid, "head": {}},
+                   {**valid, "base": []}, {**valid, "base": {}}]
+        invalid.extend({**valid, "head": {"sha": head}} for head in (None, "", "a" * 39, 42))
+        invalid.extend({**valid, "base": {"ref": base}} for base in (None, "", 42))
+        payloads = [json.dumps(data).encode() for data in invalid]
+        payloads.extend((b"", b"{", b"\xff", b"[" * 1100 + b"]" * 1100,
+                         b"x" * (base_match.MAX_PAGE_BYTES + 1)))
+        errors = (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
+                  IncompleteRead(b"{", 10))
+        for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            for payload, error in [*((payload, None) for payload in payloads),
+                                   *((b"", error) for error in errors)]:
+                with self.subTest(action=action, payload=payload[:80], error=error):
+                    result, output, _ = self.base_live_cli(self.base_event(action), payload, error)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("failed closed", output)
+                    self.assertNotIn("BASEMATCH", output)
+            result, output, calls = self.base_live_cli(self.base_event(action), json.dumps(valid).encode())
+            self.assertEqual(result, 0, output)
+            self.assertEqual(len(calls), 1)
+            args, kwargs = calls[0]
+            self.assertEqual(args[0].full_url, "https://api.github.com/repos/owner/repo/pulls/17")
+            self.assertEqual(args[0].get_method(), "GET")
+            self.assertEqual(args[0].get_header("Authorization"), "Bearer token")
+            self.assertEqual(args[0].get_header("Accept"), "application/vnd.github+json")
+            self.assertEqual(args[0].get_header("X-github-api-version"), "2022-11-28")
+            self.assertEqual(kwargs, {"timeout": 20})
+        for repository, number, token in (("../repo", 17, "token"), ("owner/..", 17, "token"),
+                                          ("owner/repo", 17, ""), ("owner/repo", True, "token"),
+                                          ("owner/repo", 0, "token"), ("owner/repo", "17", "token")):
+            with self.subTest(repository=repository, number=number, token=token), self.assertRaises(ValueError):
+                base_match.fetch_pull(repository, number, token,
+                                      MagicMock(side_effect=AssertionError("unexpected request")))
+        response = MagicMock(wraps=io.BytesIO(json.dumps(valid).encode()))
+        with patch.object(base_match, "urlopen", return_value=closing(response)):
+            self.assertEqual(base_match.fetch_pull("owner/repo", 17, "token"), valid)
+        response.read.assert_called_once_with(base_match.MAX_PAGE_BYTES + 1)
+
+    def test_base_match_ci_branch_filter_matches_workflow(self):
+        trigger = self.workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        branches = value(trigger, "branches", 4)
+        self.assertRegex(branches, r"^\[[A-Za-z0-9_-]+(?:, [A-Za-z0-9_-]+)*\]$")
+        self.assertEqual(base_match.CI_BASES, frozenset(branches[1:-1].split(", ")))
+        self.assertIsNone(value(trigger, "branches-ignore", 4))
+
+    def test_base_retarget_concurrency_never_cancels_running_guard(self):
+        workflow = self.retarget_workflow()
+        self.assertEqual(value(workflow, "group", 2),
+                         "${{ github.workflow }}-${{ github.event.pull_request.number }}")
+        self.assertEqual(value(workflow, "cancel-in-progress", 2), "false")
+
+    def test_base_match_retarget_and_title_edit_require_new_ci(self):
+        old = self.base_run()
+        api = {"total_count": 1, "workflow_runs": [old]}
+        for changes in ({"base": {"ref": {"from": "devel"}}}, {"title": {"from": "old"}},
+                        {"body": {"from": "old"}}, {}, None):
+            event = {**self.base_event(), "changes": changes}
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "BASEMISMATCH"):
+                base_match.evaluate(event, api)
+        new = self.base_run("main", 3)
+        for runs in ([old, new], [new, old]):
+            self.assertIn("run 3 base='main'", base_match.evaluate(
+                self.base_event(), {"total_count": 2, "workflow_runs": runs}))
+        # A later attempt of an older run does not create newer base evidence.
+        old["run_attempt"] = 99
+        self.assertIn("run 3", base_match.evaluate(self.base_event(),
+                      {"total_count": 2, "workflow_runs": [old, new]}))
+        new["created_at"] = "2025-12-31T23:59:59Z"
+        with self.assertRaisesRegex(ValueError, "BASEMISMATCH"):
+            base_match.evaluate(self.base_event(), {"total_count": 2, "workflow_runs": [old, new]})
+
+    def test_base_match_never_retargeted_on_every_event_including_drafts(self):
+        for action, draft, base in product((*sorted(base_match.CI_EVENTS), "edited"), (True, False), ("main", "devel")):
+            event = self.base_event(action, base, draft=draft)
+            api = {"total_count": 1, "workflow_runs": [self.base_run(base)]} if action == "edited" else None
+            with self.subTest(action=action, draft=draft, base=base):
+                self.assertIn("BASEMATCH", base_match.evaluate(event, api))
+                self.assertIn(f"base={base!r}", base_match.evaluate(event, api))
+
+    def test_base_match_missing_invalid_and_unrelated_evidence_fails_closed(self):
+        mutations = ({"pull_requests": []}, {"pull_requests": None}, {"pull_requests": [{}]},
+                     {"pull_requests": [{"number": 17}]},
+                     {"pull_requests": [{"number": 17, "base": {}}]},
+                     {"pull_requests": [{"number": 17, "base": None}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": ""}}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": None}}]},
+                     {"pull_requests": [{"number": 17, "base": {"ref": 42}}]},
+                     {"pull_requests": [{"number": 18, "base": {"ref": "main"}}]},
+                     {"pull_requests": [*self.base_run()["pull_requests"]] * 2},
+                     {"event": "push"}, {"head_sha": "b" * 40}, {"id": True},
+                     {"created_at": "unknown"})
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError, TypeError)):
+                base_match.evaluate(self.base_event(), {"total_count": 1,
+                                    "workflow_runs": [{**self.base_run("main"), **mutation}]})
+        for api in ({"total_count": 0, "workflow_runs": []}, {"total_count": 1, "workflow_runs": []},
+                    {"total_count": True, "workflow_runs": []}, {"total_count": 0, "workflow_runs": {}},
+                    {"total_count": 2, "workflow_runs": [self.base_run()] * 2}):
+            with self.subTest(api=api), self.assertRaises(ValueError):
+                base_match.evaluate(self.base_event(), api)
+        unknown = {**self.base_run("main", 4), "pull_requests": []}
+        with self.assertRaisesRegex(ValueError, "no usable"):
+            base_match.evaluate(self.base_event(), {"total_count": 2,
+                                "workflow_runs": [self.base_run("main"), unknown]})
+        # Runs for another PR sharing the head must not mask this PR's newest run.
+        self.assertIn("run 2", base_match.evaluate(self.base_event(), {"total_count": 2,
+                      "workflow_runs": [self.base_run("devel", 3, 18), self.base_run("main")]}))
+        for mutation in ({"action": "closed"}, {"pull_request": {}},
+                         {"pull_request": {**self.base_event()["pull_request"], "number": True}}):
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError)):
+                base_match.evaluate({**self.base_event(), **mutation}, None)
+
+    def test_base_match_api_reads_all_pages_and_refuses_partial_data(self):
+        requests = []
+        def opener(request, timeout):
+            requests.append(request)
+            self.assertEqual(timeout, 20)
+            self.assertIn("head_sha=" + "a" * 40, request.full_url)
+            self.assertIn("event=pull_request", request.full_url)
+            self.assertIn("/actions/workflows/ci.yml/runs?", request.full_url)
+            self.assertEqual(request.get_header("Authorization"), "Bearer token")
+            runs = [self.base_run("devel", i + 1) for i in range(100)] if len(requests) == 1 else [self.base_run("main", 101)]
+            return io.BytesIO(json.dumps({"total_count": 101, "workflow_runs": runs}).encode())
+        api = base_match.fetch_runs("owner/repo", "a" * 40, "token", opener)
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[1].full_url.endswith("page=2"))
+        self.assertIn("run 101", base_match.evaluate(self.base_event(), api))
+        for data in ({"total_count": 1001, "workflow_runs": []},
+                     {"total_count": 1, "workflow_runs": []},
+                     {"total_count": 0, "workflow_runs": [self.base_run()]},
+                     {"total_count": True, "workflow_runs": []},
+                     {"total_count": 0, "workflow_runs": None},
+                     {"total_count": 101, "workflow_runs": [self.base_run()] * 101}):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                      lambda *args, **kwargs: io.BytesIO(json.dumps(data).encode()))
+        pages = [{"total_count": 101, "workflow_runs": [self.base_run()] * 100},
+                 {"total_count": 102, "workflow_runs": [self.base_run()]}]
+        with self.assertRaisesRegex(ValueError, "changed during pagination"):
+            base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                  lambda *args, **kwargs: io.BytesIO(json.dumps(pages.pop(0)).encode()))
+        for count, batch_size, expected in ((0, 0, 0), (1000, 100, 1000), (1000, 1, None)):
+            calls = []
+            def bounded_opener(*args, **kwargs):
+                calls.append(1)
+                runs = [self.base_run("main", (len(calls) - 1) * batch_size + index + 1)
+                        for index in range(batch_size)]
+                return io.BytesIO(json.dumps({"total_count": count, "workflow_runs": runs}).encode())
+            with self.subTest(count=count, batch_size=batch_size):
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "pagination limit"):
+                        base_match.fetch_runs("owner/repo", "a" * 40, "token", bounded_opener)
+                else:
+                    complete = base_match.fetch_runs("owner/repo", "a" * 40, "token", bounded_opener)
+                    self.assertEqual(len(complete["workflow_runs"]), expected)
+                self.assertEqual(len(calls), 1 if count == 0 else 10)
+        for repository, head, token in (("../repo", "a" * 40, "token"),
+                                        ("owner/repo", "bad", "token"), ("owner/repo", "a" * 40, "")):
+            with self.subTest(repository=repository, head=head, token=token), self.assertRaises(ValueError):
+                base_match.fetch_runs(repository, head, token, MagicMock(side_effect=AssertionError("unexpected request")))
+        for payload in (b"{", b"x" * (base_match.MAX_PAGE_BYTES + 1)):
+            with self.subTest(size=len(payload)), self.assertRaises(ValueError):
+                base_match.fetch_runs("owner/repo", "a" * 40, "token",
+                                      lambda *args, **kwargs: io.BytesIO(payload))
+        with self.assertRaises(TimeoutError):
+            base_match.fetch_runs("owner/repo", "a" * 40, "token", MagicMock(side_effect=TimeoutError("deadline")))
+
+    def test_base_match_cli_injected_json_and_error_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path, api_path = Path(directory) / "event.json", Path(directory) / "api.json"
+            pr_path = Path(directory) / "pr.json"
+            pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
+            event_path.write_text(json.dumps(self.base_event()), encoding="utf-8")
+            api_path.write_text(json.dumps({"total_count": 1, "workflow_runs": [self.base_run()]}), encoding="utf-8")
+            argv = ["--event", str(event_path), "--api-json", str(api_path), "--pr-json", str(pr_path)]
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("BASEMISMATCH", output.getvalue())
+                for action in base_match.CI_EVENTS:
+                    self.assertIn(action, output.getvalue())
+            api_path.write_text(json.dumps({"total_count": 1, "workflow_runs": [self.base_run("main")]}), encoding="utf-8")
+            process = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "tools/ci/base_match.py"), *argv],
+                                     capture_output=True, text=True, timeout=5)
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            for payload in ("{", "null", "{}", json.dumps(self.base_event(base="devel")["pull_request"])):
+                pr_path.write_text(payload, encoding="utf-8")
+                with self.subTest(live=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(argv), 1)
+                    self.assertIn("failed closed", output.getvalue())
+                    self.assertNotIn("BASEMATCH", output.getvalue())
+            pr_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("failed closed", output.getvalue())
+            pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
+            for action in sorted(base_match.CI_EVENTS):
+                event_path.write_text(json.dumps(self.base_event(action)), encoding="utf-8")
+                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path)}), \
+                        patch.object(base_match, "fetch_runs", side_effect=AssertionError("unexpected runs request")), \
+                        patch.object(base_match, "fetch_pull", return_value=self.base_event()["pull_request"]) as live, \
+                        patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main([]), 0)
+                    live.assert_called_once()
+                    self.assertIn("Checking base='main'", output.getvalue())
+                    self.assertIn("BASEMATCH", output.getvalue())
+            event_path.write_text(json.dumps(self.base_event()), encoding="utf-8")
+            for payload in ("{", "null", "{}"):
+                api_path.write_text(payload, encoding="utf-8")
+                with self.subTest(payload=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(argv), 1)
+                    self.assertIn("failed closed", output.getvalue())
+            api_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(argv), 1)
+                self.assertIn("failed closed", output.getvalue())
+            for error in (TimeoutError("deadline"), base_match.URLError("denied")):
+                with patch.object(base_match, "fetch_runs", side_effect=error), \
+                        patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                    self.assertIn("failed closed", output.getvalue())
+
+            for payload in ("{", "null", "{}"):
+                event_path.write_text(payload, encoding="utf-8")
+                with self.subTest(event=payload), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                    self.assertIn("failed closed", output.getvalue())
+            event_path.unlink()
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main(["--event", str(event_path)]), 1)
+                self.assertIn("failed closed", output.getvalue())
+            with patch.dict(os.environ, {}, clear=True), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(base_match.main([]), 1)
+                self.assertIn("missing event JSON", output.getvalue())
 
     def test_required_context_job_names_are_literal_and_produced_on_pull_requests(self):
         for filename, required in REQUIRED_CONTEXT_JOBS.items():
