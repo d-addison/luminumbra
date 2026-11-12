@@ -59,13 +59,15 @@ def evaluate(event, api, run_attempt="1"):
     if base not in CI_BASES:
         raise ValueError(f"CI does not run for base={base!r}; base is outside ci.yml's pull_request branches filter")
     current = f"base={base!r} head={head!r}"
-    if event["action"] in CI_EVENTS and not rerun:
-        return f"BASEMATCH {current}: {event['action']} starts CI against this base."
     if event["action"] not in CI_EVENTS and event["action"] != "edited":
         raise ValueError("unsupported pull-request action")
     runs = api["workflow_runs"]
     if not isinstance(runs, list) or type(api["total_count"]) is not int or not 0 <= len(runs) == api["total_count"] <= MAX_RUNS:
         raise ValueError("incomplete or oversized workflow-run listing")
+    # A fresh head's companion CI may not be listed yet. Existing evidence must
+    # still be checked: first-attempt events can arrive after later retargets.
+    if not runs and event["action"] in CI_EVENTS and not rerun:
+        return f"BASEMATCH {current}: {event['action']} starts CI against this base."
     ordered = []
     for run in runs:
         if run["event"] != "pull_request" or run["head_sha"] != head or type(run["id"]) is not int or run["id"] <= 0:
@@ -161,14 +163,14 @@ def main(argv=None):
                         help="positive decimal attempt (defaults to GITHUB_RUN_ATTEMPT, then 1)")
     args = parser.parse_args(argv)
     try:
-        rerun = is_rerun(args.run_attempt)
+        is_rerun(args.run_attempt)
         if args.event is None:
             raise ValueError("missing event JSON")
         event = json.loads(args.event.read_text(encoding="utf-8"))
         print(f"Checking base={event['pull_request']['base']['ref']!r} "
               f"head={event['pull_request']['head']['sha']!r}")
         api = None
-        if event["action"] == "edited" or (rerun and event["action"] in CI_EVENTS):
+        if event["action"] == "edited" or event["action"] in CI_EVENTS:
             api = (json.loads(args.api_json.read_text(encoding="utf-8")) if args.api_json else
                    fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
                               os.environ.get("GH_TOKEN", "")))

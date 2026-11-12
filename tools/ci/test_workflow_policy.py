@@ -3255,57 +3255,62 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
             return result, output.getvalue()
 
     @patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1")
-    def test_base_match_rerun_after_round_trip_retarget_requires_newest_ci(self):
+    def test_base_match_first_attempt_and_rerun_after_round_trip_require_newest_ci(self):
         devel = self.base_run("devel", 2)
         main = self.base_run("main", 3)
         initial = {"total_count": 1, "workflow_runs": [devel]}
+        empty = {"total_count": 0, "workflow_runs": []}
         for action in sorted(base_match.CI_EVENTS):
             opened = self.base_event(action, "devel")
             with self.subTest(action=action):
-                result, output = self.base_injected_cli(opened, None)
+                result, output = self.base_injected_cli(opened, empty)
                 self.assertEqual(result, 0, output)
                 result, output = self.base_injected_cli(self.base_event(base="main"), initial)
                 self.assertEqual(result, 1, output)
                 self.assertIn("BASEMISMATCH", output)
-                result, output = self.base_injected_cli(self.base_event(action, "main"), None)
+                result, output = self.base_injected_cli(self.base_event(action, "main"),
+                                                       {"total_count": 1, "workflow_runs": [main]})
                 self.assertEqual(result, 0, output)
                 for runs in ([devel, main], [main, devel]):
                     latest = {"total_count": 2, "workflow_runs": runs}
                     result, output = self.base_injected_cli(self.base_event(base="devel"), latest)
                     self.assertEqual(result, 1, output)
                     self.assertIn("BASEMISMATCH", output)
-                    with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="2"):
-                        result, output = self.base_injected_cli(opened, latest)
-                    self.assertEqual(result, 1, output)
-                    self.assertIn("BASEMISMATCH ci.yml run 3 base='main'", output)
-                    self.assertNotIn("BASEMATCH", output)
+                    for attempt in ("1", "2"):
+                        with self.subTest(attempt=attempt), patch.dict(os.environ, GITHUB_RUN_ATTEMPT=attempt):
+                            result, output = self.base_injected_cli(opened, latest)
+                            self.assertEqual(result, 1, output)
+                            self.assertIn("BASEMISMATCH ci.yml run 3 base='main'", output)
+                            self.assertNotIn("BASEMATCH", output)
 
-    def test_base_match_rerun_accepts_newest_matching_ci(self):
-        for action, base, draft in product((*sorted(base_match.CI_EVENTS), "edited"),
-                                           ("main", "devel"), (True, False)):
+    def test_base_match_first_attempt_and_rerun_accept_newest_matching_ci(self):
+        for action, base, draft, attempt in product((*sorted(base_match.CI_EVENTS), "edited"),
+                                                    ("main", "devel"), (True, False), ("1", "2")):
             event = self.base_event(action, base, draft=draft)
             old_base = "main" if base == "devel" else "devel"
             runs = [self.base_run(old_base, 2), self.base_run(base, 3), self.base_run(old_base, 4, 18)]
             # Re-running the older CI cannot make its recorded base newer.
             runs[0]["run_attempt"] = 99
-            with self.subTest(action=action, base=base, draft=draft):
-                result, output = self.base_injected_cli(event, {"total_count": 3, "workflow_runs": runs}, "2")
+            with self.subTest(action=action, base=base, draft=draft, attempt=attempt):
+                result, output = self.base_injected_cli(event, {"total_count": 3, "workflow_runs": runs}, attempt)
                 self.assertEqual(result, 0, output)
                 self.assertIn(f"BASEMATCH ci.yml run 3 base={base!r}", output)
 
-    def test_base_match_first_attempt_ignores_listing_and_attempt_override_wins(self):
-        for action in sorted(base_match.CI_EVENTS):
-            event = self.base_event(action, "devel")
+    def test_base_match_first_attempt_empty_listing_and_attempt_override_wins(self):
+        empty = {"total_count": 0, "workflow_runs": []}
+        for action, base, draft in product(sorted(base_match.CI_EVENTS), ("main", "devel"), (True, False)):
+            event = self.base_event(action, base, draft=draft)
             for attempt in ("1", "01", "0001"):
-                with self.subTest(action=action, attempt=attempt), patch.dict(os.environ, GITHUB_RUN_ATTEMPT="x"):
-                    result, output = self.base_injected_cli(event, None, attempt)
+                with self.subTest(action=action, base=base, draft=draft, attempt=attempt), \
+                        patch.dict(os.environ, GITHUB_RUN_ATTEMPT="x"):
+                    result, output = self.base_injected_cli(event, empty, attempt)
                     self.assertEqual(result, 0, output)
                     self.assertIn(f"{action} starts CI", output)
         with patch.dict(os.environ, {}, clear=True):
-            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None)
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), empty)
         self.assertEqual(result, 0, output)
         with patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1"):
-            result, output = self.base_injected_cli(self.base_event("opened", "devel"), None, "2")
+            result, output = self.base_injected_cli(self.base_event("opened", "devel"), empty, "2")
         self.assertEqual(result, 1, output)
         self.assertIn("failed closed", output)
 
@@ -3328,36 +3333,51 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                 self.assertIn("ci.yml run 2", base_match.evaluate(self.base_event("opened"),
                               {"total_count": 1, "workflow_runs": [self.base_run("main")]}, attempt))
 
-    def test_base_match_rerun_missing_or_invalid_listing_fails_closed(self):
+    def test_base_match_first_attempt_and_rerun_invalid_listing_fail_closed(self):
         valid = self.base_run("main")
-        invalid = (None, "{", "null", "{}", {"total_count": 0, "workflow_runs": []},
+        invalid = (None, "{", "null", "{}",
+                   {"workflow_runs": []}, {"total_count": 0},
+                   {"total_count": False, "workflow_runs": []},
+                   {"total_count": -1, "workflow_runs": []},
+                   {"total_count": 0, "workflow_runs": {}},
+                   {"total_count": 0, "workflow_runs": None},
                    {"total_count": 1, "workflow_runs": []},
                    {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": []}]},
                    {"total_count": 1, "workflow_runs": [{**valid, "pull_requests": [{"number": 17}]}]},
                    {"total_count": 1, "workflow_runs": [self.base_run("main", 2, 18)]},
                    {"total_count": 1, "workflow_runs": [{**valid, "head_sha": "b" * 40}]})
-        for action, api in product(sorted(base_match.CI_EVENTS), invalid):
-            with self.subTest(action=action, api=api):
-                result, output = self.base_injected_cli(self.base_event(action), api, "2")
+        for action, api, attempt in product(sorted(base_match.CI_EVENTS), invalid, ("1", "2")):
+            with self.subTest(action=action, api=api, attempt=attempt):
+                result, output = self.base_injected_cli(self.base_event(action), api, attempt)
                 self.assertEqual(result, 1, output)
                 self.assertIn("failed closed", output)
                 self.assertNotIn("BASEMATCH", output)
-
-    def test_base_match_rerun_fetches_evidence_before_final_live_check(self):
-        event = self.base_event("opened", "devel")
-        api = {"total_count": 1, "workflow_runs": [self.base_run("devel")]}
         for action in (*sorted(base_match.CI_EVENTS), "edited"):
+            with self.subTest(action=action, empty=True):
+                result, output = self.base_injected_cli(self.base_event(action),
+                                                       {"total_count": 0, "workflow_runs": []}, "2")
+                self.assertEqual(result, 1, output)
+                self.assertIn("no ci.yml pull_request run", output)
+                self.assertNotIn("BASEMATCH", output)
+
+    def test_base_match_first_attempt_and_rerun_fetch_evidence_before_final_live_check(self):
+        event = self.base_event("opened", "devel")
+        matching = {"total_count": 1, "workflow_runs": [self.base_run("devel")]}
+        cases = list(product((*sorted(base_match.CI_EVENTS), "edited"), (("1", matching), ("2", matching))))
+        cases.extend((action, ("1", {"total_count": 0, "workflow_runs": []}))
+                     for action in sorted(base_match.CI_EVENTS))
+        for action, (attempt, api) in cases:
             event["action"] = action
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "event.json"
                 path.write_text(json.dumps(event), encoding="utf-8")
                 for error in (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
                               IncompleteRead(b"{", 10)):
-                    with self.subTest(action=action, error=error), \
+                    with self.subTest(action=action, attempt=attempt, api=api, error=error), \
                             patch.object(base_match, "fetch_runs", side_effect=error) as runs, \
                             patch.object(base_match, "fetch_pull") as pull, \
                             patch.object(sys, "stdout", new_callable=io.StringIO) as output:
-                        self.assertEqual(base_match.main(["--event", str(path), "--run-attempt", "2"]), 1)
+                        self.assertEqual(base_match.main(["--event", str(path), "--run-attempt", attempt]), 1)
                         runs.assert_called_once()
                         pull.assert_not_called()
                         self.assertIn("failed closed", output.getvalue())
@@ -3365,7 +3385,7 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                 for live in (event["pull_request"], self.base_event(base="main")["pull_request"],
                              {**event["pull_request"], "head": {"sha": "b" * 40}}, {}):
                     calls = MagicMock()
-                    with self.subTest(action=action, live=live), \
+                    with self.subTest(action=action, attempt=attempt, api=api, live=live), \
                             patch.object(base_match, "fetch_runs", return_value=api) as runs, \
                             patch.object(base_match, "fetch_pull", return_value=live) as pull, \
                             patch.object(base_match, "require_live", wraps=base_match.require_live) as require, \
@@ -3373,7 +3393,7 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                         calls.attach_mock(runs, "runs")
                         calls.attach_mock(pull, "pull")
                         calls.attach_mock(require, "require")
-                        result = base_match.main(["--event", str(path), "--run-attempt", "2"])
+                        result = base_match.main(["--event", str(path), "--run-attempt", attempt])
                     self.assertEqual([call[0] for call in calls.mock_calls], ["runs", "pull", "require"])
                     self.assertEqual(result, 0 if live == event["pull_request"] else 1, output.getvalue())
                     if result:
@@ -3491,7 +3511,7 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
     def test_base_match_never_retargeted_on_every_event_including_drafts(self):
         for action, draft, base in product((*sorted(base_match.CI_EVENTS), "edited"), (True, False), ("main", "devel")):
             event = self.base_event(action, base, draft=draft)
-            api = {"total_count": 1, "workflow_runs": [self.base_run(base)]} if action == "edited" else None
+            api = {"total_count": 1, "workflow_runs": [self.base_run(base)]}
             with self.subTest(action=action, draft=draft, base=base):
                 self.assertIn("BASEMATCH", base_match.evaluate(event, api))
                 self.assertIn(f"base={base!r}", base_match.evaluate(event, api))
@@ -3508,9 +3528,9 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                      {"pull_requests": [*self.base_run()["pull_requests"]] * 2},
                      {"event": "push"}, {"head_sha": "b" * 40}, {"id": True},
                      {"created_at": "unknown"})
-        for mutation in mutations:
-            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError, TypeError)):
-                base_match.evaluate(self.base_event(), {"total_count": 1,
+        for action, mutation in product((*sorted(base_match.CI_EVENTS), "edited"), mutations):
+            with self.subTest(action=action, mutation=mutation), self.assertRaises((ValueError, KeyError, TypeError)):
+                base_match.evaluate(self.base_event(action), {"total_count": 1,
                                     "workflow_runs": [{**self.base_run("main"), **mutation}]})
         for api in ({"total_count": 0, "workflow_runs": []}, {"total_count": 1, "workflow_runs": []},
                     {"total_count": True, "workflow_runs": []}, {"total_count": 0, "workflow_runs": {}},
@@ -3615,10 +3635,12 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
             for action in sorted(base_match.CI_EVENTS):
                 event_path.write_text(json.dumps(self.base_event(action)), encoding="utf-8")
                 with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path)}), \
-                        patch.object(base_match, "fetch_runs", side_effect=AssertionError("unexpected runs request")), \
+                        patch.object(base_match, "fetch_runs", return_value={"total_count": 0,
+                                     "workflow_runs": []}) as runs, \
                         patch.object(base_match, "fetch_pull", return_value=self.base_event()["pull_request"]) as live, \
                         patch.object(sys, "stdout", new_callable=io.StringIO) as output:
                     self.assertEqual(base_match.main([]), 0)
+                    runs.assert_called_once()
                     live.assert_called_once()
                     self.assertIn("Checking base='main'", output.getvalue())
                     self.assertIn("BASEMATCH", output.getvalue())
