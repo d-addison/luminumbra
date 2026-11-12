@@ -199,6 +199,13 @@ public:
     // channels for both border reads and rollback, without copying ambient state.
     [[nodiscard]] FieldPageState foliage_snapshot() const;
     void restore_foliage(FieldPageState&& snapshot) noexcept;
+    [[nodiscard]] bool can_adopt_foliage(const FieldPageState& candidate) const {
+        return m_soil.can_adopt(candidate.m_soil) && m_irrigation.can_adopt(candidate.m_irrigation);
+    }
+    void adopt_foliage(FieldPageState&& candidate) noexcept {
+        m_soil.adopt(std::move(candidate.m_soil));
+        m_irrigation.adopt(std::move(candidate.m_irrigation));
+    }
     bool set_soil(const ScentCellKey& cell, std::int32_t value) {
         return m_soil.set(cell, value, kSoilBaseline);
     }

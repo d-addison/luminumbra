@@ -12,6 +12,8 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -278,12 +280,13 @@ inline bool ActivateFoliagePage(FieldPageState& pages, ScentCellKey cell, bool s
 // touched/due owners; each is prepared on first use. Storage topology must remain
 // unchanged for this object's lifetime. Recreate it after admissions or loading.
 // Each Step evolves once for nonzero entries; scheduling/window expansion is the
-// caller's responsibility. No registry, host clock or source enumeration is used.
+// caller's responsibility.
 class FoliageInteriorReplay {
 public:
     struct Work {
         std::uint64_t preparation_pages = 0, preparation_cells = 0, page_probes = 0;
         std::uint64_t neighbor_cells = 0, evolved_cells = 0;
+        std::uint64_t source_preparations = 0, source_visits = 0;
     };
     struct Owner {
         FlatFoliageCells soil, moisture;
@@ -307,6 +310,75 @@ public:
         m_work.preparation_cells += soil_cells + moisture_cells;
         m_work.neighbor_cells += moisture_cells;
         return inserted.first->second;
+    }
+    // An absolute subtick denotes historical work. Cursors without absolute
+    // ticks must set replayed too; ordinary live ticks leave both defaults.
+    std::map<RegionKey, std::uint64_t> Step(entt::registry& registry,
+                                            FieldPageState& pages,
+                                            const std::map<RegionKey, std::uint32_t>& due,
+                                            std::optional<std::uint64_t> subtick = {},
+                                            bool replayed = false) {
+        namespace C = ::Luminumbra::Components;
+        for (const auto& [key, ticks] : due) {
+            if (ticks != 0) {
+                Prepare(pages, key);
+            }
+        }
+        PrepareSources(registry);
+        for (const auto& [key, ticks] : due) {
+            if (ticks == 0) {
+                continue;
+            }
+            auto found = m_sources.find(key);
+            if (found == m_sources.end()) {
+                continue;
+            }
+            auto& sources = found->second;
+            // Keep live-only entries pending for timestamp-free historical
+            // windows too, so skipped emitters are not scanned every step.
+            const auto through = subtick.value_or(std::numeric_limits<std::uint64_t>::max() -
+                                                  static_cast<std::uint64_t>(replayed));
+            while (!sources.pending.empty() && sources.pending.begin()->first <= through) {
+                for (const auto index : sources.pending.begin()->second) {
+                    sources.active.insert(index);
+                }
+                sources.pending.erase(sources.pending.begin());
+            }
+            for (const auto index : sources.active) {
+                const auto& source = sources.ordered[index];
+                // A standalone emitter has no persisted birth. It is live-tick
+                // only, including when a cursor replays without absolute ticks.
+                if (source.live_only && (replayed || subtick.has_value())) {
+                    continue;
+                }
+                ++m_work.source_visits;
+                if (source.soil) {
+                    auto& soil = m_owners.at(key).soil;
+                    if (!soil.contains(source.cell)) {
+                        continue;
+                    }
+                    auto& feeder = registry.get<C::SoilFeederComponent>(source.entity);
+                    const auto draw =
+                        static_cast<std::int32_t>(feeder.uptake) *
+                        SoilStageWeight(
+                            registry.get<C::PlantGrowthComponent>(source.entity).stage) /
+                        16;
+                    const auto got = std::min(soil.at(source.cell), draw);
+                    soil.at(source.cell) -= got;
+                    feeder.absorbed += static_cast<std::uint32_t>(got);
+                } else {
+                    auto& moisture = m_owners.at(key).moisture;
+                    if (moisture.contains(source.cell)) {
+                        moisture.at(source.cell) = std::min(
+                            kMoistureMax,
+                            moisture.at(source.cell) +
+                                static_cast<std::int32_t>(
+                                    registry.get<C::WaterSourceComponent>(source.entity).output));
+                    }
+                }
+            }
+        }
+        return Step(pages, due);
     }
     std::map<RegionKey, std::uint64_t> Step(FieldPageState& pages,
                                             const std::map<RegionKey, std::uint32_t>& due) {
@@ -340,7 +412,342 @@ public:
     }
 
 private:
+    struct Source {
+        entt::entity entity;
+        ScentCellKey cell;
+        bool soil;
+        std::uint64_t first_tick;
+        bool live_only;
+    };
+    struct Sources {
+        std::vector<Source> ordered;
+        std::map<std::uint64_t, std::vector<std::size_t>> pending;
+        std::set<std::size_t> active;
+    };
+    std::map<RegionKey, Sources> m_sources;
+    bool m_sourcesPrepared = false;
+    // A replay seals the selected registry. Each component pool has EnTT's
+    // entity-mask bound; sources are collected and ordered once, then only
+    // activated sources of due owners are visited during replay.
+    void PrepareSources(const entt::registry& registry) {
+        if (m_sourcesPrepared) {
+            return;
+        }
+        namespace C = ::Luminumbra::Components;
+        const auto collect = [&](entt::entity entity, bool soil) {
+            ++m_work.source_preparations;
+            const auto cell = FoliageCell(registry.get<C::TransformComponent>(entity).position);
+            const auto key = FieldPageState::region_of_scent_cell(cell);
+            const auto* owner = registry.try_get<const C::PlantRegionComponent>(entity);
+            if (owner && RegionKey{owner->owner_x, owner->owner_z} != key) {
+                return;
+            }
+            const auto* growth = registry.try_get<const C::PlantGrowthComponent>(entity);
+            const bool live_only = !growth || !registry.all_of<C::PlantTag>(entity);
+            const auto first =
+                live_only ? std::numeric_limits<std::uint64_t>::max()
+                : owner   ? (growth->planted_tick == owner->region_stamp
+                                 ? owner->region_stamp
+                                 : owner->region_stamp + (owner->region_stamp !=
+                                                        std::numeric_limits<std::uint64_t>::max()))
+                          : growth->planted_tick;
+            m_sources[key].ordered.push_back({entity, cell, soil, first, live_only});
+        };
+        for (const auto entity : registry.view<const C::PlantTag,
+                                               const C::SoilFeederComponent,
+                                               const C::PlantGrowthComponent,
+                                               const C::TransformComponent>()) {
+            collect(entity, true);
+        }
+        for (const auto entity :
+             registry.view<const C::WaterSourceComponent, const C::TransformComponent>()) {
+            collect(entity, false);
+        }
+        for (auto& [key, sources] : m_sources) {
+            std::sort(sources.ordered.begin(),
+                      sources.ordered.end(),
+                      [&registry](const Source& left, const Source& right) {
+                          if (left.soil != right.soil) {
+                              return left.soil;
+                          }
+                          const auto* a =
+                              registry.try_get<const C::PlantRegionComponent>(left.entity);
+                          const auto* b =
+                              registry.try_get<const C::PlantRegionComponent>(right.entity);
+                          const auto id_a = a ? a->persistent_id : 0;
+                          const auto id_b = b ? b->persistent_id : 0;
+                          if ((id_a != 0) != (id_b != 0)) {
+                              return id_a != 0;
+                          }
+                          return id_a != id_b ? id_a < id_b : left.entity < right.entity;
+                      });
+            for (std::size_t index = 0; index < sources.ordered.size(); ++index) {
+                sources.pending[sources.ordered[index].first_tick].push_back(index);
+            }
+        }
+        m_sourcesPrepared = true;
+    }
     std::map<RegionKey, Owner> m_owners;
     Work m_work;
 };
+// Materialized edits publish matching persisted stamps. Ordinary edits retain
+// that completion evidence while the owner still has a pending resume.
+inline std::uint64_t FoliagePriorTick(const ::Luminumbra::world::ActiveRegionRecord& record) {
+    if (record.frozen_at != 0 &&
+        !(record.last_edit != 0 && record.last_ticked == record.last_edit)) {
+        return record.frozen_at;
+    }
+    return record.last_ticked;
+}
+struct RegionalFoliageWindows {
+    std::map<RegionKey, std::uint32_t> elapsed;
+    std::map<RegionKey, std::uint64_t> resumes;
+};
+inline RegionalFoliageWindows
+BuildRegionalFoliageWindows(const ActiveRegionLedger& ledger,
+                            std::span<const RegionKey> due,
+                            const std::map<RegionKey, std::uint64_t>& previous,
+                            const std::set<RegionKey>& pending,
+                            const ::Luminumbra::world::WorldClock& clock) {
+    RegionalFoliageWindows result;
+    const auto add = [&](RegionKey key) {
+        const auto found = ledger.records().find(key);
+        if (found == ledger.records().end() ||
+            found->second.state == ::Luminumbra::world::RegionState::Frozen) {
+            return;
+        }
+        const auto& record = found->second;
+        const auto old = previous.find(key);
+        auto prior = old == previous.end() ? FoliagePriorTick(record) : old->second;
+        if (record.frozen_at == 0) {
+            prior = std::max(prior, record.first_active);
+        }
+        if (prior > clock.tick()) {
+            throw std::invalid_argument("Foliage window precedes owner stamp");
+        }
+        const auto elapsed = record.frozen_at != 0
+                                 ? ActiveRegionLedger::resume_window(
+                                       key, std::max(prior, record.frozen_at), clock, 36000)
+                                       .elapsed_ticks
+                                 : std::min<std::uint64_t>(clock.tick() - prior, 65536);
+        // Scheduling stamps last_ticked before foliage sees a new owner.
+        // Its first due tick still runs once. Only materialization can advance
+        // last_ticked beyond the canonical scheduler tick; an ordinary edit at
+        // that scheduled tick must not suppress the unconsumed first tick.
+        const bool materialized = record.last_ticked > ledger.tick();
+        result.elapsed[key] = static_cast<std::uint32_t>(
+            elapsed == 0 && old == previous.end() && record.frozen_at == 0 && !materialized
+                ? 1
+                : elapsed);
+        if (record.frozen_at != 0) {
+            result.resumes[key] = record.frozen_at;
+        }
+    };
+    for (const auto key : due) {
+        add(key);
+    }
+    for (const auto key : pending) {
+        const auto found = ledger.records().find(key);
+        if (found != ledger.records().end() && found->second.frozen_at != 0) {
+            add(key);
+        }
+    }
+    return result;
+}
+// Runtime cursor only: never encoded or hashed. Keep the selected registry,
+// field topology and source/growth components sealed until complete. Values and
+// feeder absorption are advanced in place; stage them before publishing to a session.
+class FoliageWindowReplay {
+public:
+    // Cap actual historical steps, including all participating cells/sources,
+    // rather than merely limiting how many owners enter an unbounded replay.
+    static constexpr std::uint32_t kStepBudget = 32;
+    FoliageWindowReplay(const FieldPageState& pages,
+                        const std::map<RegionKey, std::uint32_t>& windows,
+                        std::optional<std::uint64_t> tick = {})
+        : m_tick(tick) {
+        // Validate every window before preparing storage or modifying any state.
+        for (const auto& [key, ticks] : windows) {
+            if (ticks > 65536 || (tick && ticks > *tick)) {
+                throw std::invalid_argument("Unbounded foliage window");
+            }
+        }
+        // Prepare only supplied owners, using 32 page-range probes per channel
+        // instead of owns_region's potentially world-sized X-stripe scan.
+        // Empty preparations are bounded by windows.size(); nonempty storage is
+        // bounded by the two channels' kMaxPages * 256 cells.
+        for (const auto& [key, ticks] : windows) {
+            if (ticks != 0) {
+                const auto& owner = m_replay.Prepare(pages, key);
+                if (!owner.soil.cells().empty() || !owner.moisture.cells().empty()) {
+                    m_maximum = std::max(m_maximum, ticks);
+                }
+            }
+        }
+        // At most one start entry per nonempty owner. Empty owners never enter
+        // the historical step traversal; prepared topology is reused throughout.
+        for (const auto& [key, ticks] : windows) {
+            if (ticks != 0) {
+                const auto& owner = m_replay.Prepare(pages, key);
+                if (!owner.soil.cells().empty() || !owner.moisture.cells().empty()) {
+                    m_starts[m_maximum - ticks].push_back(key);
+                }
+            }
+        }
+    }
+    [[nodiscard]] std::uint32_t remaining_steps() const {
+        return m_maximum - m_step;
+    }
+    [[nodiscard]] const FoliageInteriorReplay::Work& work() const {
+        return m_replay.work();
+    }
+    std::map<RegionKey, std::uint64_t> Advance(entt::registry& registry, FieldPageState& pages) {
+        std::map<RegionKey, std::uint64_t> completed;
+        const auto steps = std::min(kStepBudget, remaining_steps());
+        for (std::uint32_t advanced = 0; advanced < steps; ++advanced) {
+            const auto added = m_starts.find(m_step);
+            if (added != m_starts.end()) {
+                for (const auto key : added->second) {
+                    m_due.emplace(key, 1);
+                }
+            }
+            for (const auto& [key, count] : m_replay.Step(
+                     registry,
+                     pages,
+                     m_due,
+                     m_tick ? std::optional<std::uint64_t>(*m_tick - m_maximum + m_step + 1)
+                            : std::nullopt,
+                     true)) {
+                completed[key] += count;
+            }
+            ++m_step;
+        }
+        return completed;
+    }
+
+private:
+    FoliageInteriorReplay m_replay;
+    std::map<std::uint32_t, std::vector<RegionKey>> m_starts;
+    std::map<RegionKey, std::uint32_t> m_due;
+    std::optional<std::uint64_t> m_tick;
+    std::uint32_t m_maximum = 0, m_step = 0;
+};
+using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
+inline FoliageEdges
+FoliageBorderEdges(const FieldPageState& pages,
+                   const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
+                   std::span<const RegionKey> owners) {
+    FoliageEdges edges;
+    // At most 2048 boundary cells per selected 512 m owner. Both endpoints
+    // must exist, as in continuous diffusion; storage caps cells at kMaxPages * 256.
+    for (const auto owner : owners) {
+        const auto a = records.find(owner);
+        if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
+            continue;
+        }
+        const auto x = static_cast<std::int64_t>(owner.x) * 512;
+        const auto z = static_cast<std::int64_t>(owner.z) * 512;
+        if (x < -16777216 || x > 16776704 || z < -16777216 || z > 16776704) {
+            continue;
+        }
+        for (int direction = 0; direction < 4; ++direction) {
+            const bool along_x = direction < 2;
+            const int sign = direction % 2 == 0 ? 1 : -1;
+            const RegionKey other{owner.x + (along_x ? sign : 0), owner.z + (along_x ? 0 : sign)};
+            const auto b = records.find(other);
+            if (b == records.end() || b->second.state == ::Luminumbra::world::RegionState::Frozen) {
+                continue;
+            }
+            for (int offset = 0; offset < 512; ++offset) {
+                const ScentCellKey cell{
+                    static_cast<std::int32_t>(x) + (along_x ? (sign > 0 ? 511 : 0) : offset),
+                    static_cast<std::int32_t>(z) + (along_x ? offset : (sign > 0 ? 511 : 0))};
+                const ScentCellKey next{cell.x + (along_x ? sign : 0),
+                                        cell.z + (along_x ? 0 : sign)};
+                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) &&
+                                                            pages.irrigation().initialized(next))) {
+                    edges.emplace_back(sign > 0 ? cell : next, sign > 0 ? next : cell);
+                }
+            }
+        }
+    }
+    std::sort(edges.begin(), edges.end(), [](const auto& left, const auto& right) {
+        return left.first == right.first ? left.second.x > right.second.x
+                                         : left.first < right.first;
+    });
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    return edges;
+}
+// Discover first, then select by BOTH owners' phases. A synthetic tick zero
+// cannot discover borders whose shared reduced cadence has a nonzero phase.
+inline FoliageEdges SelectFoliageBorderEdges(
+    const FoliageEdges& edges,
+    const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
+    std::uint64_t tick) {
+    const auto scheduled = [&](ScentCellKey cell) {
+        const auto found = records.find(FieldPageState::region_of_scent_cell(cell));
+        if (found == records.end()) {
+            return false;
+        }
+        const auto& record = found->second;
+        return record.state != ::Luminumbra::world::RegionState::Frozen &&
+               record.cadence_shift <= 16 &&
+               record.cadence_phase < (std::uint32_t{1} << record.cadence_shift) &&
+               (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase;
+    };
+    FoliageEdges selected;
+    // Selection cannot exceed the discovered, storage-bounded edge count.
+    for (const auto& edge : edges) {
+        if (scheduled(edge.first) && scheduled(edge.second)) {
+            selected.push_back(edge);
+        }
+    }
+    return selected;
+}
+inline std::vector<std::int32_t> FoliageBorderFluxes(const FoliageFieldPages& irrigation,
+                                                     const FoliageEdges& edges) {
+    std::vector<std::int32_t> fluxes;
+    // One prior-value difference per admitted edge, bounded by four boundary
+    // edges per initialized irrigation cell (kMaxPages * 256 cells).
+    fluxes.reserve(edges.size());
+    for (const auto& [cell, next] : edges) {
+        fluxes.push_back(irrigation.sample(cell, 0) / kMoistureDiffuseShareDen -
+                         irrigation.sample(next, 0) / kMoistureDiffuseShareDen);
+    }
+    return fluxes;
+}
+inline std::map<RegionKey, std::uint64_t> ExchangeFoliageBorders(
+    FieldPageState& pages, std::span<const std::int32_t> fluxes, const FoliageEdges& edges) {
+    if (fluxes.size() != edges.size()) {
+        throw std::invalid_argument("Incomplete irrigation border snapshot");
+    }
+    std::map<RegionKey, std::uint64_t> work;
+    // Admit endpoints before exchange. Validate the entire snapshot and reserve
+    // accounting before changing values; publication then cannot allocate.
+    for (std::size_t index = 0; index < edges.size(); ++index) {
+        const auto& [cell, next] = edges[index];
+        if (!pages.irrigation().initialized(cell) || !pages.irrigation().initialized(next) ||
+            fluxes[index] < -kMoistureMax / kMoistureDiffuseShareDen ||
+            fluxes[index] > kMoistureMax / kMoistureDiffuseShareDen) {
+            throw std::invalid_argument("Invalid irrigation border snapshot");
+        }
+        work.try_emplace(FieldPageState::region_of_scent_cell(cell), 0);
+        work.try_emplace(FieldPageState::region_of_scent_cell(next), 0);
+    }
+    std::size_t index = 0;
+    for (const auto& [cell, next] : edges) {
+        const auto flux = fluxes[index++];
+        const auto donor = flux >= 0 ? cell : next, recipient = flux >= 0 ? next : cell;
+        const auto available = pages.irrigation().sample(donor, 0);
+        const auto balance = pages.irrigation().sample(recipient, 0);
+        const auto amount = std::min({flux >= 0 ? flux : -flux, available, kMoistureMax - balance});
+        if (!pages.set_irrigation(donor, available - amount) ||
+            !pages.set_irrigation(recipient, balance + amount)) {
+            throw std::runtime_error("Irrigation border commit refused");
+        }
+        ++work[FieldPageState::region_of_scent_cell(cell)];
+        ++work[FieldPageState::region_of_scent_cell(next)];
+    }
+    return work;
+}
 } // namespace luminumbra::foliage
