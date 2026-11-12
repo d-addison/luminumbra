@@ -51,6 +51,123 @@ class UploadBudgetWiring(unittest.TestCase):
         python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
         self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
 
+    def test_saved_play_attaches_session_authority_without_fixture_binding(self):
+        entry = body(self.main, "auto finish_world_entry =")
+        self.assertIn("renderPipeline.bind_far_world_session(*gameSession, jobSystem);", entry)
+        attach = body(self.pipeline, "void RenderPipeline::bind_far_world_session(")
+        self.assertIn("m_far_world->BindSession(", attach)
+        self.assertIn("session.EnableFarWorldAuthorityProducer(", attach)
+        self.assertNotIn("BindFixture(", self.main + self.pipeline)
+        self.assertLess(attach.index("requested != FarWorldMode::Ladder"),
+                        attach.index("session.EnableFarWorldAuthorityProducer("))
+        self.assertIn("World::FarVolumeNumericProfile::RawFloat", attach)
+        self.assertIn("water->sim_resolution()", attach)
+        admission = body(attach, "if (!session.EnableFarWorldAuthorityProducer(")
+        self.assertIn("preparation.refusal = FarWorldRefusal::AdmissionFailed", admission)
+        source = compact(body(self.pipeline, "SourceConfig("))
+        # Absence is evidence too: the full horizon must fit the region budget.
+        members = int(re.search(r"memory\}, \{\{([\d']+),", source).group(1).replace("'", ""))
+        region_span = int(re.search(r"kRegionChunkSpan = (\d+)", read(
+            ROOT / "src/luminumbra_common/persistence/WorldSaveService.h")).group(1))
+        # Eight 8192m tiles plus sampling/reader halos, for every alignment.
+        region_axis = (8 * 8192 + 2 * 128 + 2 * 16) // (region_span * 16) + 2
+        self.assertGreaterEqual(members, region_axis ** 2)
+        for entry_point in ("auto start_world_creation =", "auto start_world_load ="):
+            self.assertIn("finish_world_entry();", body(self.main, entry_point))
+        stages = body(self.main, "auto run_entry_stage =")
+        prepare = stages.split("case WorldEntryStage::PrepareChunks:", 1)[1].split(
+            "case WorldEntryStage::GenerateChunks:", 1)[0]
+        self.assertIn("finish_world_entry(true);", prepare)
+        self.assertNotIn("bind_far_world_session(", body(self.main, "if (want_backdrop)"))
+
+    def test_saved_play_preparation_precedes_selection_and_keeps_one_dispatch(self):
+        render = body(self.pipeline, "void RenderPipeline::render_frame(")
+        self.assertLess(render.index("pump_far_world_session(camera, purpose);"),
+                        render.index("select_frame_far_world("))
+        self.assertIn("prepared_far_world_selection(purpose)", render)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertLess(pump.index("preparation.Request("),
+                        pump.index("session.PumpFarWorldAuthorityCapture();"))
+        self.assertLess(pump.index("session.PumpFarWorldAuthorityCapture();"),
+                        pump.index("producer->capture_status()"))
+        self.assertIn("const bool requested = preparation.Request(", pump)
+        self.assertLess(pump.index("session.PumpFarWorldAuthorityCapture();"),
+                        pump.index("if (!requested)"))
+        self.assertIn("m_far_world->StageSessionTarget(", pump)
+        self.assertIn("purpose != FarWorldPurpose::World", pump)
+        self.assertIn("!m_far_world_submission", pump)
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        self.assertEqual(prepare.count("AdvanceSelectedFarWorld("), 1)
+        for operation in ("BeginLiveOwnership(m_far_world_frame)", "AddLiveUpload(upload)",
+                          "FinishLiveOwnership()"):
+            self.assertLess(prepare.index(operation), prepare.index("AdvanceSelectedFarWorld("))
+        self.assertEqual(prepare.count("m_far_world->PrepareFrame("), 1)
+        self.assertEqual(prepare.count("legacy->update("), 1)
+        dispatch = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        self.assertEqual(dispatch.count("m_far_world->Submit("), 1)
+        replay = body(self.pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        for forbidden in ("pump_far_world_session(", "PrepareFrame(", "BeginLiveOwnership(",
+                          "AdvanceSelectedFarWorld("):
+            self.assertNotIn(forbidden, replay)
+
+    def test_preparation_refusal_and_qualification_reach_reporting(self):
+        selection = body(self.pipeline, "FarWorldSelection RenderPipeline::prepared_far_world_selection(")
+        self.assertIn("purpose == FarWorldPurpose::World", selection)
+        self.assertIn("m_far_world_session->refusal != FarWorldRefusal::None", selection)
+        self.assertIn("SelectFarWorld(selected.requested, purpose, m_far_world_session->refusal)", selection)
+        self.assertIn("m_session_attachment_refusal != FarWorldRefusal::None", selection)
+        self.assertIn("SelectFarWorld(selected.requested, purpose, m_session_attachment_refusal)", selection)
+        self.assertIn("return selected;", selection)
+        report = body(self.header, "FarWorldReportingState far_world_reporting_state() const")
+        self.assertIn("FarWorldReportState(diagnostic, terrain_submission)", report)
+        self.assertIn("prepared_far_world_selection(FarWorldPurpose::World)", report)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        for guard in ("session.WorldRevision() != preparation.revision", "!producer",
+                      "status.error != World::FarWorldAuthorityProducer::Error::None",
+                      "!status.latest_ready", "source->serial == preparation.attempted_serial"):
+            self.assertIn(guard, pump)
+        self.assertIn("FarWorldProducerRefusal({status.error", compact(pump))
+        self.assertIn("preparation.refusal = m_far_world->Selection(purpose).refusal", pump)
+        self.assertLess(pump.index("const bool staged ="),
+                        pump.index("preparation.history = preparation.candidate_history"))
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        self.assertLess(request.index("request_refusal = FarWorldRefusal::None"),
+                        request.index("!std::isfinite(camera[1])"))
+        self.assertNotRegex(request, r"(?<!_)\brefusal\s*=")
+        self.assertIn("m_far_world_session->request_refusal != FarWorldRefusal::None", selection)
+        self.assertIn("SelectFarWorld(selected.requested, purpose, m_far_world_session->request_refusal)", selection)
+        self.assertIn("!std::isfinite(camera[1])", request)
+        self.assertIn("World::ComputeFarWantedSet(", request)
+        self.assertIn("!producer.request_capture(", request)
+        self.assertIn("producer.capture_status().error", request)
+        self.assertIn("source_refusal == FarWorldRefusal::None", request)
+        self.assertIn("std::abs(camera[1] - requested_y) < 16.0", request)
+        discovery = body(self.pipeline, "bool Discover(")
+        for refusal in ("AdmissionFailed", "WaterUnavailable", "SpanRejected",
+                        "SpanHistoryExhausted", "ImmutableAuthorityUnavailable"):
+            self.assertIn("FarWorldRefusal::" + refusal, discovery)
+        self.assertIn("source.deadline.expired()", discovery)
+        self.assertIn("bed.size() != depth.size()", discovery)
+        self.assertIn("if (!chunk)", discovery)
+        self.assertIn("candidate_history[position].Extend", discovery)
+
+    def test_session_detaches_after_backend_drain_and_resumes_refused_open(self):
+        for signature, drain in (("void RenderPipeline::prepare_world_swap()", "PrepareWorldSwap"),
+                                 ("void RenderPipeline::cleanup_gpu_resources()", "Shutdown")):
+            scope = body(self.pipeline, signature)
+            self.assertLess(scope.index("FenceFarWorldAuthorityReads(true)"),
+                            scope.index("m_far_world->" + drain + "();"))
+            self.assertLess(scope.index("m_far_world->" + drain + "();"),
+                            scope.index("m_far_world_session.reset();"))
+        readers = body(self.pipeline, "void RenderPipeline::wait_for_world_readers()")
+        self.assertIn("FenceFarWorldAuthorityReads(true)", readers)
+        self.assertNotIn("m_far_world_session.reset()", readers)
+        finish = body(self.main, "auto finish_world_replacement =")
+        self.assertIn("FenceFarWorldAuthorityReads(false)", body(finish, "else"))
+        cancel = body(self.main, "auto drain_entry =")
+        retained = body(cancel, "if (gameSession->WorldRevision() == entry_world_revision)")
+        self.assertIn("FenceFarWorldAuthorityReads(false)", retained)
+
     def test_save_fence_preserves_current_world_until_quit_save_succeeds(self):
         quit_action = body(self.main, '} else if (act == "quit")')
         save = quit_action.index("if (!gameSession->SaveWorld())")
@@ -89,7 +206,9 @@ class UploadBudgetWiring(unittest.TestCase):
         cleanup = body(self.main, "auto finish_world_replacement =")
         guard = "if (gameSession->WorldRevision() != entry_world_revision)"
         self.assertIn(guard, cleanup)
-        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        self.assertEqual(compact(body(cleanup, guard)), "prepare_world_entry();")
+        self.assertEqual(compact(body(cleanup, "else")),
+                         "gameSession->FenceFarWorldAuthorityReads(false);")
         # Both outcomes use the same revision predicate: refusal before adoption
         # preserves state; success and a failure after adoption both retire it.
         expression = re.search(r"if \((.*)\)", cleanup).group(1)

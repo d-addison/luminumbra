@@ -47,6 +47,9 @@ namespace Luminumbra {
 class Chunk;
 class JobSystem;
 } // namespace Luminumbra
+namespace Luminumbra::world {
+class GameSession;
+}
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 struct TerrainGenParams;
@@ -175,6 +178,8 @@ struct WaterRenderData {
 
 // LightningRenderState (+ kMaxBoltSegmentPoints) moved to RenderFrameTypes.h (included
 //  above). Definition unchanged.
+
+struct SessionFarWorldPreparation;
 
 class RenderPipeline {
 public:
@@ -870,8 +875,10 @@ public:
     // Retire the old binding and visuals at a committed world replacement.
     // Before a fallible open, wait_for_world_readers keeps the old world resumable.
     void prepare_world_swap();
-    // Internal, non-persisted request. Normal worlds retain a typed refusal until
-    // immutable committed authority is available. Fixtures bind explicitly.
+    // Saved-play attachment, before streaming starts. Draining the pipeline
+    // detaches it; failed world admission retains the old immutable binding.
+    void bind_far_world_session(world::GameSession& session, JobSystem& jobs);
+    // Internal, non-persisted request. Preparation failures retain typed refusal.
     void set_far_world_mode(FarWorldMode requested);
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
@@ -892,7 +899,7 @@ public:
                 state.coverage_settled && diagnostic.frame == m_far_world_frame;
             return state;
         }
-        return {.selection = m_far_world->Selection(FarWorldPurpose::World),
+        return {.selection = prepared_far_world_selection(FarWorldPurpose::World),
                 .submission_refusal = terrain_submission
                                           ? FarWorldSubmissionRefusal::None
                                           : FarWorldSubmissionRefusal::IsolationSuppressed,
@@ -1399,6 +1406,8 @@ private:
     // using values published by the Legacy branch rather than Ladder reading its counters.
     std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
+    std::unique_ptr<SessionFarWorldPreparation> m_far_world_session;
+    FarWorldRefusal m_session_attachment_refusal = FarWorldRefusal::None;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;
@@ -1519,6 +1528,8 @@ private:
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
+    void pump_far_world_session(const Camera& camera, FarWorldPurpose purpose);
+    FarWorldSelection prepared_far_world_selection(FarWorldPurpose purpose) const;
     void select_frame_far_world(FarWorldSelection selection, const Camera& camera);
     void prepare_camera_projection(const Camera& camera);
     nlohmann::json terrain_coverage_camera_metadata() const;

@@ -17,9 +17,47 @@ CLI flag or environment override. Restart the client after changing the setting.
 Requested mode and effective mode remain separate. Unsupported backends, invalid
 or mismatched cave policy, and missing immutable authority still refuse Ladder
 and select effective Legacy. Requested/effective mode and refusal reasons remain
-visible in the debug HUD and diagnostic snapshots. Normal presets still lack
-the injected immutable fixture, so the default request does not establish native
-Ladder activation or qualification.
+visible in the debug HUD and diagnostic snapshots. Normal saved-world entry now
+binds the session producer without fixture binding. Each normal frame pumps
+source preparation before selecting its effective mode, then publishes same-frame
+live terrain/water ownership before advancing exactly one selected scheduler.
+Submission goes through the same renderer facade. Legacy opt-out, transient menu
+worlds, preview and paired OFF replay do not start session preparation.
+
+The producer composes immutable SessionRender observations from the committed
+baseline and published live/parked terrain and water. Numeric policy is RawFloat;
+cave policy and water resolution come from the bound world. Source assembly,
+span discovery and complete-manifest capture must succeed before Ladder can be
+selected. Pending or refused preparation selects Legacy with a typed refusal.
+Session diagnostics distinguish per-tile fingerprints, committed generation,
+serving/target serials, latest-target readiness and actual combined submission.
+A retained old cohort cannot establish current session qualification.
+
+The separately named play limits are uncalibrated finite admission ceilings.
+The total memory partition is 256 MiB per tier, with 128 MiB of V5 reserved for
+source/control storage and the remaining 128 MiB for its handoff. There are
+512 source index records, 512 wanted/history slots, 64 handoff entries per tier,
+two result slots per tier, 32 MiB of volatile copies and at most ten million
+source-query columns per transaction. Reads allow 32,768 region members (including
+absence evidence), 512 records, 65,536 headers, 131,072 probes, 8/32 MiB compressed
+member/aggregate bytes, 16/64 MiB decoded member/aggregate bytes and 4 MiB of
+reader controls. Refresh has a 120-prepared-frame and two-second source/capture
+deadline. Discovery visits at most 131 squared columns and 1536 source records
+per wanted tile; each record
+has at most 1024 water cells. Frozen capture allows one region, 200,000 height,
+20 million density and 200,000 water operations and 64 MiB per tile; the complete
+manifest has separate 16 million height/water and 128 million density operation
+ceilings. Spans stay within [-8192,8192] m with a 2048 m monotone extension hull.
+The selected scheduler permits two build/upload attempts and 16 MiB attempted
+uploads per frame. Any limit failure refuses rather than changing cave policy,
+water truth or simulation. These ceilings require native measurement before
+release; they are not a qualified production preset.
+
+A fallible world open fences source reads while retaining the old binding.
+Refusal or cancellation before adoption resumes those reads. Committed
+replacement, world exit and shutdown drain the selected backend and its workers
+before releasing session preparation or immutable images. Save fences retain
+render state; canonical save refresh remains owned by GameSession.
 
 `farlod-horizon-analysis.json` keeps the historical
 `luminumbra.farlod_horizon.v1` keys and thresholds. Its most-converged legacy
@@ -39,7 +77,7 @@ legacy counts, and a retained post-submission `snapshot`. The snapshot records:
 - world epoch, frame, content/bake identity, actual plane, numeric policy;
 - separate `requested_cave_policy` and `bound_cave_policy` values (0 for
   BandLimited, 1 for BoxFiltered), with JSON `null` for an invalid request or
-  absent immutable fixture; Ladder qualification requires both to match;
+  absent binding; Ladder qualification requires both to match;
 - whether advancement and successful submission occurred, actual draws/indices;
 - five tier rows: wanted/pending/building/ready/settled, Uploaded/Empty pairs,
   current covering, rejected/budget latches, cumulative range/budget eviction
@@ -122,20 +160,21 @@ evidence requires `--renderer legacy` (Python) or `-FarWorldRenderer Legacy`
 (native gate). The native gate also requires the config opt-out above; its
 renderer selector validates evidence and does not override the client setting.
 
-Native default gate command (requires immutable authority; not executed here):
+Native default gate command (not executed here):
 
 ```powershell
 pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon
 ```
 
 The gate allows at least 680 seconds for the existing phase-A baseline plus five
-90-second station deadlines and capture slack. The default Ladder gate refuses
-before launch because normal presets lack the injected immutable authority needed
-for ladder activation. A Legacy fallback cannot qualify Ladder. Synthetic fixtures
-can exercise the complete Ladder validator without graphics; they do not establish
-native acceptance or calibrated budgets.
+90-second station deadlines and capture slack. The current PowerShell Ladder
+gate still has its pre-launch authority guard;
+removing and qualifying that guard is separate remaining gate work. A Legacy
+fallback cannot qualify Ladder. Synthetic fixtures can exercise the complete
+Ladder validator without graphics; they do not establish native acceptance or
+calibrated budgets.
 
-S8 saved/edited authority and S9–S13 cave selection, fog/reconstruction, retirement,
-shadow reception and ladder water are outside this slice. Legacy water is not
-used as evidence of ladder water. Native GPU seams, caves, elevated views, Empty
+Session producer activation is render-only and changes no save format, simulation
+flag, authority rules revision, fixture or simulation hash. Legacy water is not
+evidence of combined Ladder water. Native GPU seams, caves, elevated views, Empty
 fixtures, memory calibration, fog/water and edited saves remain **NEEDS-NATIVE-RUN**.

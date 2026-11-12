@@ -1,5 +1,10 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
+#include "core/JobSystem.h"
+#include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_common/world/FarLodStore.h"
+#include "world/WorldStreamingState.h"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +18,7 @@
 #include <vector>
 
 namespace {
+using namespace Luminumbra;
 using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 
@@ -185,8 +191,9 @@ TEST(FarWorldLegacyIsolation, PairedOffDispatchPreservesSelectedFramePlanePolicy
                               "missing_after_eviction",
                               "clip_inner_radius_m",
                               "clip_outer_radius_m",
-                              "camera_neighbourhood"})
+                              "camera_neighbourhood"}) {
         EXPECT_FALSE(before.contains(field)) << field;
+    }
     EXPECT_EQ(CheckFarWorldStation(renderer.Diagnostic(), {}, 1),
               FarWorldStationRefusal::InvalidBinding); // dispatch alone cannot qualify
 }
@@ -327,4 +334,234 @@ TEST(FarWorldLegacyIsolation, Fsd2Version3DecodeRemainsAvailableUnderEitherSelec
         EXPECT_TRUE(tile.height_q.empty());
         EXPECT_FALSE(errors.empty());
     }
+}
+
+namespace {
+// No graphics calls or hidden buffer allocations. The selected submission is
+// observable even while the first immutable pair is still queued.
+class SessionDriver final : public FarVolumeGpuDriver {
+public:
+    bool ValidContext() const noexcept override {
+        return true;
+    }
+    bool HasError() noexcept override {
+        return false;
+    }
+    void GetVertexArrayBinding(std::uint32_t& name) noexcept override {
+        name = vao_;
+    }
+    void GetVertexBufferBinding(std::uint32_t& name) noexcept override {
+        name = vertex_;
+    }
+    void CreateVertexArray(std::uint32_t& name) noexcept override {
+        name = next_++;
+    }
+    void CreateBuffer(std::uint32_t& name) noexcept override {
+        name = next_++;
+    }
+    void DeleteVertexArray(std::uint32_t) noexcept override {}
+    void DeleteBuffer(std::uint32_t) noexcept override {}
+    void BindVertexArray(std::uint32_t name) noexcept override {
+        vao_ = name;
+    }
+    void BindBuffer(FarVolumeBufferKind kind, std::uint32_t name) noexcept override {
+        if (kind == FarVolumeBufferKind::Vertex) {
+            vertex_ = name;
+        } else {
+            index_ = name;
+        }
+    }
+    void
+    UploadBuffer(FarVolumeBufferKind kind, std::intptr_t bytes, const void*) noexcept override {
+        const auto name = kind == FarVolumeBufferKind::Vertex ? vertex_ : index_;
+        if (name < bytes_.size()) {
+            bytes_[name] = bytes;
+        }
+    }
+    void GetBufferBytes(FarVolumeBufferKind kind, std::int64_t& bytes) noexcept override {
+        const auto name = kind == FarVolumeBufferKind::Vertex ? vertex_ : index_;
+        bytes = name < bytes_.size() ? bytes_[name] : 0;
+    }
+    void SetAttribute(FarVolumeVertexAttribute, std::int32_t, std::size_t) noexcept override {}
+    void EnableAttribute(FarVolumeVertexAttribute) noexcept override {}
+    bool DrawIndexed(std::int32_t count) noexcept override {
+        return count > 0;
+    }
+
+private:
+    std::uint32_t next_ = 1, vao_ = 0, vertex_ = 0, index_ = 0;
+    std::array<std::int64_t, 32> bytes_{};
+};
+
+class SavedPlayDispatch : public testing::Test {
+protected:
+    using Producer = FarWorldAuthorityProducer;
+    using Save = Persistence::WorldSaveService;
+    std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("saved_play_dispatch_");
+    JobSystem jobs;
+    FarWorldRenderer renderer;
+    Producer producer{{512,
+                       4ULL * 1024 * 1024,
+                       300'000,
+                       std::make_shared<FarVolumeMemoryPool>(64ULL * 1024 * 1024)}};
+    std::unique_ptr<Systems::SHIELD_WorldSystem> world;
+    Producer::FrozenPolicy policy;
+    FarSessionHandoffTile tile;
+    void SetUp() override {
+        const auto main = Source("src/luminumbra_client/main_client.cpp");
+        const auto pipeline = Source("src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ASSERT_NE(main.find("renderPipeline.bind_far_world_session(*gameSession, jobSystem);"),
+                  std::string::npos);
+        ASSERT_NE(pipeline.find("session.EnableFarWorldAuthorityProducer("), std::string::npos);
+        ASSERT_NE(pipeline.find("pump_far_world_session(camera, purpose);"), std::string::npos);
+        EXPECT_EQ(pipeline.find("BindFixture("), std::string::npos);
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.caves_enabled = false;
+        params.base_amplitude = params.peaks_amplitude = 0;
+        params.height_offset = -8;
+        params.continental_spline = {{-1, 0}, {1, 0}};
+        world = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+        policy = {WorldFarVolumeIdentity(
+                      *world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4),
+                  FarCaveMode::BandLimited,
+                  FarVolumeNumericProfile::RawFloat,
+                  4};
+        ASSERT_TRUE(Save{}.save_world(WorldStreamingState{}, root));
+        const Save::AuthorityReadLimits reads{
+            512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        ASSERT_TRUE(producer.configure_capture(
+            {reads, 4, {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1}}));
+        const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_TRUE(producer.capture_status().latest_ready);
+        renderer.InstallBackend(std::make_unique<SessionDriver>());
+        ASSERT_EQ(renderer.BindSession(
+                      jobs, 1, policy.caves, policy.numeric, FarWorldDevelopmentLimits()),
+                  FarWorldRefusal::None);
+        tile.wanted = {{1, policy.pristine_identity, 0, {5, 0, 0}, 0, 1},
+                       {{5, 0, 0}, FarVolumeCoverageSpan{-512, 128}},
+                       64ULL * 1024 * 1024,
+                       {},
+                       {}};
+        tile.capture = {{5, 0, 0}, {-512, 256}, policy.pristine_identity};
+        ASSERT_TRUE(Stage());
+    }
+    bool Stage() {
+        const FarFrozenCaptureLimits limits{1, 100'000, 20'000'000, 200'000, 64ULL * 1024 * 1024};
+        return renderer.StageSessionTarget(
+            producer, *world, {&tile, 1}, policy, limits, {200'000, 20'000'000, 240'000});
+    }
+    void TearDown() override {
+        renderer.PrepareWorldSwap();
+        renderer.Shutdown();
+        jobs.shutdown();
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+};
+} // namespace
+
+TEST_F(SavedPlayDispatch, QualifiedSessionDispatchesOneSchedulerAndSelectedSubmission) {
+    LegacyRuntime legacy;
+    unsigned ladder_schedules = 0, ladder_submissions = 0;
+    const auto selection =
+        ApplyLegacyFarWorldEnable(renderer.Selection(FarWorldPurpose::World), false);
+    ASSERT_EQ(selection.requested, FarWorldMode::Ladder);
+    ASSERT_EQ(selection.effective, FarWorldMode::Ladder);
+    EXPECT_EQ(selection.refusal, FarWorldRefusal::None);
+    renderer.BeginLiveOwnership(1);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    AdvanceSelectedFarWorld(
+        selection,
+        [&] { legacy.Advance(); },
+        [&] {
+            ++ladder_schedules;
+            EXPECT_TRUE(renderer.PrepareFrame(1, {0, 0, 0}));
+        });
+    SubmitSelectedFarWorld(
+        selection,
+        [&] { return legacy.Submit(); },
+        [&](const auto&) {
+            ++ladder_submissions;
+            return renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+        },
+        {});
+    EXPECT_EQ(ladder_schedules, 1u);
+    EXPECT_EQ(ladder_submissions, 1u);
+    EXPECT_EQ(legacy.schedules + legacy.writes + legacy.submissions + legacy.water_supplements, 0u);
+    renderer.CaptureDiagnostic(selection, 1, {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
+    const auto diagnostic = FarWorldDiagnosticJson(renderer.Diagnostic());
+    EXPECT_EQ(diagnostic["requested_mode"], "ladder");
+    EXPECT_EQ(diagnostic["effective_mode"], "ladder");
+    EXPECT_EQ(renderer.Diagnostic().authority_kind, FarWorldAuthorityKind::Session);
+}
+
+TEST_F(SavedPlayDispatch, SourceRefusalDispatchesOnlyLegacyAndReportsBothModes) {
+    producer.invalidate_source();
+    ASSERT_FALSE(Stage());
+    const auto selection = renderer.Selection(FarWorldPurpose::World);
+    EXPECT_EQ(selection.requested, FarWorldMode::Ladder);
+    EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
+    EXPECT_EQ(selection.refusal, FarWorldRefusal::ImmutableAuthorityUnavailable);
+    LegacyRuntime legacy;
+    unsigned ladder_calls = 0;
+    AdvanceSelectedFarWorld(selection, [&] { legacy.Advance(); }, [&] { ++ladder_calls; });
+    SubmitSelectedFarWorld(
+        selection,
+        [&] { return legacy.Submit(); },
+        [&](const auto&) {
+            ++ladder_calls;
+            return FarWorldSubmitStats{};
+        },
+        {});
+    EXPECT_EQ(legacy.schedules, 1u);
+    EXPECT_EQ(legacy.submissions, 1u);
+    EXPECT_EQ(ladder_calls, 0u);
+    renderer.CaptureDiagnostic(
+        selection, 2, {0, 0, 0}, FarWorldPlane(selection.effective), true, 1, 3);
+    const auto diagnostic = FarWorldDiagnosticJson(renderer.Diagnostic());
+    EXPECT_EQ(diagnostic["requested_mode"], "ladder");
+    EXPECT_EQ(diagnostic["effective_mode"], "legacy");
+    EXPECT_EQ(renderer.Diagnostic().selection.refusal,
+              FarWorldRefusal::ImmutableAuthorityUnavailable);
+}
+
+TEST_F(SavedPlayDispatch, SessionBindingKeepsLegacyPreviewAndOffReplayIsolated) {
+    const auto on = renderer.Selection(FarWorldPurpose::World);
+    for (const auto purpose : {FarWorldPurpose::Preview, FarWorldPurpose::OffscreenPreview}) {
+        const auto selected = renderer.Selection(purpose);
+        EXPECT_EQ(selected.requested, FarWorldMode::Ladder);
+        EXPECT_EQ(selected.effective, FarWorldMode::Legacy);
+        LegacyRuntime legacy;
+        unsigned ladder_calls = 0;
+        AdvanceSelectedFarWorld(selected, [&] { legacy.Advance(); }, [&] { ++ladder_calls; });
+        EXPECT_EQ(ladder_calls, 0u);
+        EXPECT_EQ(legacy.schedules, purpose == FarWorldPurpose::Preview ? 1u : 0u);
+    }
+    const auto off = FarWorldSubmissionOverride(on, false);
+    unsigned calls = 0;
+    AdvanceSelectedFarWorld(off, [&] { ++calls; }, [&] { ++calls; });
+    SubmitSelectedFarWorld(
+        off,
+        [&] {
+            ++calls;
+            return FarWorldSubmitStats{};
+        },
+        [&](const auto&) {
+            ++calls;
+            return FarWorldSubmitStats{};
+        },
+        {});
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(off.effective, FarWorldMode::Ladder);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, producer.capture()->serial);
+    renderer.SetRequested(FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).requested, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
 }

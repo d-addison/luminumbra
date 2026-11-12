@@ -5905,7 +5905,7 @@
     {
       "id": "render.session-render-admission",
       "source": "docs/far-volume-memory.md#serving-and-target-handoff",
-      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Normal-play activation, native qualification and a separately named measured production limits profile remain outstanding.",
+      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Native qualification and a separately named measured production limits profile remain outstanding.",
       "status": "partial",
       "evidence": [
         {
@@ -5931,6 +5931,31 @@
         {
           "kind": "doc",
           "ref": "docs/far-volume-memory.md"
+        }
+      ]
+    },
+    {
+      "id": "render.session-producer-activation",
+      "source": "docs/far-world-horizon-v2.md#far-world-horizon-v2-fw-slice-d",
+      "statement": "Normal saved-world entry binds session authority without fixture binding, pumps bounded preparation before effective selection, forwards same-frame live ownership and uses one selected scheduler and submission. Pending or refused preparation retains the Ladder request and typed Legacy fallback. Legacy opt-out, preview and paired OFF replay remain isolated. Failed opens resume the old binding; committed replacement, exit and shutdown drain workers and backend resources before releasing it. Named finite play limits await native calibration, and the PowerShell pre-launch guard and native qualification remain outstanding.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SavedPlayDispatch.*",
+          "planned": "native saved-source dispatch, refusal, reporting and isolation execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UploadBudgetWiringPython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-world-horizon-v2.md"
         }
       ]
     },

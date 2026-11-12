@@ -711,9 +711,16 @@ restart the client. The per-user settings overlay only reads `user.*`; this flag
 has no environment or CLI override. Effective selection still falls back to
 Legacy when Ladder cannot bind, with requested/effective mode and refusals in
 the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
-for the config example and qualification gates. Saved-world far production
-authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
-explicit unavailable/refusal diagnostic.
+for the config example and qualification gates. Saved-world entry now attaches
+the session authority producer through explicit session binding. Preparation runs
+before each normal frame selects its effective mode; immutable session captures
+feed the selected scheduler and submission with same-frame live ownership.
+Source, capture and backend refusals select Legacy with the original Ladder
+request and typed refusal retained. Preview and paired OFF rendering keep their
+existing isolated paths. World replacement and shutdown drain the backend before
+releasing the binding; refused opens retain it and resume source reads. The named
+play limits are finite admission ceilings awaiting native calibration, and do not
+establish native qualification.
 
 ### Developer console
 

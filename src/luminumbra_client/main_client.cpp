@@ -2634,8 +2634,11 @@ int main(int argc, char* argv[]) {
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
-        if (gameSession->WorldRevision() != entry_world_revision)
+        if (gameSession->WorldRevision() != entry_world_revision) {
             prepare_world_entry();
+        } else {
+            gameSession->FenceFarWorldAuthorityReads(false);
+        }
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2682,6 +2685,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto finish_world_entry = [&](bool staged_entry = false) {
+        renderPipeline.bind_far_world_session(*gameSession, jobSystem);
         g_playerController.reset();
         g_procgen = {};
         g_app.worldDressing = {};
@@ -4161,6 +4165,9 @@ int main(int argc, char* argv[]) {
         // session's save eligibility. Fatal reader refusals also change revision.
         entry_save_allowed =
             entry_previous_save_allowed && gameSession->WorldRevision() == entry_world_revision;
+        if (gameSession->WorldRevision() == entry_world_revision) {
+            gameSession->FenceFarWorldAuthorityReads(false);
+        }
         entry_geometry.reset();
         entry_load_snapshot.reset();
         entry_worker_started = false;
