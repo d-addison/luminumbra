@@ -1345,7 +1345,9 @@ private:
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the
     // wanted residency set is provably unchanged).  implementation note (streaming-residual).
-    bool update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system);
+    bool update_chunk_activation(const std::vector<Vec3>& anchors,
+                                 PhysicsSystem* physics_system,
+                                 bool restorations_only);
     // Signature updated to use shared_ptr
     struct MeshingWorkItem {
         std::shared_ptr<::Luminumbra::Chunk> chunk;
@@ -1556,6 +1558,7 @@ private:
                                        float fallback);
 
     int m_update_tick_counter = 0;
+    bool m_first_update = true;
 
     // --- Dependencies ---
     struct WaterSeedSamplerTag {};
