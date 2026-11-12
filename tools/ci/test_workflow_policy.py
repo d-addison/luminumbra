@@ -3124,7 +3124,9 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
 
     def setUp(self):
         # Every listing in this suite is offline; retries must never really wait.
-        self.retry_sleep = self.enterContext(patch.object(time, "sleep"))
+        patcher = patch.object(time, "sleep")
+        self.retry_sleep = patcher.start()
+        self.addCleanup(patcher.stop)
 
     @staticmethod
     def context(*, event="pull_request", action="edited", changes=None, base="main",
@@ -3285,22 +3287,46 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                "head_repository": {"full_name": "contributor/repo"}, "head_branch": "topic"}
         return event, run
 
-    def test_base_match_unassociated_fork_first_attempt_accepts_matching_head(self):
-        for action, base in product(sorted(base_match.CI_EVENTS), ("main", "devel")):
+    def test_base_match_unassociated_fork_fails_closed_on_every_event(self):
+        for action, base, attempt in product((*sorted(base_match.CI_EVENTS), "edited"),
+                                             ("main", "devel"), ("1", "2")):
             event, run = self.fork_evidence(action, base)
-            with self.subTest(action=action, base=base):
-                result, output = self.base_injected_cli(event, {"total_count": 1, "workflow_runs": [run]}, "1")
-                self.assertEqual(result, 0, output)
-                self.assertIn("matching head", output)
-        # Delayed first attempts still have to match the live PR, after evidence.
-        event, run = self.fork_evidence()
-        live = self.fork_evidence(base="main")[0]["pull_request"]
-        result, output, _, sleep, calls = self.base_retry_cli(
-            event, [{"total_count": 1, "workflow_runs": [run]}], live=live)
-        self.assertEqual(result, 1, output)
-        self.assertIn("stale event", output)
-        self.assertEqual(calls, ["runs", "pull", "require"])
-        sleep.assert_not_called()
+            count = 6 if action in base_match.CI_EVENTS and attempt == "1" else 1
+            with self.subTest(action=action, base=base, attempt=attempt):
+                result, output, runs, sleep, calls = self.base_retry_cli(
+                    event, [{"total_count": 1, "workflow_runs": [run]}] * count, attempt=attempt)
+                self.assertEqual(result, 1, output)
+                self.assertNotIn("BASEMATCH", output)
+                self.assertIn(base_match.RECOVERY + " Fork/unassociated runs carry no base evidence; "
+                              "a maintainer lands such PRs.", output)
+                self.assertEqual(runs.call_count, count)
+                self.assertEqual(sleep.call_count, count - 1)
+                self.assertEqual(calls, ["runs", "sleep"] * (count - 1) + ["runs"])
+
+    def test_base_match_unassociated_fork_round_trip_fails(self):
+        # The head and live identity return unchanged after devel -> main -> devel.
+        # An unassociated run cannot reveal which base its CI actually used.
+        for action in sorted(base_match.CI_EVENTS):
+            original, run = self.fork_evidence(action, "devel")
+            for base in ("devel", "main", "devel"):
+                event = {**original, "pull_request": {**original["pull_request"], "base": {"ref": base}}}
+                with self.subTest(action=action, base=base):
+                    result, output = self.base_injected_cli(event, {"total_count": 1, "workflow_runs": [run]}, "1")
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("a maintainer lands such PRs", output)
+
+    def test_base_match_unassociated_fork_does_not_mask_associated_evidence(self):
+        for action, attempt, base in product((*sorted(base_match.CI_EVENTS), "edited"),
+                                             ("1", "2"), ("main", "devel")):
+            event, fork = self.fork_evidence(action)
+            fork["id"] = 3
+            associated = self.base_run(base)
+            for listing in ([fork, associated], [associated, fork]):
+                with self.subTest(action=action, attempt=attempt, base=base, listing=listing):
+                    result, output = self.base_injected_cli(event, {"total_count": 2, "workflow_runs": listing}, attempt)
+                    self.assertEqual(result, 0 if base == "devel" else 1, output)
+                    self.assertIn("ci.yml run 2", output)
+                    self.assertNotIn("a maintainer lands such PRs", output)
 
     def test_base_match_unassociated_fork_refuses_unknown_or_stale_identity_and_base(self):
         event, run = self.fork_evidence()
@@ -3316,25 +3342,123 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                     "workflow_runs": [{**run, **mutation}]}, "1")
                 self.assertEqual(result, 1, output)
                 self.assertIn("failed closed", output)
+                self.assertNotIn("a maintainer lands such PRs", output)
         for head in ({}, {"repo": None, "ref": "topic"}, {"repo": {}, "ref": "topic"},
                      {"repo": {"full_name": "contributor/repo"}, "ref": None}):
             invalid = {**event, "pull_request": {**event["pull_request"], "head": {"sha": "a" * 40, **head}}}
             with self.subTest(head=head):
                 result, output = self.base_injected_cli(invalid, {"total_count": 1, "workflow_runs": [run]}, "1")
                 self.assertEqual(result, 1, output)
-        for action, attempt in product((*sorted(base_match.CI_EVENTS), "edited"), ("1", "2")):
-            if action in base_match.CI_EVENTS and attempt == "1":
-                continue
-            with self.subTest(action=action, attempt=attempt):
-                result, output = self.base_injected_cli({**event, "action": action},
-                    {"total_count": 1, "workflow_runs": [run]}, attempt)
+        # Different complete head identities remain irrelevant to associated CI.
+        for mutation in ({"head_branch": "other"}, {"head_repository": {"full_name": "other/repo"}}):
+            unrelated = {**run, "id": 3, **mutation}
+            with self.subTest(unrelated=unrelated):
+                result, output = self.base_injected_cli(event, {"total_count": 2,
+                    "workflow_runs": [unrelated, self.base_run("devel")]}, "1")
+                self.assertEqual(result, 0, output)
+                self.assertIn("run 2", output)
+
+    def test_base_match_first_attempt_retries_no_evidence_until_associated_run(self):
+        event, fork = self.fork_evidence()
+        other = self.base_run("devel", 3, 18)
+        unrelated = {**fork, "head_branch": "other"}
+        for action, initial, recover_at in product(sorted(base_match.CI_EVENTS),
+                                                   ([other], [fork], [unrelated]), (2, 6)):
+            match = self.base_run("devel", 4)
+            missing = {"total_count": len(initial), "workflow_runs": initial}
+            later = {"total_count": len(initial) + 1, "workflow_runs": [*initial, match]}
+            with self.subTest(action=action, initial=initial, recover_at=recover_at):
+                result, output, runs, sleep, calls = self.base_retry_cli(
+                    {**event, "action": action}, [missing] * (recover_at - 1) + [later])
+                self.assertEqual(result, 0, output)
+                self.assertIn("BASEMATCH ci.yml run 4", output)
+                self.assertEqual(runs.call_count, recover_at)
+                self.assertEqual(sleep.call_count, recover_at - 1)
+                self.assertTrue(all(call.args == (20,) for call in sleep.call_args_list))
+                self.assertEqual(calls, ["runs", "sleep"] * (recover_at - 1) + ["runs", "pull", "require"])
+
+    def test_base_match_no_evidence_exhaustion_and_disappearance_fail_closed(self):
+        event, fork = self.fork_evidence()
+        other = {"total_count": 1, "workflow_runs": [self.base_run("devel", 3, 18)]}
+        empty = {"total_count": 0, "workflow_runs": []}
+        for action, initial, later in product(sorted(base_match.CI_EVENTS),
+                                              (other, {"total_count": 1, "workflow_runs": [fork]}), (other, empty)):
+            with self.subTest(action=action, initial=initial, later=later):
+                result, output, runs, sleep, calls = self.base_retry_cli(
+                    {**event, "action": action}, [initial] + [later] * 5)
+                self.assertEqual(result, 1, output)
+                self.assertIn("no ci.yml pull_request run records a base", output)
+                self.assertNotIn("BASEMATCH", output)
+                self.assertNotIn("a maintainer lands such PRs", output)
+                self.assertEqual(runs.call_count, 6)
+                self.assertEqual(sleep.call_count, 5)
+                self.assertTrue(all(call.args == (20,) for call in sleep.call_args_list))
+                self.assertEqual(calls, ["runs", "sleep"] * 5 + ["runs"])
+        for action, attempt in (("edited", "1"), ("opened", "2")):
+            result, output, runs, sleep, calls = self.base_retry_cli({**event, "action": action}, [other], attempt=attempt)
+            self.assertEqual(result, 1, output)
+            runs.assert_called_once()
+            sleep.assert_not_called()
+            self.assertEqual(calls, ["runs"])
+
+    def test_base_match_no_evidence_keeps_stale_ordering_and_final_live_check(self):
+        event = self.base_event("opened", "devel")
+        other = {"total_count": 1, "workflow_runs": [self.base_run("devel", 3, 18)]}
+        stale = {"total_count": 1, "workflow_runs": [self.base_run("main", 4)]}
+        older = {"total_count": 1, "workflow_runs": [self.base_run("devel", 2)]}
+        newer = {"total_count": 1, "workflow_runs": [self.base_run("devel", 5)]}
+        result, output, runs, sleep, calls = self.base_retry_cli(event, [stale, other] + [older] * 4)
+        self.assertEqual(result, 1, output)
+        self.assertEqual(runs.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertNotIn("pull", calls)
+        result, output, runs, sleep, calls = self.base_retry_cli(event, [other, stale, other, newer])
+        self.assertEqual(result, 0, output)
+        self.assertEqual(runs.call_count, 4)
+        self.assertEqual(sleep.call_count, 3)
+        self.assertEqual(calls[-2:], ["pull", "require"])
+        result, output, runs, sleep, calls = self.base_retry_cli(event, [other, newer],
+            live=self.base_event(base="main")["pull_request"])
+        self.assertEqual(result, 1, output)
+        self.assertIn("stale event", output)
+        self.assertEqual(runs.call_count, 2)
+        sleep.assert_called_once_with(20)
+        self.assertEqual(calls[-2:], ["pull", "require"])
+
+    def test_base_match_no_evidence_failures_and_deadline_do_not_retry(self):
+        event, fork = self.fork_evidence()
+        missing = {"total_count": 1, "workflow_runs": [self.base_run("devel", 3, 18)]}
+        malformed = ({"total_count": 1, "workflow_runs": []}, None,
+                     {"total_count": 1, "workflow_runs": [{**fork, "head_repository": None}]},
+                     {"total_count": 1, "workflow_runs": [{**fork, "pull_requests": None}]},
+                     {"total_count": 1, "workflow_runs": [{**self.base_run(), "pull_requests": [{"number": 17}]}]})
+        failures = (*malformed, OSError("denied"), TimeoutError("deadline"),
+                    base_match.URLError("unavailable"), IncompleteRead(b"{", 10))
+        for failure, prefix in product(failures, ([], [missing])):
+            with self.subTest(failure=failure, prefix=prefix):
+                result, output, runs, sleep, calls = self.base_retry_cli(event, [*prefix, failure])
                 self.assertEqual(result, 1, output)
                 self.assertIn("failed closed", output)
-        # A complete, different head is unrelated and must not mask this PR.
-        unrelated = {**run, "id": 3, "head_branch": "other"}
-        result, output = self.base_injected_cli(event, {"total_count": 2, "workflow_runs": [unrelated, run]}, "1")
-        self.assertEqual(result, 0, output)
-        self.assertIn("run 2", output)
+                self.assertEqual(runs.call_count, len(prefix) + 1)
+                self.assertEqual(sleep.call_count, len(prefix))
+                self.assertNotIn("pull", calls)
+        for initial in (missing, {"total_count": 1, "workflow_runs": [fork]}):
+            for clock, waits in (([0, 130], 0), ([0, 0, 150], 1)):
+                with self.subTest(initial=initial, clock=clock):
+                    result, output, runs, sleep, calls = self.base_retry_cli(event, [initial], clock=clock)
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("deadline expired", output)
+                    runs.assert_called_once()
+                    self.assertEqual(sleep.call_count, waits)
+                    self.assertNotIn("pull", calls)
+            sleeper = MagicMock(side_effect=OSError("wait interrupted"))
+            result, output, runs, sleep, calls = self.base_retry_cli(event, [initial], sleeper=sleeper)
+            self.assertEqual(result, 1, output)
+            self.assertIn("wait interrupted", output)
+            sleeper.assert_called_once_with(20)
+            runs.assert_called_once()
+            sleep.assert_not_called()
+            self.assertNotIn("pull", calls)
 
     def test_base_match_first_attempt_retries_stale_runs_until_newer_match(self):
         old, new = self.base_run("main"), self.base_run("devel", 3)

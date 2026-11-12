@@ -39,13 +39,13 @@ class BaseMismatch(ValueError):
         self.order = order
 
 
-def head_source(repository, branch):
-    """Bind an unassociated run to the event's repository and exact branch."""
-    name = repository.get("full_name") if isinstance(repository, dict) else None
-    if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", name)
-            or not isinstance(branch, str) or not branch):
-        raise ValueError("no usable head repository/branch metadata")
-    return name, branch
+class NoBaseEvidence(ValueError):
+    """A complete, valid listing has no applicable recorded base."""
+
+    def __init__(self, message, *, unassociated=False):
+        super().__init__(message)
+        self.note = (" Fork/unassociated runs carry no base evidence; a maintainer lands such PRs."
+                     if unassociated else "")
 
 
 def pull_identity(pr):
@@ -73,7 +73,7 @@ def is_rerun(run_attempt):
     return run_attempt.lstrip("0") != "1"
 
 
-def evaluate(event, api, run_attempt="1", *, evidence_after=None):
+def evaluate(event, api, run_attempt="1", *, evidence_after=None, allow_empty_listing=True):
     """Return a printable verdict; invalid or incomplete evidence raises ValueError."""
     rerun = is_rerun(run_attempt)
     number, head, base = pull_identity(event["pull_request"])
@@ -87,7 +87,7 @@ def evaluate(event, api, run_attempt="1", *, evidence_after=None):
         raise ValueError("incomplete or oversized workflow-run listing")
     # A fresh head's companion CI may not be listed yet. Existing evidence must
     # still be checked: first-attempt events can arrive after later retargets.
-    if not runs and event["action"] in CI_EVENTS and not rerun and evidence_after is None:
+    if not runs and event["action"] in CI_EVENTS and not rerun and evidence_after is None and allow_empty_listing:
         return f"BASEMATCH {current}: {event['action']} starts CI against this base."
     ordered = []
     for run in runs:
@@ -97,21 +97,25 @@ def evaluate(event, api, run_attempt="1", *, evidence_after=None):
         ordered.append((created, run["id"], run))
     if len({item[1] for item in ordered}) != len(ordered):
         raise ValueError("duplicate workflow-run ids in listing")
+    unassociated = False
     for created, run_id, run in sorted(ordered, key=lambda item: item[:2], reverse=True):
         pulls = run.get("pull_requests")
         if not isinstance(pulls, list) or any(not isinstance(pull, dict) or type(pull.get("number")) is not int for pull in pulls):
             raise ValueError(f"ci.yml run {run_id} has no usable pull-request/base metadata")
         if not pulls:
             pr_head = event["pull_request"]["head"]
-            source = head_source(run.get("head_repository"), run.get("head_branch"))
-            if source != head_source(pr_head.get("repo"), pr_head.get("ref")):
-                continue
-            # Fork listings can omit all base evidence. Only a fresh CI event
-            # supplies that base; edits and reruns must still fail closed. The
-            # final live check refuses delayed events after a retarget or push.
-            if event["action"] in CI_EVENTS and not rerun and evidence_after is None:
-                return f"BASEMATCH ci.yml run {run_id} {current}: matching head; event starts CI."
-            raise ValueError(f"ci.yml run {run_id} has no recorded base")
+            sources = []
+            for repository, branch in ((run.get("head_repository"), run.get("head_branch")),
+                                       (pr_head.get("repo"), pr_head.get("ref"))):
+                name = repository.get("full_name") if isinstance(repository, dict) else None
+                if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", name)
+                        or not isinstance(branch, str) or not branch):
+                    raise ValueError("no usable head repository/branch metadata")
+                sources.append((name, branch))
+            # Head identity establishes relevance only, never a recorded base.
+            # Continue so an unassociated run cannot mask associated evidence.
+            unassociated = unassociated or sources[0] == sources[1]
+            continue
         matches = [pull for pull in pulls if pull["number"] == number]
         if not matches:
             continue
@@ -125,7 +129,8 @@ def evaluate(event, api, run_attempt="1", *, evidence_after=None):
             raise BaseMismatch(f"BASEMISMATCH ci.yml run {run_id} base={recorded!r}; current {current}; "
                                "requires newer matching evidence", (created, run_id))
         return f"BASEMATCH ci.yml run {run_id} {current}"
-    raise ValueError(f"no ci.yml pull_request run records a base for this pull request; current {current}")
+    raise NoBaseEvidence(f"no ci.yml pull_request run records a base for this pull request; current {current}",
+                         unassociated=unassociated)
 
 
 def validate_api_target(repository, token):
@@ -236,13 +241,15 @@ def main(argv=None, *, sleep=None):
                        fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
                                   os.environ.get("GH_TOKEN", ""), deadline=deadline))
             try:
-                verdict = evaluate(event, api, args.run_attempt, evidence_after=evidence_after)
+                verdict = evaluate(event, api, args.run_attempt, evidence_after=evidence_after,
+                                   allow_empty_listing=attempt == 0)
                 request_timeout(deadline)
                 break
-            except BaseMismatch as error:
+            except (BaseMismatch, NoBaseEvidence) as error:
                 if attempt + 1 == attempts:
                     raise
-                evidence_after = max(evidence_after or error.order, error.order)
+                if isinstance(error, BaseMismatch):
+                    evidence_after = max(evidence_after or error.order, error.order)
                 if deadline - time.monotonic() <= delay:
                     raise TimeoutError("workflow-run retry deadline expired") from error
                 sleep(delay)
@@ -255,7 +262,8 @@ def main(argv=None, *, sleep=None):
         print(verdict)
         return 0
     except (OSError, URLError, HTTPException, ValueError, KeyError, TypeError, RecursionError) as error:
-        print(f"Base match check failed closed: {error}. {RECOVERY}")
+        note = error.note if isinstance(error, NoBaseEvidence) else ""
+        print(f"Base match check failed closed: {error}. {RECOVERY}{note}")
         return 1
 
 
