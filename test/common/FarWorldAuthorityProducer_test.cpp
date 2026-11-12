@@ -15,6 +15,10 @@
 #include <vector>
 
 namespace {
+Luminumbra::World::FarWorldAuthorityProducer::CaptureClock SourceCaptureClock() {
+    return {[](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+}
+
 using namespace Luminumbra;
 using Producer = World::FarWorldAuthorityProducer;
 using Save = Persistence::WorldSaveService;
@@ -528,7 +532,7 @@ protected:
         ASSERT_TRUE(Save{}.save_world(empty, root));
         std::string error;
         ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
-        ASSERT_TRUE(producer.configure_capture({reads, 3}));
+        ASSERT_TRUE(producer.configure_capture({reads, 3, SourceCaptureClock()}));
     }
     void TearDown() override {
         std::error_code error;
@@ -1026,7 +1030,7 @@ TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSucce
     Request();
     producer.pump_capture();
     EXPECT_EQ(producer.counters().copied_records, 2u);
-    EXPECT_FALSE(producer.configure_capture({reads, 3}));
+    EXPECT_FALSE(producer.configure_capture({reads, 3, SourceCaptureClock()}));
     first->sdf_data[0] = 3.0f;
     second->sdf_data[0] = 4.0f;
     first->water_depth_mm[0] = 8;
@@ -1102,7 +1106,7 @@ TEST_F(FarWorldSourceCaptureTest, DeadlineRefusesAndPreservesServingCapture) {
     producer.pump_capture();
     const auto* serving = producer.capture();
     ASSERT_NE(serving, nullptr);
-    ASSERT_TRUE(producer.configure_capture({reads, 1}));
+    ASSERT_TRUE(producer.configure_capture({reads, 1, SourceCaptureClock()}));
     Request();
     producer.pump_capture();
     producer.pump_capture();
@@ -1213,14 +1217,16 @@ TEST_F(FarWorldSourceCaptureTest, InvalidRequestsAndMissingSourcesNeverReplaceAc
     Producer cold(Limits());
     const std::array<Save::AuthorityWindow, 1> single{{{0, 0, 0, 0}}};
     EXPECT_FALSE(cold.request_capture(single));
-    ASSERT_TRUE(cold.configure_capture({reads, 3}));
+    ASSERT_TRUE(cold.configure_capture({reads, 3, SourceCaptureClock()}));
     EXPECT_FALSE(cold.request_capture(single));
     const std::array<Save::AuthorityWindow, 2> wide{{{0, 0, 0, 0}, {100, 100, 0, 0}}};
     EXPECT_FALSE(producer.request_capture(wide));
     auto invalid = reads;
     invalid.decoded_total_bytes = 0;
-    EXPECT_FALSE(producer.configure_capture({invalid, 3}));
-    EXPECT_FALSE(producer.configure_capture({reads, 0}));
+    EXPECT_FALSE(producer.configure_capture({invalid, 3, SourceCaptureClock()}));
+    EXPECT_FALSE(producer.configure_capture({reads, 0, SourceCaptureClock()}));
+    EXPECT_FALSE(producer.configure_capture({reads, 3}));
+    EXPECT_EQ(producer.capture(), serving);
     Request();
     producer.pump_capture();
     std::filesystem::remove_all(root);
@@ -1281,7 +1287,7 @@ protected:
         ASSERT_TRUE(Save{}.save_world(disk, root));
         std::string error;
         ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
-        ASSERT_TRUE(producer.configure_capture({reads, 4}));
+        ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
         const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
         ASSERT_TRUE(producer.request_capture(windows));
         producer.pump_capture();
@@ -1559,4 +1565,385 @@ TEST_F(FarWorldFrozenComposeTest, HaloIdentityWorkAndMemoryRefusalsPreserveAccep
     EXPECT_EQ(Compose(image).source, Producer::Error::AuthorityUnavailable);
     EXPECT_EQ(image, accepted);
 }
+} // namespace
+
+TEST_F(FarWorldSourceCaptureTest, InjectedSourceExpiryBeforeAndAfterReadPreservesServing) {
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto* accepted = producer.capture();
+    ASSERT_NE(accepted, nullptr);
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            return static_cast<const Clock*>(context)->ticks++;
+        }
+    } clock;
+    for (std::uint64_t expiry = 0; expiry < 4; ++expiry) {
+        clock.ticks = 0;
+        ASSERT_TRUE(producer.configure_capture({reads, 4, {Clock::Now, &clock, expiry + 1}}));
+        ASSERT_NO_FATAL_FAILURE(Request());
+        producer.pump_capture();
+        producer.pump_capture();
+        EXPECT_EQ(producer.capture_status().error, Producer::Error::SourceReadExpired);
+        EXPECT_EQ(producer.capture(), accepted);
+        EXPECT_FALSE(producer.capture_status().active);
+        EXPECT_FALSE(producer.capture_status().latest_ready);
+    }
+    // Remove the borrowed clock before its owner leaves scope.
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    EXPECT_NE(producer.capture(), accepted);
+}
+
+TEST_F(FarWorldFrozenComposeTest, BaseWaterAndSharedTransactionsChargeExactSamplingWork) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto tier = World::FarTierAt(1);
+    ASSERT_TRUE(tier.has_value());
+    if (!tier.has_value()) {
+        return;
+    }
+    const std::uint64_t side = tier->tile_edge_meters / tier->sample_spacing_meters + 3;
+    const auto columns = side * side;
+    const std::uint64_t vertical = 32 / tier->sample_spacing_meters + 3;
+    const World::FarFrozenCaptureWork::Counts exact{
+        2 * columns, 4 * columns * vertical, 4 * columns};
+    for (unsigned cap = 0; cap < 3; ++cap) {
+        World::FarFrozenCaptureWork::Counts aggregate{
+            2 * exact.height, 2 * exact.density, 2 * exact.water};
+        if (cap == 0) {
+            --aggregate.height;
+        } else if (cap == 1) {
+            --aggregate.density;
+        } else {
+            --aggregate.water;
+        }
+        World::FarFrozenCaptureWork work(aggregate);
+        auto bounded = limits;
+        bounded.work = &work;
+        std::shared_ptr<const World::FarFrozenObservation> image;
+        const auto compose = [&] {
+            return producer.compose_frozen(*world, Request(), policy, bounded, pool, image);
+        };
+        ASSERT_TRUE(compose().ok());
+        EXPECT_EQ(work.counts().height, exact.height);
+        EXPECT_EQ(work.counts().density, exact.density);
+        EXPECT_EQ(work.counts().water, exact.water);
+        const auto accepted = image;
+        const auto held = pool->used();
+        const auto refusal = compose();
+        EXPECT_EQ(refusal.source, Producer::Error::None);
+        EXPECT_EQ(refusal.capture, World::FarFrozenCaptureError::WorkLimit);
+        EXPECT_EQ(image, accepted);
+        EXPECT_EQ(pool->used(), held);
+        const auto charged = work.counts();
+        EXPECT_EQ(cap == 0   ? charged.height
+                  : cap == 1 ? charged.density
+                             : charged.water,
+                  cap == 0   ? aggregate.height
+                  : cap == 1 ? aggregate.density
+                             : aggregate.water);
+    }
+}
+
+TEST_F(FarWorldFrozenComposeTest, SourceDeadlineContinuesThroughFrozenSampling) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> image;
+    ASSERT_TRUE(Compose(image).ok());
+    const auto accepted = image;
+    const auto held = pool->used();
+    struct Clock {
+        mutable std::uint64_t ticks = 0;
+        std::uint64_t step = 0;
+        static std::uint64_t Now(const void* context) noexcept {
+            const auto& value = *static_cast<const Clock*>(context);
+            const auto result = value.ticks;
+            value.ticks += value.step;
+            return result;
+        }
+    } clock;
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {Clock::Now, &clock, 100}}));
+    const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_EQ(producer.capture_status().error, Producer::Error::None);
+    const auto source_serial = producer.capture()->serial;
+    clock.step = 1;
+    const auto result = Compose(image);
+    EXPECT_EQ(result.source, Producer::Error::None);
+    EXPECT_EQ(result.capture, World::FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(image, accepted);
+    EXPECT_EQ(pool->used(), held);
+    EXPECT_EQ(producer.capture()->serial, source_serial);
+    // The source is already accepted: this is capture expiry, not a read failure.
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    clock.step = 0;
+    const auto attempts = pool->attempts();
+    EXPECT_EQ(Compose(image).capture, World::FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_EQ(pool->attempts(), attempts);
+    EXPECT_EQ(image, accepted);
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_TRUE(Compose(image).ok());
+}
+
+TEST_F(FarWorldSourceCaptureTest,
+       EachTransactionGetsFreshDeadlineAndOverflowRefusesBeforeAllocation) {
+    std::uint64_t ticks = 0;
+    const auto now = [](const void* context) noexcept {
+        return *static_cast<const std::uint64_t*>(context);
+    };
+    ASSERT_TRUE(producer.configure_capture({reads, 4, {now, &ticks, 4}}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_NE(producer.capture(), nullptr);
+    EXPECT_EQ(producer.capture()->deadline.expires_at, 4u);
+    const auto first_serial = producer.capture()->serial;
+    ticks = 5;
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+    EXPECT_EQ(producer.capture()->serial, first_serial + 1);
+    EXPECT_EQ(producer.capture()->deadline.expires_at, 9u);
+    const auto* accepted = producer.capture();
+    ticks = std::numeric_limits<std::uint64_t>::max() - 2;
+    ASSERT_NO_FATAL_FAILURE(Request());
+    const auto attempts = source_limits.memory->attempts();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::InvalidLimits);
+    EXPECT_EQ(producer.capture(), accepted);
+    EXPECT_EQ(source_limits.memory->attempts(), attempts);
+    auto invalid = SourceCaptureClock();
+    invalid.max_ticks = 0;
+    EXPECT_FALSE(producer.configure_capture({reads, 4, invalid}));
+    ASSERT_TRUE(producer.configure_capture({reads, 4, SourceCaptureClock()}));
+    ASSERT_NO_FATAL_FAILURE(Request());
+    producer.pump_capture();
+    producer.pump_capture();
+    EXPECT_EQ(producer.capture_status().error, Producer::Error::None);
+}
+
+namespace {
+using namespace Luminumbra::World;
+using Error = FarFrozenCaptureError;
+
+FarFrozenCaptureLimits FrozenSamplingLimits() {
+    return {64, 2'000'000, 8'000'000, 6'000'000, 64ULL * 1024 * 1024};
+}
+FarFrozenCaptureSource FrozenSamplingSource() {
+    FarFrozenCaptureSource source;
+    source.pristine.field_identity = 41;
+    source.content_identity = 42;
+    source.durable = {7, FarEditedImageState::Committed};
+    source.pristine.numeric = FarVolumeNumericProfile::LegacySigned16;
+    source.pristine.height = [](std::int64_t, std::int64_t) {
+        return 0.25f;
+    };
+    source.pristine.density = [](const FarVolumePosition& p, float h, std::uint32_t, FarCaveMode) {
+        return FarVolumeSample{float(p.y) - h, 3};
+    };
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{false, 0};
+    };
+    return source;
+}
+std::shared_ptr<FarVolumeMemoryPool> FrozenSamplingPool() {
+    return std::make_shared<FarVolumeMemoryPool>(64ULL * 1024 * 1024);
+}
+FarFrozenTerrainOverride FrozenSamplingConstant(float value) {
+    return [value](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Present, {value, 9}};
+    };
+}
+
+TEST(FarFrozenObservation, TransactionCapsChargeActualLayersAcrossImagesBeforeCallbacks) {
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    for (const auto use :
+         {FarFrozenUse::Committed, FarFrozenUse::Preview, FarFrozenUse::SessionRender}) {
+        for (unsigned cap = 0; cap < 3; ++cap) {
+            auto source = FrozenSamplingSource();
+            source.use = use;
+            FarFrozenCaptureWork::Counts observed;
+            source.pristine.height = [&](std::int64_t, std::int64_t) {
+                ++observed.height;
+                return 0.25f;
+            };
+            source.pristine.density =
+                [&](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
+                    ++observed.density;
+                    return FarVolumeSample{1, 3};
+                };
+            source.committed = source.live =
+                source.parked = [&](std::uint8_t, const FarVolumePosition&) {
+                    ++observed.density;
+                    return FarFrozenOverride<FarVolumeSample>{};
+                };
+            source.water = [&](std::int64_t, std::int64_t) {
+                ++observed.water;
+                return FarFrozenWaterSample{};
+            };
+            source.live_water = source.parked_water = [&](std::int64_t, std::int64_t) {
+                ++observed.water;
+                return FarFrozenOverride<FarFrozenWaterSample>{};
+            };
+            const FarFrozenCaptureWork::Counts per_image{
+                9,
+                27u * (use == FarFrozenUse::Committed ? 2u : 4u),
+                9u * (use == FarFrozenUse::Committed ? 1u : 3u)};
+            FarFrozenCaptureWork::Counts caps{
+                2 * per_image.height, 2 * per_image.density, 2 * per_image.water};
+            if (cap == 0) {
+                --caps.height;
+            } else if (cap == 1) {
+                --caps.density;
+            } else {
+                --caps.water;
+            }
+            FarFrozenCaptureWork work(caps);
+            auto limits = FrozenSamplingLimits();
+            limits.work = &work;
+            auto pool = FrozenSamplingPool();
+            std::shared_ptr<const FarFrozenObservation> image;
+            ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                      Error::None);
+            const auto accepted = image;
+            const auto held = pool->used();
+            EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                      Error::WorkLimit);
+            EXPECT_EQ(image, accepted);
+            EXPECT_EQ(pool->used(), held);
+            const auto charged = work.counts();
+            EXPECT_EQ(charged.height, observed.height);
+            EXPECT_EQ(charged.density, observed.density);
+            EXPECT_EQ(charged.water, observed.water);
+            EXPECT_LE(observed.height, caps.height);
+            EXPECT_LE(observed.density, caps.density);
+            EXPECT_LE(observed.water, caps.water);
+            EXPECT_EQ(cap == 0   ? observed.height
+                      : cap == 1 ? observed.density
+                                 : observed.water,
+                      cap == 0   ? caps.height
+                      : cap == 1 ? caps.density
+                                 : caps.water);
+        }
+    }
+}
+
+TEST(FarFrozenObservation, SelectedLayersChargeOnlyCallbacksActuallyInvoked) {
+    auto source = FrozenSamplingSource();
+    source.use = FarFrozenUse::SessionRender;
+    source.live = FrozenSamplingConstant(-1);
+    source.live_water = [](std::int64_t, std::int64_t) {
+        return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Present, {false, 0}};
+    };
+    source.parked = source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        ADD_FAILURE() << "Selected live terrain must stop resolution";
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.parked_water = [](std::int64_t, std::int64_t) {
+        ADD_FAILURE() << "Selected live water must stop resolution";
+        return FarFrozenOverride<FarFrozenWaterSample>{};
+    };
+    source.water = [](std::int64_t, std::int64_t) {
+        ADD_FAILURE() << "Selected live water must stop base sampling";
+        return FarFrozenWaterSample{};
+    };
+    FarFrozenCaptureWork work({18, 108, 18});
+    auto limits = FrozenSamplingLimits();
+    limits.work = &work;
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    std::shared_ptr<const FarFrozenObservation> image;
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        ASSERT_EQ(
+            CaptureFarFrozenObservation({&region, 1}, source, limits, FrozenSamplingPool(), image),
+            Error::None);
+    }
+    EXPECT_EQ(work.counts().height, 18u);
+    EXPECT_EQ(work.counts().density, 108u);
+    EXPECT_EQ(work.counts().water, 18u);
+}
+
+TEST(FarFrozenObservation, SamplingDeadlineChecksEveryLayerAndPreservesAcceptedImage) {
+    const FarFrozenRegion region{1, {{0, 0, 0}, {0, 0, 0}}};
+    const auto clock = [](const void* context) noexcept {
+        return *static_cast<const std::uint64_t*>(context);
+    };
+    for (unsigned layer = 0; layer < 8; ++layer) {
+        auto source = FrozenSamplingSource();
+        source.use = FarFrozenUse::SessionRender;
+        std::uint64_t ticks = 0;
+        const auto terrain = [&](std::uint8_t, const FarVolumePosition&) {
+            return FarFrozenOverride<FarVolumeSample>{};
+        };
+        source.live = source.parked = terrain;
+        const auto water = [&](std::int64_t, std::int64_t) {
+            return FarFrozenOverride<FarFrozenWaterSample>{};
+        };
+        source.live_water = source.parked_water = water;
+        std::shared_ptr<const FarFrozenObservation> image;
+        auto pool = FrozenSamplingPool();
+        ASSERT_EQ(
+            CaptureFarFrozenObservation({&region, 1}, source, FrozenSamplingLimits(), pool, image),
+            Error::None);
+        const auto accepted = image;
+        const auto held = pool->used();
+        if (layer == 0) {
+            source.pristine.height = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return 0.25f;
+            };
+        } else if (layer == 1) {
+            source.pristine.density =
+                [&](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
+                    ++ticks;
+                    return FarVolumeSample{1, 3};
+                };
+        } else if (layer < 5) {
+            auto& callback = layer == 2   ? source.live
+                             : layer == 3 ? source.parked
+                                          : source.committed;
+            callback = [&](std::uint8_t, const FarVolumePosition&) {
+                ++ticks;
+                return FarFrozenOverride<FarVolumeSample>{};
+            };
+        } else if (layer < 7) {
+            auto& callback = layer == 5 ? source.live_water : source.parked_water;
+            callback = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return FarFrozenOverride<FarFrozenWaterSample>{};
+            };
+        } else {
+            source.water = [&](std::int64_t, std::int64_t) {
+                ++ticks;
+                return FarFrozenWaterSample{};
+            };
+        }
+        auto limits = FrozenSamplingLimits();
+        limits.deadline = {clock, &ticks, 1};
+        EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                  Error::DeadlineExceeded);
+        EXPECT_EQ(ticks, 1u);
+        EXPECT_EQ(image, accepted);
+        EXPECT_EQ(pool->used(), held);
+        const auto attempts = pool->attempts();
+        EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, image),
+                  Error::DeadlineExceeded);
+        EXPECT_EQ(pool->attempts(), attempts);
+        EXPECT_EQ(ticks, 1u);
+    }
+}
+
 } // namespace
