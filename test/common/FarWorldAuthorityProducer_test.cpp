@@ -121,6 +121,27 @@ TEST(FarWorldAuthorityProducer, PoolAllocatorMovesKeepTheSourcePool) {
     EXPECT_EQ(pool->used(), 0u);
 }
 
+TEST(FarWorldAuthorityProducer, RefusingPoolAdmitsOnlyContainerBookkeeping) {
+    using Allocator = World::FarVolumePoolAllocator<std::uint64_t>;
+    const auto pool = SourceMemory();
+    // Refuse every admission. MSVC Debug container proxies are allocated during
+    // construction and move but are never charged, so these operations still succeed.
+    pool->RefuseAttemptsFrom(pool->attempts());
+    {
+        std::vector<std::uint64_t, Allocator> first{Allocator{pool}};
+        auto second = std::move(first);
+        std::vector<std::uint64_t, Allocator> third{Allocator{pool}};
+        third = std::move(second);
+        EXPECT_EQ(pool->used(), 0u);
+        // Payload storage still requires admission.
+        EXPECT_THROW(third.reserve(1), World::FarVolumeMemoryRefused);
+        EXPECT_THROW(first.assign(8, 1u), // NOLINT(bugprone-use-after-move)
+                     World::FarVolumeMemoryRefused);
+        EXPECT_TRUE(third.empty());
+    }
+    EXPECT_EQ(pool->used(), 0u);
+}
+
 TEST(FarWorldAuthorityProducer, MembershipCapacityIsAdmittedBeforeAttachmentAndReusedOnClear) {
     auto limits = Limits();
     limits.index_records = 1;
