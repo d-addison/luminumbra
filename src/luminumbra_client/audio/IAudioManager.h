@@ -1,6 +1,8 @@
 #pragma once
 #include "glm/glm.hpp"
 #include "luminumbra_common/components/audio/AudioTypes.h"
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -10,6 +12,15 @@ using Luminumbra::Common::AudioEventID;
 using Luminumbra::Common::AudioParamID;
 
 namespace Luminumbra::Client {
+
+// Pure presentation gain: stronger is louder; each additional 600 m attenuates
+// the cue. Negative distance is treated as zero; unknown inputs are silent.
+inline float ThunderCueGain(float magnitude, float distance_m) {
+    if (std::isnan(magnitude) || std::isnan(distance_m)) {
+        return 0.0f;
+    }
+    return std::clamp(magnitude, 0.0f, 1.0f) / (1.0f + std::max(distance_m, 0.0f) / 600.0f);
+}
 
 // the client mix-bus tree. Render/audio-side only
 // (never sim). Hierarchy:
@@ -56,7 +67,9 @@ public:
     // Events (these sidechain-duck the ambient bus), UI clicks -> Ui.
     virtual bool
     PlayOneShot(const AudioEventID& eventID, const glm::vec3& position, BusId bus = BusId::Sfx) = 0;
-    virtual bool PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx) = 0;
+    // Per-voice gain is applied before playback; defaults preserve existing callers.
+    virtual bool
+    PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx, float gain = 1.0f) = 0;
 
     // NEW
     virtual void PlayMusic(const AudioEventID& musicEventID) = 0;
