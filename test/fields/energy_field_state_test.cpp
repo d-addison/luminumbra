@@ -1239,12 +1239,26 @@ void CheckBatchCapacityRefusal() {
     EXPECT_TRUE(field.SerializeRegionalRecord().empty());
     entt::registry registry;
     AddBatchEmitter(registry, {480, 0, 24}, {0, 1000, 1});
-    EnergyFieldState staged(2);
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(
+        registry.view<FieldEmitterComponent>().front(),
+        Luminumbra::Components::SimulationIdentityComponent{1});
     EXPECT_EQ(field.regional_deposit_capacity(), 1u);
-    const auto stats = GatherRegionalFieldEmitterDeposits(
-        registry, staged, records, false, field.regional_deposit_capacity());
-    EXPECT_FALSE(stats.accepted);
-    EXPECT_FALSE(staged.OwnsRegion({0, 0}));
+    for (const auto order : {Luminumbra::Systems::FieldEmitterSourceOrder::Legacy,
+                             Luminumbra::Systems::FieldEmitterSourceOrder::SimulationIdentity}) {
+        EnergyFieldState staged(2);
+        const auto stats = GatherRegionalFieldEmitterDeposits(
+            registry, staged, records, false, field.regional_deposit_capacity(), nullptr, order);
+        EXPECT_FALSE(stats.accepted);
+        EXPECT_FALSE(staged.OwnsRegion({0, 0}));
+        EXPECT_FALSE(GatherRegionalFieldEmitterDeposits(registry,
+                                                        field,
+                                                        records,
+                                                        false,
+                                                        EnergyFieldState::kMaxRegionalDeposits,
+                                                        nullptr,
+                                                        order)
+                         .accepted);
+    }
     ExpectBatchContinuation(field, prior);
     // Refusal did not poison later admission or stepping.
     EXPECT_TRUE(field.QueueRegionalDeposits(batch, records));
@@ -1417,12 +1431,64 @@ TEST(RegionalEnergy, EmitterBatchOrderingIsIndependentOfRegistryStorage) {
     ASSERT_NO_FATAL_FAILURE(CheckEmitterBatchOrdering(true));
 }
 
+TEST(AetherEmitterDeterminism, NeutralSourceKeysMatchStableKeysForBothIntegerDepositPaths) {
+    const auto records = TwoEnergyOwners();
+    const std::array due{RegionKey{0, 0}, RegionKey{1, 0}};
+    const std::array deposits{RegionalDeposit{1, 1, 1, 0, UINT32_MAX},
+                              RegionalDeposit{2, 1, 1, 0, 7},
+                              RegionalDeposit{3, 1, 1, 1, UINT32_MAX},
+                              RegionalDeposit{4, 21, 1, 1, 123},
+                              RegionalDeposit{5, 21, 1, 0, 0}};
+    for (const bool regional : {false, true}) {
+        for (const bool reverse : {false, true}) {
+            EnergyFieldState stable(2), neutral(2);
+            auto reordered = deposits;
+            if (reverse)
+                std::reverse(reordered.begin(), reordered.end());
+            for (auto& deposit : reordered)
+                deposit.emitter_id = 0;
+            if (regional) {
+                ASSERT_TRUE(stable.QueueRegionalDeposits(deposits, records));
+                ASSERT_TRUE(neutral.QueueRegionalDeposits(reordered, records));
+            } else {
+                for (const auto& deposit : deposits)
+                    stable.QueueDeposit(deposit.emitter_id,
+                                        deposit.cx,
+                                        deposit.cz,
+                                        deposit.channel,
+                                        static_cast<std::uint32_t>(deposit.amount));
+                for (const auto& deposit : reordered)
+                    neutral.QueueDeposit(0,
+                                         deposit.cx,
+                                         deposit.cz,
+                                         deposit.channel,
+                                         static_cast<std::uint32_t>(deposit.amount));
+            }
+            if (regional) {
+                const auto expected = RegionalStep(stable, 1, records, due, {});
+                const auto actual = RegionalStep(neutral, 1, records, due, {});
+                EXPECT_EQ(actual.clipped_raw, expected.clipped_raw);
+                EXPECT_EQ(actual.ages, expected.ages);
+                EXPECT_EQ(stable.SerializeRegionalRecord(), neutral.SerializeRegionalRecord());
+                EXPECT_EQ(stable.CanonicalRegionalBytes(), neutral.CanonicalRegionalBytes());
+            } else {
+                EXPECT_EQ(stable.Tick(1), neutral.Tick(1));
+            }
+            ASSERT_GT(stable.total_raw(), 0u);
+            EXPECT_EQ(stable.CanonicalBytes(), neutral.CanonicalBytes());
+        }
+    }
+}
+
 void CheckEmitterRosterBound(bool use_footprints) {
     entt::registry registry;
     // 134 full 63x63 footprints exceed the batch budget; the inert-looking roster alone does too.
     const auto count = use_footprints ? 134u : EnergyFieldState::kMaxRegionalBatchDeposits + 16;
     for (std::size_t index = 0; index < count; ++index) {
         AddBatchEmitter(registry, {0, 0, 0}, {0, 0xFFFFFFFFu, use_footprints ? 31 : 0});
+        registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(
+            registry.view<FieldEmitterComponent>().front(),
+            Luminumbra::Components::SimulationIdentityComponent{index + 1});
     }
     EnergyFieldState field(2);
     ASSERT_TRUE(field.QueueRegionalDeposit(99, 0, 0, 0, 123));
@@ -1433,10 +1499,20 @@ void CheckEmitterRosterBound(bool use_footprints) {
             records.try_emplace(RegionKey{x, z});
         }
     }
-    const auto stats = GatherRegionalFieldEmitterDeposits(registry, field, records);
-    EXPECT_FALSE(stats.accepted);
-    EXPECT_EQ(stats.queued.deposits, 0u);
-    EXPECT_LE(stats.visited_emitters, EnergyFieldState::kMaxRegionalBatchDeposits + 1);
+    for (const auto order : {Luminumbra::Systems::FieldEmitterSourceOrder::Legacy,
+                             Luminumbra::Systems::FieldEmitterSourceOrder::SimulationIdentity}) {
+        const auto stats =
+            GatherRegionalFieldEmitterDeposits(registry,
+                                               field,
+                                               records,
+                                               false,
+                                               EnergyFieldState::kMaxRegionalDeposits,
+                                               nullptr,
+                                               order);
+        EXPECT_FALSE(stats.accepted);
+        EXPECT_EQ(stats.queued.deposits, 0u);
+        EXPECT_LE(stats.visited_emitters, EnergyFieldState::kMaxRegionalBatchDeposits + 1);
+    }
     ExpectBatchContinuation(field, prior);
 }
 

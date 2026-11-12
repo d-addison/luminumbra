@@ -8,18 +8,20 @@
 // saturation (/ ordering law), so neither registry iteration
 // order nor gather order can ever reach the field bytes.
 //
-// DETERMINISTIC: id-ordered traversal (sort by entt::to_integral — the
-// EcologyHash rule); world -> cell quantization is std::floor over the shared
+// DETERMINISTIC: legacy traversal sorts runtime handles; the dormant identity
+// path orders by simulation identity. World -> cell quantization is std::floor over the shared
 // 24 m grid identity (kAetherCellSizeM), byte-matching GameSession's anchor
 // quantization; the falloff is integer shift math only (no libm, no RNG).
 // Participant-gated: a world with no emitter component queues nothing — the
 // canonical roster runs this as a pure no-op.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -28,9 +30,16 @@
 #include "../components/CoreComponents.h"
 #include "../components/FieldEmitterComponents.h"
 #include "../fields/EnergyFieldState.h"
+#include "../simulation/SimulationIdentity.h"
 #include "AetherFieldSystem.h" // kAetherCellSizeM — the shared 24 m grid identity
 
 namespace Luminumbra::Systems {
+
+// Shipping callers retain legacy semantics until the authority activation.
+enum class FieldEmitterSourceOrder {
+    Legacy,
+    SimulationIdentity
+};
 
 struct FieldEmitterGatherStats {
     std::uint64_t emitters = 0; // carriers that queued at least one deposit
@@ -38,15 +47,57 @@ struct FieldEmitterGatherStats {
 };
 
 // Registry-owned scratch follows the existing exclusive owner-thread gather contract.
-// The ordinary roster is bounded by live entities; regional buffers by kMaxRegionalBatchDeposits.
+// Ordinary counts are bounded by live entities; regional counts by kMaxRegionalBatchDeposits.
+// Retained ordering storage grows only with the largest participating roster seen.
 struct FieldEmitterScratch {
     std::vector<entt::entity> emitters, regional_emitters;
+    std::vector<entt::entity> identity_order;
     std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit> deposits;
 };
 
 inline FieldEmitterScratch& EmitterScratch(entt::registry& registry) {
     auto* scratch = registry.ctx().find<FieldEmitterScratch>();
     return scratch ? *scratch : registry.ctx().emplace<FieldEmitterScratch>();
+}
+
+// Only the participating roster is inspected. Eight byte passes keep ordering O(n),
+// and scratch grows only with that roster (regional counts also obey the batch cap).
+// Identity violations are refused before either gather publishes any deposits.
+inline void OrderFieldEmittersByIdentity(const entt::registry& registry,
+                                         std::vector<entt::entity>& emitters,
+                                         std::vector<entt::entity>& scratch) {
+    using Components::SimulationIdentityComponent;
+    for (const auto entity : emitters) {
+        const auto* identity = registry.try_get<SimulationIdentityComponent>(entity);
+        if (!identity || !simulation::IsValidSimulationId(identity->id))
+            throw std::logic_error("Field emitter requires a valid simulation identity");
+    }
+    if (emitters.size() < 2)
+        return;
+    scratch.resize(emitters.size());
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        std::array<std::size_t, 256> offsets{};
+        const auto bucket = [&](entt::entity entity) {
+            return static_cast<std::size_t>(
+                (registry.get<SimulationIdentityComponent>(entity).id >> shift) & 0xffu);
+        };
+        for (const auto entity : emitters)
+            ++offsets[bucket(entity)];
+        std::size_t prefix = 0;
+        for (auto& offset : offsets) {
+            const auto count = offset;
+            offset = prefix;
+            prefix += count;
+        }
+        for (const auto entity : emitters)
+            scratch[offsets[bucket(entity)]++] = entity;
+        emitters.swap(scratch);
+    }
+    for (std::size_t index = 1; index < emitters.size(); ++index) {
+        if (registry.get<SimulationIdentityComponent>(emitters[index - 1]).id ==
+            registry.get<SimulationIdentityComponent>(emitters[index]).id)
+            throw std::logic_error("Duplicate field emitter simulation identity");
+    }
 }
 
 // Queue this tick's emitter deposits into `field` (call right before the
@@ -59,23 +110,33 @@ inline FieldEmitterGatherStats
 GatherFieldEmitterDeposits(entt::registry& registry,
                            luminumbra::fields::EnergyFieldState& field,
                            bool clip_to_world = false,
-                           const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
+                           const luminumbra::ai::CreatureTickAdmission* admission = nullptr,
+                           FieldEmitterSourceOrder source_order = FieldEmitterSourceOrder::Legacy) {
     using Luminumbra::Components::FieldEmitterComponent;
     using Luminumbra::Components::TransformComponent;
 
     FieldEmitterGatherStats stats;
 
-    // id-ordered traversal (the EcologyHash rule) so the queue order is a pure
-    // function of sim state, never of entt storage layout.
-    auto& emitters = EmitterScratch(registry).emitters;
+    // Preserve the legacy handle order unless simulation identity is explicitly selected.
+    auto& scratch = EmitterScratch(registry);
+    auto& emitters = scratch.emitters;
     emitters.clear();
     {
         auto view = registry.view<const TransformComponent, const FieldEmitterComponent>();
-        for (auto e : view)
+        for (auto e : view) {
+            if (source_order == FieldEmitterSourceOrder::SimulationIdentity &&
+                ((admission && !admission->Allows(e)) ||
+                 view.get<const FieldEmitterComponent>(e).rate_raw_per_tick == 0u))
+                continue;
             emitters.push_back(e);
-        std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
-        });
+        }
+        if (source_order == FieldEmitterSourceOrder::SimulationIdentity) {
+            OrderFieldEmittersByIdentity(registry, emitters, scratch.identity_order);
+        } else {
+            std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+                return entt::to_integral(a) < entt::to_integral(b);
+            });
+        }
     }
 
     for (auto e : emitters) {
@@ -92,9 +153,12 @@ GatherFieldEmitterDeposits(entt::registry& registry,
         const int cx = static_cast<int>(std::floor(tf.position.x / kAetherCellSizeM));
         const int cz = static_cast<int>(std::floor(tf.position.z / kAetherCellSizeM));
 
-        // Admitted deposits are additive integer input. A neutral key lets the field
-        // sort by cell/channel/amount without leaking runtime handles into ordering.
-        const auto emitter_id = admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(e));
+        // Legacy admitted input uses neutral keys under the additive integer law.
+        // Identity input retains source provenance even with an admission filter.
+        const auto emitter_id =
+            source_order == FieldEmitterSourceOrder::SimulationIdentity
+                ? registry.get<Components::SimulationIdentityComponent>(e).id
+                : (admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(e)));
         const int radius = emitter.radius_cells > 0 ? emitter.radius_cells : 0;
         bool queued = false;
         for (int dz = -radius; dz <= radius; ++dz) {
@@ -138,7 +202,8 @@ inline bool AppendRegionalEmitterFootprint(
     int channels,
     const luminumbra::fields::EnergyFieldState::RegionRecords& records,
     bool clip_to_owners,
-    const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
+    const luminumbra::ai::CreatureTickAdmission* admission = nullptr,
+    const Components::SimulationIdentityComponent* identity = nullptr) {
     if (admission && !admission->Allows(entity)) {
         return true;
     }
@@ -167,7 +232,9 @@ inline bool AppendRegionalEmitterFootprint(
             if (deposits.size() >= EnergyFieldState::kMaxRegionalBatchDeposits)
                 return false;
             deposits.push_back(
-                {admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(entity)),
+                {identity
+                     ? identity->id
+                     : (admission ? 0u : static_cast<std::uint64_t>(entt::to_integral(entity))),
                  cx + dx,
                  cz + dz,
                  emitter.channel,
@@ -186,10 +253,11 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
     const luminumbra::fields::EnergyFieldState::RegionRecords& records,
     bool clip_to_owners = false,
     std::size_t available_slots = luminumbra::fields::EnergyFieldState::kMaxRegionalDeposits,
-    const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
+    const luminumbra::ai::CreatureTickAdmission* admission = nullptr,
+    FieldEmitterSourceOrder source_order = FieldEmitterSourceOrder::Legacy) {
     using luminumbra::fields::EnergyFieldState;
     RegionalEmitterGatherStats stats;
-    // Both scratch vectors are bounded by kMaxRegionalBatchDeposits, including
+    // Regional roster and deposit counts are bounded by kMaxRegionalBatchDeposits, including
     // a roster of emitters whose footprints eventually clip to nothing. They grow
     // with the roster, so an ordinary tick with a few emitters allocates little.
     auto& scratch = EmitterScratch(registry);
@@ -212,9 +280,13 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
             return stats;
         emitters.push_back(entity);
     }
-    std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    if (source_order == FieldEmitterSourceOrder::SimulationIdentity) {
+        OrderFieldEmittersByIdentity(registry, emitters, scratch.identity_order);
+    } else {
+        std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     FieldEmitterGatherStats queued;
     for (auto entity : emitters) {
         const auto previous = deposits.size();
@@ -226,7 +298,10 @@ inline RegionalEmitterGatherStats GatherRegionalFieldEmitterDeposits(
                 field.channels(),
                 records,
                 clip_to_owners,
-                admission))
+                admission,
+                source_order == FieldEmitterSourceOrder::SimulationIdentity
+                    ? &registry.get<Components::SimulationIdentityComponent>(entity)
+                    : nullptr))
             return stats;
         queued.emitters += deposits.size() != previous ? 1u : 0u;
     }

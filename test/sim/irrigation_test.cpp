@@ -8,6 +8,8 @@
 // canonical NetworkStateHash baseline stays byte-identical.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -126,6 +128,73 @@ TEST(Irrigation, DepositOrderIndependent) {
         return MoistureAt(grid, 1.0f, 1.0f, kOX, kOZ, kCell);
     };
     EXPECT_EQ(run(false), run(true));
+}
+
+TEST(Irrigation, DormantIntegerReductionMatchesLegacyAcrossPermutationsAndRegionGates) {
+    using luminumbra::foliage::IrrigationSourceOrder;
+    std::array<int, 4> permutation{0, 1, 2, 3};
+    do {
+        for (const bool regional : {false, true}) {
+            entt::registry registry;
+            for (const auto index : permutation) {
+                const auto hole = registry.create();
+                registry.destroy(hole);
+                constexpr std::array<std::uint16_t, 4> outputs{0, 700, 65535, 999};
+                spawnSource(registry,
+                            index == 3 ? 1000.0f : 1.25f,
+                            1.25f,
+                            outputs[static_cast<std::size_t>(index)]);
+            }
+            registry.sort<Comp::WaterSourceComponent>(
+                [](const auto& a, const auto& b) { return a.output > b.output; });
+            const std::array due{Luminumbra::world::RegionKey{0, 0}};
+            const auto gate = regional ? Luminumbra::world::RegionConsumerGate(registry, due)
+                                       : Luminumbra::world::RegionConsumerGate{};
+            IrrigationGrid legacy(4, 4), candidate(4, 4);
+            for (int tick = 0; tick < 8; ++tick) {
+                const auto expected = RunIrrigationOnTick(registry, legacy, kOX, kOZ, kCell, gate);
+                const auto actual =
+                    RunIrrigationOnTick(registry,
+                                        candidate,
+                                        kOX,
+                                        kOZ,
+                                        kCell,
+                                        gate,
+                                        IrrigationSourceOrder::PermutationInvariant);
+                EXPECT_EQ(actual.sources, expected.sources);
+                EXPECT_EQ(actual.deposited, expected.deposited);
+                EXPECT_EQ(actual.drained, expected.drained);
+                EXPECT_EQ(actual.sources, regional ? 3 : 4);
+                EXPECT_EQ(actual.deposited, 66235);
+                EXPECT_GT(candidate.AtCell(1, 1), kMoistureBaseline);
+                for (int z = 0; z < 4; ++z)
+                    for (int x = 0; x < 4; ++x)
+                        EXPECT_EQ(candidate.AtCell(x, z), legacy.AtCell(x, z));
+            }
+        }
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+}
+
+TEST(Irrigation, DormantReductionSaturatesDenseSourcesWithoutSignedOverflow) {
+    entt::registry registry;
+    constexpr int sources = 33000;
+    constexpr auto output = (std::numeric_limits<std::uint16_t>::max)();
+    for (int index = 0; index < sources; ++index)
+        spawnSource(registry, 0.0f, 0.0f, output);
+    IrrigationGrid grid(1, 1);
+    const auto stats =
+        RunIrrigationOnTick(registry,
+                            grid,
+                            kOX,
+                            kOZ,
+                            kCell,
+                            {},
+                            luminumbra::foliage::IrrigationSourceOrder::PermutationInvariant);
+    EXPECT_EQ(stats.sources, sources);
+    EXPECT_EQ(stats.deposited, std::int64_t{sources} * output);
+    EXPECT_GT(stats.deposited, (std::numeric_limits<std::int32_t>::max)());
+    EXPECT_EQ(grid.AtCell(0, 0), kMoistureMax - kMoistureDrainPerTick);
+    EXPECT_EQ(stats.drained, stats.deposited - grid.AtCell(0, 0));
 }
 
 // ---- diffusion: moisture spreads to neighbours ----
