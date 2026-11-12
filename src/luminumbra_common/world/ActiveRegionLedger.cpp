@@ -131,12 +131,17 @@ void ActiveRegionLedger::activate_owned(RegionKey key, const WorldClock& clock) 
 void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
     auto& record = activate(key, clock);
     record.edited = true;
-    record.last_edit = clock.tick();
+    // While a resume is pending, matching stamps identify completed field
+    // materialization. An ordinary edit must not erase that persisted evidence.
+    if (record.frozen_at == 0 || record.last_edit == 0 || record.last_edit != record.last_ticked) {
+        record.last_edit = clock.tick();
+    }
     record.wake_pending = true;
 }
 void ActiveRegionLedger::mark_materialized_edit(RegionKey key, const WorldClock& clock) {
     mark_edited(key, clock);
     auto& record = m_records.at(key);
+    record.last_edit = clock.tick();
     record.last_ticked = clock.tick();
     if (record.state == RegionState::Frozen) {
         record.state = RegionState::Active;

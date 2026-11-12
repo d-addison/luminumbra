@@ -311,10 +311,13 @@ public:
         m_work.neighbor_cells += moisture_cells;
         return inserted.first->second;
     }
+    // An absolute subtick denotes historical work. Cursors without absolute
+    // ticks must set replayed too; ordinary live ticks leave both defaults.
     std::map<RegionKey, std::uint64_t> Step(entt::registry& registry,
                                             FieldPageState& pages,
                                             const std::map<RegionKey, std::uint32_t>& due,
-                                            std::optional<std::uint64_t> subtick = {}) {
+                                            std::optional<std::uint64_t> subtick = {},
+                                            bool replayed = false) {
         namespace C = ::Luminumbra::Components;
         for (const auto& [key, ticks] : due) {
             if (ticks != 0) {
@@ -331,7 +334,10 @@ public:
                 continue;
             }
             auto& sources = found->second;
-            const auto through = subtick.value_or(std::numeric_limits<std::uint64_t>::max());
+            // Keep live-only entries pending for timestamp-free historical
+            // windows too, so skipped emitters are not scanned every step.
+            const auto through = subtick.value_or(std::numeric_limits<std::uint64_t>::max() -
+                                                  static_cast<std::uint64_t>(replayed));
             while (!sources.pending.empty() && sources.pending.begin()->first <= through) {
                 for (const auto index : sources.pending.begin()->second) {
                     sources.active.insert(index);
@@ -340,6 +346,11 @@ public:
             }
             for (const auto index : sources.active) {
                 const auto& source = sources.ordered[index];
+                // A standalone emitter has no persisted birth. It is live-tick
+                // only, including when a cursor replays without absolute ticks.
+                if (source.live_only && (replayed || subtick.has_value())) {
+                    continue;
+                }
                 ++m_work.source_visits;
                 if (source.soil) {
                     auto& soil = m_owners.at(key).soil;
@@ -406,6 +417,7 @@ private:
         ScentCellKey cell;
         bool soil;
         std::uint64_t first_tick;
+        bool live_only;
     };
     struct Sources {
         std::vector<Source> ordered;
@@ -431,14 +443,15 @@ private:
                 return;
             }
             const auto* growth = registry.try_get<const C::PlantGrowthComponent>(entity);
+            const bool live_only = !growth || !registry.all_of<C::PlantTag>(entity);
             const auto first =
-                owner && growth
-                    ? (growth->planted_tick == owner->region_stamp
-                           ? owner->region_stamp
-                           : owner->region_stamp +
-                                 (owner->region_stamp != std::numeric_limits<std::uint64_t>::max()))
-                    : (growth ? growth->planted_tick : 0);
-            m_sources[key].ordered.push_back({entity, cell, soil, first});
+                live_only ? std::numeric_limits<std::uint64_t>::max()
+                : owner   ? (growth->planted_tick == owner->region_stamp
+                                 ? owner->region_stamp
+                                 : owner->region_stamp + (owner->region_stamp !=
+                                                        std::numeric_limits<std::uint64_t>::max()))
+                          : growth->planted_tick;
+            m_sources[key].ordered.push_back({entity, cell, soil, first, live_only});
         };
         for (const auto entity : registry.view<const C::PlantTag,
                                                const C::SoilFeederComponent,
@@ -477,8 +490,8 @@ private:
     std::map<RegionKey, Owner> m_owners;
     Work m_work;
 };
-// Materialized edits publish matching stamps. Ordinary edits only wake the
-// owner and must retain its entire historical field window across reopening.
+// Materialized edits publish matching persisted stamps. Ordinary edits retain
+// that completion evidence while the owner still has a pending resume.
 inline std::uint64_t FoliagePriorTick(const ::Luminumbra::world::ActiveRegionRecord& record) {
     if (record.frozen_at != 0 &&
         !(record.last_edit != 0 && record.last_ticked == record.last_edit)) {
@@ -598,7 +611,8 @@ public:
                      pages,
                      m_due,
                      m_tick ? std::optional<std::uint64_t>(*m_tick - m_maximum + m_step + 1)
-                            : std::nullopt)) {
+                            : std::nullopt,
+                     true)) {
                 completed[key] += count;
             }
             ++m_step;
