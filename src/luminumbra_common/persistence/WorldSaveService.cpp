@@ -8222,6 +8222,8 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                     ++found_regions;
                     continue;
                 }
+                // Each scanned container is temporary; release its charge before the next one.
+                const AuthorityReadScratch member_scratch(budget);
                 std::vector<RegionRecord> records;
                 if (!ReadRegionFile(path, records, nullptr, {}, false, &budget) ||
                     std::any_of(records.begin(), records.end(), [](const RegionRecord& record) {
