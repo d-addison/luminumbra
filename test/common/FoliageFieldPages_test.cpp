@@ -648,7 +648,8 @@ TEST(FoliageFieldPages, BorderDiscoveryUsesEitherEndpointAndRejectsUnavailableNe
         const RegionKey other{owner.x + (coordinate < 0 ? -1 : 1), owner.z};
         ActiveRegionLedger ledger;
         ledger.pin(owner, true, WorldClock(32));
-        ledger.pin(other, true, WorldClock(32));
+        // The neighbour lies past the ledger's key range, so it can never be active.
+        EXPECT_FALSE(ledger.can_activate(other));
         const std::array<RegionKey, 2> owners{{owner, other}};
         EXPECT_TRUE(FoliageBorderEdges(pages, ledger.records(), owners, 32).empty());
     }
