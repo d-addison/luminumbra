@@ -778,10 +778,8 @@ TEST(StreamingHardening, DurableLoaderRunsOffOwnerForEveryRestorationEntry) {
                     SCOPED_TRACE(step);
                     world.update(registry, Vec3(8.0f), nullptr);
                     EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
-                    EXPECT_EQ(reads, step == 4 ? 1 : 0);
-                    if (step < 4) {
-                        EXPECT_FALSE(world.find_streamed_chunk(coords));
-                    }
+                    EXPECT_EQ(reads, 1);
+                    EXPECT_TRUE(world.find_streamed_chunk(coords));
                 }
             }
             EXPECT_EQ(reads, 1);
@@ -851,10 +849,8 @@ TEST(StreamingHardening, DurableWorkerRefusalsPublishFailStopOnOwner) {
                     SCOPED_TRACE(step);
                     world.update(registry, Vec3(8.0f), nullptr);
                     EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
-                    if (step < 4) {
-                        EXPECT_EQ(reads, 0);
-                        EXPECT_EQ(faults, 0);
-                    }
+                    EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
+                    EXPECT_EQ(faults, 1);
                 }
                 EXPECT_EQ(reads, failure >= 4 ? 0 : 1);
                 EXPECT_EQ(faults, 1);
@@ -901,8 +897,10 @@ TEST(StreamingHardening, DurableActivationRetainsFourUpdateCadenceFromStartup) {
         SCOPED_TRACE(step);
         world.update(registry, Vec3(8.0f), nullptr);
         EXPECT_EQ(world.get_last_streaming_budget_stats().update_interval_frames, 4);
-        EXPECT_EQ(reads, step == 4 ? 1 : 0);
-        EXPECT_EQ(static_cast<bool>(world.find_streamed_chunk({0, 0, 0})), step == 4);
+        // The empty first update keeps the first-update restoration pending for the first
+        // anchored update; the interval cadence still lands on update 4.
+        EXPECT_EQ(reads, 1);
+        EXPECT_TRUE(world.find_streamed_chunk({0, 0, 0}));
     }
     for (int step = 1; step <= 4; ++step) {
         SCOPED_TRACE(step);

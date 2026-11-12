@@ -19,7 +19,7 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=6, calendar=None):
+                    region_reduced_shift=1, authority_rules_revision=7, calendar=None):
     result = bytearray(b"system-config:v3:" if authority_rules_revision == 3 else b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
@@ -109,7 +109,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                     document.setdefault("sim", {}).setdefault("active_regions", {})[
                         "enabled"] = regions
                     expected.extend(identity(document, authority_rules_revision=revision)
-                                    for revision in (3, 6))
+                                    for revision in (3, 7))
                 self.assertEqual(re.findall(r'"([0-9a-f]{16})"', literals), expected)
 
     def test_cpp_frozen_session_vectors_match_independent_encoding(self):
@@ -123,7 +123,7 @@ class SystemConfigIdentityTest(unittest.TestCase):
                             {"region_work_limit": (1 << 64) - 2},
                             {"region_hold_ticks": 31}, {"region_reduced_shift": 2}):
                 expected.extend(identity(document, authority_rules_revision=revision, **options)
-                                for revision in (3, 6))
+                                for revision in (3, 7))
         self.assertEqual(re.findall(r'"([0-9a-f]{16})"', table), expected)
 
     def test_literal_ctest_names_are_unique_in_each_registration_directory(self):
@@ -210,17 +210,18 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "60ab3c242d54ce89")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=5), "35e233a89e8c87b1")
         self.assertEqual(identity(SHIPPED, authority_rules_revision=6), "b439df88e7c3623a")
-        self.assertEqual(identity(SHIPPED), "b439df88e7c3623a")
+        self.assertEqual(identity(SHIPPED), "bf3da613768a50cb")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
         self.assertEqual(len(canonical_bytes(SHIPPED, authority_rules_revision=3)), 297)
-        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 6))
+        self.assertEqual(canonical_bytes(SHIPPED)[297:301], struct.pack("<I", 7))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
         header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
-        self.assertIn("kAuthorityRulesRevision = 6;", header)
+        self.assertIn("kAuthorityRulesRevision = 7;", header)
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=5))
+        self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=6))
         # The previously admitted shipping rules must fail compatibility.
         self.assertNotEqual(identity(SHIPPED), "60ab3c242d54ce89")
         self.assertNotEqual(identity(SHIPPED), "2f2a9405252345a8")  # revision 4
