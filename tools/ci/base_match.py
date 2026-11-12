@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -25,6 +26,27 @@ RECOVERY = ("Re-trigger ci.yml with synchronize (push a new head), reopened, "
 MAX_RUNS = 1000
 # Bound each REST response to 8 MiB before decoding JSON.
 MAX_PAGE_BYTES = 8 * 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+# Retry work, including paginated requests, ends within 150 seconds. The final
+# live lookup retains its 20-second timeout, keeping the budget below 3 minutes.
+RETRY_BUDGET_SECONDS = 150
+
+
+class BaseMismatch(ValueError):
+    """A valid run records stale evidence; only first attempts may retry it."""
+
+    def __init__(self, message, order):
+        super().__init__(message)
+        self.order = order
+
+
+class NoBaseEvidence(ValueError):
+    """A complete, valid listing has no applicable recorded base."""
+
+    def __init__(self, message, *, unassociated=False):
+        super().__init__(message)
+        self.note = (" Fork/unassociated runs carry no base evidence; a maintainer lands such PRs."
+                     if unassociated else "")
 
 
 def pull_identity(pr):
@@ -52,20 +74,22 @@ def is_rerun(run_attempt):
     return run_attempt.lstrip("0") != "1"
 
 
-def evaluate(event, api, run_attempt="1"):
+def evaluate(event, api, run_attempt="1", *, evidence_after=None, allow_empty_listing=True):
     """Return a printable verdict; invalid or incomplete evidence raises ValueError."""
     rerun = is_rerun(run_attempt)
     number, head, base = pull_identity(event["pull_request"])
     if base not in CI_BASES:
         raise ValueError(f"CI does not run for base={base!r}; base is outside ci.yml's pull_request branches filter")
     current = f"base={base!r} head={head!r}"
-    if event["action"] in CI_EVENTS and not rerun:
-        return f"BASEMATCH {current}: {event['action']} starts CI against this base."
     if event["action"] not in CI_EVENTS and event["action"] != "edited":
         raise ValueError("unsupported pull-request action")
     runs = api["workflow_runs"]
     if not isinstance(runs, list) or type(api["total_count"]) is not int or not 0 <= len(runs) == api["total_count"] <= MAX_RUNS:
         raise ValueError("incomplete or oversized workflow-run listing")
+    # A fresh head's companion CI may not be listed yet. Existing evidence must
+    # still be checked: first-attempt events can arrive after later retargets.
+    if not runs and event["action"] in CI_EVENTS and not rerun and evidence_after is None and allow_empty_listing:
+        return f"BASEMATCH {current}: {event['action']} starts CI against this base."
     ordered = []
     for run in runs:
         if run["event"] != "pull_request" or run["head_sha"] != head or type(run["id"]) is not int or run["id"] <= 0:
@@ -74,10 +98,25 @@ def evaluate(event, api, run_attempt="1"):
         ordered.append((created, run["id"], run))
     if len({item[1] for item in ordered}) != len(ordered):
         raise ValueError("duplicate workflow-run ids in listing")
-    for _, run_id, run in sorted(ordered, key=lambda item: item[:2], reverse=True):
+    unassociated = False
+    for created, run_id, run in sorted(ordered, key=lambda item: item[:2], reverse=True):
         pulls = run.get("pull_requests")
-        if not isinstance(pulls, list) or not pulls or any(not isinstance(pull, dict) or type(pull.get("number")) is not int for pull in pulls):
-            raise ValueError(f"ci.yml run {run_id} has no usable pull-request/base metadata (including fork runs)")
+        if not isinstance(pulls, list) or any(not isinstance(pull, dict) or type(pull.get("number")) is not int for pull in pulls):
+            raise ValueError(f"ci.yml run {run_id} has no usable pull-request/base metadata")
+        if not pulls:
+            pr_head = event["pull_request"]["head"]
+            sources = []
+            for repository, branch in ((run.get("head_repository"), run.get("head_branch")),
+                                       (pr_head.get("repo"), pr_head.get("ref"))):
+                name = repository.get("full_name") if isinstance(repository, dict) else None
+                if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", name)
+                        or not isinstance(branch, str) or not branch):
+                    raise ValueError("no usable head repository/branch metadata")
+                sources.append((name, branch))
+            # Head identity establishes relevance only, never a recorded base.
+            # Continue so an unassociated run cannot mask associated evidence.
+            unassociated = unassociated or sources[0] == sources[1]
+            continue
         matches = [pull for pull in pulls if pull["number"] == number]
         if not matches:
             continue
@@ -87,10 +126,12 @@ def evaluate(event, api, run_attempt="1"):
         recorded = recorded_base.get("ref") if isinstance(recorded_base, dict) else None
         if not isinstance(recorded, str) or not recorded:
             raise ValueError(f"ci.yml run {run_id} has no recorded base")
-        if recorded != base:
-            raise ValueError(f"BASEMISMATCH ci.yml run {run_id} base={recorded!r}; current {current}")
+        if recorded != base or (evidence_after is not None and (created, run_id) <= evidence_after):
+            raise BaseMismatch(f"BASEMISMATCH ci.yml run {run_id} base={recorded!r}; current {current}; "
+                               "requires newer matching evidence", (created, run_id))
         return f"BASEMATCH ci.yml run {run_id} {current}"
-    raise ValueError(f"no ci.yml pull_request run records a base for this pull request; current {current}")
+    raise NoBaseEvidence(f"no ci.yml pull_request run records a base for this pull request; current {current}",
+                         unassociated=unassociated)
 
 
 def validate_api_target(repository, token):
@@ -101,11 +142,30 @@ def validate_api_target(repository, token):
         raise ValueError("missing workflow token")
 
 
-def fetch_json(url, token, opener):
+def request_timeout(deadline):
+    if deadline is None:
+        return 20
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("workflow-run retry deadline expired")
+    return min(20, remaining)
+
+
+def fetch_json(url, token, opener, *, deadline=None):
     request = Request(url, headers={"Authorization": f"Bearer {token}",
                       "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
-    with opener(request, timeout=20) as response:
-        payload = response.read(MAX_PAGE_BYTES + 1)
+    with opener(request, timeout=request_timeout(deadline)) as response:
+        # read1 returns after at most one socket receive, so a slowly dripping body cannot
+        # outlive the retry deadline by more than one receive timeout.
+        read = getattr(response, "read1", None) or response.read
+        payload = bytearray()
+        while len(payload) <= MAX_PAGE_BYTES:
+            chunk = read(min(READ_CHUNK_BYTES, MAX_PAGE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+            request_timeout(deadline)
+    request_timeout(deadline)
     if len(payload) > MAX_PAGE_BYTES:
         raise ValueError("API response exceeds byte limit")
     return json.loads(payload)
@@ -123,7 +183,7 @@ def fetch_pull(repository, number, token, opener=None):
     return data
 
 
-def fetch_runs(repository, head, token, opener=urlopen):
+def fetch_runs(repository, head, token, opener=urlopen, *, deadline=None):
     """Read every filtered API page, refusing truncated or inconsistent listings.
 
     The workflow-runs REST schema records pull_requests[].base.ref:
@@ -137,7 +197,7 @@ def fetch_runs(repository, head, token, opener=urlopen):
     for page in range(1, MAX_RUNS // 100 + 1):
         query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100, "page": page})
         data = fetch_json(f"https://api.github.com/repos/{repository}/actions/workflows/ci.yml/runs?{query}",
-                          token, opener)
+                          token, opener, deadline=deadline)
         count, batch = data["total_count"], data["workflow_runs"]
         if type(count) is not int or not 0 <= count <= MAX_RUNS or not isinstance(batch, list) or len(batch) > 100:
             raise ValueError("invalid or truncated workflow-run API page")
@@ -152,7 +212,19 @@ def fetch_runs(repository, head, token, opener=urlopen):
     raise ValueError("workflow-run pagination limit reached")
 
 
-def main(argv=None):
+def retry_parameters():
+    """Bound both environment overrides before converting decimal strings."""
+    values = []
+    for name, default, minimum, maximum in (("BASE_MATCH_RETRY_ATTEMPTS", "6", 1, 6),
+                                           ("BASE_MATCH_RETRY_SECONDS", "20", 1, 20)):
+        value = os.environ.get(name, default)
+        if not re.fullmatch(r"[0-9]{1,2}", value) or not minimum <= int(value) <= maximum:
+            raise ValueError(f"invalid {name}: expected {minimum}..{maximum}")
+        values.append(int(value))
+    return tuple(values)
+
+
+def main(argv=None, *, sleep=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", type=Path, default=os.environ.get("GITHUB_EVENT_PATH"))
     parser.add_argument("--api-json", type=Path, help="inject a complete workflow-run listing for offline checks")
@@ -160,6 +232,7 @@ def main(argv=None):
     parser.add_argument("--run-attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
                         help="positive decimal attempt (defaults to GITHUB_RUN_ATTEMPT, then 1)")
     args = parser.parse_args(argv)
+    sleep = time.sleep if sleep is None else sleep
     try:
         rerun = is_rerun(args.run_attempt)
         if args.event is None:
@@ -167,12 +240,30 @@ def main(argv=None):
         event = json.loads(args.event.read_text(encoding="utf-8"))
         print(f"Checking base={event['pull_request']['base']['ref']!r} "
               f"head={event['pull_request']['head']['sha']!r}")
-        api = None
-        if event["action"] == "edited" or (rerun and event["action"] in CI_EVENTS):
-            api = (json.loads(args.api_json.read_text(encoding="utf-8")) if args.api_json else
-                   fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
-                              os.environ.get("GH_TOKEN", "")))
-        verdict = evaluate(event, api, args.run_attempt)
+        first_ci = event["action"] in CI_EVENTS and not rerun
+        attempts, delay = retry_parameters() if first_ci else (1, 0)
+        deadline = time.monotonic() + RETRY_BUDGET_SECONDS if first_ci else None
+        evidence_after = None
+        for attempt in range(attempts):
+            api = None
+            if event["action"] == "edited" or event["action"] in CI_EVENTS:
+                api = (json.loads(args.api_json.read_text(encoding="utf-8")) if args.api_json else
+                       fetch_runs(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["head"]["sha"],
+                                  os.environ.get("GH_TOKEN", ""), deadline=deadline))
+            try:
+                verdict = evaluate(event, api, args.run_attempt, evidence_after=evidence_after,
+                                   allow_empty_listing=attempt == 0)
+                request_timeout(deadline)
+                break
+            except (BaseMismatch, NoBaseEvidence) as error:
+                if attempt + 1 == attempts:
+                    raise
+                if isinstance(error, BaseMismatch):
+                    evidence_after = max(evidence_after or error.order, error.order)
+                if deadline - time.monotonic() <= delay:
+                    raise TimeoutError("workflow-run retry deadline expired") from error
+                sleep(delay)
+                request_timeout(deadline)
         # Fetch last: a workflow-run lookup can take multiple pages before this check.
         live = (json.loads(args.pr_json.read_text(encoding="utf-8")) if args.pr_json else
                 fetch_pull(os.environ.get("GITHUB_REPOSITORY", ""), event["pull_request"]["number"],
@@ -181,7 +272,8 @@ def main(argv=None):
         print(verdict)
         return 0
     except (OSError, URLError, HTTPException, ValueError, KeyError, TypeError, RecursionError) as error:
-        print(f"Base match check failed closed: {error}. {RECOVERY}")
+        note = error.note if isinstance(error, NoBaseEvidence) else ""
+        print(f"Base match check failed closed: {error}. {RECOVERY}{note}")
         return 1
 
 
