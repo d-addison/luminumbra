@@ -43,15 +43,18 @@ bool ReplayWriter::Finalize(std::uint64_t tick_count, const RegionScheduleTrace*
         return false;
     try {
         std::string bytes;
-        if (trace && (trace->size() != tick_count || !EncodeTrace(*trace, bytes))) {
+        if (m_replacement_guard ||
+            (trace && (trace->size() != tick_count || !EncodeTrace(*trace, bytes)))) {
             m_open = false;
             std::vector<std::uint8_t>{}.swap(m_buffer);
+            m_replacement_guard.reset();
             return false;
         }
         return Finish(tick_count, trace ? &bytes : nullptr, true);
     } catch (const std::exception&) {
         m_open = false;
         std::vector<std::uint8_t>{}.swap(m_buffer);
+        m_replacement_guard.reset();
         return false;
     }
 }

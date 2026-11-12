@@ -168,8 +168,10 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                          it != app.audio.pendingThunder.end();) {
                         const double delay_s = it->distance_m / 343.0; // speed of sound
                         if (now_s - it->fired_at_seconds >= delay_s) {
-                            audioManager->PlayOneShot2D("thunder",
-                                                        Luminumbra::Client::BusId::Events);
+                            audioManager->PlayOneShot2D(
+                                "thunder",
+                                Luminumbra::Client::BusId::Events,
+                                Luminumbra::Client::ThunderCueGain(it->magnitude, it->distance_m));
                             it = app.audio.pendingThunder.erase(it);
                         } else {
                             ++it;
