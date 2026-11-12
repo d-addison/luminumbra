@@ -620,11 +620,12 @@ void StepChunkWaterFixed(Chunk& c,
     out_depth_after += sum_after;
     c.max_water_delta_last_tick = static_cast<float>(max_delta) / static_cast<float>(MM_PER_M);
     if (max_delta > 1) {
-        c.water_mesh_dirty_ticks++;
-        if (c.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL) {
+        if (c.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL - 1) {
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
             result.water_mesh_invalidated = true;
+        } else {
+            ++c.water_mesh_dirty_ticks;
         }
     }
     if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_entry.begin())) {

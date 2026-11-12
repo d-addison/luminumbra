@@ -52,6 +52,64 @@ auto Snapshot(const Chunk& chunk) {
                            chunk.water_revision());
 }
 
+TEST(RegionalWater, MaximalDirtyTickCounterInvalidatesWithoutOverflow) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const auto policy :
+         {WaterKernels::OverflowPolicy::Refuse, WaterKernels::OverflowPolicy::Saturate}) {
+        for (const int initial_ticks :
+             {std::numeric_limits<int>::max() - 1, std::numeric_limits<int>::max()}) {
+            for (const std::int32_t rain_mm : {0, 1, 2}) {
+                SCOPED_TRACE(::testing::Message() << initial_ticks << " rain=" << rain_mm
+                                                  << " policy=" << static_cast<int>(policy));
+                Chunk chunk({0, 0, 0});
+                FillWater(chunk, 8);
+                chunk.water_mesh_generated.store(true);
+                chunk.water_mesh_dirty_ticks = initial_ticks;
+
+                const auto result =
+                    WaterKernels::StepInterior(chunk, shield, {.rain_mm = rain_mm}, policy);
+
+                ASSERT_TRUE(result.applied);
+                ASSERT_EQ(chunk.water_depth_mm.front(), 1000 + rain_mm);
+                const bool invalidated = rain_mm > 1;
+                EXPECT_EQ(result.water_mesh_invalidated, invalidated);
+                EXPECT_EQ(chunk.water_mesh_generated.load(), !invalidated);
+                EXPECT_EQ(chunk.water_mesh_dirty_ticks, invalidated ? 0 : initial_ticks);
+            }
+        }
+    }
+}
+
+TEST(RegionalWater, DirtyTickCounterPreservesRemeshCadence) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const auto policy :
+         {WaterKernels::OverflowPolicy::Refuse, WaterKernels::OverflowPolicy::Saturate}) {
+        for (int initial_ticks = 0; initial_ticks <= 16; ++initial_ticks) {
+            for (const std::int32_t rain_mm : {0, 1, 2}) {
+                SCOPED_TRACE(::testing::Message() << initial_ticks << " rain=" << rain_mm
+                                                  << " policy=" << static_cast<int>(policy));
+                Chunk chunk({0, 0, 0});
+                FillWater(chunk, 8);
+                chunk.water_mesh_generated.store(true);
+                chunk.water_mesh_dirty_ticks = initial_ticks;
+
+                const auto result =
+                    WaterKernels::StepInterior(chunk, shield, {.rain_mm = rain_mm}, policy);
+
+                ASSERT_TRUE(result.applied);
+                ASSERT_EQ(chunk.water_depth_mm.front(), 1000 + rain_mm);
+                const bool dirty = rain_mm > 1;
+                const bool invalidated = dirty && initial_ticks >= 14;
+                const int expected_ticks =
+                    invalidated ? 0 : initial_ticks + static_cast<int>(dirty);
+                EXPECT_EQ(result.water_mesh_invalidated, invalidated);
+                EXPECT_EQ(chunk.water_mesh_generated.load(), !invalidated);
+                EXPECT_EQ(chunk.water_mesh_dirty_ticks, expected_ticks);
+            }
+        }
+    }
+}
+
 TEST(RegionalWater, InteriorAndSeamsConserveRandomizedSignedCoordinateGrids) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     std::mt19937 random(std::mt19937::result_type{7123});
