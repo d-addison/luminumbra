@@ -10,7 +10,10 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <random>
+#include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -515,5 +518,504 @@ TEST(FoliageFieldPages, PageActivationPreservesSparseValuesAndRefusesInvalidOrFu
     EXPECT_EQ(pages.soil().sample({17, 0}, -1), kSoilBaseline);
     EXPECT_EQ(pages.irrigation().sample({16, 0}, -1), 17);
     EXPECT_EQ(pages.irrigation().sample({17, 0}, -1), 0);
+}
+} // namespace
+
+namespace {
+// Test-only drain of the public bounded cursor; session callers advance once
+// per update and retain the cursor until remaining_steps() reaches zero.
+std::map<RegionKey, std::uint64_t>
+ReplayAllFoliageInteriors(entt::registry& registry,
+                          FieldPageState& pages,
+                          const std::map<RegionKey, std::uint32_t>& windows,
+                          std::optional<std::uint64_t> tick = {},
+                          FoliageInteriorReplay::Work* diagnostic = nullptr) {
+    FoliageWindowReplay replay(pages, windows, tick);
+    std::map<RegionKey, std::uint64_t> work;
+    while (replay.remaining_steps() != 0) {
+        for (const auto& [key, count] : replay.Advance(registry, pages)) {
+            work[key] += count;
+        }
+    }
+    if (diagnostic) {
+        *diagnostic = replay.work();
+    }
+    return work;
+}
+FoliageEdges ScheduledFoliageBorderEdges(const FieldPageState& pages,
+                                         const std::map<RegionKey, ActiveRegionRecord>& records,
+                                         std::span<const RegionKey> owners,
+                                         std::uint64_t tick) {
+    return SelectFoliageBorderEdges(FoliageBorderEdges(pages, records, owners), records, tick);
+}
+TEST(FoliageFieldPages, ElapsedWindowsMatchIndependentSoilAndIrrigationSteps) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = {0.0f, 0.0f, 0.0f};
+    registry.emplace<C::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(C::PlantStage::Mature);
+    registry.emplace<C::SoilFeederComponent>(plant);
+    registry.emplace<C::WaterSourceComponent>(plant);
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, 1200));
+    ASSERT_TRUE(pages.set_irrigation({0, 0}, 3999999));
+    ASSERT_TRUE(pages.set_irrigation({1, 0}, 0));
+    ASSERT_TRUE(pages.set_soil({512, 0}, 37));
+    auto soil = FoliageCells(pages.soil());
+    auto moisture = FoliageCells(pages.irrigation());
+    std::uint32_t absorbed = 0;
+    for (int step = 0; step < 17; ++step) {
+        const auto draw = std::min(soil.at({0, 0}), 500);
+        soil.at({0, 0}) -= draw;
+        absorbed += static_cast<std::uint32_t>(draw);
+        soil.at({0, 0}) = std::min(kSoilBaseline, soil.at({0, 0}) + kSoilRegenPerTick);
+        moisture.at({0, 0}) = std::min(kMoistureMax, moisture.at({0, 0}) + 1000);
+        EvolveFoliageIrrigation(moisture);
+    }
+    ReplayAllFoliageInteriors(registry, pages, {{{0, 0}, 17}, {{1, 0}, 0}, {{2, 0}, 65536}});
+    FieldPageState expected;
+    CommitReference(soil, moisture, expected);
+    EXPECT_EQ(pages.serialize(), expected.serialize());
+    EXPECT_EQ(registry.get<C::SoilFeederComponent>(plant).absorbed, absorbed);
+    const auto before = pages.serialize();
+    EXPECT_THROW(ReplayAllFoliageInteriors(registry, pages, {{{0, 0}, 65537}}),
+                 std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+    EXPECT_TRUE(ReplayAllFoliageInteriors(registry, pages, {}).empty());
+}
+TEST(FoliageFieldPages, BordersUsePriorHostValuesCommonPhaseAndBothOwners) {
+    ActiveRegionLedger ledger;
+    const WorldClock clock(32);
+    ledger.pin({0, 0}, true, clock);
+    ledger.pin({1, 0}, true, clock);
+    FieldPageState prior;
+    ASSERT_TRUE(prior.set_irrigation({511, 0}, 800));
+    ASSERT_TRUE(prior.set_irrigation({512, 0}, 0));
+    const std::vector<RegionKey> owners{{0, 0}, {1, 0}};
+    const auto edges = ScheduledFoliageBorderEdges(prior, ledger.records(), owners, 32);
+    ASSERT_EQ(edges.size(), 1u);
+    auto next = prior;
+    ASSERT_TRUE(next.set_irrigation({511, 0}, 794));
+    const auto fluxes = FoliageBorderFluxes(prior.irrigation(), edges);
+    ASSERT_EQ(fluxes.size(), edges.size());
+    EXPECT_EQ(fluxes.front(), 100);
+    const auto work = ExchangeFoliageBorders(next, fluxes, edges);
+    EXPECT_EQ(next.irrigation().sample({511, 0}, -1), 694);
+    EXPECT_EQ(next.irrigation().sample({512, 0}, -1), 100);
+    EXPECT_EQ(work.at({0, 0}), 1u);
+    EXPECT_EQ(work.at({1, 0}), 1u);
+    EXPECT_TRUE(ScheduledFoliageBorderEdges(prior, {}, owners, 32).empty());
+    auto records = ledger.records();
+    records.at({1, 0}).cadence_shift = 2;
+    EXPECT_TRUE(ScheduledFoliageBorderEdges(prior, records, owners, 33).empty());
+    records.at({1, 0}).state = RegionState::Frozen;
+    EXPECT_TRUE(ScheduledFoliageBorderEdges(prior, records, owners, 32).empty());
+}
+TEST(FoliageFieldPages, BorderSnapshotContainsOnlyEdgesAndRefusesIncompleteInput) {
+    FieldPageState pages;
+    for (int index = 0; index < 128; ++index) {
+        ASSERT_TRUE(ActivateFoliagePage(pages, {index * 16, 32}, true));
+        ASSERT_TRUE(ActivateFoliagePage(pages, {index * 16, 32}, false));
+    }
+    ASSERT_TRUE(pages.set_irrigation({511, 0}, 800));
+    ASSERT_TRUE(pages.set_irrigation({512, 0}, 0));
+    const FoliageEdges edges{{{511, 0}, {512, 0}}};
+    const auto fluxes = FoliageBorderFluxes(pages.irrigation(), edges);
+    ASSERT_EQ(fluxes.size(), 1u);
+    EXPECT_EQ(fluxes.front(), 100);
+    EXPECT_TRUE(FoliageBorderFluxes(pages.irrigation(), {}).empty());
+    const auto before = pages.serialize();
+    EXPECT_THROW(ExchangeFoliageBorders(pages, {}, edges), std::invalid_argument);
+    EXPECT_THROW(ExchangeFoliageBorders(pages, fluxes, {}), std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+    EXPECT_TRUE(ExchangeFoliageBorders(pages, {}, {}).empty());
+    EXPECT_EQ(ExchangeFoliageBorders(pages, fluxes, edges).size(), 2u);
+    EXPECT_EQ(pages.irrigation().sample({511, 0}, -1), 700);
+    EXPECT_EQ(pages.irrigation().sample({512, 0}, -1), 100);
+}
+TEST(FoliageFieldPages, BorderDiscoveryUsesEitherEndpointAndRejectsUnavailableNeighbors) {
+    const std::array<ScentCellKey, 4> cells{{{511, 8}, {0, 8}, {8, 511}, {8, 0}}};
+    const std::array<ScentCellKey, 4> neighbors{{{512, 8}, {-1, 8}, {8, 512}, {8, -1}}};
+    for (std::size_t direction = 0; direction < cells.size(); ++direction) {
+        for (const bool initialize_source : {false, true}) {
+            SCOPED_TRACE(direction);
+            SCOPED_TRACE(initialize_source);
+            const auto cell = cells[direction], next = neighbors[direction];
+            const auto owner = FieldPageState::region_of_scent_cell(cell);
+            const auto other = FieldPageState::region_of_scent_cell(next);
+            ActiveRegionLedger ledger;
+            ledger.pin(owner, true, WorldClock(32));
+            ledger.pin(other, true, WorldClock(32));
+            const std::array<RegionKey, 1> owners{{owner}};
+            FieldPageState pages;
+            EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, ledger.records(), owners, 32).empty());
+            ASSERT_TRUE(pages.set_irrigation(initialize_source ? cell : next, 800));
+            const auto edges = ScheduledFoliageBorderEdges(pages, ledger.records(), owners, 32);
+            ASSERT_EQ(edges.size(), 1u);
+            EXPECT_EQ(edges.front().first, std::min(cell, next));
+            EXPECT_EQ(edges.front().second, std::max(cell, next));
+            const auto fluxes = FoliageBorderFluxes(pages.irrigation(), edges);
+            ASSERT_EQ(fluxes.size(), 1u);
+            EXPECT_EQ(fluxes.front(), (initialize_source == (direction % 2 == 0)) ? 100 : -100);
+            auto records = ledger.records();
+            records.at(other).cadence_shift = 1;
+            EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, records, owners, 33).empty());
+            records.at(other).cadence_shift = 17;
+            EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, records, owners, 32).empty());
+            records.at(other).state = RegionState::Frozen;
+            EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, records, owners, 32).empty());
+            records.erase(other);
+            EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, records, owners, 32).empty());
+        }
+    }
+    for (const int coordinate : {-16777216, 16777215}) {
+        FieldPageState pages;
+        ASSERT_TRUE(pages.set_irrigation({coordinate, 8}, 800));
+        const auto owner = FieldPageState::region_of_scent_cell({coordinate, 8});
+        const RegionKey other{owner.x + (coordinate < 0 ? -1 : 1), owner.z};
+        ActiveRegionLedger ledger;
+        ledger.pin(owner, true, WorldClock(32));
+        // The neighbour lies past the ledger's key range, so it can never be active.
+        EXPECT_FALSE(ledger.can_activate(other));
+        const std::array<RegionKey, 2> owners{{owner, other}};
+        EXPECT_TRUE(ScheduledFoliageBorderEdges(pages, ledger.records(), owners, 32).empty());
+    }
+}
+TEST(FoliageFieldPages, FirstDueWindowsDistinguishNewOwnersFromConsumedTicks) {
+    ActiveRegionLedger ledger;
+    ledger.pin({0, 0}, true, WorldClock(1));
+    const WorldClock clock(32);
+    const auto schedule = ledger.schedule(clock, std::span<const Luminumbra::Vec3>{}, {}, {});
+    ASSERT_EQ(schedule.due.size(), 1u);
+    EXPECT_EQ(BuildRegionalFoliageWindows(ledger, schedule.due, {}, {}, clock).elapsed.at({0, 0}),
+              1u);
+    for (const std::uint64_t previous : {20u, 31u, 32u}) {
+        const std::map<RegionKey, std::uint64_t> history{{{0, 0}, previous}};
+        EXPECT_EQ(BuildRegionalFoliageWindows(ledger, schedule.due, history, {}, clock)
+                      .elapsed.at({0, 0}),
+                  32u - previous);
+    }
+    const std::map<RegionKey, std::uint64_t> future{{{0, 0}, 33}};
+    EXPECT_THROW(BuildRegionalFoliageWindows(ledger, schedule.due, future, {}, clock),
+                 std::invalid_argument);
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, {}, {}, clock).elapsed.empty());
+    const std::array<RegionKey, 1> missing{{{1, 0}}};
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, missing, {}, {}, clock).elapsed.empty());
+}
+TEST(FoliageFieldPages, ZeroResumeAndStaleOrRepeatedTokensCannotReplayAWindow) {
+    ActiveRegionLedger ledger;
+    WorldClock clock(32);
+    ledger.pin({0, 0}, true, clock);
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({0, 0});
+    record.frozen_at = 32;
+    const std::set<RegionKey> pending{{0, 0}};
+    const std::map<RegionKey, std::uint64_t> previous{{{0, 0}, 32}};
+    const auto windows = BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock);
+    EXPECT_EQ(windows.elapsed.at({0, 0}), 0u);
+    EXPECT_EQ(windows.resumes.at({0, 0}), 32u);
+    EXPECT_FALSE(ledger.acknowledge_resume({0, 0}, 31));
+    EXPECT_TRUE(ledger.acknowledge_resume({0, 0}, 32));
+    const auto bytes = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume({0, 0}, 32));
+    EXPECT_EQ(ledger.encode(), bytes);
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock).elapsed.empty());
+    record.state = RegionState::Frozen;
+    record.frozen_at = 32;
+    EXPECT_TRUE(BuildRegionalFoliageWindows(ledger, {}, previous, pending, clock).elapsed.empty());
+}
+} // namespace
+
+namespace {
+TEST(FoliageFieldPages, ReplayCollectsSourcesOnceAndVisitsOnlyDueOwnersAndBirths) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, kSoilBaseline));
+    ASSERT_TRUE(pages.set_irrigation({512, 0}, 0));
+    for (int index = 0; index < 64; ++index) {
+        const auto plant = registry.create();
+        registry.emplace<C::PlantTag>(plant);
+        registry.emplace<C::TransformComponent>(plant);
+        registry.emplace<C::PlantGrowthComponent>(plant);
+        registry.emplace<C::SoilFeederComponent>(plant);
+        registry.emplace<C::PlantRegionComponent>(
+            plant, static_cast<std::uint64_t>(index + 1), 0, 0, std::uint64_t{999});
+        const auto source = registry.create();
+        registry.emplace<C::TransformComponent>(source).position = {512, 0, 0};
+        registry.emplace<C::WaterSourceComponent>(source);
+    }
+    FoliageInteriorReplay::Work work;
+    ReplayAllFoliageInteriors(registry, pages, {{{0, 0}, 1000}, {{1, 0}, 1}}, 1000, &work);
+    EXPECT_EQ(work.source_preparations, 128u);
+    EXPECT_EQ(work.source_visits, 128u);
+    EXPECT_EQ(work.evolved_cells, 1001u);
+    EXPECT_TRUE(ReplayAllFoliageInteriors(registry, pages, {}, 1000, &work).empty());
+    EXPECT_EQ(work.source_preparations, 0u);
+    const auto before = pages.serialize();
+    EXPECT_THROW(ReplayAllFoliageInteriors(registry, pages, {{{0, 0}, 1001}}, 1000),
+                 std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), before);
+}
+
+TEST(FoliageFieldPages, SparsePublicationPreservesUntouchedCellsAndPreflightsBothChannels) {
+    FieldPageState live, candidate;
+    ASSERT_TRUE(live.set_soil({0, 0}, 7));
+    ASSERT_TRUE(candidate.set_soil({1, 0}, 9));
+    ASSERT_TRUE(live.can_adopt_foliage(candidate));
+    live.adopt_foliage(std::move(candidate));
+    EXPECT_EQ(live.soil().sample({0, 0}, -1), 7);
+    EXPECT_EQ(live.soil().sample({1, 0}, -1), 9);
+    for (std::size_t index = 0; index < FoliageFieldPages::kMaxPages; ++index) {
+        ASSERT_TRUE(live.set_irrigation({static_cast<std::int32_t>(index * 16), 0}, 0));
+    }
+    const auto before = live.serialize();
+    FieldPageState refused;
+    ASSERT_TRUE(refused.set_soil({16, 0}, 11));
+    ASSERT_TRUE(refused.set_irrigation({-16, 0}, 13));
+    EXPECT_FALSE(live.can_adopt_foliage(refused));
+    EXPECT_EQ(live.serialize(), before);
+    FieldPageState replacement;
+    ASSERT_TRUE(replacement.set_irrigation({0, 0}, 13));
+    ASSERT_TRUE(live.can_adopt_foliage(replacement));
+    live.adopt_foliage(std::move(replacement));
+    EXPECT_EQ(live.irrigation().sample({0, 0}, -1), 13);
+}
+} // namespace
+
+namespace {
+TEST(FoliageFieldPages, BoundedReplayMatchesUninterruptedWindowAndLimitsEveryCall) {
+    namespace C = Luminumbra::Components;
+    const auto populate = [](entt::registry& registry) {
+        for (const std::uint64_t birth : {0u, 32u, 33u, 35999u, 36001u}) {
+            const auto entity = registry.create();
+            registry.emplace<C::PlantTag>(entity);
+            registry.emplace<C::TransformComponent>(entity);
+            auto& growth = registry.emplace<C::PlantGrowthComponent>(entity);
+            growth.stage = static_cast<std::uint8_t>(C::PlantStage::Mature);
+            growth.planted_tick = birth;
+            registry.emplace<C::SoilFeederComponent>(entity);
+            registry.emplace<C::WaterSourceComponent>(entity);
+            registry.emplace<C::PlantRegionComponent>(entity, 36002 - birth, 0, 0, birth);
+        }
+    };
+    entt::registry bounded_registry, reference_registry;
+    populate(bounded_registry);
+    populate(reference_registry);
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, 1200));
+    ASSERT_TRUE(pages.set_irrigation({0, 0}, 3999999));
+    ASSERT_TRUE(pages.set_irrigation({1, 0}, 0));
+    ASSERT_TRUE(pages.set_soil({512, 0}, 37));
+    ASSERT_TRUE(pages.set_soil({1024, 0}, 53));
+    auto expected = pages;
+    // Mixed lengths activate the short window near the end of the shared
+    // timeline. Zero windows and pageless owners must never consume steps.
+    const std::map<RegionKey, std::uint32_t> windows{
+        {{0, 0}, 36000}, {{1, 0}, 47}, {{2, 0}, 0}, {{3, 0}, 36000}};
+    FoliageWindowReplay replay(pages, windows, 36000);
+    EXPECT_EQ(replay.remaining_steps(), 36000u);
+    std::uint32_t calls = 0;
+    while (replay.remaining_steps() != 0) {
+        const auto remaining = replay.remaining_steps();
+        const auto evolved = replay.work().evolved_cells;
+        const auto visits = replay.work().source_visits;
+        replay.Advance(bounded_registry, pages);
+        const auto advanced = remaining - replay.remaining_steps();
+        EXPECT_LE(advanced, 32u);
+        EXPECT_EQ(advanced, std::min(remaining, FoliageWindowReplay::kStepBudget));
+        EXPECT_LE(replay.work().evolved_cells - evolved, 4u * advanced);
+        EXPECT_LE(replay.work().source_visits - visits, 10u * advanced);
+        ++calls;
+    }
+    EXPECT_EQ(calls,
+              (36000u + FoliageWindowReplay::kStepBudget - 1) / FoliageWindowReplay::kStepBudget);
+    EXPECT_EQ(replay.work().source_preparations, 10u);
+    EXPECT_EQ(replay.work().preparation_cells, 4u);
+    EXPECT_EQ(replay.work().evolved_cells, 36000u * 3 + 47u);
+    // The unbounded oracle uses one uninterrupted replay with the original
+    // absolute subticks and independently selects the owners on each step.
+    FoliageInteriorReplay reference;
+    for (std::uint32_t step = 1; step <= 36000; ++step) {
+        std::map<RegionKey, std::uint32_t> due{{{0, 0}, 1}};
+        if (step > 36000 - 47) {
+            due.emplace(RegionKey{1, 0}, 1);
+        }
+        reference.Step(reference_registry, expected, due, step);
+    }
+    EXPECT_EQ(pages.serialize(), expected.serialize());
+    for (const auto entity : bounded_registry.view<C::SoilFeederComponent>()) {
+        EXPECT_EQ(bounded_registry.get<C::SoilFeederComponent>(entity).absorbed,
+                  reference_registry.get<C::SoilFeederComponent>(entity).absorbed);
+    }
+    const auto bytes = pages.serialize();
+    EXPECT_TRUE(replay.Advance(bounded_registry, pages).empty());
+    EXPECT_EQ(pages.serialize(), bytes);
+    EXPECT_EQ(replay.work().evolved_cells, reference.work().evolved_cells);
+    EXPECT_EQ(replay.work().source_visits, reference.work().source_visits);
+}
+
+TEST(FoliageFieldPages, BoundedReplayEmptyZeroAndInvalidWindowsDoNotMutateState) {
+    entt::registry registry;
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({0, 0}, 37));
+    const auto bytes = pages.serialize();
+    for (const auto& windows : {std::map<RegionKey, std::uint32_t>{},
+                                std::map<RegionKey, std::uint32_t>{{{0, 0}, 0}},
+                                std::map<RegionKey, std::uint32_t>{{{1, 0}, 65536}}}) {
+        FoliageWindowReplay replay(pages, windows);
+        EXPECT_EQ(replay.remaining_steps(), 0u);
+        EXPECT_TRUE(replay.Advance(registry, pages).empty());
+        EXPECT_EQ(replay.work().preparation_cells, 0u);
+        EXPECT_EQ(replay.work().source_preparations, 0u);
+    }
+    const std::map<RegionKey, std::uint32_t> too_long{{{0, 0}, 65537}};
+    EXPECT_THROW((FoliageWindowReplay(pages, too_long)), std::invalid_argument);
+    const std::map<RegionKey, std::uint32_t> underflow{{{0, 0}, 33}};
+    EXPECT_THROW((FoliageWindowReplay(pages, underflow, 32)), std::invalid_argument);
+    EXPECT_EQ(pages.serialize(), bytes);
+}
+
+TEST(FoliageFieldPages, BorderDiscoveryRetainsNonzeroPhasesAndSelectionRequiresBothOwners) {
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_irrigation({511, 8}, 800));
+    ASSERT_TRUE(pages.set_irrigation({512, 8}, 0));
+    std::map<RegionKey, ActiveRegionRecord> records{{{0, 0}, ActiveRegionRecord{}},
+                                                    {{1, 0}, ActiveRegionRecord{}}};
+    const std::array<RegionKey, 2> owners{{{0, 0}, {1, 0}}};
+    auto& left = records.at({0, 0});
+    auto& right = records.at({1, 0});
+    left.state = right.state = RegionState::Reduced;
+    left.cadence_shift = 1;
+    left.cadence_phase = 1;
+    right.cadence_shift = 2;
+    for (const std::uint32_t phase : {1u, 2u, 3u}) {
+        right.cadence_phase = phase;
+        const auto edges = FoliageBorderEdges(pages, records, owners);
+        ASSERT_EQ(edges.size(), 1u);
+        for (std::uint64_t tick = 0; tick < 16; ++tick) {
+            SCOPED_TRACE(phase);
+            SCOPED_TRACE(tick);
+            const auto selected = SelectFoliageBorderEdges(edges, records, tick);
+            EXPECT_EQ(selected.size(), tick % 2 == 1 && tick % 4 == phase ? 1u : 0u);
+        }
+        right.cadence_shift = 17;
+        EXPECT_TRUE(SelectFoliageBorderEdges(edges, records, phase).empty());
+        right.cadence_shift = 2;
+        right.cadence_phase = 4;
+        EXPECT_TRUE(SelectFoliageBorderEdges(edges, records, phase).empty());
+        right.cadence_phase = phase;
+        right.state = RegionState::Frozen;
+        EXPECT_TRUE(SelectFoliageBorderEdges(edges, records, phase).empty());
+        right.state = RegionState::Reduced;
+        auto missing = records;
+        missing.erase({1, 0});
+        EXPECT_TRUE(SelectFoliageBorderEdges(edges, missing, phase).empty());
+    }
+    EXPECT_TRUE(SelectFoliageBorderEdges({}, records, 3).empty());
+}
+
+TEST(FoliageFieldPages, MaterializedEditsPreserveResumeTokensAndRoundTripWithoutReplayingEdits) {
+    const RegionKey owner{0, 0};
+    for (const auto state : {RegionState::Active, RegionState::Reduced, RegionState::Frozen}) {
+        ActiveRegionLedger ledger;
+        ledger.pin(owner, true, WorldClock(32));
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
+        record.state = state;
+        record.cadence_shift = state == RegionState::Active ? 0 : 1;
+        record.cadence_phase = ActiveRegionLedger::phase(owner, record.cadence_shift);
+        record.last_ticked = 31;
+        record.frozen_at = 32;
+        EXPECT_EQ(FoliagePriorTick(record), 32u);
+        ledger.mark_edited(owner, WorldClock(40));
+        EXPECT_EQ(FoliagePriorTick(record), 32u);
+        ledger.mark_materialized_edit(owner, WorldClock(48));
+        EXPECT_EQ(record.last_edit, 48u);
+        EXPECT_EQ(record.last_ticked, 48u);
+        EXPECT_EQ(record.frozen_at, 32u);
+        EXPECT_TRUE(record.wake_pending);
+        EXPECT_NE(record.state, RegionState::Frozen);
+        EXPECT_EQ(FoliagePriorTick(record), 48u);
+        ActiveRegionLedger reopened;
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
+        EXPECT_EQ(reopened.encode(), ledger.encode());
+        const std::set<RegionKey> pending{owner};
+        const auto window = BuildRegionalFoliageWindows(reopened, {}, {}, pending, WorldClock(52));
+        EXPECT_EQ(window.elapsed.at(owner), 4u);
+        EXPECT_EQ(window.resumes.at(owner), 32u);
+    }
+    ActiveRegionLedger ledger;
+    ledger.mark_materialized_edit(owner, WorldClock(8));
+    EXPECT_EQ(ledger.records().at(owner).last_ticked, 8u);
+    const auto bytes = ledger.encode();
+    EXPECT_THROW(ledger.mark_materialized_edit({32768, 0}, WorldClock(16)), std::invalid_argument);
+    EXPECT_EQ(ledger.encode(), bytes);
+}
+
+TEST(FoliageFieldPages, BorderExchangeRejectsPartialEndpointsAndInvalidFluxBeforeAnyWrites) {
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_irrigation({511, 8}, 800));
+    ASSERT_TRUE(pages.set_irrigation({512, 8}, 0));
+    const auto bytes = pages.serialize();
+    const FoliageEdges partial{{{511, 8}, {512, 8}}, {{511, 9}, {512, 9}}};
+    const std::array<std::int32_t, 2> fluxes{{100, 100}};
+    EXPECT_THROW(ExchangeFoliageBorders(pages, fluxes, partial), std::invalid_argument);
+    const FoliageEdges edge{{{511, 8}, {512, 8}}};
+    for (const auto flux :
+         {std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()}) {
+        const std::array<std::int32_t, 1> invalid{{flux}};
+        EXPECT_THROW(ExchangeFoliageBorders(pages, invalid, edge), std::invalid_argument);
+    }
+    EXPECT_EQ(pages.serialize(), bytes);
+}
+} // namespace
+
+namespace {
+TEST(FoliageFieldPages, WindowPreparationAndEveryCallExcludeDormantPages) {
+    FieldPageState pages;
+    for (std::size_t index = 0; index < FoliageFieldPages::kMaxPages; ++index) {
+        const ScentCellKey cell{0, static_cast<std::int32_t>(index) * 512};
+        ASSERT_TRUE(pages.set_soil(cell, 0));
+        ASSERT_TRUE(pages.set_irrigation(cell, 1000));
+    }
+    entt::registry registry;
+    const auto dormant = pages.region_bytes({0, 1});
+    const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, 65}, {{0, 1}, 0}};
+    FoliageWindowReplay replay(pages, windows, 65);
+    EXPECT_EQ(replay.work().preparation_pages, 2u);
+    EXPECT_EQ(replay.work().preparation_cells, 2u);
+    EXPECT_EQ(replay.work().page_probes, 64u);
+    for (const auto expected : {33u, 1u, 0u}) {
+        const auto evolved = replay.work().evolved_cells;
+        const auto work = replay.Advance(registry, pages);
+        EXPECT_EQ(replay.remaining_steps(), expected);
+        EXPECT_EQ(work.size(), 1u);
+        EXPECT_LE(replay.work().evolved_cells - evolved, 64u);
+        EXPECT_EQ(replay.work().preparation_pages, 2u);
+        EXPECT_EQ(replay.work().page_probes, 64u);
+    }
+    EXPECT_EQ(replay.work().evolved_cells, 130u);
+    EXPECT_EQ(pages.region_bytes({0, 1}), dormant);
+}
+
+TEST(FoliageFieldPages, SparsePublicationPreflightsSoilCapacityAndEmptyCandidates) {
+    FieldPageState live;
+    for (std::size_t index = 0; index < FoliageFieldPages::kMaxPages; ++index) {
+        ASSERT_TRUE(live.set_soil({static_cast<std::int32_t>(index * 16), 0}, 7));
+    }
+    FieldPageState refused;
+    ASSERT_TRUE(refused.set_soil({-16, 0}, 11));
+    ASSERT_TRUE(refused.set_irrigation({0, 0}, 13));
+    const auto bytes = live.serialize();
+    EXPECT_FALSE(live.can_adopt_foliage(refused));
+    EXPECT_EQ(live.serialize(), bytes);
+    FieldPageState empty;
+    EXPECT_TRUE(live.can_adopt_foliage(empty));
+    live.adopt_foliage(std::move(empty));
+    EXPECT_EQ(live.serialize(), bytes);
 }
 } // namespace
