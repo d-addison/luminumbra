@@ -3,6 +3,7 @@
 #include "core/FilesystemPath.h"
 
 #include "CreatedWorldArtifacts.h"
+#include "PlantSnapshot.h"
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
@@ -50,6 +51,16 @@ constexpr std::size_t kHashBlockBytes = 64u * 1024u;
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
     return active;
+}
+
+bool& PlantSnapshotSelected() {
+    static thread_local bool selected = false;
+    return selected;
+}
+
+bool& PlantFactsInvalidating() {
+    static thread_local bool invalidating = false;
+    return invalidating;
 }
 
 SnapshotStepHook& StepHook() {
@@ -969,6 +980,32 @@ bool FinishJournal(const fs::path& save_dir,
 
 } // namespace
 
+PlantSnapshotContract::PlantSnapshotContract(bool selected)
+    : m_previous(PlantSnapshotSelected()) {
+    select(selected);
+}
+
+PlantSnapshotContract::~PlantSnapshotContract() {
+    select(m_previous);
+}
+
+bool PlantSnapshotContract::selected() {
+    return PlantSnapshotSelected();
+}
+
+bool PlantSnapshotContract::invalidating_facts() {
+    return PlantFactsInvalidating();
+}
+
+void PlantSnapshotContract::select(bool selected) {
+    if (selected == PlantSnapshotSelected())
+        return;
+    PlantFactsInvalidating() = true;
+    invalidate_facts();
+    PlantFactsInvalidating() = false;
+    PlantSnapshotSelected() = selected;
+}
+
 fs::path snapshot_index_path(const fs::path& save_dir) {
     return save_dir / "chunks" / "region" / "snapshot.json";
 }
@@ -1440,7 +1477,8 @@ SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
     , m_tick(tick)
     , m_anchors(std::move(anchors))
     , m_digest_fn(digest_fn)
-    , m_artifacts(artifacts) {
+    , m_artifacts(artifacts)
+    , m_plant_snapshot(PlantSnapshotContract::selected()) {
     if (ActiveTransaction() == nullptr) {
         ActiveTransaction() = this;
         m_registered = true;
@@ -1498,6 +1536,22 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         if (!read_snapshot_index(m_save_dir, m_previous, errors)) {
             release_registration();
             return false;
+        }
+        if (m_plant_snapshot) {
+            const PlantSnapshotContract contract;
+            // Admit the committed baseline before creating any transaction artifacts.
+            if (!WorldSaveService::validate_save(m_save_dir, errors)) {
+                release_registration();
+                return false;
+            }
+            if (m_previous.generation != 0) {
+                PlantSnapshot plants;
+                if (!WorldSaveService::load_plant_snapshot(plants, m_save_dir, errors)) {
+                    release_registration();
+                    return false;
+                }
+                m_plant_next_id = plants.next_id;
+            }
         }
         if (m_previous.generation == std::numeric_limits<std::uint64_t>::max() ||
             m_previous.txn_id == std::numeric_limits<std::uint64_t>::max()) {
@@ -1917,6 +1971,16 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         return false;
     }
     try {
+        const PlantSnapshotContract contract(m_plant_snapshot);
+        if (m_plant_snapshot) {
+            PlantSnapshot plants;
+            if (!WorldSaveService::load_plant_snapshot(plants, m_save_dir, errors) ||
+                plants.next_id < m_plant_next_id) {
+                AddError(errors, "plant v2 commit refused: invalid or decreased allocator cursor");
+                abort(errors);
+                return false;
+            }
+        }
         SnapshotIndex next = m_previous;
         next.generation = m_new_generation;
         next.tick = m_tick;

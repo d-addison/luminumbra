@@ -1,5 +1,6 @@
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
+#include "luminumbra_common/persistence/PlantSnapshot.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
@@ -47,6 +48,20 @@
 namespace fs = std::filesystem;
 
 namespace Luminumbra::Persistence {
+
+TEST(SaveTransaction, CandidateSelectionNestsAndDoesNotChangeTheDefaultContract) {
+    EXPECT_FALSE(PlantSnapshotContract::selected());
+    {
+        const PlantSnapshotContract candidate;
+        EXPECT_TRUE(PlantSnapshotContract::selected());
+        {
+            const PlantSnapshotContract legacy(false);
+            EXPECT_FALSE(PlantSnapshotContract::selected());
+        }
+        EXPECT_TRUE(PlantSnapshotContract::selected());
+    }
+    EXPECT_FALSE(PlantSnapshotContract::selected());
+}
 
 TEST(SaveTransaction, IndexedEnergyValidationRejectsCanonicalFingerprintOfMalformedContents) {
     const auto remaining = std::to_string(luminumbra::fields::kEnergyCadenceTicks);
@@ -140,6 +155,18 @@ public:
 private:
     fs::path m_path;
 };
+
+TEST(SaveTransaction, LegacyTransactionCannotPublishCandidateEvenWhenSelectionChanges) {
+    TempSave save;
+    SaveTransaction transaction(save.path(), 0, {}, &WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    const PlantSnapshotContract candidate;
+    WorldSaveService::PreparedPlantSnapshotWrite prepared;
+    ASSERT_TRUE(prepared.prepare(PlantSnapshot{.next_id = 37, .entities = {}}));
+    EXPECT_FALSE(transaction.publish_plant_snapshot(prepared.bytes()));
+    EXPECT_FALSE(transaction.member_is_protected("chunks/region/plant-entities.json"));
+    EXPECT_FALSE(fs::exists(WorldSaveService::plant_entities_path(save.path())));
+}
 
 void Put(const fs::path& file, const std::string& bytes) {
     std::error_code ec;

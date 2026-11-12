@@ -14,6 +14,7 @@
 #include "luminumbra/core/Types.h"
 #include "persistence/CreatedWorldArtifacts.h"
 #include "persistence/PlantPersistence.h"
+#include "persistence/PlantSnapshot.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/SavedInputFile.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -76,6 +77,43 @@ using Luminumbra::Vec2;
 using Luminumbra::Vec3;
 using Luminumbra::WorldStreamingState;
 using Luminumbra::Persistence::WorldSaveService;
+
+TEST(WorldSaveService, PlantMemberIntegritySelectsTheCandidateOnlyWithinItsContract) {
+    namespace P = Luminumbra::Persistence;
+    const Luminumbra::TestSupport::ScopedTempFile temp("plant_digest_", ".unused");
+    const auto root = temp.Path().parent_path();
+    std::filesystem::create_directories(WorldSaveService::region_directory(root));
+    WorldSaveService::PreparedPlantSnapshotWrite prepared;
+    ASSERT_TRUE(prepared.prepare(P::PlantSnapshot{.next_id = 91, .entities = {}}));
+    {
+        std::ofstream output(WorldSaveService::plant_entities_path(root), std::ios::binary);
+        output << prepared.bytes();
+        output.flush();
+        ASSERT_TRUE(output.good());
+    }
+    P::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(
+        WorldSaveService::member_digest(root, "chunks/region/plant-entities.json", digest, error));
+    {
+        const P::PlantSnapshotContract candidate;
+        ASSERT_TRUE(WorldSaveService::member_digest(
+            root, "chunks/region/plant-entities.json", digest, error));
+        EXPECT_TRUE(digest.present);
+        EXPECT_EQ(digest.bytes, prepared.bytes().size());
+        EXPECT_EQ(digest.fnv64, P::fnv1a64_bytes(prepared.bytes().data(), prepared.bytes().size()));
+        ASSERT_TRUE(std::filesystem::remove(WorldSaveService::plant_entities_path(root)));
+        EXPECT_FALSE(WorldSaveService::member_digest(
+            root, "chunks/region/plant-entities.json", digest, error));
+        std::stop_source stopped;
+        stopped.request_stop();
+        EXPECT_FALSE(WorldSaveService::member_digest_cancellable(
+            root, "chunks/region/plant-entities.json", digest, error, stopped.get_token()));
+    }
+    ASSERT_TRUE(
+        WorldSaveService::member_digest(root, "chunks/region/plant-entities.json", digest, error));
+    EXPECT_FALSE(digest.present);
+}
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
     const std::filesystem::path dir = Luminumbra::TestSupport::CreateUniqueTempDirectory(

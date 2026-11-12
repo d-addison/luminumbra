@@ -32,6 +32,25 @@ class CreatedWorldArtifacts;
 class TransactionOwnership;
 struct BoundPublicationStage;
 
+// Explicit candidate selection shared by transaction writers and world/member readers.
+// Owner-thread only; scopes nest and restore their caller's selection. Shipping callers
+// keep the default v1 contract until the authority transition.
+class PlantSnapshotContract {
+public:
+    explicit PlantSnapshotContract(bool selected = true);
+    ~PlantSnapshotContract();
+    PlantSnapshotContract(const PlantSnapshotContract&) = delete;
+    PlantSnapshotContract& operator=(const PlantSnapshotContract&) = delete;
+    [[nodiscard]] static bool selected();
+    // Coordination diagnostic for invalidating cached facts at a selection boundary.
+    [[nodiscard]] static bool invalidating_facts();
+
+private:
+    static void select(bool selected);
+    static void invalidate_facts();
+    bool m_previous;
+};
+
 namespace detail {
 // Indexed publication excludes readers until commit/rollback. Reentrant reads and
 // writer-owned reads do not reacquire the shared mutex; readers never take writer ownership.
@@ -172,6 +191,11 @@ public:
     // replaces them. Already protected paths are skipped. The index file is protected on the first
     // call.
     bool protect(const std::vector<std::string>& relative_paths, std::vector<std::string>* errors);
+    // Publish bytes owned by PreparedPlantSnapshotWrite. Candidate selection is required.
+    // All payloads must be prepared before begin(); install the matching ledger/ground
+    // payloads before this call. An empty preparation refuses before protecting or writing.
+    bool publish_plant_snapshot(const std::string& prepared_bytes,
+                                std::vector<std::string>* errors = nullptr);
     // Internal writer coordination: journal incoming identities before publication, then
     // verify the protected occupant under the publication lock. Journal/control writes bypass
     // member coordination; the persistence integration owns their identities separately.
@@ -257,6 +281,8 @@ private:
     std::vector<std::array<float, 3>> m_anchors;
     MemberDigestFn m_digest_fn = nullptr;
     CreatedWorldArtifacts* m_artifacts = nullptr;
+    bool m_plant_snapshot = false;
+    std::uint64_t m_plant_next_id = 1;
     State m_state = State::Idle;
     SnapshotIndex m_previous;
     std::uint64_t m_txn_id = 0;

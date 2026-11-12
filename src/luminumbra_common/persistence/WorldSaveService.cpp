@@ -4370,6 +4370,11 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
         AddError(errors, "indexed envelope requires an open save transaction");
         return false;
     }
+    if (PlantSnapshotContract::selected()) {
+        PlantSnapshot plants;
+        if (!load_plant_snapshot(plants, save_dir, errors))
+            return false;
+    }
     nlohmann::json metadata;
     bool missing = false;
     if (!ReadSavedJson(save_dir / "world_info.json",
@@ -4743,6 +4748,101 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
     return region_directory(save_dir) / "plant-entities.json";
 }
 
+namespace {
+constexpr std::string_view kPlantMember = "chunks/region/plant-entities.json";
+constexpr std::string_view kPlantSidecar = "chunks/region/plant-identities.json";
+
+bool PlantMemberMatches(const SnapshotIndex& index,
+                        std::string_view path,
+                        const MemberDigest& actual) {
+    // At most kMaxSnapshotMembers, checked by read_snapshot_index.
+    const auto found =
+        std::find_if(index.members.begin(),
+                     index.members.end(),
+                     [path](const SnapshotMember& member) { return member.path == path; });
+    return found == index.members.end() ? !actual.present
+                                        : found->present == actual.present &&
+                                              (!actual.present || (found->bytes == actual.bytes &&
+                                                                   found->fnv64 == actual.fnv64));
+}
+
+bool AdmitPlantSnapshotContext(const PlantSnapshot& plants,
+                               const std::filesystem::path& save_dir,
+                               std::vector<std::string>* errors,
+                               const std::stop_token& stop,
+                               const SnapshotIndex* index = nullptr) {
+    world::ActiveRegionLedger ledger;
+    std::string error;
+    {
+        // Read type, bytes and digest through the same handle. A missing regional
+        // ledger uses the envelope's cursor; a present invalid ledger never does.
+        const SavedInputFile input(WorldSaveService::active_regions_path(save_dir));
+        MemberDigest digest;
+        if (input.missing()) {
+            if (!ledger.reserve_persistent_ids(plants.next_id))
+                return false;
+        } else {
+            std::string bytes;
+            if (!input.read(bytes, world::ActiveRegionLedger::kMaxFileBytes, stop) ||
+                !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+                AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+                return false;
+            }
+            digest = {.present = true,
+                      .bytes = bytes.size(),
+                      .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
+        }
+        if (index && !PlantMemberMatches(*index, "chunks/region/active-regions.arl", digest)) {
+            AddError(errors, "inconsistent snapshot: chunks/region/active-regions.arl");
+            return false;
+        }
+    }
+    world::GroundObjectStore ground;
+    if (!WorldSaveService::load_ground_objects(ground, save_dir, plants.next_id, errors, stop))
+        return false;
+    if (!ValidatePlantSnapshot(plants, ledger, ground, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Plant v2 load cancelled.");
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+bool SaveTransaction::publish_plant_snapshot(const std::string& prepared_bytes,
+                                             std::vector<std::string>* errors) {
+    const WorldSaveService::SaveOwnership ownership;
+    if (m_state != State::Open || !m_plant_snapshot || !PlantSnapshotContract::selected()) {
+        AddError(errors, "plant v2 publication requires a candidate save transaction");
+        return false;
+    }
+    PlantSnapshot plants;
+    MemberDigest digest;
+    std::string error;
+    if (!WorldSaveService::decode_plant_snapshot_member(prepared_bytes, plants, digest, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    if (plants.next_id < m_plant_next_id) {
+        AddError(errors, "plant v2 publication refused: decreased allocator cursor");
+        return false;
+    }
+    {
+        const SavedInputFile sidecar(WorldSaveService::plant_identities_path(m_save_dir));
+        if (!sidecar.missing()) {
+            AddError(errors, std::string(kUnsupportedPlantSnapshot));
+            return false;
+        }
+    }
+    if (!AdmitPlantSnapshotContext(plants, m_save_dir, errors, {}) ||
+        !protect({std::string(kPlantMember)}, errors))
+        return false;
+    return WorldSaveService::write_member_bytes(m_save_dir, kPlantMember, prepared_bytes, errors);
+}
+
 bool WorldSaveService::PreparedPlantSnapshotWrite::prepare(const PlantSnapshot& snapshot,
                                                            std::vector<std::string>* errors) {
     m_bytes.clear();
@@ -4773,23 +4873,21 @@ bool WorldSaveService::load_plant_snapshot(PlantSnapshot& out,
                                            std::vector<std::string>* errors,
                                            const std::stop_token& stop) {
     const detail::SnapshotReadOwnership ownership;
-    const SavedInputFile input(plant_entities_path(save_dir));
-    const SavedInputFile sidecar(plant_identities_path(save_dir));
-    if (stop.stop_requested() || !sidecar.missing()) {
-        AddError(errors,
-                 stop.stop_requested() ? "Plant v2 load cancelled."
-                                       : std::string(kUnsupportedPlantSnapshot));
-        return false;
-    }
-    if (input.missing()) {
-        AddError(errors, std::string(kUnsupportedPlantSnapshot));
-        return false;
-    }
     std::string bytes;
-    if (!input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)) {
-        AddError(errors,
-                 "Plant v2 load refused: unreadable, non-regular, partial or oversized input.");
-        return false;
+    {
+        const SavedInputFile input(plant_entities_path(save_dir));
+        const SavedInputFile sidecar(plant_identities_path(save_dir));
+        if (stop.stop_requested() || !sidecar.missing() || input.missing()) {
+            AddError(errors,
+                     stop.stop_requested() ? "Plant v2 load cancelled."
+                                           : std::string(kUnsupportedPlantSnapshot));
+            return false;
+        }
+        if (!input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)) {
+            AddError(errors,
+                     "Plant v2 load refused: unreadable, non-regular, partial or oversized input.");
+            return false;
+        }
     }
     PlantSnapshot candidate;
     MemberDigest digest;
@@ -4797,6 +4895,25 @@ bool WorldSaveService::load_plant_snapshot(PlantSnapshot& out,
     if (!decode_plant_snapshot_member(bytes, candidate, digest, error)) {
         AddError(errors, error);
         return false;
+    }
+    if (PlantSnapshotContract::selected()) {
+        SnapshotIndex index;
+        const bool publishing = SaveTransaction::active_for(save_dir) != nullptr;
+        if (!publishing) {
+            if (!read_snapshot_index(save_dir, index, errors, stop))
+                return false;
+            if (index.generation == 0 || !PlantMemberMatches(index, kPlantMember, digest) ||
+                std::any_of(
+                    index.members.begin(), index.members.end(), [](const SnapshotMember& member) {
+                        return member.path == kPlantSidecar;
+                    })) {
+                AddError(errors, "inconsistent snapshot: plant v2 member inventory");
+                return false;
+            }
+        }
+        if (!AdmitPlantSnapshotContext(
+                candidate, save_dir, errors, stop, publishing ? nullptr : &index))
+            return false;
     }
     if (stop.stop_requested()) {
         AddError(errors, "Plant v2 load cancelled.");
@@ -6078,6 +6195,19 @@ void WorldSaveService::SaveFactsScope::discard_deferred() {
 
 void WorldSaveService::SaveFactsScope::invalidate_presence_facts() {
     m_presence_known = false;
+    if (PlantSnapshotContract::invalidating_facts()) {
+        // Only live, nested facts scopes are visited, once at a contract boundary.
+        // Ordinary payload publication retains its admitted baseline as before.
+        for (auto* scope = this; scope; scope = scope->m_previous) {
+            scope->m_validated = false;
+            scope->m_presence_known = false;
+        }
+    }
+}
+
+void PlantSnapshotContract::invalidate_facts() {
+    if (auto* facts = ActiveFacts())
+        facts->invalidate_presence_facts();
 }
 
 bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
@@ -6881,9 +7011,14 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
         std::string member_bytes;
         {
             const SavedInputFile input(path);
-            if (input.missing())
+            if (input.missing()) {
+                if (PlantSnapshotContract::selected() && relative == kPlantMember) {
+                    error = kUnsupportedPlantSnapshot;
+                    return false;
+                }
                 return true;
-            if (!input.read(member_bytes, maximum)) {
+            }
+            if (!input.read(member_bytes, maximum, stop)) {
                 error = "unreadable or oversized snapshot member";
                 return false;
             }
@@ -6926,6 +7061,10 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
                 return false;
             }
         } else if (relative == "chunks/region/plant-entities.json") {
+            if (PlantSnapshotContract::selected()) {
+                PlantSnapshot plants;
+                return decode_plant_snapshot_member(member_bytes, plants, out, error);
+            }
             Ecs::EntityRegistrySnapshot plants;
             if (!AdmitPlantComponentBytes(member_bytes) ||
                 !Ecs::LoadEntityRegistrySnapshotJson(member_bytes, plants, diagnostics) ||
@@ -6934,6 +7073,10 @@ bool WorldSaveService::member_digest_cancellable(const std::filesystem::path& sa
                 return false;
             }
         } else if (relative == "chunks/region/plant-identities.json") {
+            if (PlantSnapshotContract::selected()) {
+                error = kUnsupportedPlantSnapshot;
+                return false;
+            }
             std::string payload;
             const SavedInputFile input(plant_entities_path(save_dir));
             Ecs::EntityRegistrySnapshot plants;
@@ -8762,6 +8905,12 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!indexed && requires_index)
             return reject("inconsistent snapshot: index missing");
         auto inventory = ReadWorldPersistenceInventory(save_dir, stop);
+        if (PlantSnapshotContract::selected() &&
+            (indexed || !metadata_missing || !manifest_missing || inventory.present)) {
+            PlantSnapshot plants;
+            if (!load_plant_snapshot(plants, save_dir, &errors, stop))
+                return reject("");
+        }
         if (!inventory.directories_present)
             return false;
         auto& region_files = inventory.region_files;
@@ -8893,9 +9042,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 !ValidateRegionalEnergy(save_dir, ledger, &errors, stop))
                 return reject("");
             Ecs::EntityRegistrySnapshot plants;
-            if (!load_plant_entities(plants, save_dir, &errors, stop))
+            if (!PlantSnapshotContract::selected() &&
+                !load_plant_entities(plants, save_dir, &errors, stop))
                 return reject("");
-            if (plants.persistent_identity) {
+            if (!PlantSnapshotContract::selected() && plants.persistent_identity) {
                 if (!indexed)
                     return reject(
                         "Corrupt plant authority: identity map requires a snapshot index.");
