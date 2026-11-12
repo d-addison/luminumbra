@@ -3392,9 +3392,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     bool activation_ran_this_tick = false;
-    const bool initial_durable_activation =
-        m_first_update && m_durable_residency && !m_durable_chunks.empty();
-    m_first_update = false;
+    // An update without anchors restores nothing, so the first-update restoration waits for the
+    // first anchored update instead of falling back to the four-update cadence.
+    const bool initial_durable_activation = m_first_update && m_durable_residency &&
+                                            !m_durable_chunks.empty() && !anchor_positions.empty();
+    if (!anchor_positions.empty()) {
+        m_first_update = false;
+    }
     m_update_tick_counter++;
     const bool interval_activation = m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES;
     if (initial_durable_activation || interval_activation) {
