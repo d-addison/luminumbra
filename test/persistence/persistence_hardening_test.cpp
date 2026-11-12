@@ -126,6 +126,9 @@ std::shared_ptr<Chunk> AddRichChunk(WorldStreamingState& state,
     // / (authoritative-state change): the authoritative fixed-point state (hashed).
     chunk->water_depth_mm = {static_cast<std::int32_t>(150 + salt), 0};
     chunk->water_bed_mm = {1000, static_cast<std::int32_t>(1500 + salt)};
+    // Active resolution 16 requires all 256 integer cells; retain the adversarial prefix.
+    chunk->water_depth_mm.resize(16u * 16u, 0);
+    chunk->water_bed_mm.resize(16u * 16u, 1000);
     chunk->has_water_sim.store(true, std::memory_order_release);
     chunk->water_mesh_generated.store(true, std::memory_order_release);
     chunk->current_water_resolution.store(16, std::memory_order_release);
@@ -135,6 +138,7 @@ std::shared_ptr<Chunk> AddRichChunk(WorldStreamingState& state,
     chunk->water_mesh_dirty_ticks = static_cast<int>(salt + 2u);
     // / (authoritative-state change): flow momentum is persisted + hashed sim truth.
     chunk->water_edge_flux = {static_cast<std::int32_t>(3 + salt), -7, 0, 12};
+    chunk->water_edge_flux.resize(2u * chunk->water_depth_mm.size(), -7);
     return chunk;
 }
 
@@ -1630,6 +1634,7 @@ TEST(WaterPersistenceSettleParity, EdgeFluxRoundTripsExactly) {
     WorldStreamingState original;
     auto src = AddRichChunk(original, IVec3(2, 0, -3), ChunkState::Ready, 5u);
     src->water_edge_flux = {101, -202, 303, -404};
+    src->water_edge_flux.resize(2u * src->water_depth_mm.size(), -404);
     const std::vector<std::int32_t> expected_flux = src->water_edge_flux;
 
     std::vector<std::string> errors;

@@ -88,7 +88,7 @@ std::string SerializeChunkSnapshotJson(const Chunk& chunk);
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
                                                      bool preserve_authority = false);
 struct ChunkAuthorityLoadPolicy {
-    // Indexed admission checks JSON water arrays and encoded integer grids before insertion.
+    // Strict admission additionally checks legacy JSON water; encoded water is always strict.
     bool strict_water = false;
     bool terrain_edited = true;
     bool migrate_legacy_water = false;
@@ -97,7 +97,7 @@ struct ChunkAuthorityLoadPolicy {
     // repair keeps it), but it may not carry terrain ownership.
     bool allow_unflagged_water = false;
     // Proof of the water array contract from this same decode, for either record encoding.
-    // False on failure, observational only when strict_water is false.
+    // False on failure; legacy JSON observation is permissive when strict_water is false.
     bool* strict_water_valid = nullptr;
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
@@ -106,7 +106,8 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 // Region chunk record payload: one chunk, compact JSON, every array as little-endian base64
 // (record_format 2). Storage only; hashes keep the canonical serializers above. The loader
 // below accepts this form and the plain-JSON form.
-// Optional process-local proof of the integer water grid contract, captured while encoding.
+// Refuses invalid water arrays with std::invalid_argument before returning any payload.
+// Optional process-local proof is false on refusal and true after successful encoding.
 std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid = nullptr);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
