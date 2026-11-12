@@ -308,4 +308,36 @@ TEST(Scavenging, RunEqualsReplay) {
     }
 }
 
+TEST(Scavenging, LegacyCarcassTieKeepsStorageOrderDespiteIdentity) {
+    entt::registry r;
+    const auto actor = spawnScavenger(r, 0, 0, 0.9f);
+    const auto first = spawnCarcassEaten(r, 10, 0);
+    const auto second = spawnCarcassMortal(r, -10, 0);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 30u);
+    r.emplace<Comp::SimulationIdentityComponent>(first, 10u);
+    r.emplace<Comp::SimulationIdentityComponent>(second, 20u);
+    const auto stats = RunScavengingOnTick(r, 0);
+    EXPECT_EQ(stats.identity_order_visits, 0u);
+    EXPECT_LT(scav(r, actor).wish_x, 0);
+}
+
+TEST(Scavenging, IdentityModeWithoutCarcassesResetsStaleWish) {
+    entt::registry r;
+    const auto actor = spawnScavenger(r, 0, 0, 0.9f);
+    r.emplace<Comp::SimulationIdentityComponent>(actor, 1u);
+    auto& sc = r.get<Comp::ScavengerComponent>(actor);
+    sc.wish_x = 1;
+    sc.wish_z = -1;
+    sc.feeding = 1;
+    const auto stats = luminumbra::ai::RunScavengingOnTickV2(r, 0);
+    EXPECT_EQ(stats.scavengers, 1);
+    EXPECT_EQ(stats.carcasses, 0);
+    EXPECT_EQ(stats.seeking, 0);
+    EXPECT_EQ(stats.feeding, 0);
+    EXPECT_FLOAT_EQ(sc.wish_x, 0);
+    EXPECT_FLOAT_EQ(sc.wish_z, 0);
+    EXPECT_EQ(sc.feeding, 0);
+    EXPECT_FLOAT_EQ(hungerOf(r, actor), 0.9f);
+}
+
 } // namespace
