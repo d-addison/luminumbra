@@ -1094,6 +1094,38 @@ TEST(ScentFieldGates, NoncopyableDiffusionGatesKeepEdgeOrderAndRefusals) {
     }
 }
 
+TEST(ScentFieldGates, DiffusionGatesReturningBoolConvertibleValuesMatchBoolGates) {
+    using luminumbra::fields::ScalarFieldDiffusion;
+    ScalarFieldDiffusion seed(3, 2);
+    seed.add_impulse(0, 0, 8.0);
+    auto expected = seed;
+    (void)expected.diffuse(
+        1, 0.25, [](std::size_t lhs, std::size_t rhs) { return lhs != 0 || rhs != 3; });
+    auto index_int = seed;
+    (void)index_int.diffuse(
+        1, 0.25, [](std::size_t lhs, std::size_t rhs) { return (lhs != 0 || rhs != 3) ? 1 : 0; });
+    EXPECT_EQ(index_int.values(), expected.values());
+    auto coordinate_int = seed;
+    (void)coordinate_int.diffuse(
+        1, 0.25, [](std::size_t x, std::size_t z, std::size_t nx, std::size_t nz) {
+            return (z * 3 + x != 0 || nz * 3 + nx != 3) ? 2 : 0;
+        });
+    EXPECT_EQ(coordinate_int.values(), expected.values());
+    auto erased_int = seed;
+    const std::function<int(std::size_t, std::size_t)> erased_gate = [](std::size_t lhs,
+                                                                        std::size_t rhs) {
+        return (lhs != 0 || rhs != 3) ? 1 : 0;
+    };
+    (void)erased_int.diffuse(1, 0.25, erased_gate);
+    EXPECT_EQ(erased_int.values(), expected.values());
+    auto empty_int = seed;
+    auto ungated = seed;
+    const std::function<int(std::size_t, std::size_t)> empty_gate;
+    (void)empty_int.diffuse(1, 0.25, empty_gate);
+    (void)ungated.diffuse(1, 0.25, [](std::size_t, std::size_t) { return true; });
+    EXPECT_EQ(empty_int.values(), ungated.values());
+}
+
 TEST(ScentFieldGates, DiffusionEmptyCompatibilityAndSingleCellNeverCallAGate) {
     using luminumbra::fields::ScalarFieldDiffusion;
     ScalarFieldDiffusion initial(3, 2);

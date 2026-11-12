@@ -102,16 +102,17 @@ public:
             std::vector<double> next = energy_;
             double max_delta = 0.0;
 
-            const auto admitted = [&](const std::size_t lhs, const std::size_t rhs) {
+            const auto admitted = [&](const std::size_t lhs, const std::size_t rhs) -> bool {
                 if constexpr (requires { static_cast<bool>(admits); }) {
                     if (!admits) {
                         return true;
                     }
                 }
                 if constexpr (std::is_invocable_r_v<bool, const Gate&, std::size_t, std::size_t>) {
-                    return admits(lhs, rhs);
+                    return static_cast<bool>(admits(lhs, rhs));
                 } else {
-                    return admits(lhs % width_, lhs / width_, rhs % width_, rhs / width_);
+                    return static_cast<bool>(
+                        admits(lhs % width_, lhs / width_, rhs % width_, rhs / width_));
                 }
             };
             const auto exchange = [&](const std::size_t lhs, const std::size_t rhs) {
