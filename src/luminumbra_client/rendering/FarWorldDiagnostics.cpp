@@ -1,9 +1,173 @@
 #include "FarWorldDiagnostics.h"
+#include "FarWorldHandoffDiagnostics.h"
 #include <algorithm>
 #include <cmath>
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Rendering {
+FarWorldRefusal
+FarWorldProducerRefusal(const World::FarWorldAuthorityProducer::FrozenResult& result) noexcept {
+    using E = World::FarWorldAuthorityProducer::Error;
+    using C = World::FarFrozenCaptureError;
+    using R = FarWorldRefusal;
+    switch (result.source) {
+        case E::None:
+            break;
+        case E::InvalidLimits:
+            return R::MissingLimits;
+        case E::InvalidWindow:
+            return R::SpanRejected;
+        case E::IndexCapacity:
+        case E::CopyLimit:
+        case E::AllocationFailure:
+        case E::DeadlineExceeded:
+        case E::CommittedReadRefused:
+        case E::SourceReadExpired:
+            return R::AdmissionFailed;
+        case E::AuthorityUnavailable:
+            return R::ImmutableAuthorityUnavailable;
+        case E::WaterUnavailable:
+            return R::WaterUnavailable;
+    }
+    if (result.source != E::None) {
+        return R::InvalidRequests;
+    }
+    switch (result.capture) {
+        case C::None:
+            return R::None;
+        case C::InvalidSource:
+        case C::Unavailable:
+        case C::NonFiniteSample:
+        case C::IdentityMismatch:
+            return R::ImmutableAuthorityUnavailable;
+        case C::InvalidRegion:
+        case C::CoordinateRange:
+            return R::SpanRejected;
+        case C::WorkLimit:
+        case C::ByteLimit:
+        case C::AllocationFailure:
+        case C::DeadlineExceeded:
+            return R::AdmissionFailed;
+    }
+    return R::InvalidRequests;
+}
+void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& in,
+                                      World::FarVolumeNumericProfile numeric,
+                                      FarWorldDiagnosticSnapshot& out) noexcept {
+    out.authority_kind = FarWorldAuthorityKind::Session;
+    out.content_identity = 0;
+    out.numeric = numeric;
+    out.bake_generation = in.state.committed_generation;
+    out.serving_serial = in.state.serving_serial;
+    out.target_serial = in.state.target_serial;
+    out.latest_target_ready = in.tile_count <= in.tiles.size() && FarWorldHandoffTargetReady(in);
+    out.advanced = out.advanced && in.frame == out.frame;
+    out.complete = out.complete && in.captured && in.complete &&
+                   out.world_epoch == in.state.world_epoch && in.tile_count <= in.tiles.size() &&
+                   in.draw_count <= in.draws.size();
+    out.ladder_water_available = true;
+    out.water_capability = FarWorldWaterCapability::ExplicitlyDry;
+    const bool selected = out.selection.effective == FarWorldMode::Ladder && out.selection.submit;
+    const bool submitted = selected && in.frame == out.frame;
+    out.draws = submitted ? in.submission.draws : 0;
+    out.indices = submitted ? in.submission.indices : 0;
+    out.submitted_water_indices = submitted ? in.submission.water_indices : 0;
+    out.submission_occurred = out.draws != 0;
+    if (submitted && in.submission.refused) {
+        out.submission_refusal = FarWorldSubmissionRefusal::DrawRejected;
+    }
+    out.tile_count = 0;
+    out.tiers = {};
+    for (std::size_t i = 0; i < out.tiers.size(); ++i) {
+        out.tiers[i].resident.memory = in.memory[i];
+    }
+    // Each value view has at most 512 entries. No resource is borrowed or copied.
+    for (std::size_t i = 0; i < std::min(in.tile_count, in.tiles.size()); ++i) {
+        const auto& value = in.tiles[i].observation;
+        if (!value.target) {
+            continue;
+        }
+        const auto& target = *value.target;
+        const auto tier = target.identity.key.tier;
+        if (tier < 1 || tier > World::kFarTierCount || out.tile_count == out.tiles.size()) {
+            out.complete = false;
+            continue;
+        }
+        auto& tile = out.tiles[out.tile_count++];
+        tile.desired = target.identity;
+        tile.accepted_content_identity = target.identity.content_hash;
+        tile.numeric = numeric;
+        tile.intent = target.intent;
+        tile.request = value.target_built;
+        tile.coverage = value.target_coverage;
+        tile.eligibility = value.target_eligibility;
+        tile.has_pair = tile.coverage.state == World::FarTileState::Uploaded ||
+                        tile.coverage.state == World::FarTileState::Empty;
+        if (World::IsFarTileCovering(tile.coverage)) {
+            tile.built = tile.desired;
+        }
+        tile.water_complete = value.target_water_complete;
+        tile.water_known_dry = value.target_water_known_dry;
+        tile.terrain_indices = value.target_terrain_indices;
+        tile.water_indices = value.target_water_indices;
+        auto& counters = out.tiers[tier - 1].resident;
+        ++counters.wanted;
+        switch (tile.eligibility) {
+            case FarVolumeEligibility::Wanted:
+                break;
+            case FarVolumeEligibility::Pending:
+                ++counters.pending;
+                break;
+            case FarVolumeEligibility::Building:
+                ++counters.building;
+                break;
+            case FarVolumeEligibility::Ready:
+                ++counters.ready;
+                break;
+            case FarVolumeEligibility::Settled:
+                ++counters.settled;
+                break;
+            case FarVolumeEligibility::RequestRejected:
+                ++counters.request_rejected;
+                break;
+            case FarVolumeEligibility::BudgetEvicted:
+                ++counters.budget_evicted;
+                break;
+        }
+        counters.covering += World::IsFarTileCovering(tile.coverage);
+        counters.empty_pairs += tile.has_pair && tile.coverage.state == World::FarTileState::Empty;
+        counters.uploaded_pairs +=
+            tile.has_pair && tile.coverage.state == World::FarTileState::Uploaded;
+        counters.ready_cpu_bytes += value.ready_cpu_bytes;
+        counters.retained_gpu_bytes += value.staged_gpu_bytes + value.serving_gpu_bytes;
+        if (tile.water_complete) {
+            counters.water_known_dry_tiles += tile.water_known_dry;
+            counters.water_wet_tiles += !tile.water_known_dry;
+            counters.retained_water_indices += tile.water_indices;
+            if (!tile.water_known_dry) {
+                out.water_capability = FarWorldWaterCapability::Wet;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < std::min(in.draw_count, in.draws.size()); ++i) {
+        const auto& draw = in.draws[i];
+        if (submitted && draw.submitted && draw.identity.key.tier >= 1 &&
+            draw.identity.key.tier <= World::kFarTierCount) {
+            ++out.tiers[draw.identity.key.tier - 1].draws;
+        }
+    }
+    // Component totals become submission evidence only when every drawable target
+    // pair in that tier was actually submitted from the latest serving cohort.
+    for (std::size_t i = 0; i < out.tile_count; ++i) {
+        const auto& tile = out.tiles[i];
+        auto& tier = out.tiers[tile.desired.key.tier - 1];
+        if (out.serving_serial == out.target_serial && tier.draws == tier.resident.uploaded_pairs &&
+            tile.coverage.state == World::FarTileState::Uploaded) {
+            tier.indices += static_cast<std::size_t>(tile.terrain_indices + tile.water_indices);
+            tier.resident.submitted_water_indices += tile.water_indices;
+        }
+    }
+}
 bool FarWorldReportChanged(const std::optional<FarWorldReportingState>& previous,
                            const FarWorldReportingState& current) noexcept {
     return !previous || previous->selection.requested != current.selection.requested ||
@@ -39,7 +203,10 @@ FarWorldReportingState FarWorldReportState(const FarWorldDiagnosticSnapshot& s,
             !tier.draw_refusals && resident.water_known_dry_tiles <= resident.wanted &&
             resident.water_wet_tiles == resident.wanted - resident.water_known_dry_tiles;
     }
-    result.coverage_settled = result.coverage_settled && remaining == 0;
+    result.coverage_settled =
+        result.coverage_settled && remaining == 0 &&
+        (s.authority_kind == FarWorldAuthorityKind::Fixture ||
+         (s.latest_target_ready && s.target_serial != 0 && s.serving_serial == s.target_serial));
     return result;
 }
 
@@ -153,6 +320,9 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
         const auto& t = s.tiles[i];
         tiles.push_back({{"desired", IdentityJson(t.desired)},
                          {"built", IdentityJson(t.built)},
+                         {"accepted_content_identity", t.accepted_content_identity},
+                         {"built_field_identity", t.request.field_identity},
+                         {"numeric_policy", static_cast<int>(t.numeric)},
                          {"has_pair", t.has_pair},
                          {"water_complete", t.water_complete},
                          {"water_known_dry", t.water_known_dry},
@@ -168,7 +338,15 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
                                               : nlohmann::json(nullptr)},
                          {"built_span", {t.request.span.min_y, t.request.span.max_y}}});
     }
-    return {{"requested_mode", FarWorldModeName(s.selection.requested)},
+    return {{"authority_kind",
+             s.authority_kind == FarWorldAuthorityKind::Session ? "session" : "fixture"},
+            {"serving_serial", s.serving_serial},
+            {"target_serial", s.target_serial},
+            {"submitted_water_indices", s.submitted_water_indices},
+            {"latest_target_ready", s.latest_target_ready},
+            {"source_error", static_cast<int>(s.source_failure.source)},
+            {"capture_error", static_cast<int>(s.source_failure.capture)},
+            {"requested_mode", FarWorldModeName(s.selection.requested)},
             {"effective_mode", FarWorldModeName(s.selection.effective)},
             {"refusal", FarWorldRefusalName(s.selection.refusal)},
             {"submission_refusal", FarWorldSubmissionRefusalName(s.submission_refusal)},
@@ -222,11 +400,22 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
         return R::SubmissionSuppressed;
     if (s.far_plane != World::kFarPlaneMeters)
         return R::WrongPlane;
-    if (!s.world_epoch || !s.frame || !s.content_identity || !s.requested_cave_policy ||
-        !s.bound_cave_policy || s.requested_cave_policy != s.bound_cave_policy ||
+    if (!s.world_epoch || !s.frame ||
+        (s.authority_kind == FarWorldAuthorityKind::Fixture && !s.content_identity) ||
+        (s.authority_kind != FarWorldAuthorityKind::Fixture &&
+         s.authority_kind != FarWorldAuthorityKind::Session) ||
+        (s.numeric != World::FarVolumeNumericProfile::RawFloat &&
+         s.numeric != World::FarVolumeNumericProfile::LegacySigned16) ||
+        !s.requested_cave_policy || !s.bound_cave_policy ||
+        s.requested_cave_policy != s.bound_cave_policy ||
         (*s.bound_cave_policy != World::FarCaveMode::BandLimited &&
          *s.bound_cave_policy != World::FarCaveMode::BoxFiltered))
         return R::InvalidBinding;
+    if (s.authority_kind == FarWorldAuthorityKind::Session &&
+        (!s.target_serial || s.serving_serial != s.target_serial || !s.latest_target_ready ||
+         !s.source_failure.ok())) {
+        return R::StaleGeneration;
+    }
     if (!s.advanced)
         return R::NoAdvancement;
     if (s.submission_refusal != FarWorldSubmissionRefusal::None)
@@ -245,29 +434,55 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
     bool mixed = false;
     std::uint64_t wet_tiles = 0, submitted_water = 0;
     std::array<std::uint64_t, World::kFarTierCount> dry_counts{}, water_counts{}, terrain_counts{};
+    // One flag for each of the snapshot's at most 512 tile slots.
+    std::array<bool, kFarWorldDiagnosticTiles> matched{};
     for (const auto& key : expected) {
         const auto end = s.tiles.begin() + static_cast<std::ptrdiff_t>(s.tile_count);
         const auto found =
             std::find_if(s.tiles.begin(), end, [&](const auto& t) { return t.desired.key == key; });
         if (found == end)
             return R::ExpectedSetMismatch;
+        const auto slot = static_cast<std::size_t>(found - s.tiles.begin());
+        if (matched[slot]) {
+            return R::ExpectedSetMismatch;
+        }
+        matched[slot] = true;
         if (!found->has_pair)
             return R::MissingPair;
         if (found->built != found->desired)
             return R::StaleGeneration;
         if (found->desired.world_epoch != s.world_epoch ||
-            found->desired.content_hash != s.content_identity ||
+            (s.authority_kind == FarWorldAuthorityKind::Fixture
+                 ? found->desired.content_hash != s.content_identity
+                 : !found->accepted_content_identity ||
+                       found->desired.content_hash != found->accepted_content_identity ||
+                       found->numeric != s.numeric ||
+                       found->request.field_identity != found->accepted_content_identity ||
+                       found->request.key.tier != key.tier || found->request.key.x != key.tx ||
+                       found->request.key.z != key.tz) ||
             found->desired.bake_generation != s.bake_generation ||
             found->desired.cave_policy != static_cast<std::uint8_t>(*s.bound_cave_policy))
             return R::StaleBinding;
+        if (s.authority_kind == FarWorldAuthorityKind::Session) {
+            if (key.tier < 1 || key.tier > World::kFarTierCount) {
+                return R::SpanRefused;
+            }
+            const auto edge = World::kFarTierTable[key.tier - 1].brick_edge_meters;
+            const auto& span = found->request.span;
+            if (span.min_y < -World::kFarVolumeExactCoordinateLimitMeters ||
+                span.max_y > World::kFarVolumeExactCoordinateLimitMeters ||
+                span.min_y % edge != 0 || span.max_y % edge != 0) {
+                return R::SpanRefused;
+            }
+        }
         if (!World::IsFarTileCovering(found->coverage) ||
             found->request.span.min_y >= found->request.span.max_y ||
             (found->intent.extra_span &&
              (!std::isfinite(found->intent.extra_span->min_y) ||
               !std::isfinite(found->intent.extra_span->max_y) ||
               found->intent.extra_span->min_y > found->intent.extra_span->max_y ||
-              found->request.span.min_y > found->intent.extra_span->min_y ||
-              found->request.span.max_y < found->intent.extra_span->max_y)))
+              static_cast<double>(found->request.span.min_y) > found->intent.extra_span->min_y ||
+              static_cast<double>(found->request.span.max_y) < found->intent.extra_span->max_y)))
             return R::SpanRefused;
         if (!found->water_complete || found->water_known_dry != (found->water_indices == 0) ||
             (found->coverage.state == World::FarTileState::Empty &&
@@ -278,7 +493,7 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
         if (key.tier < 1 || key.tier > World::kFarTierCount || found->water_indices % 6 != 0 ||
             found->terrain_indices % 3 != 0)
             return R::WaterIncomplete;
-        const auto number = key.tier - 1;
+        const auto number = static_cast<std::size_t>(key.tier) - 1;
         dry_counts[number] += found->water_known_dry;
         water_counts[number] += found->water_indices;
         terrain_counts[number] += found->terrain_indices;
@@ -309,6 +524,10 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
         submitted_water += tier.resident.submitted_water_indices;
         total_draws += tier.draws;
         total_indices += tier.indices;
+    }
+    if (s.authority_kind == FarWorldAuthorityKind::Session &&
+        submitted_water != s.submitted_water_indices) {
+        return R::WaterIncomplete;
     }
     if (total_draws != s.draws || total_indices != s.indices)
         return R::DrawTotals;

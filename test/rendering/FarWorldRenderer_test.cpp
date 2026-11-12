@@ -1,3 +1,5 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "core/JobSystem.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarVolumeGpuBackend.h"
@@ -20,6 +22,7 @@
 #include "world/FarVolumeRuntime.h"
 #include "world/FarVolumeTile.h"
 #include "world/FarWantedSet.h"
+#include "world/WorldStreamingState.h"
 
 #include <array>
 #include <atomic>
@@ -27,6 +30,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <glm/matrix.hpp>
 #include <gtest/gtest.h>
@@ -38,7 +42,10 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -59,6 +66,8 @@ struct DriverState {
     bool destroyed = false, released_with_context = true, fixture_released = false;
     std::size_t uploads = 0, held_build_drains = 0;
     BuildGate* release_on_drain = nullptr;
+    std::weak_ptr<const FarFrozenObservation> session_image;
+    bool session_image_alive_during_drain = false;
 };
 // Fixed storage: fake operations neither load GL nor allocate hidden buffers.
 class Driver final : public FarVolumeGpuDriver {
@@ -103,6 +112,7 @@ public:
             auto* gate = std::exchange(state_.release_on_drain, nullptr);
             EXPECT_TRUE(gate->entered.try_wait());
             EXPECT_FALSE(gate->exited.try_wait());
+            state_.session_image_alive_during_drain = !state_.session_image.expired();
             ++state_.held_build_drains;
             gate->release.count_down();
         }
@@ -1800,7 +1810,8 @@ RendererHandoffInput(FarWorldHandoffRenderer& renderer,
                      std::uint64_t generation,
                      bool mixed,
                      FarCaveMode caves = FarCaveMode::BandLimited,
-                     FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
+                     FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat,
+                     FarFrozenUse use = FarFrozenUse::Committed) {
     FarVolumeWantedRequest wanted;
     EXPECT_TRUE(ToFarVolumeTileKey(key, wanted.intent.key));
     wanted.identity = {1, 100 + generation, static_cast<std::uint8_t>(caves), key, generation, 1};
@@ -1811,6 +1822,7 @@ RendererHandoffInput(FarWorldHandoffRenderer& renderer,
     source.pristine.numeric = numeric;
     source.content_identity = source.pristine.field_identity = wanted.identity.content_hash;
     source.durable = {generation, FarEditedImageState::Committed};
+    source.use = use;
     source.committed = [](std::uint8_t, const FarVolumePosition&) {
         return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Absent, {}};
     };
@@ -2201,4 +2213,466 @@ TEST(FarWorldHandoffRenderer, ExternalCaptureAliasesKeepOneMemoryDomainAliveAfte
     EXPECT_TRUE(weak.expired());
     state.fixture_released = true;
     renderer.Shutdown();
+}
+
+namespace {
+class SessionRendererTest : public testing::Test {
+protected:
+    using Producer = FarWorldAuthorityProducer;
+    using Save = Persistence::WorldSaveService;
+    std::filesystem::path root = TestSupport::CreateUniqueTempDirectory("session_renderer_");
+    DriverState state;
+    JobSystem jobs;
+    FarWorldRenderer renderer;
+    Producer producer{{512,
+                       4u * 1024u * 1024u,
+                       300'000,
+                       std::make_shared<FarVolumeMemoryPool>(64u * 1024u * 1024u)}};
+    std::unique_ptr<Systems::SHIELD_WorldSystem> world;
+    Producer::FrozenPolicy policy;
+    FarWorldExperimentalLimits limits = FarWorldDevelopmentLimits();
+    FarFrozenCaptureLimits capture_limits{1, 100'000, 20'000'000, 200'000, 64u * 1024u * 1024u};
+    FarFrozenCaptureWork::Counts samples{400'000, 40'000'000, 480'000};
+    std::uint64_t frame = 0;
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    void SetUp() override {
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.caves_enabled = false;
+        params.base_amplitude = params.peaks_amplitude = 0;
+        params.height_offset = -8;
+        params.continental_spline = {{-1, 0}, {1, 0}};
+        world = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+        policy = {WorldFarVolumeIdentity(
+                      *world, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, 4),
+                  FarCaveMode::BandLimited,
+                  FarVolumeNumericProfile::RawFloat,
+                  4};
+        WorldStreamingState disk;
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        const Save::AuthorityReadLimits reads{
+            512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+        std::string error;
+        ASSERT_TRUE(producer.admit_saved_source(root, reads, error)) << error;
+        const Producer::CaptureClock clock{
+            [](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+        ASSERT_TRUE(producer.configure_capture({reads, 4, clock}));
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_TRUE(producer.capture_status().latest_ready);
+        limits.residency = RendererHandoffLimits();
+        renderer.InstallBackend(std::make_unique<Driver>(state));
+        ASSERT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, limits),
+                  FarWorldRefusal::None);
+    }
+    void TearDown() override {
+        renderer.PrepareWorldSwap();
+        state.fixture_released = true;
+        renderer.Shutdown();
+        jobs.shutdown();
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+    std::array<FarSessionHandoffTile, 2> Tiles() const {
+        std::array<FarSessionHandoffTile, 2> result{};
+        const std::array<FarTileKey, 2> keys{{{1, 0, 0}, {5, 0, 0}}};
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            auto& tile = result[i];
+            const auto& key = keys[i];
+            tile.wanted.identity = {1, policy.pristine_identity, 0, key, 0, 1};
+            EXPECT_TRUE(ToFarVolumeTileKey(key, tile.wanted.intent.key));
+            tile.wanted.intent.extra_span =
+                key.tier == 1 ? FarVolumeCoverageSpan{-256, 0} : FarVolumeCoverageSpan{-256, 512};
+            tile.wanted.build_headroom_bytes = limits.build_headroom_bytes;
+            tile.capture = {tile.wanted.intent.key,
+                            key.tier == 1 ? FarVolumeSpan{-256, 16} : FarVolumeSpan{-256, 768},
+                            policy.pristine_identity};
+        }
+        return result;
+    }
+    bool Stage() {
+        const auto tiles = Tiles();
+        return renderer.StageSessionTarget(
+            producer, *world, tiles, policy, capture_limits, samples);
+    }
+    bool Settle() {
+        return RendererHandoffWait([&] {
+            if (!renderer.PrepareFrame(++frame, {0, 0, 0})) {
+                return false;
+            }
+            const auto* diagnostic = renderer.SessionDiagnostic();
+            return diagnostic &&
+                   diagnostic->state.serving_serial == diagnostic->state.target_serial &&
+                   FarWorldHandoffTargetReady(*diagnostic);
+        });
+    }
+    void Capture(const FarWorldSubmitStats& stats = {}) {
+        renderer.CaptureDiagnostic(renderer.Selection(FarWorldPurpose::World),
+                                   frame,
+                                   {0, 0, 0},
+                                   kFarPlaneMeters,
+                                   true,
+                                   stats.draws,
+                                   stats.indices);
+    }
+};
+} // namespace
+
+TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileFingerprints) {
+    EXPECT_EQ(renderer.Residency(), nullptr);
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    const auto stats = renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    Capture(stats);
+    const auto& snapshot = renderer.Diagnostic();
+    ASSERT_EQ(snapshot.tile_count, 2u);
+    EXPECT_GT(stats.water_indices, 0u);
+    EXPECT_NE(snapshot.tiles[0].accepted_content_identity,
+              snapshot.tiles[1].accepted_content_identity);
+    EXPECT_EQ(snapshot.authority_kind, FarWorldAuthorityKind::Session);
+    EXPECT_EQ(snapshot.bake_generation, 0u);
+    const std::array<FarTileKey, 2> expected{{{1, 0, 0}, {5, 0, 0}}};
+    EXPECT_EQ(CheckFarWorldStation(snapshot, expected, 1), FarWorldStationRefusal::None);
+    EXPECT_EQ(FarWorldDiagnosticJson(snapshot)["authority_kind"], "session");
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::Preview).effective, FarWorldMode::Legacy);
+    EXPECT_FALSE(renderer.AdvanceFrame(++frame, {0, 0, 0}, {}));
+}
+
+TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOldServing) {
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+    const auto serving = renderer.SessionDiagnostic()->state.serving_serial;
+    producer.fence_source_reads(true);
+    EXPECT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving);
+    producer.fence_source_reads(false);
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(producer.request_capture(windows));
+    EXPECT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving);
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(Stage());
+    Capture();
+    const std::array<FarTileKey, 2> expected{{{1, 0, 0}, {5, 0, 0}}};
+    EXPECT_NE(CheckFarWorldStation(renderer.Diagnostic(), expected, 1),
+              FarWorldStationRefusal::None);
+    EXPECT_EQ(renderer.Diagnostic().serving_serial, serving);
+    EXPECT_GT(renderer.Diagnostic().target_serial, serving);
+    auto bad = Tiles();
+    bad[0].capture.span.min_y = -255;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, bad, policy, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving);
+    auto no_work = samples;
+    no_work.density = 1;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, Tiles(), policy, capture_limits, no_work));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    Capture();
+    EXPECT_EQ(renderer.Diagnostic().source_failure.capture, FarFrozenCaptureError::WorkLimit);
+    auto expired = capture_limits;
+    expired.deadline = {[](const void*) noexcept -> std::uint64_t { return 1; }, nullptr, 1};
+    EXPECT_FALSE(renderer.StageSessionTarget(producer, *world, Tiles(), policy, expired, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    Capture();
+    EXPECT_EQ(renderer.Diagnostic().source_failure.capture,
+              FarFrozenCaptureError::DeadlineExceeded);
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+}
+
+TEST_F(SessionRendererTest,
+       SessionStationChecksAcceptedIdentityPoliciesSpansKeysAndActualSubmission) {
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    const auto stats = renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    Capture(stats);
+    const std::array<FarTileKey, 2> expected{{{1, 0, 0}, {5, 0, 0}}};
+    const auto accepted = std::make_unique<FarWorldDiagnosticSnapshot>(renderer.Diagnostic());
+    ASSERT_TRUE(FarWorldStationReady(*accepted, expected, 1));
+    auto changed = std::make_unique<FarWorldDiagnosticSnapshot>();
+    for (int fault = 0; fault < 16; ++fault) {
+        *changed = *accepted;
+        auto& tile = changed->tiles[0];
+        switch (fault) {
+            case 0:
+                ++tile.accepted_content_identity;
+                break;
+            case 1:
+                ++tile.desired.world_epoch;
+                break;
+            case 2:
+                ++tile.desired.bake_generation;
+                break;
+            case 3:
+                tile.desired.cave_policy = 1;
+                break;
+            case 4:
+                tile.numeric = FarVolumeNumericProfile::LegacySigned16;
+                break;
+            case 5:
+                ++tile.request.field_identity;
+                break;
+            case 6:
+                tile.request.span = {0, 16};
+                break;
+            case 7:
+                tile.water_complete = false;
+                break;
+            case 8:
+                --changed->tile_count;
+                break;
+            case 9:
+                changed->target_serial = 0;
+                break;
+            case 10:
+                changed->latest_target_ready = false;
+                break;
+            case 11:
+                changed->authority_kind = FarWorldAuthorityKind::Fixture;
+                break;
+            case 12:
+                changed->numeric = static_cast<FarVolumeNumericProfile>(255);
+                break;
+            case 13:
+                ++tile.request.span.max_y;
+                break;
+            case 14:
+                tile.request.span.min_y = -16777216;
+                break;
+            case 15:
+                changed->submitted_water_indices = 0;
+                break;
+        }
+        EXPECT_FALSE(FarWorldStationReady(*changed, expected, 1)) << fault;
+    }
+    const std::array<FarTileKey, 2> duplicates{{{1, 0, 0}, {1, 0, 0}}};
+    EXPECT_FALSE(FarWorldStationReady(*accepted, duplicates, 1));
+    state.fail_draw = true;
+    Capture(renderer.Submit({0, 0, 0}, [](const auto&) { return true; }));
+    EXPECT_FALSE(FarWorldStationReady(renderer.Diagnostic(), expected, 1));
+    EXPECT_EQ(renderer.Diagnostic().draws, 0u);
+    EXPECT_GT(renderer.Diagnostic().tiers[4].resident.retained_gpu_bytes, 0u);
+}
+
+TEST(FarWorldRenderer, EveryProducerAndCaptureRefusalHasAnExactDiagnosticProjection) {
+    using E = FarWorldAuthorityProducer::Error;
+    using C = FarFrozenCaptureError;
+    using R = FarWorldRefusal;
+    const std::array source{std::pair{E::None, R::None},
+                            std::pair{E::InvalidLimits, R::MissingLimits},
+                            std::pair{E::InvalidWindow, R::SpanRejected},
+                            std::pair{E::IndexCapacity, R::AdmissionFailed},
+                            std::pair{E::CopyLimit, R::AdmissionFailed},
+                            std::pair{E::AuthorityUnavailable, R::ImmutableAuthorityUnavailable},
+                            std::pair{E::WaterUnavailable, R::WaterUnavailable},
+                            std::pair{E::AllocationFailure, R::AdmissionFailed},
+                            std::pair{E::DeadlineExceeded, R::AdmissionFailed},
+                            std::pair{E::CommittedReadRefused, R::AdmissionFailed},
+                            std::pair{E::SourceReadExpired, R::AdmissionFailed}};
+    for (const auto& [error, expected] : source) {
+        EXPECT_EQ(FarWorldProducerRefusal({error, C::None}), expected);
+    }
+    const std::array capture{std::pair{C::None, R::None},
+                             std::pair{C::InvalidSource, R::ImmutableAuthorityUnavailable},
+                             std::pair{C::InvalidRegion, R::SpanRejected},
+                             std::pair{C::CoordinateRange, R::SpanRejected},
+                             std::pair{C::WorkLimit, R::AdmissionFailed},
+                             std::pair{C::ByteLimit, R::AdmissionFailed},
+                             std::pair{C::Unavailable, R::ImmutableAuthorityUnavailable},
+                             std::pair{C::NonFiniteSample, R::ImmutableAuthorityUnavailable},
+                             std::pair{C::IdentityMismatch, R::ImmutableAuthorityUnavailable},
+                             std::pair{C::AllocationFailure, R::AdmissionFailed},
+                             std::pair{C::DeadlineExceeded, R::AdmissionFailed}};
+    for (const auto& [error, expected] : capture) {
+        EXPECT_EQ(FarWorldProducerRefusal({E::None, error}), expected);
+        EXPECT_EQ(FarWorldProducerRefusal({E::WaterUnavailable, error}), R::WaterUnavailable);
+    }
+    EXPECT_EQ(FarWorldProducerRefusal({static_cast<E>(255), C::None}), R::InvalidRequests);
+    EXPECT_EQ(FarWorldProducerRefusal({E::None, static_cast<C>(255)}), R::InvalidRequests);
+}
+
+TEST(FarWorldHandoffRenderer, SessionImageLivesThroughHeldWorkerBackendTransfer) {
+    JobSystem jobs;
+    jobs.startup(1);
+    DriverState state;
+    BuildGate barrier;
+    RendererHandoffGate gate(barrier);
+    FarWorldHandoffRenderer renderer;
+    struct ReleaseHeldWorker {
+        BuildGate& barrier;
+        ~ReleaseHeldWorker() {
+            barrier.release.count_down();
+        }
+    };
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits(),
+                              &gate));
+    auto input = RendererHandoffInput(renderer,
+                                      {5, 0, 0},
+                                      1,
+                                      true,
+                                      FarCaveMode::BandLimited,
+                                      FarVolumeNumericProfile::RawFloat,
+                                      FarFrozenUse::SessionRender);
+    ASSERT_TRUE(input.observation);
+    state.session_image = input.observation;
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, {&input, 1})));
+    input = {};
+    gate.Arm();
+    ReleaseHeldWorker release{barrier};
+    ASSERT_TRUE(renderer.AdvanceFrame(1, {0, 0, 0}, {1, 1, 64ULL * 1024 * 1024}));
+    ASSERT_TRUE(RendererHandoffWait([&] { return barrier.entered.try_wait(); }));
+    state.release_on_drain = &barrier;
+    auto backend = renderer.TakeBackend();
+    EXPECT_TRUE(state.session_image_alive_during_drain);
+    EXPECT_TRUE(barrier.exited.try_wait());
+    EXPECT_TRUE(state.session_image.expired());
+    EXPECT_EQ(state.held_build_drains, 1u);
+    EXPECT_EQ(renderer.Handoff(), nullptr);
+    EXPECT_EQ(state.live, 0u);
+    state.fixture_released = true;
+    renderer.InstallBackend(std::move(backend));
+    renderer.Shutdown();
+    jobs.shutdown();
+}
+
+TEST_F(SessionRendererTest, BackendAndFixtureTransitionsDrainSessionBeforeRebinding) {
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
+    EXPECT_EQ(state.live, 0u);
+    auto fixture = std::make_shared<Fixture>(state);
+    ASSERT_EQ(renderer.BindFixture(jobs, fixture, 2, 1, limits), FarWorldRefusal::None);
+    fixture.reset();
+    ASSERT_EQ(renderer.BindSession(jobs, 3, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::None);
+    EXPECT_TRUE(state.fixture_released);
+    EXPECT_EQ(renderer.Residency(), nullptr);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::ImmutableAuthorityUnavailable);
+    renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
+    EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
+    EXPECT_EQ(renderer.BindSession(jobs, 4, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::CavePolicyMismatch);
+}
+
+TEST(FarWorldRenderer, StationRejectsUnknownNumericPolicyAndRepeatedExpectedKeys) {
+    Owner owner;
+    const auto empty = Request({5, 1, 1});
+    ASSERT_TRUE(owner.WaitSettled(empty));
+    owner.Renderer().CaptureDiagnostic(owner.Renderer().Selection(FarWorldPurpose::World),
+                                       owner.Frame(),
+                                       {0, 0, 0},
+                                       kFarPlaneMeters,
+                                       true,
+                                       0,
+                                       0);
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>(owner.Renderer().Diagnostic());
+    ASSERT_TRUE(FarWorldStationReady(*snapshot, {&empty.identity.key, 1}, 1));
+    snapshot->numeric = static_cast<FarVolumeNumericProfile>(255);
+    EXPECT_EQ(CheckFarWorldStation(*snapshot, {&empty.identity.key, 1}, 1),
+              FarWorldStationRefusal::InvalidBinding);
+    snapshot->numeric = FarVolumeNumericProfile::LegacySigned16;
+    snapshot->tiles[1] = snapshot->tiles[0];
+    ++snapshot->tiles[1].desired.key.tx;
+    ++snapshot->tiles[1].built.key.tx;
+    snapshot->tile_count = 2;
+    auto& counters = snapshot->tiers[4].resident;
+    counters.wanted = counters.covering = counters.settled = counters.empty_pairs =
+        counters.water_known_dry_tiles = 2;
+    const std::array<FarTileKey, 2> duplicate{{empty.identity.key, empty.identity.key}};
+    EXPECT_EQ(CheckFarWorldStation(*snapshot, duplicate, 1),
+              FarWorldStationRefusal::ExpectedSetMismatch);
+}
+
+TEST_F(SessionRendererTest, SessionProjectionRefusesMalformedBoundsAndStaleFrame) {
+    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Settle());
+    Capture();
+    auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>(*renderer.SessionDiagnostic());
+    auto output = std::make_unique<FarWorldDiagnosticSnapshot>(renderer.Diagnostic());
+    const auto tiles = input->tile_count;
+    input->tile_count = input->tiles.size() + 1;
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_FALSE(output->complete);
+    EXPECT_FALSE(output->latest_target_ready);
+    input->tile_count = tiles;
+    input->draw_count = input->draws.size() + 1;
+    *output = renderer.Diagnostic();
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_FALSE(output->complete);
+    input->draw_count = 0;
+    *output = renderer.Diagnostic();
+    ++output->frame;
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_FALSE(output->advanced);
+    EXPECT_EQ(output->draws, 0u);
+    *output = renderer.Diagnostic();
+    ++output->world_epoch;
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_FALSE(output->complete);
+}
+
+TEST_F(SessionRendererTest, SessionAdmissionKeepsTypedBindingAndInputRefusals) {
+    auto invalid = policy;
+    invalid.caves = FarCaveMode::BoxFiltered;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, Tiles(), invalid, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::CavePolicyMismatch);
+    invalid = policy;
+    invalid.numeric = FarVolumeNumericProfile::LegacySigned16;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, Tiles(), invalid, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::InvalidRequests);
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, {}, policy, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::InvalidRequests);
+    auto incomplete = capture_limits;
+    incomplete.max_bytes = 0;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, Tiles(), policy, incomplete, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::MissingLimits);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.BindSession(jobs, 0, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::InvalidRequests);
+    EXPECT_EQ(renderer.BindSession(jobs, 1, static_cast<FarCaveMode>(255), policy.numeric, limits),
+              FarWorldRefusal::InvalidCavePolicy);
+    EXPECT_EQ(renderer.BindSession(
+                  jobs, 1, policy.caves, static_cast<FarVolumeNumericProfile>(255), limits),
+              FarWorldRefusal::InvalidRequests);
+    auto no_limits = limits;
+    no_limits.frame.builds = 0;
+    EXPECT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, no_limits),
+              FarWorldRefusal::MissingLimits);
+    auto tiny = limits;
+    tiny.budgets.bytes.fill(1);
+    EXPECT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, tiny),
+              FarWorldRefusal::AdmissionFailed);
+    state.current = false;
+    EXPECT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::BackendUnavailable);
+    state.current = true;
+    renderer.SetRequestedCavePolicy(std::nullopt);
+    EXPECT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::InvalidCavePolicy);
+    EXPECT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::InvalidCavePolicy);
 }
