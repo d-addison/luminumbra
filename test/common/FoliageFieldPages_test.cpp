@@ -744,6 +744,9 @@ TEST(FoliageFieldPages, ReplayCollectsSourcesOnceAndVisitsOnlyDueOwnersAndBirths
         registry.emplace<C::PlantRegionComponent>(
             plant, static_cast<std::uint64_t>(index + 1), 0, 0, std::uint64_t{999});
         const auto source = registry.create();
+        registry.emplace<C::PlantTag>(source);
+        auto& source_growth = registry.emplace<C::PlantGrowthComponent>(source);
+        source_growth.planted_tick = source_growth.last_tick = 1000;
         registry.emplace<C::TransformComponent>(source).position = {512, 0, 0};
         registry.emplace<C::WaterSourceComponent>(source);
     }
@@ -954,6 +957,163 @@ TEST(FoliageFieldPages, MaterializedEditsPreserveResumeTokensAndRoundTripWithout
     const auto bytes = ledger.encode();
     EXPECT_THROW(ledger.mark_materialized_edit({32768, 0}, WorldClock(16)), std::invalid_argument);
     EXPECT_EQ(ledger.encode(), bytes);
+}
+
+TEST(FoliageFieldPages, OrdinaryEditsRetainMaterializedCompletionAcrossReloads) {
+    const RegionKey owner{0, 0};
+    ActiveRegionLedger ledger({.work_limit = 0, .hold_ticks = 1, .reduced_shift = 1});
+    ledger.mark_edited(owner, WorldClock(29));
+    const std::array<RegionWork, 1> work{{{owner, 1, 0, 0, 0}}};
+    for (std::uint64_t tick = 30; tick <= 32; ++tick) {
+        ledger.schedule(WorldClock(tick), std::span<const Luminumbra::Vec3>{}, work, [](RegionKey) {
+            return std::uint64_t{1};
+        });
+    }
+    ASSERT_EQ(ledger.records().at(owner).state, RegionState::Frozen);
+    ASSERT_EQ(ledger.records().at(owner).frozen_at, 32u);
+    ledger.mark_edited(owner, WorldClock(40));
+    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner)), 32u);
+    ledger.mark_materialized_edit(owner, WorldClock(48));
+    ledger.mark_edited(owner, WorldClock(50));
+    ledger.mark_edited(owner, WorldClock(50));
+    ledger.mark_edited(owner, WorldClock(51));
+    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner)), 48u);
+
+    ActiveRegionLedger reopened;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
+    EXPECT_EQ(reopened.encode(), ledger.encode());
+    FieldPageState materialized;
+    ASSERT_TRUE(materialized.set_soil({0, 0}, 100));
+    ASSERT_TRUE(materialized.set_irrigation({0, 0}, 1000));
+    entt::registry registry;
+    ReplayAllFoliageInteriors(registry, materialized, {{owner, 16}}, 48);
+    auto continuous = materialized;
+    ReplayAllFoliageInteriors(registry, continuous, {{owner, 4}}, 52);
+    for (const auto* saved : {&ledger, &reopened}) {
+        const auto window = BuildRegionalFoliageWindows(*saved, {}, {}, {owner}, WorldClock(52));
+        EXPECT_EQ(window.elapsed.at(owner), 4u);
+        EXPECT_EQ(window.resumes.at(owner), 32u);
+        auto recovered = materialized;
+        FoliageInteriorReplay::Work replay_work;
+        ReplayAllFoliageInteriors(registry, recovered, window.elapsed, 52, &replay_work);
+        EXPECT_EQ(replay_work.evolved_cells, 8u);
+        EXPECT_EQ(recovered.serialize(), continuous.serialize());
+    }
+    // A later materialization must replace BOTH completion stamps; an ordinary
+    // edit must preserve them again. Invalid/backward calls cannot change either.
+    reopened.mark_materialized_edit(owner, WorldClock(56));
+    reopened.mark_materialized_edit(owner, WorldClock(56));
+    reopened.mark_edited(owner, WorldClock(58));
+    EXPECT_EQ(FoliagePriorTick(reopened.records().at(owner)), 56u);
+    const auto bytes = reopened.encode();
+    EXPECT_THROW(reopened.mark_materialized_edit(owner, WorldClock(57)), std::invalid_argument);
+    EXPECT_THROW(reopened.mark_edited({32768, 0}, WorldClock(60)), std::invalid_argument);
+    EXPECT_EQ(reopened.encode(), bytes);
+}
+
+TEST(FoliageFieldPages, StandaloneWaterSourcesAreLiveTickOnlyAcrossReplayWindows) {
+    namespace C = Luminumbra::Components;
+    const std::map<RegionKey, std::uint32_t> due{{{0, 0}, 1}};
+    for (const std::uint64_t birth : {33u, 48u, 64u}) {
+        // Missing growth, tag, or both cannot establish a persisted plant birth.
+        for (unsigned components = 0; components < 3; ++components) {
+            SCOPED_TRACE(birth);
+            SCOPED_TRACE(components);
+            entt::registry registry;
+            const auto source = registry.create();
+            registry.emplace<C::TransformComponent>(source);
+            registry.emplace<C::WaterSourceComponent>(source);
+            if ((components & 1u) != 0) {
+                registry.emplace<C::PlantTag>(source);
+            }
+            if ((components & 2u) != 0) {
+                auto& growth = registry.emplace<C::PlantGrowthComponent>(source);
+                growth.planted_tick = growth.last_tick = birth;
+            }
+            FieldPageState initial;
+            ASSERT_TRUE(initial.set_irrigation({0, 0}, 0));
+            // Historical windows exclude this emitter, including ticks after
+            // its creation. With no birth metadata it is never replayable.
+            for (const auto end :
+                 {std::optional<std::uint64_t>{64}, std::optional<std::uint64_t>{}}) {
+                auto replayed = initial;
+                FoliageInteriorReplay::Work replay_work;
+                ReplayAllFoliageInteriors(registry, replayed, {{{0, 0}, 32}}, end, &replay_work);
+                EXPECT_EQ(replayed.serialize(), initial.serialize());
+                EXPECT_EQ(replay_work.source_visits, 0u);
+                EXPECT_EQ(replay_work.source_preparations, 1u);
+            }
+            auto live = initial;
+            FoliageInteriorReplay continuous;
+            // The source is created at birth in live execution, so the caller
+            // starts supplying it then. Compare with independent scalar deposits.
+            auto expected = FoliageCells(initial.irrigation());
+            for (std::uint64_t tick = 33; tick <= 64; ++tick) {
+                if (tick >= birth) {
+                    continuous.Step(registry, live, due);
+                    expected.at({0, 0}) += 1000;
+                } else {
+                    continuous.Step(live, due);
+                }
+                EvolveFoliageIrrigation(expected);
+                EXPECT_EQ(live.irrigation().sample({0, 0}, -1), expected.at({0, 0}));
+            }
+            EXPECT_EQ(continuous.work().source_visits, 65u - birth);
+            // Reusing a prepared live cursor for historical work cannot admit
+            // an emitter that was already activated by the live tick.
+            const auto visits = continuous.work().source_visits;
+            continuous.Step(registry, live, due, 65);
+            EvolveFoliageIrrigation(expected);
+            EXPECT_EQ(live.irrigation().sample({0, 0}, -1), expected.at({0, 0}));
+            EXPECT_EQ(continuous.work().source_visits, visits);
+        }
+    }
+}
+
+TEST(FoliageFieldPages, PlantWaterBirthsUsePersistedTicksAtEveryWindowBoundary) {
+    namespace C = Luminumbra::Components;
+    for (const std::uint64_t birth : {33u, 48u, 64u, 65u}) {
+        // Absent ownership uses planted_tick. Matching stamps activate at that
+        // stamp; a completed growth stamp activates on its following tick.
+        for (unsigned ownership = 0; ownership < 3; ++ownership) {
+            SCOPED_TRACE(birth);
+            SCOPED_TRACE(ownership);
+            entt::registry registry;
+            const auto plant = registry.create();
+            registry.emplace<C::PlantTag>(plant);
+            registry.emplace<C::TransformComponent>(plant);
+            auto& growth = registry.emplace<C::PlantGrowthComponent>(plant);
+            growth.planted_tick = ownership == 2 ? birth - 2 : birth;
+            growth.last_tick = ownership == 2 ? birth - 1 : birth;
+            registry.emplace<C::WaterSourceComponent>(plant);
+            if (ownership != 0) {
+                registry.emplace<C::PlantRegionComponent>(
+                    plant, std::uint64_t{1}, 0, 0, ownership == 1 ? birth : birth - 1);
+            }
+            FieldPageState pages;
+            ASSERT_TRUE(pages.set_irrigation({0, 0}, 0));
+            auto before_birth = pages;
+            ReplayAllFoliageInteriors(registry,
+                                      before_birth,
+                                      {{{0, 0}, static_cast<std::uint32_t>(birth - 33)}},
+                                      birth - 1);
+            EXPECT_EQ(before_birth.serialize(), pages.serialize());
+            auto continuous = FoliageCells(pages.irrigation());
+            for (std::uint64_t tick = 33; tick <= 64; ++tick) {
+                if (tick >= birth) {
+                    continuous.at({0, 0}) += 1000;
+                }
+                EvolveFoliageIrrigation(continuous);
+            }
+            FoliageInteriorReplay::Work replay_work;
+            ReplayAllFoliageInteriors(registry, pages, {{{0, 0}, 32}}, 64, &replay_work);
+            FieldPageState expected;
+            ASSERT_TRUE(expected.set_irrigation({0, 0}, continuous.at({0, 0})));
+            EXPECT_EQ(pages.serialize(), expected.serialize());
+            EXPECT_EQ(replay_work.source_visits, birth <= 64 ? 65u - birth : 0u);
+        }
+    }
 }
 
 TEST(FoliageFieldPages, BorderExchangeRejectsPartialEndpointsAndInvalidFluxBeforeAnyWrites) {
