@@ -501,7 +501,9 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     auto& rows = scratch.rows;
     rows.clear();
     rows.reserve(m_records.size() + scratch.added.size());
+    // Publication swaps these buffers; retain both capacities for warm calls.
     scratch.evictions.reserve(rows.capacity());
+    result.evicted.reserve(rows.capacity());
     auto existing = m_records.begin();
     auto added = scratch.added.begin();
     auto next_visit = visits.begin();

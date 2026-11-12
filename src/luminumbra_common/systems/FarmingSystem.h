@@ -20,6 +20,16 @@
 namespace luminumbra::foliage {
 // `Comp` (=::Luminumbra::Components) is already aliased in PlantGrowthSystem.h.
 
+// Runtime-only session gate: historical candidates seal their sources until
+// publication. Standalone registries remain editable without this context.
+struct FarmingReplayGate {
+    bool blocked = false;
+};
+inline bool FarmingActionsAllowed(const entt::registry& registry) {
+    const auto* gate = registry.ctx().find<FarmingReplayGate>();
+    return !gate || !gate->blocked;
+}
+
 // Plant a seed: spawn a PlantTag plant at the Seed stage with the given genome.
 // The growth system (once ticking) advances it from here.
 inline entt::entity PlantSeed(entt::registry& reg,
@@ -165,20 +175,22 @@ struct FarmingController {
                       const SpeciesTemplate& tmpl,
                       luminumbra::core::DeterministicRng& rng,
                       std::uint64_t tick) {
-        if (seeds <= 0)
+        if (!FarmingActionsAllowed(reg) || seeds <= 0)
             return entt::null;
         --seeds;
         return MakePlantFromSpecies(reg, pos, tmpl, rng, tick);
     }
 
     bool Water(entt::registry& reg, entt::entity e) {
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Water(reg.get<Comp::PlantGrowthComponent>(e));
         return true;
     }
     bool Fertilize(entt::registry& reg, entt::entity e) {
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Fertilize(reg.get<Comp::PlantGrowthComponent>(e));
         return true;
@@ -188,7 +200,8 @@ struct FarmingController {
     // the HarvestResult (harvestable=false if the target is not ready / invalid).
     HarvestResult Harvest(entt::registry& reg, entt::entity e) {
         HarvestResult r;
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
             return r;
         r = luminumbra::foliage::Harvest(reg.get<Comp::PlantGrowthComponent>(e),
                                          reg.get<Comp::PlantGenomeComponent>(e));

@@ -380,6 +380,16 @@ public:
         }
         return Step(pages, due);
     }
+    // Refresh only source metadata for the current live step: early tick
+    // consumers may have moved admitted emitters since historical preparation.
+    // Keep the evolved cells and neighbor topology in place.
+    std::map<RegionKey, std::uint64_t> LiveStep(entt::registry& registry,
+                                                FieldPageState& pages,
+                                                const std::map<RegionKey, std::uint32_t>& due) {
+        m_sources.clear();
+        m_sourcesPrepared = false;
+        return Step(registry, pages, due);
+    }
     std::map<RegionKey, std::uint64_t> Step(FieldPageState& pages,
                                             const std::map<RegionKey, std::uint32_t>& due) {
         std::map<RegionKey, std::uint64_t> completed;
@@ -564,8 +574,10 @@ public:
     static constexpr std::uint32_t kStepBudget = 32;
     FoliageWindowReplay(const FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
-                        std::optional<std::uint64_t> tick = {})
-        : m_tick(tick) {
+                        std::optional<std::uint64_t> tick = {},
+                        bool live_tick = false)
+        : m_tick(tick)
+        , m_liveTick(live_tick) {
         // Validate every window before preparing storage or modifying any state.
         for (const auto& [key, ticks] : windows) {
             if (ticks > 65536 || (tick && ticks > *tick)) {
@@ -598,12 +610,16 @@ public:
     [[nodiscard]] std::uint32_t remaining_steps() const {
         return m_maximum - m_step;
     }
+    [[nodiscard]] std::uint32_t remaining_history_steps() const {
+        const auto remaining = remaining_steps();
+        return remaining - static_cast<std::uint32_t>(m_liveTick && remaining != 0);
+    }
     [[nodiscard]] const FoliageInteriorReplay::Work& work() const {
         return m_replay.work();
     }
     std::map<RegionKey, std::uint64_t> Advance(entt::registry& registry, FieldPageState& pages) {
         std::map<RegionKey, std::uint64_t> completed;
-        const auto steps = std::min(kStepBudget, remaining_steps());
+        const auto steps = std::min(kStepBudget, remaining_history_steps());
         for (std::uint32_t advanced = 0; advanced < steps; ++advanced) {
             const auto added = m_starts.find(m_step);
             if (added != m_starts.end()) {
@@ -625,21 +641,45 @@ public:
         return completed;
     }
 
+    // Sessions reserve the last step for the current tick, after early consumers
+    // and their live registry refresh. Pure historical cursors keep the default.
+    std::map<RegionKey, std::uint64_t> FinishLiveTick(entt::registry& registry,
+                                                      FieldPageState& pages) {
+        if (!m_liveTick || remaining_steps() == 0) {
+            return {};
+        }
+        if (remaining_history_steps() != 0) {
+            throw std::invalid_argument("Incomplete foliage history");
+        }
+        const auto added = m_starts.find(m_step);
+        if (added != m_starts.end()) {
+            for (const auto key : added->second) {
+                m_due.emplace(key, 1);
+            }
+        }
+        auto completed = m_replay.LiveStep(registry, pages, m_due);
+        ++m_step;
+        return completed;
+    }
+
 private:
     FoliageInteriorReplay m_replay;
     std::map<std::uint32_t, std::vector<RegionKey>> m_starts;
     std::map<RegionKey, std::uint32_t> m_due;
     std::optional<std::uint64_t> m_tick;
+    bool m_liveTick = false;
     std::uint32_t m_maximum = 0, m_step = 0;
 };
 using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
 inline FoliageEdges
 FoliageBorderEdges(const FieldPageState& pages,
                    const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
-                   std::span<const RegionKey> owners) {
+                   std::span<const RegionKey> owners,
+                   bool discover_recipients = false) {
     FoliageEdges edges;
     // At most 2048 boundary cells per selected 512 m owner. Both endpoints
-    // must exist, as in continuous diffusion; storage caps cells at kMaxPages * 256.
+    // exist by default. Admission discovery also includes wet-to-missing edges;
+    // callers must stage endpoints before computing flux. Dry missing pages stay absent.
     for (const auto owner : owners) {
         const auto a = records.find(owner);
         if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
@@ -664,8 +704,11 @@ FoliageBorderEdges(const FieldPageState& pages,
                     static_cast<std::int32_t>(z) + (along_x ? offset : (sign > 0 ? 511 : 0))};
                 const ScentCellKey next{cell.x + (along_x ? sign : 0),
                                         cell.z + (along_x ? 0 : sign)};
-                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) &&
-                                                            pages.irrigation().initialized(next))) {
+                if (FoliageFieldPages::valid_cell(next) &&
+                    ((pages.irrigation().initialized(cell) &&
+                      pages.irrigation().initialized(next)) ||
+                     (discover_recipients && (pages.irrigation().sample(cell, 0) > 0 ||
+                                              pages.irrigation().sample(next, 0) > 0)))) {
                     edges.emplace_back(sign > 0 ? cell : next, sign > 0 ? next : cell);
                 }
             }

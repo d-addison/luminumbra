@@ -75,6 +75,7 @@
 #include "../simulation/SimWorkCounters.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
+#include "../systems/FarmingSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
 #include "../systems/FireSpreadSystem.h"   // Fire propagation.
 #include "../systems/FoliageRegistryStage.h"
@@ -312,7 +313,10 @@ SelectFoliageRegistry(const entt::registry& original,
             }
             const auto* owner = original.try_get<const Comp::PlantRegionComponent>(entity);
             const auto* transform = original.try_get<const Comp::TransformComponent>(entity);
-            bool include = owner && windows.elapsed.contains({owner->owner_x, owner->owner_z});
+            // Incomplete opt-ins still participate in staging; consumers reject
+            // missing transforms without mutating their payloads.
+            bool include = (!owner && !transform && !windows.elapsed.empty()) ||
+                           (owner && windows.elapsed.contains({owner->owner_x, owner->owner_z}));
             if (!owner && !include && transform &&
                 ActiveRegionLedger::valid_anchor(transform->position)) {
                 const auto cell = luminumbra::foliage::FoliageCell(transform->position);
@@ -362,6 +366,7 @@ struct GameSession::FoliageStep {
     std::map<RegionKey, std::pair<RegionState, std::pair<std::uint8_t, std::uint32_t>>> states;
     bool has_registry_work = false;
     std::uint64_t target_tick = 0, replay_cell_visits = 0;
+    std::uint32_t advanced_steps = 0;
     std::uint64_t staged_pages = 0, preparation_pages = 0;
     bool active = false, blocked = false, prepared = false, advanced = false;
 
@@ -402,8 +407,8 @@ struct GameSession::FoliageStep {
         if (!session.m_activeRegionsEnabled || session.m_foliageStep) {
             return;
         }
-        session.m_foliageStep = std::make_unique<FoliageStep>();
-        auto& step = *session.m_foliageStep;
+        auto candidate = std::make_unique<FoliageStep>();
+        auto& step = *candidate;
         for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
             step.last_ticks.emplace(key, luminumbra::foliage::FoliagePriorTick(record));
             step.committed_ticks.emplace(key, record.last_ticked);
@@ -440,6 +445,9 @@ struct GameSession::FoliageStep {
                 }
             }
         }
+        auto& farming = session.m_registry.ctx().emplace<luminumbra::foliage::FarmingReplayGate>();
+        farming.blocked = step.blocked;
+        session.m_foliageStep = std::move(candidate);
     }
     void StageOwner(const GameSession& session, RegionKey key) {
         for (const bool soil : {false, true}) {
@@ -510,7 +518,7 @@ struct GameSession::FoliageStep {
             step.field_windows.clear();
             step.has_registry_work = false;
             step.replay = std::make_unique<luminumbra::foliage::FoliageWindowReplay>(
-                step.pages, step.field_windows, target_tick);
+                step.pages, step.field_windows, target_tick, true);
             replay_work.clear();
             prepared = true;
             return;
@@ -560,7 +568,8 @@ struct GameSession::FoliageStep {
             }
         }
         step.borders = luminumbra::foliage::SelectFoliageBorderEdges(
-            luminumbra::foliage::FoliageBorderEdges(session.m_fieldPages, ledger.records(), owners),
+            luminumbra::foliage::FoliageBorderEdges(
+                session.m_fieldPages, ledger.records(), owners, true),
             ledger.records(),
             clock.tick());
         std::erase_if(step.borders, [&](const auto& edge) {
@@ -653,7 +662,7 @@ struct GameSession::FoliageStep {
             step.registry.Begin(selected, ledger.next_persistent_id());
         }
         step.replay = std::make_unique<luminumbra::foliage::FoliageWindowReplay>(
-            step.pages, step.field_windows, target_tick);
+            step.pages, step.field_windows, target_tick, true);
         replay_work.clear();
         prepared = true;
     }
@@ -671,9 +680,11 @@ struct GameSession::FoliageStep {
             return;
         }
         advanced = true;
+        const auto remaining = replay->remaining_steps();
         for (const auto& [key, work] : replay->Advance(registry.registry(), pages)) {
             replay_work[key] += work;
         }
+        advanced_steps = remaining - replay->remaining_steps();
         replay_cell_visits = replay->work().evolved_cells;
         preparation_pages = staged_pages + replay->work().preparation_pages;
     }
@@ -687,6 +698,7 @@ struct GameSession::FoliageStep {
         }
         auto& step = *session.m_foliageStep;
         step.advanced = false;
+        step.advanced_steps = 0;
         if (!step.blocked) {
             return true;
         }
@@ -709,7 +721,8 @@ struct GameSession::FoliageStep {
             step.Begin(session, owners, clock, nullptr);
         }
         step.AdvanceReplay();
-        return step.replay->remaining_steps() == 0;
+        return step.replay->remaining_history_steps() == 0 &&
+               step.advanced_steps < luminumbra::foliage::FoliageWindowReplay::kStepBudget;
     }
     static bool PauseBatch(GameSession& session,
                            const luminumbra::core::SimulationClock& prior_clock,
@@ -786,8 +799,9 @@ struct GameSession::FoliageStep {
         // Do not consume a partial tick into the isolated candidate here.
         if (step.replay->remaining_steps() >
                 luminumbra::foliage::FoliageWindowReplay::kStepBudget ||
-            (step.advanced && step.replay->remaining_steps() != 0)) {
+            (step.advanced && step.replay->remaining_history_steps() != 0)) {
             step.blocked = true;
+            session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked = true;
             step.deferred.clear();
             for (const auto& [key, elapsed] : step.field_windows) {
                 if (elapsed > luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
@@ -801,6 +815,11 @@ struct GameSession::FoliageStep {
         }
         step.RestoreUnpublishedTicks(session);
         step.AdvanceReplay();
+        for (const auto& [key, work] :
+             step.replay->FinishLiveTick(step.registry.registry(), step.pages)) {
+            step.replay_work[key] += work;
+        }
+        step.replay_cell_visits = step.replay->work().evolved_cells;
         step.due.clear();
         for (const auto& [key, elapsed] : step.windows.elapsed) {
             if (elapsed != 0) {
@@ -819,6 +838,7 @@ struct GameSession::FoliageStep {
         if (!step.has_registry_work && step.pages.empty() && step.windows.resumes.empty()) {
             step.prepared = false;
             step.registry.Abort();
+            session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked = false;
             return nullptr;
         }
         step.active = true;
@@ -895,6 +915,7 @@ struct GameSession::FoliageStep {
         active = false;
         prepared = false;
         replay.reset();
+        session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked = false;
     }
     void CommitTicks(GameSession& session) noexcept {
         for (const auto& [key, elapsed] : windows.elapsed) {
@@ -1152,6 +1173,7 @@ void GameSession::ResetWorldSystems() {
     DisableFarWorldAuthorityProducer();
     m_regionalEnergyStep.reset();
     m_foliageStep.reset();
+    m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -1477,6 +1499,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // Each fixed simulation update has its own replay allowance, even
             // when several updates share one host frame.
             m_foliageStep->advanced = false;
+            m_foliageStep->advanced_steps = 0;
         }
         using Stage = luminumbra::simulation::SimBudgetStage;
         namespace TelemetryComp = Luminumbra::Components;
@@ -5259,6 +5282,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     DisableFarWorldAuthorityProducer();
     // All refusing readers have passed; publish the staged state together.
     m_foliageStep.reset();
+    m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_lastLoadedChunkCount = 0;
     m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;
@@ -5351,6 +5375,10 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         m_registry.destroy(stale.begin(), stale.end());
     }
     luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, saved.plants);
+
+    // Restore the farming refusal before input can reach an unfinished window,
+    // including the interval between loading and the first simulation update.
+    FoliageStep::Initialize(*this);
 
     // Commit the validated cursor only after every refusing load step passes.
     m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
