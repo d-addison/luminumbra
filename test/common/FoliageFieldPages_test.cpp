@@ -734,7 +734,8 @@ TEST(FoliageFieldPages, CurrentTickMaterializationKeepsFieldsAndSourcesUnchanged
                 ledger.mark_materialized_edit(owner, clock);
                 ledger.mark_materialized_edit(owner, clock);
             } else {
-                ledger.pin(owner, true, clock);
+                // Scheduling needs a tick newer than the activation stamp.
+                ledger.pin(owner, true, WorldClock(tick - 1));
                 ledger.schedule(clock, std::span<const Luminumbra::Vec3>{});
                 ledger.mark_edited(owner, clock);
             }
