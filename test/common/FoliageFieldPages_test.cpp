@@ -1010,16 +1010,16 @@ TEST(FoliageFieldPages, MaterializedEditsPreserveResumeTokensAndRoundTripWithout
         record.cadence_phase = ActiveRegionLedger::phase(owner, record.cadence_shift);
         record.last_ticked = 31;
         record.frozen_at = 32;
-        EXPECT_EQ(FoliagePriorTick(record), 32u);
+        EXPECT_EQ(FoliagePriorTick(record, ledger.foliage_completion(owner)), 32u);
         ledger.mark_edited(owner, WorldClock(40));
-        EXPECT_EQ(FoliagePriorTick(record), 32u);
+        EXPECT_EQ(FoliagePriorTick(record, ledger.foliage_completion(owner)), 32u);
         ledger.mark_materialized_edit(owner, WorldClock(48));
         EXPECT_EQ(record.last_edit, 48u);
         EXPECT_EQ(record.last_ticked, 48u);
         EXPECT_EQ(record.frozen_at, 32u);
         EXPECT_TRUE(record.wake_pending);
         EXPECT_NE(record.state, RegionState::Frozen);
-        EXPECT_EQ(FoliagePriorTick(record), 48u);
+        EXPECT_EQ(FoliagePriorTick(record, ledger.foliage_completion(owner)), 48u);
         ActiveRegionLedger reopened;
         std::string error;
         ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
@@ -1050,12 +1050,12 @@ TEST(FoliageFieldPages, OrdinaryEditsRetainMaterializedCompletionAcrossReloads) 
     ASSERT_EQ(ledger.records().at(owner).state, RegionState::Frozen);
     ASSERT_EQ(ledger.records().at(owner).frozen_at, 32u);
     ledger.mark_edited(owner, WorldClock(40));
-    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner)), 32u);
+    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner), ledger.foliage_completion(owner)), 32u);
     ledger.mark_materialized_edit(owner, WorldClock(48));
     ledger.mark_edited(owner, WorldClock(50));
     ledger.mark_edited(owner, WorldClock(50));
     ledger.mark_edited(owner, WorldClock(51));
-    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner)), 48u);
+    EXPECT_EQ(FoliagePriorTick(ledger.records().at(owner), ledger.foliage_completion(owner)), 48u);
 
     ActiveRegionLedger reopened;
     std::string error;
@@ -1078,16 +1078,107 @@ TEST(FoliageFieldPages, OrdinaryEditsRetainMaterializedCompletionAcrossReloads) 
         EXPECT_EQ(replay_work.evolved_cells, 8u);
         EXPECT_EQ(recovered.serialize(), continuous.serialize());
     }
-    // A later materialization must replace BOTH completion stamps; an ordinary
-    // edit must preserve them again. Invalid/backward calls cannot change either.
+    // A later materialization replaces the exclusive completion register.
+    // Ordinary edits preserve it; invalid/backward calls cannot change it.
     reopened.mark_materialized_edit(owner, WorldClock(56));
     reopened.mark_materialized_edit(owner, WorldClock(56));
     reopened.mark_edited(owner, WorldClock(58));
-    EXPECT_EQ(FoliagePriorTick(reopened.records().at(owner)), 56u);
+    EXPECT_EQ(FoliagePriorTick(reopened.records().at(owner), reopened.foliage_completion(owner)),
+              56u);
     const auto bytes = reopened.encode();
     EXPECT_THROW(reopened.mark_materialized_edit(owner, WorldClock(57)), std::invalid_argument);
     EXPECT_THROW(reopened.mark_edited({32768, 0}, WorldClock(60)), std::invalid_argument);
     EXPECT_EQ(reopened.encode(), bytes);
+}
+
+TEST(FoliageFieldPages, ExclusiveCompletionSurvivesSchedulingAndFrozenWakeReload) {
+    const RegionKey owner{0, 0};
+    for (const bool materialized : {false, true}) {
+        ActiveRegionLedger ledger({.work_limit = 0, .hold_ticks = 1, .reduced_shift = 1});
+        ledger.mark_edited(owner, WorldClock(29));
+        const std::array work{RegionWork{owner, 1, 0, 0, 0}};
+        for (std::uint64_t tick = 30; tick <= 32; ++tick)
+            ledger.schedule(WorldClock(tick),
+                            std::span<const Luminumbra::Vec3>{},
+                            work,
+                            [](RegionKey) { return std::uint64_t{1}; });
+        ASSERT_EQ(ledger.records().at(owner).state, RegionState::Frozen);
+        ledger.wake_frozen(owner);
+        ledger.schedule(WorldClock(48), std::span<const Luminumbra::Vec3>{});
+        ASSERT_EQ(ledger.records().at(owner).last_ticked, 48u);
+        if (materialized)
+            ledger.mark_materialized_edit(owner, WorldClock(48));
+        else
+            ledger.mark_edited(owner, WorldClock(48));
+        // Both histories still have matching ordinary record stamps.
+        EXPECT_EQ(ledger.records().at(owner).last_edit, 48u);
+        EXPECT_EQ(ledger.records().at(owner).last_ticked, 48u);
+        ActiveRegionLedger edited_reload;
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), edited_reload, error)) << error;
+        for (const auto* saved : {&ledger, &edited_reload}) {
+            const auto at_edit =
+                BuildRegionalFoliageWindows(*saved, {}, {}, {owner}, WorldClock(48));
+            EXPECT_EQ(at_edit.elapsed.at(owner), materialized ? 0u : 16u);
+            EXPECT_EQ(at_edit.resumes.at(owner), 32u);
+        }
+        ledger.schedule(WorldClock(52), std::span<const Luminumbra::Vec3>{});
+        EXPECT_EQ(ledger.records().at(owner).last_ticked, 52u);
+        ActiveRegionLedger reopened;
+        ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
+        for (const auto* saved : {&ledger, &reopened}) {
+            const auto windows =
+                BuildRegionalFoliageWindows(*saved, {}, {}, {owner}, WorldClock(52));
+            EXPECT_EQ(windows.elapsed.at(owner), materialized ? 4u : 20u);
+            EXPECT_EQ(windows.resumes.at(owner), 32u);
+            if (materialized) {
+                // A stale live history cannot replay a completed materialization.
+                const auto stale =
+                    BuildRegionalFoliageWindows(*saved, {}, {{owner, 40}}, {owner}, WorldClock(52));
+                EXPECT_EQ(stale.elapsed.at(owner), 4u);
+                EXPECT_THROW(BuildRegionalFoliageWindows(*saved, {}, {}, {owner}, WorldClock(47)),
+                             std::invalid_argument);
+            }
+        }
+        if (materialized) {
+            ASSERT_TRUE(reopened.acknowledge_resume(owner, 32));
+            EXPECT_EQ(reopened.foliage_completion(owner), 48u);
+        }
+    }
+}
+
+TEST(FoliageFieldPages, AlreadyScheduledZeroWindowUsesExclusiveCompletionIncludingTickZero) {
+    const RegionKey owner{0, 0};
+    for (const std::uint64_t tick :
+         {std::uint64_t{0}, std::uint64_t{48}, WorldClock::kTickLimit - 1}) {
+        for (const bool materialized : {false, true}) {
+            ActiveRegionLedger ledger;
+            ledger.activate_owned(owner, WorldClock{});
+            if (tick != 0)
+                ledger.schedule(WorldClock(tick), std::span<const Luminumbra::Vec3>{});
+            if (materialized)
+                ledger.mark_materialized_edit(owner, WorldClock(tick));
+            else
+                ledger.mark_edited(owner, WorldClock(tick));
+            EXPECT_EQ(ledger.tick(), tick);
+            ActiveRegionLedger reopened;
+            std::string error;
+            ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), reopened, error)) << error;
+            const std::array due{owner};
+            for (const auto* saved : {&ledger, &reopened}) {
+                const auto windows =
+                    BuildRegionalFoliageWindows(*saved, due, {}, {}, WorldClock(tick));
+                EXPECT_EQ(windows.elapsed.at(owner), materialized ? 0u : 1u);
+                EXPECT_TRUE(windows.resumes.empty());
+            }
+            if (tick < WorldClock::kTickLimit - 1) {
+                reopened.schedule(WorldClock(tick + 1), std::span<const Luminumbra::Vec3>{});
+                const auto next =
+                    BuildRegionalFoliageWindows(reopened, due, {}, {}, WorldClock(tick + 1));
+                EXPECT_EQ(next.elapsed.at(owner), 1u);
+            }
+        }
+    }
 }
 
 TEST(FoliageFieldPages, StandaloneWaterSourcesAreLiveTickOnlyAcrossReplayWindows) {

@@ -1248,6 +1248,184 @@ EnergyAgePayload(std::uint32_t count, const RegionKey& owner = kFar, std::uint64
            LittleEndian(static_cast<std::uint32_t>(owner.z), 4) + LittleEndian(age, 8);
 }
 
+TEST(ActiveRegionLedgerTest, FoliageCompletionHasExactSparseBytesAndCanonicalHash) {
+    ActiveRegionLedger ledger;
+    ledger.mark_materialized_edit(kFar, WorldClock{});
+    const auto tlv = Tlv(7, EnergyAgePayload(1));
+    EXPECT_EQ(tlv.size(), 26u);
+    EXPECT_EQ(ledger.encode(), Version3With(tlv, ledger));
+    EXPECT_EQ(ledger.encode().size(),
+              ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes + 4u + 26u + 8u);
+    EXPECT_EQ(ledger.foliage_completion(kFar), 0u);
+    EXPECT_FALSE(ledger.foliage_completion({11, -3}));
+    EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+    ActiveRegionLedger assigned;
+    assigned = ledger;
+    EXPECT_EQ(assigned.encode(), ledger.encode());
+
+    // Identical records and header: only the exclusive stamp differs.
+    ledger.mark_materialized_edit(kFar, WorldClock(8));
+    const auto first = Version3With(Tlv(7, EnergyAgePayload(1, kFar, 7)), ledger);
+    const auto second = Version3With(Tlv(7, EnergyAgePayload(1, kFar, 8)), ledger);
+    ActiveRegionLedger earlier, later;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(first, earlier, error)) << error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(second, later, error)) << error;
+    EXPECT_EQ(earlier.records(), later.records());
+    EXPECT_NE(earlier.canonical_bytes(), later.canonical_bytes());
+    EXPECT_NE(Fnv1a64(earlier.canonical_bytes()), Fnv1a64(later.canonical_bytes()));
+    EXPECT_NE(earlier.encode(), later.encode());
+    EXPECT_EQ(later.canonical_bytes(),
+              earlier.canonical_bytes().substr(0, earlier.canonical_bytes().size() - 8) +
+                  LittleEndian(8, 8));
+}
+
+TEST(ActiveRegionLedgerTest, FoliageCompletionCombinesWithAllExistingExtensions) {
+    for (const bool frozen : {false, true}) {
+        const auto ledger = frozen ? FrozenLedger() : Distant();
+        for (unsigned mask = 0; mask < 16; ++mask) {
+            std::string tlvs;
+            if (mask & 1u)
+                tlvs += Tlv(1, LittleEndian(2, 8));
+            if (frozen)
+                tlvs += Tlv(2, std::string(1, '\x02'));
+            if (mask & 2u)
+                tlvs += Tlv(4, EnergyAgePayload(1));
+            if (mask & 4u)
+                tlvs += Tlv(5, EnergyAgePayload(1, kFar, 9));
+            if (mask & 8u)
+                tlvs += Tlv(6, EnergyAgePayload(1, kFar, 10));
+            tlvs += Tlv(7, EnergyAgePayload(1));
+            const auto bytes = Version3With(tlvs, ledger);
+            ActiveRegionLedger restored;
+            std::string error;
+            ASSERT_TRUE(ActiveRegionLedger::decode(bytes, restored, error)) << error;
+            EXPECT_EQ(restored.encode(), bytes);
+            EXPECT_EQ(Reload(restored).canonical_bytes(), restored.canonical_bytes());
+        }
+    }
+}
+
+TEST(ActiveRegionLedgerTest, FoliageCompletionPreservesLegacyFrozenDigestProjection) {
+    auto ledger = FrozenLedger();
+    auto legacy = ledger.encode();
+    legacy.resize(ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes + 8);
+    legacy[4] = 1;
+    Seal(legacy);
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(legacy, ledger, error)) << error;
+    const auto digest = ledger.records().at(kFar).frozen_digest;
+    ledger.mark_materialized_edit(kFar, WorldClock(3));
+    EXPECT_EQ(ledger.records().at(kFar).frozen_digest, digest);
+    // The exclusive register must not relabel an opaque historical digest.
+    EXPECT_EQ(ledger.encode(), Version3With(Tlv(7, EnergyAgePayload(1, kFar, 3)), ledger));
+    EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+}
+
+TEST(ActiveRegionLedgerTest, FoliageCompletionRefusalMatrixIsTransactional) {
+    auto ledger = Distant();
+    ledger.activate_owned({11, -3}, WorldClock(1));
+    const auto a = EnergyAgePayload(1, kFar, 0).substr(4);
+    const auto b = EnergyAgePayload(1, {11, -3}, 1).substr(4);
+    const auto valid = Tlv(7, LittleEndian(2, 4) + a + b);
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(Version3With(valid, ledger), restored, error)) << error;
+    EXPECT_EQ(restored.foliage_completion(kFar), 0u);
+    EXPECT_EQ(restored.foliage_completion({11, -3}), 1u);
+    EXPECT_EQ(restored.encode(), Version3With(valid, ledger));
+    const std::array malformed{
+        Tlv(7, LittleEndian(2, 4) + b + a),       // unsorted
+        Tlv(7, LittleEndian(2, 4) + a + a),       // duplicate owner
+        Tlv(7, EnergyAgePayload(1, {12, -3}, 0)), // unknown owner
+        Tlv(7, EnergyAgePayload(1, kFar, 2)),     // above validation ceiling
+        Tlv(7, EnergyAgePayload(1, kFar, WorldClock::kTickLimit)),
+        Tlv(7, EnergyAgePayload(1, kFar, std::numeric_limits<std::uint64_t>::max())),
+        Tlv(7, LittleEndian(0, 4)), // empty register must be absent
+        Tlv(7, LittleEndian(ActiveRegionLedger::kMaxRegions + 1, 4)),
+        Tlv(7, std::string(3, '\0')),
+        Tlv(7, EnergyAgePayload(1).substr(0, 19)), // partial entry
+        Tlv(7, EnergyAgePayload(1) + "x"),         // trailing byte
+        valid + valid,                             // duplicate TLV
+        valid + Tlv(8, LittleEndian(0, 4)),        // unknown TLV
+        valid + Tlv(4, EnergyAgePayload(1)),       // out-of-order TLV
+    };
+    for (const auto& tlvs : malformed)
+        ExpectRefused(Version3With(tlvs, ledger), ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(Version2With(Tlv(7, EnergyAgePayload(1))), ActiveRegionLedger::kCorruptMessage);
+}
+
+TEST(ActiveRegionLedgerTest, OtherWritersNeverCreateOrReplaceFoliageCompletion) {
+    for (const bool completed : {false, true}) {
+        auto ledger = FrozenLedger();
+        if (completed)
+            ledger.mark_materialized_edit(kFar, WorldClock(3));
+        const auto stamp = ledger.foliage_completion(kFar);
+        ledger.mark_edited(kFar, WorldClock(4));
+        ledger.activate_owned(kFar, WorldClock(4));
+        ledger.wake_frozen(kFar);
+        ledger.pin(kFar, true, WorldClock(4));
+        ledger.schedule(WorldClock(4), std::span<const Vec3>{});
+        ASSERT_TRUE(ledger.acknowledge_resume(kFar, 3));
+        ledger.set_populated(kFar, true);
+        ledger.set_water_cursor(kFar, 7);
+        ASSERT_TRUE(ledger.set_energy_age(kFar, 1));
+        ASSERT_TRUE(ledger.set_energy_ages({{kFar, 2}}));
+        ASSERT_TRUE(ledger.set_water_debts({{kFar, 1}}));
+        const std::array patches{ActiveRegionLedger::WaterPatch{kFar, 2, 8}};
+        ActiveRegionLedger::WaterDebts scratch;
+        ASSERT_TRUE(ledger.prepare_water_patch(patches, scratch));
+        ledger.commit_water_patch(patches, scratch);
+        const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+        ledger.publish_completed_work(work);
+        const std::array ages{std::pair{kFar, std::uint64_t{3}}};
+        ASSERT_TRUE(ledger.prepare_energy_work(ages, work, 2));
+        ledger.commit_energy_work();
+        ledger.clear_completed_work();
+        ledger.reset_energy_ages();
+        ledger.mark_saved(WorldClock(4));
+        ledger.acknowledge_world_clock(WorldClock(5));
+        ledger.restore_clock(WorldClock(6));
+        EXPECT_EQ(ledger.foliage_completion(kFar), stamp);
+        EXPECT_EQ(Reload(ledger).foliage_completion(kFar), stamp);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, AbsentFoliageCompletionPreservesHistoricalBytesAndProjection) {
+    const auto ledger = Distant();
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 1u);
+    EXPECT_EQ(bytes.size(),
+              ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes + 8u);
+    EXPECT_FALSE(ledger.foliage_completion(kFar));
+    // The historical projection is the persisted payload minus its observational
+    // header ceiling and per-record save stamp; no extension or marker is added.
+    const auto payload = bytes.substr(8, 8) + bytes.substr(24, 88) + bytes.substr(120, 40);
+    EXPECT_EQ(ledger.canonical_bytes(), "active_regions:v1:" + payload);
+    EXPECT_EQ(Reload(ledger).encode(), bytes);
+    const auto frozen = FrozenLedger();
+    EXPECT_EQ(Version(frozen.encode()), 2u);
+    EXPECT_EQ(Reload(frozen).encode(), frozen.encode());
+}
+
+TEST(ActiveRegionLedgerTest, FoliageCompletionRetainsOtherwiseIdleOwner) {
+    ActiveRegionLedger ledger;
+    ledger.activate_owned(kFar, WorldClock{});
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(
+        Version3With(Tlv(7, EnergyAgePayload(1)), ledger), ledger, error))
+        << error;
+    ASSERT_FALSE(ledger.records().at(kFar).edited);
+    ledger.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+                    std::span<const Vec3>{},
+                    {},
+                    {},
+                    [](RegionKey) { return false; });
+    EXPECT_TRUE(ledger.records().contains(kFar));
+    EXPECT_EQ(ledger.foliage_completion(kFar), 0u);
+    EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+}
+
 TEST(ActiveRegionLedgerTest, HistoricalExtendedV2BytesPreserveEnergyAge) {
     // Fixed historical v2 bytes: Distant(), energy age zero, original checksum.
     const std::string historical(
@@ -1590,12 +1768,63 @@ RegionKey CapacityKey(std::uint32_t index) {
 }
 } // namespace
 
+TEST(ActiveRegionLedgerTest, FoliageCompletionCapacityIncludesEveryRegisterAndAdmission) {
+    ActiveRegionLedger ledger;
+    // At most 2^20 records, matching the existing envelope-cap regressions.
+    for (std::uint32_t index = 0; index + 1 < ActiveRegionLedger::kMaxRegions; ++index)
+        ledger.activate_owned(CapacityKey(index), WorldClock{});
+    const auto missing = CapacityKey(ActiveRegionLedger::kMaxRegions - 1);
+    EXPECT_THROW(ledger.mark_materialized_edit(missing, WorldClock(1)), std::length_error);
+    EXPECT_FALSE(ledger.records().contains(missing));
+    EXPECT_EQ(ledger.header_tick(), 0u);
+    // Six stamps cost 4 + 10 + 16*6 = 110 of the remaining 115 bytes.
+    for (std::uint32_t index = 0; index < 6; ++index)
+        ledger.mark_materialized_edit(CapacityKey(index), WorldClock{});
+    const auto before = ledger.encode();
+    EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes - before.size(), 5u);
+    EXPECT_THROW(ledger.mark_materialized_edit(CapacityKey(6), WorldClock(1)), std::length_error);
+    EXPECT_FALSE(ledger.foliage_completion(CapacityKey(6)));
+    EXPECT_FALSE(ledger.records().at(CapacityKey(6)).edited);
+    EXPECT_EQ(ledger.header_tick(), 0u);
+    EXPECT_FALSE(ledger.can_activate(missing));
+    EXPECT_THROW(ledger.activate_owned(missing, WorldClock{}), std::length_error);
+    std::uint64_t id = 99;
+    EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    EXPECT_EQ(id, 99u);
+    EXPECT_FALSE(ledger.set_energy_age(CapacityKey(0), 0));
+    EXPECT_FALSE(ledger.set_energy_ages({{CapacityKey(0), 0}}));
+    EXPECT_FALSE(ledger.set_water_debts({{CapacityKey(0), 1}}));
+    const std::array patches{ActiveRegionLedger::WaterPatch{CapacityKey(0), 1, 2}};
+    ActiveRegionLedger::WaterDebts scratch{{missing, 17}};
+    EXPECT_FALSE(ledger.prepare_water_patch(patches, scratch));
+    EXPECT_EQ(scratch, (ActiveRegionLedger::WaterDebts{{missing, 17}}));
+    const std::array work{RegionWork{CapacityKey(0), 1, 0, 0, 0}};
+    EXPECT_THROW(ledger.publish_completed_work(work), std::length_error);
+    const std::array ages{std::pair{CapacityKey(0), std::uint64_t{0}}};
+    EXPECT_FALSE(ledger.prepare_energy_work(ages, {}, 1));
+    EXPECT_FALSE(ledger.prepare_energy_work({}, work, 1));
+    EXPECT_FALSE(ledger.prepare_energy_work({}, {}, 2));
+    EXPECT_EQ(ledger.encode(), before);
+    EXPECT_NO_THROW(ledger.mark_materialized_edit(CapacityKey(0), WorldClock{}));
+    EXPECT_EQ(ledger.encode(), before);
+    ledger.set_local_anchor({-5120, 0, -5120});
+    EXPECT_GT(ledger.schedule(WorldClock(1)).rejected.capacity, 0u);
+    EXPECT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions - 1);
+    EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
+}
+
 TEST(ActiveRegionLedgerTest, EnergyAgesThePersistedFileCannotHoldAreRefused) {
     EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes, 109051979u);
     ActiveRegionLedger ledger;
     for (std::uint32_t index = 0; index < ActiveRegionLedger::kMaxRegions; ++index)
         ledger.mark_edited(CapacityKey(index), WorldClock{});
     ASSERT_EQ(ledger.records().size(), ActiveRegionLedger::kMaxRegions);
+    // A first completion cannot fit for either an existing or a new owner.
+    EXPECT_THROW(ledger.mark_materialized_edit(CapacityKey(0), WorldClock(1)), std::length_error);
+    EXPECT_THROW(ledger.mark_materialized_edit({32767, 32767}, WorldClock(1)), std::length_error);
+    EXPECT_FALSE(ledger.foliage_completion(CapacityKey(0)));
+    EXPECT_FALSE(ledger.records().contains({32767, 32767}));
+    EXPECT_EQ(ledger.header_tick(), 0u);
     // 56 + 104 * 2^20 + 4 + (6 + 4 + 16) + 8 = 109051998 > 109051979.
     EXPECT_FALSE(ledger.set_energy_age({0, 0}, 0));
     EXPECT_FALSE(ledger.set_energy_ages({{{0, 0}, 0}}));
