@@ -359,13 +359,20 @@ TEST(PersistenceHardening, WaterScalarsRefuseInvalidInputTransactionallyAcrossRe
                 // Exercise both ordinary snapshot loads and the authority-checked record path.
                 for (const bool authority_checked : {false, true}) {
                     SCOPED_TRACE(authority_checked);
+                    // A record read under authority checks holds a single chunk, so
+                    // that path receives the invalid chunk on its own.
+                    auto input = document;
+                    if (authority_checked) {
+                        input["chunks"] = nlohmann::json::array({document["chunks"][1]});
+                        input["chunk_count"] = 1;
+                    }
                     WorldStreamingState loaded;
                     AddCompleteWaterChunk(loaded, {9, 0, 0});
                     std::vector<std::string> errors;
                     const P::ChunkAuthorityLoadPolicy policy{.validate_record_authority =
                                                                  authority_checked};
-                    EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(
-                        document.dump(), loaded, errors, policy));
+                    EXPECT_FALSE(
+                        LoadWorldStreamingStateSnapshotJson(input.dump(), loaded, errors, policy));
                     EXPECT_EQ(loaded.size(), 0u);
                     ASSERT_FALSE(errors.empty());
                     EXPECT_NE(errors.front().find("Saved water scalar"), std::string::npos);
