@@ -7,6 +7,7 @@
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/components/SimulationIdentityComponent.h"
 
 #include <algorithm>
 #include <cmath>
@@ -336,6 +337,13 @@ ExpectRosterMatches(const std::vector<GridTestAgent>& roster, int ticks = 3) {
     const auto entities = PopulateGridRoster(grid_registry, roster);
     const auto reference_entities = PopulateGridRoster(reference_registry, roster);
     EXPECT_EQ(entities, reference_entities);
+    // Identity presence must not select candidate ordering in legacy sessions.
+    std::uint64_t identity = static_cast<std::uint64_t>(entities.size());
+    for (const auto entity : entities) {
+        grid_registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(entity,
+                                                                                   identity);
+        --identity;
+    }
     luminumbra::ai::InstinctLocomotionTickStats stats;
     for (int tick = 0; tick < ticks; ++tick) {
         SCOPED_TRACE(tick);

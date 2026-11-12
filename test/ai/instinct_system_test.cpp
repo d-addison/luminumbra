@@ -7,6 +7,7 @@
 #include "luminumbra_common/ai/InstinctSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/components/SimulationIdentityComponent.h"
 
 #include <string>
 #include <vector>
@@ -144,4 +145,22 @@ TEST(InstinctSystem, RespectsOpportunityRadiusWithTransforms) {
     EXPECT_NEAR(identity.current_plan.candidates.front().score,
                 (0.9 * 0.5 * 2.0) + (0.5 * 1.5) - (3.0 * 0.35),
                 1.0e-4);
+}
+
+TEST(InstinctSystem, IdentitiesAloneRetainLegacyEqualNameStorageOrder) {
+    entt::registry registry;
+    const auto agent = MakeAgent(registry);
+    const auto first = MakeOpportunity(registry, "same", "alpha", 0.9f, 0.5f);
+    const auto second = MakeOpportunity(registry, "same", "alpha", 0.9f, 0.5f);
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(agent, std::uint64_t{3});
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(first, std::uint64_t{1});
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(second, std::uint64_t{2});
+    // The retained stable name sort preserves this view's first equal-name source.
+    const auto expected = registry.view<const OpportunityComponent>().front();
+    luminumbra::ai::RunInstinctSystemOnTick(registry, 1);
+    const auto& plan = registry.get<ActionPlanComponent>(agent);
+    ASSERT_EQ(plan.plan.size(), 1u);
+    EXPECT_EQ(plan.plan.front().target, expected);
+    EXPECT_EQ(registry.get<InstinctAgentComponent>(agent).current_plan.candidates.front().id,
+              "same");
 }

@@ -100,3 +100,18 @@ TEST(PerceptionSystem, IsDeterministic) {
     };
     EXPECT_EQ(run(), run());
 }
+
+TEST(PerceptionSystem, IdentitiesAloneRetainLegacyEqualSignalTarget) {
+    entt::registry registry;
+    const auto predator = MakePredator(registry, 0, 0, 1, 0);
+    const auto first = MakePrey(registry, 10, 1);
+    const auto second = MakePrey(registry, 10, -1);
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(predator,
+                                                                          std::uint64_t{3});
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(first, std::uint64_t{2});
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(second, std::uint64_t{1});
+    RunPerceptionSystemOnTick(registry, 1.0f);
+    const auto& awareness = registry.get<AwarenessComponent>(predator).awareness;
+    ASSERT_TRUE(awareness.has_last_known);
+    EXPECT_EQ(awareness.last_known_z, 1.0f);
+}
