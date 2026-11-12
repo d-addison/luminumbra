@@ -3392,11 +3392,24 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     // Decouple the expensive chunk activation/deactivation logic from the frame rate.
     bool activation_ran_this_tick = false;
+    // An update without anchors restores nothing, so the first-update restoration waits for the
+    // first anchored update instead of falling back to the four-update cadence.
+    const bool initial_durable_activation = m_first_update && m_durable_residency &&
+                                            !m_durable_chunks.empty() && !anchor_positions.empty();
+    if (!anchor_positions.empty()) {
+        m_first_update = false;
+    }
     m_update_tick_counter++;
-    if (m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES) {
+    const bool interval_activation = m_update_tick_counter >= STREAMING_ACTIVATION_INTERVAL_FRAMES;
+    if (initial_durable_activation || interval_activation) {
         // activation may elide itself (return false) when the residency set is provably unchanged;
         // only count it as "ran" when it actually did work, so the meshing gate stays accurate.
-        activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);
+        // The initial pass restores only authority; generation and eviction retain updates 4, 8,
+        // ...
+        activation_ran_this_tick =
+            update_chunk_activation(anchor_positions, physics_system, !interval_activation);
+    }
+    if (interval_activation) {
         m_update_tick_counter = 0;
     }
     _dbg_split(m_dbg_stream.activation); // runtime telemetry
@@ -3951,7 +3964,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,
-                                                 PhysicsSystem* physics_system) {
+                                                 PhysicsSystem* physics_system,
+                                                 bool restorations_only) {
     if (anchors.empty() || m_durable_read_failed) {
         return false; // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
     }
@@ -4232,6 +4246,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     return false;
                 ++restored;
             } else {
+                if (restorations_only)
+                    continue;
                 generate_now.push_back({item.coords, generation_step(item.coords)});
             }
             if (item.surface)
@@ -4248,6 +4264,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_last_streaming_budget_stats.generation_candidates -
         m_last_streaming_budget_stats.scheduled_generation;
     m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
+    if (restorations_only)
+        return restored != 0;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         if (m_durable_read_failed)
