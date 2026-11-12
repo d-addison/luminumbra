@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra::Systems::RegionalWater {
@@ -105,14 +106,14 @@ struct Plan {
 // caps: at most R entries, S sources, D region outputs, 2*R topology faces,
 // 2*R pair pointers, 2*R output faces (including eligible borders before budget
 // truncation) and 5*R participant IDs before deduplication. All products fit 32-bit size_t.
-// Callers supply participating snapshots; this API has no production tick caller.
+// Callers supply participating snapshots; never pass a whole-world store.
 [[nodiscard]] Plan Build(std::span<const Resident> residents,
                          std::span<const SourceInput> sources,
                          const world::ActiveRegionLedger& ledger,
                          const world::RegionSchedule& schedule,
                          const Inputs& inputs);
 
-// One owner-thread transaction per executor, with no live tick caller yet.
+// One owner-thread transaction per executor.
 // Begin captures only the supplied participants (<= kMaxResidents, <= 1024 cells
 // each) and owner patches (<= kMaxRegions). Hold exclusive mutation access to
 // those chunks and the ledger through Publish/Rollback; mesh workers use copies.
@@ -137,7 +138,14 @@ public:
                                       SHIELD_WorldSystem& shield,
                                       const WaterKernels::InteriorInputs& inputs);
     WaterKernels::Result StepFace(ChunkID positive, ChunkID other, bool is_x);
-    void Publish();
+    // Preparation and physical inputs mutate private storage only. Preparation preserves
+    // integer bed/depth by endpoint-aligned bilinear sampling and accounts volume changes.
+    void PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolution);
+    void Inject(const Source& source);
+    void FinishInterior(ChunkID id);
+    // Mesh additions share the water commit; refusal retains the caller's existing IDs.
+    void Publish(SHIELD_WorldSystem* shield = nullptr,
+                 std::unordered_set<ChunkID>* mesh_invalidations = nullptr);
     void Rollback() noexcept;
     [[nodiscard]] bool pending() const noexcept {
         return m_ledger != nullptr;
@@ -154,8 +162,15 @@ private:
         std::uint64_t authority_revision = 0;
         std::uint32_t water_revision = 0;
         bool changed = false;
+        bool mesh_invalidated = false;
+        // An endpoint without an interior step advances its remesh cadence once per
+        // transaction from its first seam change above 1 mm.
+        bool interior_stepped = false;
+        bool face_cadence_advanced = false;
     };
+    Entry& FindEntry(ChunkID id);
     Chunk& Grid(ChunkID id);
+    void AdvanceFaceCadence(Entry& entry, const std::vector<std::int32_t>& before);
     void Account(const WaterKernels::Result& result, const Chunk& grid);
     std::vector<Entry> m_entries;
     std::vector<world::ActiveRegionLedger::WaterPatch> m_patches;
