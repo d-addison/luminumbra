@@ -16,9 +16,10 @@
 //
 // DETERMINISM (this feeds world_hash once wired): the nutrient store is INTEGER
 // fixed-point milli-units — no float accumulates in sim truth. Plants are visited
-// in ascending entity-id order, but consumption is ACCUMULATED per cell first and
-// applied as one integer subtraction, so the result is independent of traversal
-// order (two plants on one cell deplete it the same regardless of id order).
+// in ascending handle order on the legacy path and common identity order on the
+// candidate path. Absorption credits follow that order when plants compete for a
+// depleted cell. The grid's total consumption is applied as one integer subtraction
+// and is independent of traversal order.
 // Regeneration is an integer step toward a baseline. NO rng (offset +18 reserved
 // but unused — the flow is pure), NO wall-clock, NO libm transcendentals.
 //
@@ -29,8 +30,10 @@
 // NetworkStateHash baseline is unperturbed until soil-aware plants are spawned.
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -38,6 +41,7 @@
 #include "../components/CoreComponents.h"  // TransformComponent
 #include "../components/PlantComponents.h" // PlantTag, PlantGrowthComponent, PlantStage
 #include "../components/SoilComponents.h"  // SoilFeederComponent
+#include "../simulation/SimulationIdentity.h"
 #include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
@@ -194,6 +198,8 @@ inline std::int32_t SampleSoilCell(const SoilGrid& g, int cx, int cz) {
 
 // Telemetry / sub-hash for the soil tick.
 struct SoilNutrientStats {
+    // Observational candidate-order work only; never saved or hashed.
+    std::size_t ordering_visits = 0;
     int participants = 0;         // PlantTag + SoilFeeder plants considered this tick
     std::int64_t consumed = 0;    // total nutrient consumed this tick (milli-units)
     std::int64_t regenerated = 0; // total nutrient regenerated this tick (milli-units)
@@ -233,11 +239,57 @@ ApplyConsumptionAndRegen(SoilGrid& g,
     return regenerated;
 }
 
+// Candidate-only ordering. Admission requires unique, valid common identities;
+// refuse broken invariants before any simulation state is changed. Eight byte passes
+// bound ordering to O(participants), with scratch bounded by this participant list.
+inline std::size_t OrderSoilParticipants(const entt::registry& reg,
+                                         std::vector<entt::entity>& entities) {
+    using Identity = Comp::SimulationIdentityComponent;
+    std::size_t visits = 0;
+    if (entities.empty())
+        return visits;
+    for (const auto entity : entities) {
+        ++visits;
+        const auto* identity = reg.try_get<Identity>(entity);
+        if (!identity || !::Luminumbra::simulation::IsValidSimulationId(identity->id))
+            throw std::logic_error("Missing or invalid simulation identity");
+    }
+    std::vector<entt::entity> scratch(entities.size());
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        std::array<std::size_t, 256> offsets{};
+        for (const auto entity : entities) {
+            ++visits;
+            ++offsets[static_cast<std::size_t>((reg.get<Identity>(entity).id >> shift) & 255u)];
+        }
+        std::size_t offset = 0;
+        for (auto& bucket : offsets) {
+            const auto count = bucket;
+            bucket = offset;
+            offset += count; // sum is bounded by entities.size()
+        }
+        for (const auto entity : entities) {
+            ++visits;
+            scratch[offsets[static_cast<std::size_t>((reg.get<Identity>(entity).id >> shift) &
+                                                     255u)]++] = entity;
+        }
+        entities.swap(scratch);
+    }
+    for (std::size_t index = 1; index < entities.size(); ++index) {
+        ++visits;
+        if (reg.get<Identity>(entities[index - 1]).id == reg.get<Identity>(entities[index]).id)
+            throw std::logic_error("Duplicate simulation identity");
+    }
+    // One validation, sixteen radix visits and one uniqueness pass per participant.
+    return visits;
+}
+
 // Advance the soil nutrient field by ONE fixed tick. Pure function of registry
-// state + the grid. id-ordered traversal; consumption is ACCUMULATED per cell
-// (order-independent) then applied with the regen step. Plants that opt in
+// state + the grid. Ordered traversal assigns depletion credits; consumption is
+// accumulated per cell (order-independent) then applied with the regen step. Plants that opt in
 // (PlantTag + SoilFeederComponent) draw from their cell proportional to growth
 // stage * feeder uptake; their `absorbed` integer accrues what they actually got.
+// StableIdentity is selected by session wiring only at authority activation.
+template<bool StableIdentity = false>
 inline SoilNutrientStats
 RunSoilNutrientOnTick(entt::registry& reg,
                       SoilGrid& soil,
@@ -267,9 +319,13 @@ RunSoilNutrientOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    if constexpr (StableIdentity) {
+        stats.ordering_visits += OrderSoilParticipants(reg, ents);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
 
     const int W = soil.width();
     const int H = soil.height();
@@ -302,7 +358,7 @@ RunSoilNutrientOnTick(entt::registry& reg,
 
         // Track the plant's intent; the cell may not have this much (clamped on apply),
         // but `absorbed` records demand-met after the cell is known. To keep absorbed
-        // exact + order-independent we credit min(draw, available-before-regen) using
+        // exact in the selected order we credit min(draw, available-before-regen) using
         // the cell's CURRENT level minus what's already demanded this tick.
         const std::size_t ci = static_cast<std::size_t>(cz) * static_cast<std::size_t>(W) +
                                static_cast<std::size_t>(cx);
