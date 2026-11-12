@@ -22,6 +22,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <type_traits>
 #include <vector>
 
 namespace luminumbra::foliage {
@@ -144,10 +145,12 @@ using EnvSampler = std::function<PlantEnvSample(const Comp::TransformComponent&)
 // Advance every admitted PlantTag plant by ONE fixed tick. Deterministic: entities are
 // visited in ascending-id order, all accumulation is integer, env is a pure
 // function of position. Returns telemetry (also useful for the world sub-hash).
+template<typename Sampler>
+    requires std::is_invocable_r_v<PlantEnvSample, const Sampler&, const Comp::TransformComponent&>
 inline PlantGrowthStats
 RunPlantGrowthSystemOnTick(entt::registry& reg,
                            std::uint64_t current_tick,
-                           const EnvSampler& sample_env,
+                           const Sampler& sample_env,
                            const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
     PlantGrowthStats stats;
     auto view = reg.view<Comp::PlantTag,
@@ -169,7 +172,12 @@ RunPlantGrowthSystemOnTick(entt::registry& reg,
         const auto& tf = view.get<const Comp::TransformComponent>(e);
 
         const PlantPhenotype ph = ExpressGenome(genome);
-        const PlantEnvSample env = sample_env(tf);
+        if constexpr (std::is_pointer_v<Sampler> || std::is_member_pointer_v<Sampler>) {
+            if (sample_env == nullptr) {
+                throw std::bad_function_call();
+            }
+        }
+        const PlantEnvSample env = std::invoke(sample_env, tf);
         // FARMING husbandry: tending (water/fertilize) lifts the cell's suitability
         // and is consumed slowly, so the player must keep tending (DST-style).
         const float tendBonus = static_cast<float>(growth.tended) * (1.0f / 255.0f) * 0.45f;
@@ -211,6 +219,14 @@ RunPlantGrowthSystemOnTick(entt::registry& reg,
         ++stats.updated;
     }
     return stats;
+}
+
+inline PlantGrowthStats
+RunPlantGrowthSystemOnTick(entt::registry& reg,
+                           std::uint64_t current_tick,
+                           const EnvSampler& sample_env,
+                           const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    return RunPlantGrowthSystemOnTick<EnvSampler>(reg, current_tick, sample_env, gate);
 }
 
 // --- Breeding & seeding (reuse the creature GA operators) ---
