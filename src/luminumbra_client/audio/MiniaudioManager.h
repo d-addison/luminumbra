@@ -131,7 +131,8 @@ public:
     bool PlayOneShot(const AudioEventID& eventID,
                      const glm::vec3& position,
                      BusId bus = BusId::Sfx) override;
-    bool PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx) override;
+    bool
+    PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx, float gain = 1.0f) override;
     void PlayMusic(const AudioEventID& musicEventID) override;
     void StopMusic() override;
 
