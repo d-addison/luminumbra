@@ -3122,6 +3122,10 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
         cls.workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         cls.blocks = jobs(cls.workflow)
 
+    def setUp(self):
+        # Every listing in this suite is offline; retries must never really wait.
+        self.retry_sleep = self.enterContext(patch.object(time, "sleep"))
+
     @staticmethod
     def context(*, event="pull_request", action="edited", changes=None, base="main",
                 draft=False, labels=(), paths="false", cpp="true", result="success", run_id=1):
@@ -3253,6 +3257,215 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
                     patch.object(sys, "stdout", new_callable=io.StringIO) as output:
                 result = base_match.main(argv)
             return result, output.getvalue()
+
+    def base_retry_cli(self, event, listings, *, attempt="1", live=None, clock=None, environment=None, sleeper=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(event), encoding="utf-8")
+            calls = MagicMock()
+            with patch.dict(os.environ, {"BASE_MATCH_RETRY_ATTEMPTS": "6", "BASE_MATCH_RETRY_SECONDS": "20",
+                                        **(environment or {})}), \
+                    patch.object(base_match, "fetch_runs", side_effect=listings) as runs, \
+                    patch.object(base_match, "fetch_pull", return_value=event["pull_request"] if live is None else live) as pull, \
+                    patch.object(base_match, "require_live", wraps=base_match.require_live) as require, \
+                    patch.object(time, "monotonic", side_effect=clock, return_value=0), \
+                    patch.object(time, "sleep") as sleep, \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                for name, mock in (("runs", runs), ("pull", pull), ("require", require), ("sleep", sleep)):
+                    calls.attach_mock(mock, name)
+                argv = ["--event", str(path), "--run-attempt", attempt]
+                result = base_match.main(argv) if sleeper is None else base_match.main(argv, sleep=sleeper)
+            return result, output.getvalue(), runs, sleep, [call[0] for call in calls.mock_calls]
+
+    @classmethod
+    def fork_evidence(cls, action="opened", base="devel"):
+        event = cls.base_event(action, base)
+        event["pull_request"]["head"].update(repo={"full_name": "contributor/repo"}, ref="topic")
+        run = {**cls.base_run(base), "pull_requests": [],
+               "head_repository": {"full_name": "contributor/repo"}, "head_branch": "topic"}
+        return event, run
+
+    def test_base_match_unassociated_fork_first_attempt_accepts_matching_head(self):
+        for action, base in product(sorted(base_match.CI_EVENTS), ("main", "devel")):
+            event, run = self.fork_evidence(action, base)
+            with self.subTest(action=action, base=base):
+                result, output = self.base_injected_cli(event, {"total_count": 1, "workflow_runs": [run]}, "1")
+                self.assertEqual(result, 0, output)
+                self.assertIn("matching head", output)
+        # Delayed first attempts still have to match the live PR, after evidence.
+        event, run = self.fork_evidence()
+        live = self.fork_evidence(base="main")[0]["pull_request"]
+        result, output, _, sleep, calls = self.base_retry_cli(
+            event, [{"total_count": 1, "workflow_runs": [run]}], live=live)
+        self.assertEqual(result, 1, output)
+        self.assertIn("stale event", output)
+        self.assertEqual(calls, ["runs", "pull", "require"])
+        sleep.assert_not_called()
+
+    def test_base_match_unassociated_fork_refuses_unknown_or_stale_identity_and_base(self):
+        event, run = self.fork_evidence()
+        mutations = ({"head_sha": "b" * 40}, {"head_repository": {"full_name": "other/repo"}},
+                     {"head_branch": "other"}, {"head_repository": None}, {"head_repository": {}},
+                     {"head_repository": {"full_name": 42}}, {"head_repository": {"full_name": "../repo"}},
+                     {"head_branch": None}, {"head_branch": ""}, {"head_branch": 42},
+                     {"pull_requests": None}, {"pull_requests": [{}]},
+                     {"pull_requests": self.base_run("main")["pull_requests"]})
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                result, output = self.base_injected_cli(event, {"total_count": 1,
+                    "workflow_runs": [{**run, **mutation}]}, "1")
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+        for head in ({}, {"repo": None, "ref": "topic"}, {"repo": {}, "ref": "topic"},
+                     {"repo": {"full_name": "contributor/repo"}, "ref": None}):
+            invalid = {**event, "pull_request": {**event["pull_request"], "head": {"sha": "a" * 40, **head}}}
+            with self.subTest(head=head):
+                result, output = self.base_injected_cli(invalid, {"total_count": 1, "workflow_runs": [run]}, "1")
+                self.assertEqual(result, 1, output)
+        for action, attempt in product((*sorted(base_match.CI_EVENTS), "edited"), ("1", "2")):
+            if action in base_match.CI_EVENTS and attempt == "1":
+                continue
+            with self.subTest(action=action, attempt=attempt):
+                result, output = self.base_injected_cli({**event, "action": action},
+                    {"total_count": 1, "workflow_runs": [run]}, attempt)
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+        # A complete, different head is unrelated and must not mask this PR.
+        unrelated = {**run, "id": 3, "head_branch": "other"}
+        result, output = self.base_injected_cli(event, {"total_count": 2, "workflow_runs": [unrelated, run]}, "1")
+        self.assertEqual(result, 0, output)
+        self.assertIn("run 2", output)
+
+    def test_base_match_first_attempt_retries_stale_runs_until_newer_match(self):
+        old, new = self.base_run("main"), self.base_run("devel", 3)
+        stale = {"total_count": 1, "workflow_runs": [old]}
+        for action, recover_at in product(sorted(base_match.CI_EVENTS), (2, 6)):
+            with self.subTest(action=action, recover_at=recover_at):
+                result, output, runs, sleep, calls = self.base_retry_cli(self.base_event(action, "devel"),
+                    [stale] * (recover_at - 1) + [{"total_count": 2, "workflow_runs": [new, old]}])
+                self.assertEqual(result, 0, output)
+                self.assertIn("BASEMATCH ci.yml run 3", output)
+                self.assertEqual(runs.call_count, recover_at)
+                self.assertEqual(sleep.call_count, recover_at - 1)
+                self.assertTrue(all(call.args == (20,) for call in sleep.call_args_list))
+                self.assertEqual(calls, ["runs", "sleep"] * (recover_at - 1) + ["runs", "pull", "require"])
+
+    def test_base_match_first_attempt_retry_exhaustion_and_live_retarget_fail(self):
+        stale = {"total_count": 1, "workflow_runs": [self.base_run("main")]}
+        for action in sorted(base_match.CI_EVENTS):
+            with self.subTest(action=action):
+                result, output, runs, sleep, calls = self.base_retry_cli(self.base_event(action, "devel"), [stale] * 6)
+                self.assertEqual(result, 1, output)
+                self.assertIn("BASEMISMATCH", output)
+                self.assertEqual(runs.call_count, 6)
+                self.assertEqual(sleep.call_count, 5)
+                self.assertEqual(calls, ["runs", "sleep"] * 5 + ["runs"])
+        match = {"total_count": 1, "workflow_runs": [self.base_run("devel", 3)]}
+        result, output, _, _, calls = self.base_retry_cli(self.base_event("opened", "devel"), [stale, match],
+                                                        live=self.base_event(base="main")["pull_request"])
+        self.assertEqual(result, 1, output)
+        self.assertIn("stale event", output)
+        self.assertEqual(calls[-2:], ["pull", "require"])
+
+    def test_base_match_retry_never_accepts_disappeared_or_older_evidence(self):
+        stale = {"total_count": 1, "workflow_runs": [self.base_run("main", 4)]}
+        event, fork = self.fork_evidence()
+        fork["id"] = 5
+        for later in ({"total_count": 0, "workflow_runs": []},
+                      {"total_count": 1, "workflow_runs": [self.base_run("devel", 3)]},
+                      {"total_count": 1, "workflow_runs": [self.base_run("devel", 4)]},
+                      {"total_count": 1, "workflow_runs": [fork]}):
+            with self.subTest(later=later):
+                result, output, _, sleep, calls = self.base_retry_cli(event, [stale] + [later] * 5)
+                self.assertEqual(result, 1, output)
+                self.assertNotIn("BASEMATCH", output)
+                self.assertGreaterEqual(sleep.call_count, 1)
+                self.assertNotIn("pull", calls)
+        # Timestamp is primary; an increased id alone cannot supersede a run.
+        older = {**self.base_run("devel", 5), "created_at": "2025-12-31T23:59:59Z"}
+        result, output, _, _, _ = self.base_retry_cli(event, [stale] + [{"total_count": 1, "workflow_runs": [older]}] * 5)
+        self.assertEqual(result, 1, output)
+        # Seeing another stale run advances the floor, even if it disappears.
+        newer_stale = {"total_count": 1, "workflow_runs": [self.base_run("main", 6)]}
+        middle = {"total_count": 1, "workflow_runs": [self.base_run("devel", 5)]}
+        result, output, runs, sleep, _ = self.base_retry_cli(event, [stale, newer_stale] + [middle] * 4)
+        self.assertEqual(result, 1, output)
+        self.assertEqual(runs.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+
+    def test_base_match_retry_parameters_deadline_and_failures_are_bounded(self):
+        event = self.base_event("opened", "devel")
+        stale = {"total_count": 1, "workflow_runs": [self.base_run("main")]}
+        result, output, runs, sleep, _ = self.base_retry_cli(event, [stale] * 2,
+            environment={"BASE_MATCH_RETRY_ATTEMPTS": "2", "BASE_MATCH_RETRY_SECONDS": "1"})
+        self.assertEqual(result, 1, output)
+        self.assertEqual(runs.call_count, 2)
+        sleep.assert_called_once_with(1)
+        result, output, runs, sleep, _ = self.base_retry_cli(event, [stale],
+            environment={"BASE_MATCH_RETRY_ATTEMPTS": "1"})
+        self.assertEqual(result, 1, output)
+        runs.assert_called_once()
+        sleep.assert_not_called()
+        for name in ("BASE_MATCH_RETRY_ATTEMPTS", "BASE_MATCH_RETRY_SECONDS"):
+            for value in ("", "0", "-1", "1.5", "nan", "inf", "9" * 5000,
+                          "7" if name.endswith("ATTEMPTS") else "21"):
+                with self.subTest(name=name, value=value[:30]):
+                    result, output, runs, sleep, _ = self.base_retry_cli(event, [], environment={name: value})
+                    self.assertEqual(result, 1, output)
+                    self.assertIn("invalid " + name, output)
+                    runs.assert_not_called()
+                    sleep.assert_not_called()
+        for clock, count in (([0, 130], 0), ([0, 0, 150], 1)):
+            with self.subTest(clock=clock):
+                result, output, runs, sleep, _ = self.base_retry_cli(event, [stale], clock=clock)
+                self.assertEqual(result, 1, output)
+                self.assertIn("deadline expired", output)
+                self.assertEqual(runs.call_count, 1)
+                self.assertEqual(sleep.call_count, count)
+        matching = {"total_count": 1, "workflow_runs": [self.base_run("devel", 3)]}
+        result, output, _, sleep, calls = self.base_retry_cli(event, [matching], clock=[0, 150])
+        self.assertEqual(result, 1, output)
+        self.assertIn("deadline expired", output)
+        sleep.assert_not_called()
+        self.assertNotIn("pull", calls)
+        for failure in (OSError("denied"), TimeoutError("deadline"), base_match.URLError("unavailable"),
+                        IncompleteRead(b"{", 10), {"total_count": 1, "workflow_runs": []}, None):
+            with self.subTest(failure=failure):
+                result, output, runs, sleep, calls = self.base_retry_cli(event, [stale, failure])
+                self.assertEqual(result, 1, output)
+                self.assertIn("failed closed", output)
+                self.assertEqual(runs.call_count, 2)
+                sleep.assert_called_once_with(20)
+                self.assertNotIn("pull", calls)
+        # Exercise the explicit sleep seam, including a failed wait.
+        sleeper = MagicMock(side_effect=OSError("wait interrupted"))
+        result, output, runs, sleep, calls = self.base_retry_cli(event, [stale], sleeper=sleeper)
+        self.assertEqual(result, 1, output)
+        self.assertIn("wait interrupted", output)
+        sleeper.assert_called_once_with(20)
+        runs.assert_called_once()
+        sleep.assert_not_called()
+        self.assertNotIn("pull", calls)
+        # Edits and reruns keep their single lookup even with invalid retry env.
+        for action, attempt in (("edited", "1"), ("opened", "2")):
+            result, output, runs, sleep, _ = self.base_retry_cli({**event, "action": action}, [stale], attempt=attempt,
+                environment={"BASE_MATCH_RETRY_ATTEMPTS": "invalid"})
+            self.assertEqual(result, 1, output)
+            runs.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_base_match_paginated_retry_deadline_bounds_requests(self):
+        for clock, requested in (([150], 0), ([0, 150], 1), ([0, 0, 150], 1)):
+            opener = MagicMock(return_value=io.BytesIO(json.dumps({"total_count": 101,
+                "workflow_runs": [self.base_run()] * 100}).encode()))
+            with self.subTest(clock=clock), patch.object(time, "monotonic", side_effect=clock), \
+                    self.assertRaisesRegex(TimeoutError, "deadline expired"):
+                base_match.fetch_runs("owner/repo", "a" * 40, "token", opener, deadline=150)
+            self.assertEqual(opener.call_count, requested)
+        opener = MagicMock(return_value=io.BytesIO(b'{"total_count": 0, "workflow_runs": []}'))
+        with patch.object(time, "monotonic", return_value=145):
+            self.assertEqual(base_match.fetch_runs("owner/repo", "a" * 40, "token", opener, deadline=150)["total_count"], 0)
+        self.assertEqual(opener.call_args.kwargs["timeout"], 5)
 
     @patch.dict(os.environ, GITHUB_RUN_ATTEMPT="1")
     def test_base_match_first_attempt_and_rerun_after_round_trip_require_newest_ci(self):
