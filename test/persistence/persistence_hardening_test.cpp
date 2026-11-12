@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -314,6 +315,168 @@ TEST(PersistenceHardening, SnapshotRoundTripPreservesEveryFieldExactly) {
     auto loaded = restored.find_chunk(IVec3(4, -2, 6));
     ASSERT_NE(loaded, nullptr);
     ExpectChunkFieldExact(*expected, *loaded);
+}
+
+TEST(PersistenceHardening, WaterScalarsRefuseInvalidInputTransactionallyAcrossRecordReaders) {
+    WorldStreamingState original;
+    const auto first = AddCompleteWaterChunk(original, {0, 0, 0});
+    const auto second = AddCompleteWaterChunk(original, {1, 0, 0});
+    for (const auto& chunk : {first, second}) {
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->mark_water_data_dirty();
+    }
+    for (const bool encoded : {false, true}) {
+        for (const bool nested : {false, true}) {
+            SCOPED_TRACE(encoded);
+            SCOPED_TRACE(nested);
+            auto valid =
+                nlohmann::json::parse(encoded ? P::SerializeChunkRecordPayloadJson(*first)
+                                              : SerializeWorldStreamingStateSnapshotJson(original));
+            if (encoded) {
+                const auto next =
+                    nlohmann::json::parse(P::SerializeChunkRecordPayloadJson(*second));
+                valid["chunks"].push_back(next.at("chunks").at(0));
+                valid["chunk_count"] = 2;
+            }
+            if (!nested) {
+                for (auto& object : valid["chunks"])
+                    object.erase("water_state");
+            }
+            const auto refuse = [&](const char* field,
+                                    const nlohmann::json& invalid,
+                                    bool missing = false) {
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto document = valid;
+                auto& object = document["chunks"][1];
+                auto& state = nested && std::string_view(field) != "water_mesh_version"
+                                  ? object["water_state"]
+                                  : object;
+                if (missing)
+                    state.erase(field);
+                else
+                    state[field] = invalid;
+                // Exercise both ordinary snapshot loads and the authority-checked record path.
+                for (const bool authority_checked : {false, true}) {
+                    SCOPED_TRACE(authority_checked);
+                    WorldStreamingState loaded;
+                    AddCompleteWaterChunk(loaded, {9, 0, 0});
+                    std::vector<std::string> errors;
+                    const P::ChunkAuthorityLoadPolicy policy{.validate_record_authority =
+                                                                 authority_checked};
+                    EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(
+                        document.dump(), loaded, errors, policy));
+                    EXPECT_EQ(loaded.size(), 0u);
+                    ASSERT_FALSE(errors.empty());
+                    EXPECT_NE(errors.front().find("Saved water scalar"), std::string::npos);
+                }
+                if (!encoded && nested) {
+                    std::vector<std::string> errors;
+                    EXPECT_FALSE(P::ValidateWorldStreamingChunkFormatJson(object.dump(), errors));
+                    EXPECT_FALSE(errors.empty());
+                }
+            };
+            for (const nlohmann::json& invalid :
+                 {nlohmann::json(1e39),
+                  nlohmann::json(-1e39),
+                  nlohmann::json(
+                      std::nextafter(static_cast<double>(std::numeric_limits<float>::max()),
+                                     std::numeric_limits<double>::infinity()))})
+                refuse("max_water_delta_last_tick", invalid);
+            for (const char* field :
+                 {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"}) {
+                for (const nlohmann::json& invalid :
+                     {nlohmann::json(static_cast<std::int64_t>(std::numeric_limits<int>::max()) +
+                                     1),
+                      nlohmann::json(static_cast<std::int64_t>(std::numeric_limits<int>::min()) -
+                                     1),
+                      nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                      nlohmann::json(1e38),
+                      nlohmann::json(0.5),
+                      nlohmann::json(1.0)})
+                    refuse(field, invalid);
+            }
+            refuse("ticks_below_threshold", -1);
+            for (const nlohmann::json& invalid :
+                 {nlohmann::json(-1),
+                  nlohmann::json(
+                      static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1u),
+                  nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                  nlohmann::json(1e38),
+                  nlohmann::json(0.5),
+                  nlohmann::json(1.0)})
+                refuse("water_mesh_version", invalid);
+            for (const char* field : {"max_water_delta_last_tick",
+                                      "current_water_resolution",
+                                      "ticks_below_threshold",
+                                      "water_mesh_dirty_ticks",
+                                      "water_mesh_version"}) {
+                refuse(field, nullptr, true);
+                for (const nlohmann::json& invalid : {nlohmann::json(),
+                                                      nlohmann::json(true),
+                                                      nlohmann::json("NaN"),
+                                                      nlohmann::json("Infinity"),
+                                                      nlohmann::json("-Infinity"),
+                                                      nlohmann::json::array(),
+                                                      nlohmann::json::object()})
+                    refuse(field, invalid);
+            }
+        }
+    }
+}
+
+TEST(PersistenceHardening, WaterScalarBoundariesStillRoundTripAcrossRecordReaders) {
+    WorldStreamingState original;
+    const auto chunk = AddCompleteWaterChunk(original, {0, 0, 0});
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->mark_water_data_dirty();
+    for (const float delta : {std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::lowest(),
+                              0.0f,
+                              -0.0f,
+                              std::numeric_limits<float>::denorm_min()}) {
+        for (const int quiet_ticks : {0, std::numeric_limits<int>::max()}) {
+            chunk->max_water_delta_last_tick = delta;
+            chunk->ticks_below_threshold = quiet_ticks;
+            chunk->water_mesh_dirty_ticks = quiet_ticks == 0 ? std::numeric_limits<int>::min()
+                                                             : std::numeric_limits<int>::max();
+            chunk->water_mesh_version.store(
+                quiet_ticks == 0 ? 0u : std::numeric_limits<std::uint32_t>::max());
+            // These writer-produced values must load without changing the format or their bits.
+            for (const bool encoded : {false, true}) {
+                auto document = nlohmann::json::parse(
+                    encoded ? P::SerializeChunkRecordPayloadJson(*chunk)
+                            : SerializeWorldStreamingStateSnapshotJson(original));
+                for (const bool nested : {true, false}) {
+                    if (!nested)
+                        document["chunks"][0].erase("water_state");
+                    for (const bool authority_checked : {false, true}) {
+                        WorldStreamingState loaded;
+                        std::vector<std::string> errors;
+                        const P::ChunkAuthorityLoadPolicy policy{.validate_record_authority =
+                                                                     authority_checked};
+                        ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(
+                            document.dump(), loaded, errors, policy));
+                        const auto restored = loaded.find_chunk(chunk->get_id());
+                        ASSERT_NE(restored, nullptr);
+                        EXPECT_EQ(std::bit_cast<std::uint32_t>(restored->max_water_delta_last_tick),
+                                  std::bit_cast<std::uint32_t>(delta));
+                        EXPECT_EQ(restored->ticks_below_threshold, quiet_ticks);
+                        EXPECT_EQ(restored->water_mesh_dirty_ticks, chunk->water_mesh_dirty_ticks);
+                        EXPECT_EQ(restored->water_mesh_version.load(),
+                                  chunk->water_mesh_version.load());
+                        EXPECT_TRUE(errors.empty());
+                    }
+                    if (!encoded && nested) {
+                        std::vector<std::string> errors;
+                        EXPECT_TRUE(P::ValidateWorldStreamingChunkFormatJson(
+                            document["chunks"][0].dump(), errors));
+                        EXPECT_TRUE(errors.empty());
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(PersistenceHardening, WaterDirtinessKeepsVoxelGeometryAndOwnershipIndependent) {
