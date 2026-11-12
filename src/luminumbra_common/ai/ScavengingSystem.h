@@ -35,7 +35,10 @@
 // writes/changes nothing), so the canonical NetworkStateHash baseline stays byte-identical.
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include <entt/entity/registry.hpp>
@@ -44,6 +47,7 @@
 #include "../components/CreatureComponents.h"
 #include "../components/MortalComponents.h"
 #include "../components/ScavengerComponent.h"
+#include "../components/SimulationIdentityComponent.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
 
@@ -72,6 +76,8 @@ struct ScavengingStats {
     int carcasses = 0;  // dead creatures available as food this tick
     int seeking = 0;    // hungry live scavengers that found a carcass to steer toward
     int feeding = 0;    // scavengers within feed radius that lowered hunger this tick
+    // Diagnostic: actual identity reads by the radix passes; unrelated residents add no visits.
+    std::uint64_t identity_order_visits = 0;
 };
 
 [[nodiscard]] inline float ScavengeClamp01(float v) {
@@ -104,10 +110,56 @@ struct ScavengingTuning {
 // RunScavengingOnTick: hungry scavengers seek + eat the nearest carcass. id-ordered,
 // two-phase snapshot (order-independent). Returns telemetry; mutates ScavengerComponent
 // .wish_x/z + .feeding and CreatureComponent.hunger on feeding scavengers.
-inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
-                                           std::uint64_t /*tick*/,
-                                           const ScavengingTuning& tuning = {},
-                                           const CreatureTickAdmission* admission = nullptr) {
+namespace detail {
+
+// Eight byte passes bound ordering to O(participants), with scratch bounded by the
+// supplied role view. Unique admitted IDs make the final order independent of input order.
+template<bool IdentityOrder>
+inline std::uint64_t SortScavengingEntities(const entt::registry& reg,
+                                            std::vector<entt::entity>& entities) {
+    if constexpr (!IdentityOrder) {
+        std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        return 0;
+    } else {
+        if (entities.size() < 2)
+            return 0;
+        std::uint64_t visits = 0;
+        std::vector<entt::entity> scratch(entities.size());
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            std::array<std::size_t, 256> offsets{};
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                ++offsets[static_cast<std::size_t>((id >> shift) & 255u)];
+            }
+            std::size_t total = 0;
+            for (auto& offset : offsets) {
+                const auto count = offset;
+                offset = total;
+                total += count; // At most entities.size(), so the prefix sum cannot overflow.
+            }
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                scratch[offsets[static_cast<std::size_t>((id >> shift) & 255u)]++] = entity;
+            }
+            entities.swap(scratch);
+        }
+        return visits;
+    }
+}
+
+// Identity mode requires admitted, unique SimulationIdentityComponent IDs on participants
+// and resource sources. Legacy mode deliberately retains runtime-handle ordering.
+template<bool IdentityOrder>
+inline ScavengingStats RunScavengingOnTickImpl(entt::registry& reg,
+                                               std::uint64_t /*tick*/,
+                                               const ScavengingTuning& tuning = {},
+                                               const CreatureTickAdmission* admission = nullptr) {
     ScavengingStats stats;
 
     // ---- First pass: snapshot every carcass position. ----
@@ -116,7 +168,12 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     struct Carcass {
         float x, z;
     };
-    std::vector<Carcass> carcasses;
+    struct IdentifiedCarcass {
+        float x, z;
+        std::uint64_t id;
+    };
+    using CarcassSnapshot = std::conditional_t<IdentityOrder, IdentifiedCarcass, Carcass>;
+    std::vector<CarcassSnapshot> carcasses;
     {
         auto cview = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : cview) {
@@ -128,7 +185,12 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
             if (!ScavengeIsCarcass(cr, mortal))
                 continue;
             const auto& tf = cview.get<Comp::TransformComponent>(e);
-            carcasses.push_back({tf.position.x, tf.position.z});
+            if constexpr (IdentityOrder) {
+                const auto id = reg.get<Comp::SimulationIdentityComponent>(e).id;
+                carcasses.push_back({tf.position.x, tf.position.z, id});
+            } else {
+                carcasses.push_back({tf.position.x, tf.position.z});
+            }
         }
     }
     stats.carcasses = static_cast<int>(carcasses.size());
@@ -137,9 +199,7 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     auto sview =
         reg.view<Comp::ScavengerComponent, Comp::CreatureComponent, Comp::TransformComponent>();
     std::vector<entt::entity> ents(sview.begin(), sview.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    stats.identity_order_visits += SortScavengingEntities<IdentityOrder>(reg, ents);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -168,20 +228,29 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
         if (carcasses.empty())
             continue; // nothing to scavenge.
 
-        // Find the NEAREST carcass (deterministic Sqrt distance; first-found wins ties, and
-        // the carcass list is built in a fixed order so ties are stable).
+        // V2 resolves equal distances by source identity directly: no additional sort
+        // or neighborhood scan. Legacy keeps its storage/position tie rules.
         float bestD = -1.0f;
         float bestDx = 0.0f;
         float bestDz = 0.0f;
-        for (const Carcass& c : carcasses) {
+        std::uint64_t bestId = 0;
+        for (const auto& c : carcasses) {
             const float dx = c.x - tf.position.x;
             const float dz = c.z - tf.position.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (bestD < 0.0f || d < bestD ||
-                (admission && d == bestD && (dx < bestDx || (dx == bestDx && dz < bestDz)))) {
+            bool nearer = bestD < 0.0f || d < bestD;
+            if constexpr (IdentityOrder) {
+                nearer = nearer || (d == bestD && c.id < bestId);
+            } else {
+                nearer = nearer || (admission && d == bestD &&
+                                    (dx < bestDx || (dx == bestDx && dz < bestDz)));
+            }
+            if (nearer) {
                 bestD = d;
                 bestDx = dx;
                 bestDz = dz;
+                if constexpr (IdentityOrder)
+                    bestId = c.id;
             }
         }
         // (carcasses non-empty here, so bestD >= 0.)
@@ -207,6 +276,23 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     }
 
     return stats;
+}
+
+} // namespace detail
+
+inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
+                                           std::uint64_t tick,
+                                           const ScavengingTuning& tuning = {},
+                                           const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunScavengingOnTickImpl<false>(reg, tick, tuning, admission);
+}
+
+// Dormant candidate: shipping callers select this only with the v2 authority activation.
+inline ScavengingStats RunScavengingOnTickV2(entt::registry& reg,
+                                             std::uint64_t tick,
+                                             const ScavengingTuning& tuning = {},
+                                             const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunScavengingOnTickImpl<true>(reg, tick, tuning, admission);
 }
 
 } // namespace luminumbra::ai

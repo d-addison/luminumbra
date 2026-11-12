@@ -25,6 +25,8 @@
 // NetworkStateHash baseline stays byte-identical.
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -32,6 +34,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
+#include "../components/SimulationIdentityComponent.h"
 #include "../components/ThirstComponents.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
@@ -61,6 +64,8 @@ struct ThirstStats {
     int participants = 0; // creatures carrying a ThirstComponent that took part
     int seeking = 0;      // creatures that wrote a non-zero water-seeking wish this tick
     int drinking = 0;     // creatures inside a water hole's radius this tick
+    // Diagnostic: actual identity reads by the radix passes; unrelated residents add no visits.
+    std::uint64_t identity_order_visits = 0;
 };
 
 // Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
@@ -83,10 +88,56 @@ struct ThirstTuning {
 // let them drink when in range. id-ordered. `dt` scales the rise/drink rates so the behaviour
 // is frame-rate independent (the sim runs a fixed dt; the parameter keeps the signature honest
 // and lets tests exercise multiple ticks).
-inline ThirstStats RunThirstOnTick(entt::registry& reg,
-                                   float dt,
-                                   const ThirstTuning& tuning = {},
-                                   const CreatureTickAdmission* admission = nullptr) {
+namespace detail {
+
+// Eight byte passes bound ordering to O(participants), with scratch bounded by the
+// supplied role view. Unique admitted IDs make the final order independent of input order.
+template<bool IdentityOrder>
+inline std::uint64_t SortThirstEntities(const entt::registry& reg,
+                                        std::vector<entt::entity>& entities) {
+    if constexpr (!IdentityOrder) {
+        std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        return 0;
+    } else {
+        if (entities.size() < 2)
+            return 0;
+        std::uint64_t visits = 0;
+        std::vector<entt::entity> scratch(entities.size());
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            std::array<std::size_t, 256> offsets{};
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                ++offsets[static_cast<std::size_t>((id >> shift) & 255u)];
+            }
+            std::size_t total = 0;
+            for (auto& offset : offsets) {
+                const auto count = offset;
+                offset = total;
+                total += count; // At most entities.size(), so the prefix sum cannot overflow.
+            }
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                scratch[offsets[static_cast<std::size_t>((id >> shift) & 255u)]++] = entity;
+            }
+            entities.swap(scratch);
+        }
+        return visits;
+    }
+}
+
+// Identity mode requires admitted, unique SimulationIdentityComponent IDs on participants
+// and resource sources. Legacy mode deliberately retains runtime-handle ordering.
+template<bool IdentityOrder>
+inline ThirstStats RunThirstOnTickImpl(entt::registry& reg,
+                                       float dt,
+                                       const ThirstTuning& tuning = {},
+                                       const CreatureTickAdmission* admission = nullptr) {
     ThirstStats stats;
 
     // Snapshot every water hole once (deterministic, read-only this tick). id-ordered for a
@@ -99,9 +150,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg,
     {
         auto hview = reg.view<Comp::WaterHoleComponent, Comp::TransformComponent>();
         std::vector<entt::entity> hents(hview.begin(), hview.end());
-        std::sort(hents.begin(), hents.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
-        });
+        stats.identity_order_visits += SortThirstEntities<IdentityOrder>(reg, hents);
         holes.reserve(hents.size());
         for (auto e : hents) {
             if (admission && !admission->Allows(e)) {
@@ -117,9 +166,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg,
 
     // id-ordered participant list (deterministic traversal).
     std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    stats.identity_order_visits += SortThirstEntities<IdentityOrder>(reg, ents);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -203,6 +250,23 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg,
     }
 
     return stats;
+}
+
+} // namespace detail
+
+inline ThirstStats RunThirstOnTick(entt::registry& reg,
+                                   float dt,
+                                   const ThirstTuning& tuning = {},
+                                   const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunThirstOnTickImpl<false>(reg, dt, tuning, admission);
+}
+
+// Dormant candidate: shipping callers select this only with the v2 authority activation.
+inline ThirstStats RunThirstOnTickV2(entt::registry& reg,
+                                     float dt,
+                                     const ThirstTuning& tuning = {},
+                                     const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunThirstOnTickImpl<true>(reg, dt, tuning, admission);
 }
 
 } // namespace luminumbra::ai
