@@ -4905,6 +4905,17 @@ void IndexWaterFixture(const std::filesystem::path& root) {
                                  .fnv64 = P::fnv1a64_bytes(stream.data(), stream.size()),
                                  .generation = 1});
     }
+    // Admission reconciles the control files too; list any the fixture's save wrote.
+    // The paths sort after the region members, keeping the index ordered.
+    for (const char* control : {"chunks/region/world-manifest.json", "world_info.json"}) {
+        if (!std::filesystem::exists(root / control))
+            continue;
+        const auto bytes = ReadFileBytes(root / control);
+        index.members.push_back({.path = control,
+                                 .bytes = static_cast<std::uint64_t>(bytes.size()),
+                                 .fnv64 = P::fnv1a64_bytes(bytes.data(), bytes.size()),
+                                 .generation = 1});
+    }
     ASSERT_TRUE(WorldSaveService::write_file_durably(P::snapshot_index_path(root),
                                                      P::encode_snapshot_index(index)));
 }
