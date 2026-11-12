@@ -104,6 +104,8 @@ struct RegionSchedule {
     std::uint64_t tick = 0, work = 0;
     std::vector<RegionKey> due; // Unique keys in scheduler rank/proximity order.
     std::vector<RegionTransition> transitions;
+    // Runtime-only retention delta, bounded by kMaxRegions; never encoded or hashed.
+    std::vector<RegionKey> evicted;
     RegionRejections rejected;
     std::string digest;
     // Measurement hook: ledger record count after retention ran this tick.
@@ -246,6 +248,17 @@ public:
     // stamps, so a saved frozen_at cannot cause catch-up twice. Commits last_ticked to tick(),
     // including a thaw between Reduced due phases, so consumers cannot replay that window.
     bool acknowledge_resume(const RegionKey& key, std::uint64_t frozen_at);
+    // Restore an unpublished window's prior stamp, or advance it after payload
+    // publication. Unknown/frozen records and ticks past tick() refuse unchanged.
+    bool set_foliage_tick(RegionKey key, std::uint64_t tick) noexcept {
+        const auto found = m_records.find(key);
+        if (found == m_records.end() || found->second.state == RegionState::Frozen ||
+            tick > m_tick) {
+            return false;
+        }
+        found->second.last_ticked = tick;
+        return true;
+    }
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
         return m_energyAges;
