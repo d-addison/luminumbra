@@ -336,7 +336,7 @@ private:
     static bool Present(const Gate& gate) {
         if constexpr (std::is_same_v<Gate, std::nullptr_t>) {
             return false;
-        } else if constexpr (requires { static_cast<bool>(gate); }) {
+        } else if constexpr (fields::kNullableGate<Gate>) {
             return static_cast<bool>(gate);
         } else {
             return true;

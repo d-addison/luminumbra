@@ -19,6 +19,18 @@ namespace luminumbra::fields {
 
 inline constexpr const char* kScalarDiffusionSchema = "luminumbra.fields.scalar_diffusion.v1";
 
+// Only nullable gate forms can be empty. Any other callable is always invoked, even
+// when it also converts to bool, so a false conversion never opens an edge or cell.
+template<typename Gate>
+struct IsStdFunctionGate : std::false_type {};
+template<typename Signature>
+struct IsStdFunctionGate<std::function<Signature>> : std::true_type {};
+template<typename Gate>
+inline constexpr bool kNullableGate =
+    std::is_pointer_v<std::remove_cvref_t<Gate>> ||
+    IsStdFunctionGate<std::remove_cvref_t<Gate>>::value ||
+    requires { typename std::remove_cvref_t<Gate>::nullable_gate; };
+
 struct ScalarDiffusionStep {
     std::size_t iteration = 0;
     double total_energy = 0.0;
@@ -103,7 +115,7 @@ public:
             double max_delta = 0.0;
 
             const auto admitted = [&](const std::size_t lhs, const std::size_t rhs) -> bool {
-                if constexpr (requires { static_cast<bool>(admits); }) {
+                if constexpr (kNullableGate<Gate>) {
                     if (!admits) {
                         return true;
                     }

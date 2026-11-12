@@ -59,6 +59,8 @@ private:
 // the owning compatibility form for callers that supply arbitrary live gates.
 class ScentParticipants {
 public:
+    // Default-constructed gates are empty; see fields::kNullableGate.
+    using nullable_gate = void;
     ScentParticipants() = default;
     template<typename Gate>
         requires(!std::is_same_v<std::remove_cvref_t<Gate>, ScentParticipants> &&
@@ -90,6 +92,8 @@ private:
 
 class ScentExchange {
 public:
+    // Default-constructed gates are empty; see fields::kNullableGate.
+    using nullable_gate = void;
     ScentExchange() = default;
     template<typename Gate>
         requires(!std::is_same_v<std::remove_cvref_t<Gate>, ScentExchange> &&

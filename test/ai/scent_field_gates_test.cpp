@@ -1126,6 +1126,78 @@ TEST(ScentFieldGates, DiffusionGatesReturningBoolConvertibleValuesMatchBoolGates
     EXPECT_EQ(empty_int.values(), ungated.values());
 }
 
+// A callable that also converts to false is a gate, not an empty filter.
+template<typename Callback>
+class FalseConvertibleGate {
+public:
+    explicit FalseConvertibleGate(const Callback& callback)
+        : m_callback(callback) {}
+    explicit operator bool() const {
+        return false;
+    }
+    template<typename... Args>
+        requires std::is_invocable_v<const Callback&, Args...>
+    bool operator()(Args... args) const {
+        return m_callback(args...);
+    }
+
+private:
+    Callback m_callback;
+};
+
+TEST(ScentFieldGates, FalseConvertibleDiffusionGatesStillRefuseEdges) {
+    using luminumbra::fields::ScalarFieldDiffusion;
+    ScalarFieldDiffusion seed(3, 2);
+    seed.add_impulse(0, 0, 8.0);
+    const auto refuse_index = [](std::size_t lhs, std::size_t rhs) {
+        return lhs != 0 || rhs != 3;
+    };
+    const auto refuse_coordinate =
+        [](std::size_t x, std::size_t z, std::size_t nx, std::size_t nz) {
+            return z * 3 + x != 0 || nz * 3 + nx != 3;
+        };
+    auto expected = seed;
+    (void)expected.diffuse(1, 0.25, refuse_index);
+    auto ungated = seed;
+    (void)ungated.diffuse(1, 0.25);
+    ASSERT_NE(expected.values(), ungated.values());
+    auto index_gate = seed;
+    (void)index_gate.diffuse(1, 0.25, FalseConvertibleGate(refuse_index));
+    EXPECT_EQ(index_gate.values(), expected.values());
+    auto coordinate_gate = seed;
+    (void)coordinate_gate.diffuse(1, 0.25, FalseConvertibleGate(refuse_coordinate));
+    EXPECT_EQ(coordinate_gate.values(), expected.values());
+}
+
+TEST(ScentFieldGates, FalseConvertibleScentGatesStillRefuseCellsAndEdges) {
+    const auto refuse_cell = [](int x, int z) {
+        return x != 1 || z != 1;
+    };
+    const auto refuse_edge = [](int x, int z, int nx, int nz) {
+        return (x != 1 || z != 1) && (nx != 1 || nz != 1);
+    };
+    ScentField seed(3, 2);
+    seed.Deposit(0, 1, 1, 8.0);
+    auto expected = seed;
+    expected.Step(0.25, 2, 0.125, 0.375, -1.25, refuse_cell, refuse_edge);
+    expected.Clamp(0.25, 3.0, refuse_cell);
+    auto ungated = seed;
+    ungated.Step(0.25, 2, 0.125, 0.375, -1.25);
+    ungated.Clamp(0.25, 3.0);
+    ASSERT_NE(std::bit_cast<std::uint64_t>(expected.Sample(0, 1, 1)),
+              std::bit_cast<std::uint64_t>(ungated.Sample(0, 1, 1)));
+    auto actual = seed;
+    actual.Step(0.25,
+                2,
+                0.125,
+                0.375,
+                -1.25,
+                FalseConvertibleGate(refuse_cell),
+                FalseConvertibleGate(refuse_edge));
+    actual.Clamp(0.25, 3.0, FalseConvertibleGate(refuse_cell));
+    ExpectScentBits(actual, expected);
+}
+
 TEST(ScentFieldGates, DiffusionEmptyCompatibilityAndSingleCellNeverCallAGate) {
     using luminumbra::fields::ScalarFieldDiffusion;
     ScalarFieldDiffusion initial(3, 2);
