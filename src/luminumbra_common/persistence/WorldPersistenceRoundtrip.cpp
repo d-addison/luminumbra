@@ -1771,7 +1771,14 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             out_state.clear();
             return false;
         };
-        for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+        const auto& chunks = snapshot.at("chunks");
+        // A container record owns one chunk control block. Enforce this before
+        // constructing any chunk, including for malformed or partial records.
+        if (authority.validate_record_authority && (!chunks.is_array() || chunks.size() != 1)) {
+            errors.push_back("chunk record must contain exactly one chunk");
+            return reject();
+        }
+        for (const nlohmann::json& chunk_json : chunks) {
             // Encoded water is always strict. Check counts and cross-field shapes before
             // allocating any chunk arrays: at most 32 * 32 cells, two fluxes per cell.
             if (encoded_arrays || authority.strict_water)

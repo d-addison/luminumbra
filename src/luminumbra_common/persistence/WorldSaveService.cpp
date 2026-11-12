@@ -4,6 +4,7 @@
 #include "ReplacementOutputFile.h"
 #include "WorldSaveEncoding.h"
 #include "core/Profiler.h"
+#include "world/FarVolumeMemory.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "../fields/EnergyFieldState.h"
@@ -2588,8 +2589,71 @@ std::atomic<std::uint64_t>& RegionReadCounter() {
     return counter;
 }
 
+// Reservations for compatibility parsers use conservative storage envelopes.
+// 256 bytes per admitted text byte covers DOM nodes, tree nodes, string/vector
+// capacities (including growth overlap), decoded arrays and parser scratch on
+// supported standard libraries. One chunk/control allocation is added separately.
+// Scratch envelopes unwind at return; retained capacities stay charged through
+// every returned chunk alias, not just the read.
+struct AuthorityReadStorage {
+    explicit AuthorityReadStorage(const std::shared_ptr<World::FarVolumeMemoryPool>& memory)
+        : pool(memory)
+        , lease(*memory) {}
+    std::shared_ptr<World::FarVolumeMemoryPool> pool;
+    World::FarVolumeMemoryLease lease;
+    void charge(std::uint64_t count, std::uint64_t size) {
+        if (count > std::numeric_limits<std::uint64_t>::max() / size ||
+            count > std::numeric_limits<std::size_t>::max() / size ||
+            !lease.TryCharge(count * size)) {
+            throw World::FarVolumeMemoryRefused();
+        }
+    }
+};
+
 struct AuthorityReadBudget {
+    explicit AuthorityReadBudget(const WorldSaveService::AuthorityReadLimits& read_limits,
+                                 const std::shared_ptr<World::FarVolumeMemoryPool>& memory = {})
+        : limits(read_limits)
+        , storage(memory ? std::allocate_shared<AuthorityReadStorage>(
+                               World::FarVolumePoolAllocator<AuthorityReadStorage>(memory), memory)
+                         : nullptr) {}
+    ~AuthorityReadBudget() {
+        // Declared before operation-local containers, so scratch is freed before
+        // returning its reservation. Only admitted output capacities survive.
+        if (storage && committed_storage) {
+            storage->lease.Uncharge(storage->lease.bytes() - retained_bytes);
+        }
+    }
     const WorldSaveService::AuthorityReadLimits& limits;
+    std::shared_ptr<AuthorityReadStorage> storage;
+    std::uint64_t retained_bytes = 0;
+    bool committed_storage = false;
+    void retain_storage(std::uint64_t count, std::uint64_t size) {
+        if (storage) {
+            const auto available = storage->lease.bytes() - retained_bytes;
+            if (count > available / size) {
+                throw World::FarVolumeMemoryRefused();
+            }
+            retained_bytes += count * size;
+        }
+    }
+    void charge_storage(std::uint64_t count, std::uint64_t size) const {
+        if (storage) {
+            storage->charge(count, size);
+        }
+    }
+    void charge_paths(const std::filesystem::path& root) const {
+        // At most 32 path temporaries. Component-vector capacity/growth uses
+        // at most 64 bytes per root unit; each directory entry adds one bounded
+        // filename. Include UTF-8/native conversion and overlapping buffers.
+        constexpr std::size_t max_path_units = 32768;
+        if (root.native().size() > max_path_units) {
+            throw std::runtime_error("authority path limit exceeded");
+        }
+        charge_storage(root.native().size() + 1,
+                       32 * 64 * sizeof(std::filesystem::path::value_type));
+        charge_storage(32 * max_path_units, 4 * sizeof(std::filesystem::path::value_type));
+    }
     std::uint64_t members = 0;
     std::uint64_t records = 0;
     std::uint64_t headers = 0;
@@ -2609,6 +2673,26 @@ struct AuthorityReadBudget {
                limits.compressed_total_bytes != 0 && limits.decoded_member_bytes != 0 &&
                limits.decoded_total_bytes != 0 && limits.control_bytes != 0;
     }
+};
+
+// Declare before the buffers it admits. Nested scopes return only their new
+// scratch; capacities retained by an admitted output remain in the shared lease.
+struct AuthorityReadScratch {
+    explicit AuthorityReadScratch(AuthorityReadBudget& read_budget)
+        : budget(read_budget)
+        , initial_bytes(budget.storage ? budget.storage->lease.bytes() : 0)
+        , initial_retained(budget.retained_bytes) {}
+    AuthorityReadScratch(const AuthorityReadScratch&) = delete;
+    AuthorityReadScratch& operator=(const AuthorityReadScratch&) = delete;
+    ~AuthorityReadScratch() {
+        if (budget.storage) {
+            budget.storage->lease.Uncharge(budget.storage->lease.bytes() - initial_bytes -
+                                           (budget.retained_bytes - initial_retained));
+        }
+    }
+    AuthorityReadBudget& budget;
+    const std::uint64_t initial_bytes;
+    const std::uint64_t initial_retained;
 };
 
 bool ReadRegionFile(const std::filesystem::path& path,
@@ -2676,6 +2760,10 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return refuse("region file record manifest is truncated");
     // The 8-byte control is validated before buffering anything proportional.
     // u16 count bounds this manifest to 65535 * 18 bytes.
+    if (budget) {
+        budget->charge_storage(file_size, 2);
+        budget->charge_storage(count, sizeof(RegionRecord) + 256);
+    }
     std::string manifest(manifest_bytes, '\0');
     if (!input.read_exact(manifest.data(), manifest.size(), stop))
         return refuse("region file record manifest is truncated");
@@ -2855,15 +2943,50 @@ std::atomic<std::uint64_t>& ChunkRecordDecodeCounter() {
     return counter;
 }
 
+constexpr std::size_t kAuthorityRecordStructureUnits = 4096;
+constexpr std::uint64_t kAuthorityRecordByteFactor = 16;
+
+bool ChunkRecordHasBoundedStructure(std::string_view payload) {
+    // Each DOM node/key and plain-array element consumes at least one unit.
+    // Encoded array strings consume one, irrespective of their base64 length.
+    // Cap structural storage at 4096 * 256 bytes, including vector growth and
+    // decoded small arrays. Count outside-string whitespace too: parser error
+    // diagnostics expand control characters. No parser allocation.
+    std::size_t units = 0;
+    bool quoted = false;
+    bool escaped = false;
+    for (const char character : payload) {
+        if (quoted) {
+            if (escaped)
+                escaped = false;
+            else if (character == '\\')
+                escaped = true;
+            else if (character == '"')
+                quoted = false;
+        } else {
+            if (character == '"')
+                quoted = true;
+            if (++units > kAuthorityRecordStructureUnits)
+                return false;
+        }
+    }
+    return true;
+}
+
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors,
+                                         AuthorityReadBudget* budget = nullptr,
                                          bool strict_water = false,
                                          bool* strict_water_valid = nullptr) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
+    }
+    if (budget && !ChunkRecordHasBoundedStructure(payload)) {
+        // General compatibility JSON needs the full DOM envelope (16 + 240).
+        budget->charge_storage(record.uncompressed_size, 256 - kAuthorityRecordByteFactor);
     }
 
     WorldStreamingState single;
@@ -3221,7 +3344,7 @@ bool AdmitChunkRecord(const RegionRecord& record,
         }
     }
     bool water_valid = false;
-    auto chunk = DecodeChunkRecord(record, path, errors, strict_water, &water_valid);
+    auto chunk = DecodeChunkRecord(record, path, errors, nullptr, strict_water, &water_valid);
     if (!chunk)
         return false;
     facts = DecodedChunkRecordFacts(*chunk);
@@ -3391,6 +3514,11 @@ WorldPersistenceInventory ReadWorldPersistenceInventory(const std::filesystem::p
             if (budget && !AuthorityReadBudget::Charge(1, budget->limits.members, budget->members))
                 throw WorldPersistenceRefusal("authority member limit exceeded");
             // Authority inventories retain at most limits.members paths, also bounded by probes.
+            if (budget) {
+                budget->charge_storage(entry.path().native().size() + 1,
+                                       64 * sizeof(std::filesystem::path::value_type));
+                budget->charge_storage(4, sizeof(std::filesystem::path));
+            }
             inventory.region_files.push_back(entry.path());
             inventory.present = true;
         } else {
@@ -5970,7 +6098,8 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
     for (const RegionRecord& record : raw_records) {
         if (record.lod_level != 0u)
             continue;
-        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
+        std::shared_ptr<Chunk> chunk =
+            DecodeChunkRecord(record, region_file, errors, nullptr, strict_water);
         if (!chunk) {
             out_chunks.clear();
             return false;
@@ -6016,7 +6145,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
         }
         std::shared_ptr<Chunk> chunk;
         if ((record.flags & kRecordFlagEdited) != 0u) {
-            chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
+            chunk = DecodeChunkRecord(record, region_file, errors, nullptr, strict_water);
         } else {
             ChunkRecordFacts facts;
             if (!AdmitChunkRecord(
@@ -6189,7 +6318,8 @@ bool WorldSaveService::audit_admitted_chunk_records_for_testing(
         ++audit.records;
         const auto admitted = AdmittedChunkRecordCache().find(ChunkRecordKeyOf(record));
         bool water_valid = false;
-        const auto chunk = DecodeChunkRecord(record, region_file, &errors, false, &water_valid);
+        const auto chunk =
+            DecodeChunkRecord(record, region_file, &errors, nullptr, false, &water_valid);
         if (!admitted)
             continue;
         ++audit.admitted;
@@ -7730,8 +7860,14 @@ bool ReadChunkEnvelope(const std::filesystem::path& save_dir,
                            !AuthorityReadBudget::Charge(
                                size, budget->limits.decoded_total_bytes, budget->decoded)))
                 return false;
+            if (budget) {
+                budget->charge_storage(size, 256);
+            }
             std::string bytes;
-            if (!input.read(bytes, limits[i]) ||
+            // A concurrent in-place growth must not allocate beyond the length
+            // whose parser storage was admitted. The version check also rejects
+            // shrinkage and same-length edits through this same handle.
+            if (!input.read(bytes, budget ? std::min(limits[i], size) : limits[i]) ||
                 (budget && (!input.version(after) || before != after)))
                 return false;
             if (versions)
@@ -7910,10 +8046,24 @@ bool AuthorityWaterValid(const Chunk& chunk) {
 }
 
 // Decode directly, sharing validation without populating the unrestricted compatibility cache.
-std::shared_ptr<Chunk> DecodeAuthorityRecord(
-    const RegionRecord& record, const std::filesystem::path& path, int rx, int rz, bool legacy) {
+std::shared_ptr<Chunk> DecodeAuthorityRecord(const RegionRecord& record,
+                                             const std::filesystem::path& path,
+                                             int rx,
+                                             int rz,
+                                             bool legacy,
+                                             AuthorityReadBudget& budget) {
+    // For N decompressed bytes: <= 2N for the payload capacity, <= 8N for
+    // DOM strings/keys and lexer buffers including growth overlap, <= 4N for
+    // base64 scratch and decoded vectors (including padded vertex elements).
+    // 16N covers these peaks together. At most 4096 structural units use the
+    // separate 1 MiB allowance; larger JSON DOMs are admitted before parsing
+    // in DecodeChunkRecord. One chunk/control and single-world bookkeeping
+    // need sizeof(Chunk) + 4096. All byte products pass charge_storage checks.
+    static_assert(sizeof(VoxelVertex) <= 2 * 28 && sizeof(Vec2) <= 2 * 8);
+    budget.charge_storage(record.uncompressed_size, kAuthorityRecordByteFactor);
+    budget.charge_storage(1, sizeof(Chunk) + 4096 + kAuthorityRecordStructureUnits * 256);
     std::vector<std::string> errors;
-    auto chunk = DecodeChunkRecord(record, path, &errors, true);
+    auto chunk = DecodeChunkRecord(record, path, &errors, &budget, true);
     if (!chunk)
         throw std::runtime_error(errors.empty() ? "malformed authority record" : errors.front());
     int actual_rx = 0, actual_rz = 0;
@@ -7991,10 +8141,15 @@ struct WorldSaveService::AuthorityWindowReader::Impl {
         SnapshotMember expected;
         SavedInputFile::Version version{};
     };
+    std::shared_ptr<AuthorityReadStorage> storage;
     std::filesystem::path root;
     std::array<std::uint64_t, 3> root_identity{};
     std::array<SavedInputFile::Version, 3> envelope_versions{};
-    std::map<std::pair<int, int>, Member> members;
+    using MemberEntry = std::pair<const std::pair<int, int>, Member>;
+    explicit Impl(const std::shared_ptr<World::FarVolumeMemoryPool>& memory)
+        : members(World::FarVolumePoolAllocator<MemberEntry>(memory)) {}
+    std::map<std::pair<int, int>, Member, std::less<>, World::FarVolumePoolAllocator<MemberEntry>>
+        members;
     std::uint64_t generation = 0;
     std::uint64_t identity = 0;
 
@@ -8049,7 +8204,9 @@ struct WorldSaveService::AuthorityWindowReader::Impl {
     }
 };
 
-WorldSaveService::AuthorityWindowReader::AuthorityWindowReader() = default;
+WorldSaveService::AuthorityWindowReader::AuthorityWindowReader(
+    std::shared_ptr<World::FarVolumeMemoryPool> memory)
+    : m_memory(std::move(memory)) {}
 WorldSaveService::AuthorityWindowReader::~AuthorityWindowReader() = default;
 
 bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path& save_dir,
@@ -8060,10 +8217,13 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
     error.clear();
     auto reason = AdmissionRefusal::InvalidSource;
     try {
-        AuthorityReadBudget budget{limits};
+        AuthorityReadBudget budget{limits, m_memory};
         if (!budget.valid())
             throw std::runtime_error("missing finite authority limits");
-        auto candidate = std::make_unique<Impl>();
+        budget.charge_paths(save_dir);
+        auto candidate =
+            std::allocate_shared<Impl>(World::FarVolumePoolAllocator<Impl>(m_memory), m_memory);
+        candidate->storage = budget.storage;
         candidate->root = Filesystem::WeaklyCanonicalPath(save_dir);
         RequireCommittedAuthority(candidate->root, budget);
         if (!AuthorityReadBudget::Charge(1, limits.probes, budget.probes))
@@ -8074,7 +8234,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             throw std::runtime_error("unknown authority index status or envelope limit exceeded");
         const auto index = AuthorityEnvelopeIndex(envelope, budget);
         candidate->generation = index.generation;
-        const auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
+        auto inventory = ReadWorldPersistenceInventory(candidate->root, {}, &budget);
+        // Scratch peaks include the retained member prefix. Fix that prefix
+        // order independently of filesystem directory enumeration.
+        std::sort(inventory.region_files.begin(), inventory.region_files.end());
         if (index.generation != 0) {
             std::size_t present_regions = 0;
             for (const auto& member : index.members) {
@@ -8105,6 +8268,8 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                     ++found_regions;
                     continue;
                 }
+                // Each scanned container is temporary; release its charge before the next one.
+                const AuthorityReadScratch member_scratch(budget);
                 std::vector<RegionRecord> records;
                 if (!ReadRegionFile(path, records, nullptr, {}, false, &budget) ||
                     std::any_of(records.begin(), records.end(), [](const RegionRecord& record) {
@@ -8120,6 +8285,7 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
             }
         } else {
             for (const auto& path : inventory.region_files) {
+                const AuthorityReadScratch member_scratch(budget);
                 int rx = 0, rz = 0;
                 ParseRegionFileName(path, rx, rz);
                 std::vector<RegionRecord> records;
@@ -8135,8 +8301,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                 if (!digest.present)
                     continue;
                 for (const auto& record : records) {
-                    if (record.lod_level == 0)
-                        DecodeAuthorityRecord(record, path, rx, rz, true);
+                    if (record.lod_level == 0) {
+                        const AuthorityReadScratch record_scratch(budget);
+                        DecodeAuthorityRecord(record, path, rx, rz, true, budget);
+                    }
                 }
                 candidate->members.emplace(std::pair{rx, rz},
                                            Impl::Member{SnapshotMember{RelativeRegionMember(rx, rz),
@@ -8150,12 +8318,19 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
         }
         candidate->verify_envelope(budget);
         candidate->identity = NextAuthoritySourceIdentity();
+        budget.retain_storage(candidate->root.native().capacity() + 1,
+                              64 * sizeof(std::filesystem::path::value_type));
+        for (const auto& [coords, member] : candidate->members) {
+            (void)coords;
+            budget.retain_storage(member.expected.path.capacity() + 1, sizeof(char));
+        }
+        budget.committed_storage = true;
         m_impl = std::move(candidate);
         if (refusal)
             *refusal = AdmissionRefusal::None;
         return true;
     } catch (const std::exception& failure) {
-        error = failure.what();
+        error = m_memory ? "read refused" : failure.what();
         if (refusal)
             *refusal = reason;
         return false;
@@ -8166,11 +8341,13 @@ WorldSaveService::AuthorityWindowResult
 WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
                                               const AuthorityReadLimits& limits) const {
     const detail::SnapshotReadOwnership ownership;
-    AuthorityWindowResult result;
+    AuthorityWindowResult result(m_memory);
     try {
-        AuthorityReadBudget budget{limits};
+        AuthorityReadBudget budget{limits, m_memory};
         if (!m_impl || !budget.valid())
             throw std::runtime_error("unadmitted source or missing finite authority limits");
+        budget.charge_paths(m_impl->root);
+        result.storage = budget.storage;
         result.generation = m_impl->generation;
         result.source_identity = m_impl->identity;
         if (window.min_chunk_x > window.max_chunk_x || window.min_chunk_z > window.max_chunk_z ||
@@ -8197,6 +8374,7 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
         result.members.reserve(static_cast<std::size_t>(width * depth));
         for (int rx = min_rx; rx <= max_rx; ++rx) {
             for (int rz = min_rz; rz <= max_rz; ++rz) {
+                const AuthorityReadScratch member_scratch(budget);
                 const auto found = m_impl->members.find({rx, rz});
                 result.members.push_back(AuthorityMemberEvidence{
                     rx,
@@ -8213,17 +8391,35 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
                 for (const auto& record : records) {
                     if (record.lod_level != 0)
                         continue;
+                    const AuthorityReadScratch record_scratch(budget);
                     // Validate all lod-0 records, including those outside the window.
                     auto chunk = DecodeAuthorityRecord(record,
                                                        region_file_path(m_impl->root, rx, rz),
                                                        rx,
                                                        rz,
-                                                       m_impl->generation == 0);
+                                                       m_impl->generation == 0,
+                                                       budget);
                     const auto coords = chunk->get_coords();
                     if (coords.x >= min_x && coords.x <= max_x && coords.z >= min_z &&
                         coords.z <= max_z && chunk->has_simulation_authority()) {
                         present = true;
-                        result.chunks.push_back(std::move(chunk));
+                        // The parser envelope was admitted before decoding. Keep
+                        // just the chunk/control allowance and surviving capacities.
+                        budget.retain_storage(1, sizeof(Chunk) + 4096);
+                        budget.retain_storage(chunk->estimated_heap_bytes(), 1);
+                        if (budget.storage) {
+                            struct OwnedChunk {
+                                std::shared_ptr<AuthorityReadStorage> storage;
+                                std::shared_ptr<Chunk> chunk;
+                            };
+                            auto owner = std::allocate_shared<OwnedChunk>(
+                                World::FarVolumePoolAllocator<OwnedChunk>(m_memory),
+                                budget.storage,
+                                chunk);
+                            result.chunks.emplace_back(owner, chunk.get());
+                        } else {
+                            result.chunks.push_back(std::move(chunk));
+                        }
                     }
                 }
                 result.members.back().membership =
@@ -8236,12 +8432,20 @@ WorldSaveService::AuthorityWindowReader::read(const AuthorityWindow& window,
         });
         result.membership = result.chunks.empty() ? AuthorityMembership::ProvenAbsent
                                                   : AuthorityMembership::Present;
+        budget.committed_storage = true;
     } catch (const std::exception& failure) {
         result.membership = AuthorityMembership::Unavailable;
         result.chunks.clear();
         for (auto& member : result.members)
             member.membership = AuthorityMembership::Unavailable;
-        result.error = failure.what();
+        if (m_memory) {
+            decltype(result.chunks){}.swap(result.chunks);
+            decltype(result.members){}.swap(result.members);
+            result.storage.reset();
+        }
+        // Bounded refusals need no new diagnostic allocation after admission
+        // has failed. The producer retains this inline message in fixed storage.
+        result.error = m_memory ? "read refused" : failure.what();
     }
     return result;
 }
