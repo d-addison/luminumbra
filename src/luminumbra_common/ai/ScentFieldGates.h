@@ -55,9 +55,80 @@ private:
     mutable std::size_t m_queryVisits = 0;
 };
 
+// Cached gates own only the four tile decisions. The callback constructors retain
+// the owning compatibility form for callers that supply arbitrary live gates.
+class ScentParticipants {
+public:
+    // Default-constructed gates are empty; see fields::kNullableGate.
+    using nullable_gate = void;
+    ScentParticipants() = default;
+    template<typename Gate>
+        requires(!std::is_same_v<std::remove_cvref_t<Gate>, ScentParticipants> &&
+                 std::is_constructible_v<ScentField::CellGate, Gate &&>)
+    ScentParticipants(Gate&& gate)
+        : m_callback(std::forward<Gate>(gate)) {}
+    ScentParticipants(int split_x, int split_z, const std::array<bool, 4>& due)
+        : m_splitX(split_x)
+        , m_splitZ(split_z)
+        , m_due(due)
+        , m_cached(true) {}
+    explicit operator bool() const {
+        return m_cached || static_cast<bool>(m_callback);
+    }
+    bool operator()(int x, int z) const {
+        if (m_cached) {
+            return m_due[static_cast<std::size_t>((x >= m_splitX) + 2 * (z >= m_splitZ))];
+        }
+        return m_callback(x, z);
+    }
+
+private:
+    // Copy the owning callback first so a failed copy leaves cached decisions unchanged.
+    ScentField::CellGate m_callback;
+    int m_splitX = 0, m_splitZ = 0;
+    std::array<bool, 4> m_due{};
+    bool m_cached = false;
+};
+
+class ScentExchange {
+public:
+    // Default-constructed gates are empty; see fields::kNullableGate.
+    using nullable_gate = void;
+    ScentExchange() = default;
+    template<typename Gate>
+        requires(!std::is_same_v<std::remove_cvref_t<Gate>, ScentExchange> &&
+                 std::is_constructible_v<ScentField::EdgeGate, Gate &&>)
+    ScentExchange(Gate&& gate)
+        : m_callback(std::forward<Gate>(gate)) {}
+    ScentExchange(int split_x, int split_z, std::uint32_t open)
+        : m_splitX(split_x)
+        , m_splitZ(split_z)
+        , m_open(open)
+        , m_cached(true) {}
+    explicit operator bool() const {
+        return m_cached || static_cast<bool>(m_callback);
+    }
+    bool operator()(int x, int z, int nx, int nz) const {
+        if (m_cached) {
+            const auto tile = [this](int cx, int cz) {
+                return static_cast<unsigned>((cx >= m_splitX) + 2 * (cz >= m_splitZ));
+            };
+            return (m_open & (std::uint32_t{1} << (4 * tile(x, z) + tile(nx, nz)))) != 0;
+        }
+        return m_callback(x, z, nx, nz);
+    }
+
+private:
+    // Copy the owning callback first so a failed copy leaves cached decisions unchanged.
+    ScentField::EdgeGate m_callback;
+    int m_splitX = 0, m_splitZ = 0;
+    std::uint32_t m_open = 0;
+    bool m_cached = false;
+};
+
 struct ScentStepGates {
-    ScentField::CellGate participants;
-    ScentField::EdgeGate exchange;
+    ScentParticipants participants;
+    ScentExchange exchange;
 };
 
 // The nonempty square is smaller than an owner on both axes, so it intersects at
@@ -99,23 +170,12 @@ template<typename OwnerOf, typename CellDue, typename EdgeOpen>
     }
     ScentStepGates gates;
     if (!decisions.all_due) {
-        const auto participants = [tile, cached_due = decisions.due](int x, int z) {
-            return cached_due[tile(x, z)];
-        };
-        static_assert(sizeof(participants) <= 16);
-        static_assert(std::is_trivially_copyable_v<decltype(participants)>);
-        gates.participants = participants;
+        gates.participants = ScentParticipants(split_x, split_z, decisions.due);
     }
     // An open domain uses the original ungated arithmetic, with the same
     // bilinear interpolation and without per-sample sealed-path walks.
     if (!decisions.all_open) {
-        const auto exchange = [tile, cached_open = decisions.open](int x, int z, int nx, int nz) {
-            return (cached_open & (std::uint32_t{1} << (4 * tile(x, z) + tile(nx, nz)))) != 0;
-        };
-        // libstdc++ stores a trivial closure of at most 16 bytes inline.
-        static_assert(sizeof(exchange) <= 16);
-        static_assert(std::is_trivially_copyable_v<decltype(exchange)>);
-        gates.exchange = exchange;
+        gates.exchange = ScentExchange(split_x, split_z, decisions.open);
     }
     return gates;
 }

@@ -1217,8 +1217,9 @@ class RegionalEnergySourceContract(unittest.TestCase):
                              .read_text(encoding="utf-8"))
         self.assertIn("constEdgeGate&gate);", header)
         self.assertNotIn("constEdgeGate&gate={}", header)
-        self.assertIn("if(!can_exchange(lhs,rhs)||(admits&&!admits(lhs,rhs)))", source)
-        self.assertIn("gate(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", source)
+        self.assertIn("if(!can_exchange(lhs,rhs)||!admitted(lhs,rhs))", header)
+        self.assertIn("admits(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", header)
+        self.assertIn("returndiffuse<EdgeGate>(iterations,diffusion_rate,gate);", source)
 
 
 if __name__ == "__main__":
