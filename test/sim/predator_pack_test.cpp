@@ -16,6 +16,7 @@
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
 #include "components/PackHunterComponents.h"
+#include "components/SimulationIdentityComponent.h"
 
 namespace {
 
@@ -286,6 +287,36 @@ TEST(PredatorPack, RunEqualsReplay) {
     for (std::size_t i = 0; i < run.size(); ++i) {
         EXPECT_EQ(run[i], replay[i]) << "divergence at sample " << i;
     }
+}
+
+TEST(PredatorPack, DormantPreyTiesKeepBothLegacyAdmissionPaths) {
+    entt::registry r;
+    const auto hunter = spawnPredator(r, 0.0f, 0.0f);
+    spawnPrey(r, -10.0f, 0.0f);
+    spawnPrey(r, 10.0f, 0.0f);
+    RunPredatorPackOnTick(r, 0);
+    // The legacy snapshot visits the most recently created prey first.
+    EXPECT_FLOAT_EQ(packOf(r, hunter).coord_x, 1.0f);
+    luminumbra::ai::CreatureTickAdmission admission;
+    admission.Capture(r, Luminumbra::world::RegionConsumerGate{});
+    RunPredatorPackOnTick(r, 0, &admission);
+    // Legacy admission resolves equal distances by position instead.
+    EXPECT_FLOAT_EQ(packOf(r, hunter).coord_x, -1.0f);
+}
+
+TEST(PredatorPack, IdentityComponentsAloneKeepLegacyPositionalTies) {
+    entt::registry r;
+    const auto first = spawnPredator(r, 0.0f, 0.0f);
+    const auto second = spawnPredator(r, 0.0f, 0.0f);
+    const auto prey = spawnPrey(r, 1.0f, 0.0f);
+    // Reverse identity order must not affect the dormant shipping path.
+    r.emplace<Comp::SimulationIdentityComponent>(first, Comp::SimulationIdentityComponent{.id = 2});
+    r.emplace<Comp::SimulationIdentityComponent>(second,
+                                                 Comp::SimulationIdentityComponent{.id = 1});
+    r.emplace<Comp::SimulationIdentityComponent>(prey, Comp::SimulationIdentityComponent{.id = 0});
+    EXPECT_EQ(RunPredatorPackOnTick(r, 0).packed, 2);
+    EXPECT_GT(packOf(r, first).coord_x, 0.99f);
+    EXPECT_LT(packOf(r, second).coord_x, -0.99f);
 }
 
 } // namespace

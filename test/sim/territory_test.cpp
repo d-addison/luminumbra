@@ -13,6 +13,7 @@
 
 #include "ai/TerritorySystem.h"
 #include "components/CoreComponents.h"
+#include "components/SimulationIdentityComponent.h"
 #include "components/TerritoryComponents.h"
 #include "core/DeterministicMath.h"
 
@@ -275,6 +276,18 @@ TEST(Territory, OrderIndependent) {
     RunTerritoryOnTick(r2, 1);
     (void)a;
     EXPECT_FLOAT_EQ(biasOf(r2, b).wish_x, ref_x);
+}
+
+TEST(Territory, IdentityComponentsAloneKeepLegacyPath) {
+    entt::registry r;
+    const auto entity = spawnTerritorial(r, 0.0f, 0.0f, 1.0f);
+    r.emplace<Comp::SimulationIdentityComponent>(entity,
+                                                 Comp::SimulationIdentityComponent{.id = 0});
+    EXPECT_EQ(RunTerritoryOnTick(r).claimed, 1);
+    moveTo(r, entity, 3.0f, 0.0f);
+    EXPECT_EQ(RunTerritoryOnTick(r, 1).homing, 1);
+    EXPECT_FLOAT_EQ(biasOf(r, entity).wish_x, -0.5f);
+    EXPECT_FLOAT_EQ(terrOf(r, entity).home_x, 0.0f);
 }
 
 } // namespace

@@ -21,7 +21,7 @@
 // claimed ground is steered back toward its own territory (territorial separation falls out of
 // each animal homing to its own range).
 //
-// DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE:  claims
+// DETERMINISM. Legacy handle order; candidate v2 uses session-stable identity. TWO-PHASE:  claims
 // home (writing only the creature's OWN territory) and snapshots its position + home;
 // computes the bias from that snapshot and writes TerritoryBiasComponent. Each creature's
 // output depends only on its own position + its own fixed home, so the result is fully
@@ -45,6 +45,7 @@
 #include "../components/TerritoryComponents.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
+#include "HerdAlarmSystem.h"
 
 namespace luminumbra::ai {
 
@@ -83,9 +84,17 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg,
 
     // id-ordered participant list (deterministic traversal).
     std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    auto* identity_order = reg.ctx().find<SocialIdentityOrder>();
+    if (identity_order) {
+        if (admission)
+            std::erase_if(ents,
+                          [admission](entt::entity entity) { return !admission->Allows(entity); });
+        identity_order->Sort(reg, ents);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 

@@ -348,6 +348,7 @@ add_executable(common_tests
     sim/photo_mode_test.cpp
     sim/photo_mode_perf_test.cpp
     sim/predator_pack_test.cpp
+    sim/social_identity_order_test.cpp
     sim/migration_test.cpp
     sim/thirst_test.cpp
     sim/scavenging_test.cpp

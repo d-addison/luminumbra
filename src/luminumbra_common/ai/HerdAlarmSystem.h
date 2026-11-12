@@ -17,8 +17,8 @@
 // CreatureBrainSystem consumes the propagated level when evaluating flee
 // behaviour; this system maintains that field.
 //
-// DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE so the result is
-// order-INDEPENDENT:  SNAPSHOTS every participant's pre-tick level/role/position;
+// DETERMINISM. Legacy handle order; candidate v2 uses session-stable identity. TWO-PHASE so the
+// result is order-INDEPENDENT:  SNAPSHOTS every participant's pre-tick level/role/position;
 //  computes each creature's new level from that frozen snapshot (decay of its own
 // snapshot level + the max-closeness contribution from snapshot sources) and writes it.
 // Because every read is from the snapshot, no creature's update can see another creature's
@@ -32,7 +32,10 @@
 // canonical NetworkStateHash baseline stays byte-identical.
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -41,12 +44,75 @@
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
 #include "../core/DeterministicMath.h"
+#include "../simulation/SimulationIdentity.h"
 #include "CreatureTickAdmission.h"
 
 namespace luminumbra::ai {
 
 namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
+
+// Candidate v2 ordering shared by alarm, pack and territory. Shipping sessions do
+// not install this registry context until authority activation. Components alone
+// never select it. This reusable scratch is session-local, neither saved nor hashed.
+class SocialIdentityOrder {
+public:
+    // Only admitted social participants enter this list. Eight byte passes give
+    // O(N) ordering with O(N) retained scratch; invalid/duplicate IDs throw before
+    // the caller mutates simulation state. No runtime-handle fallback is allowed.
+    void Sort(const entt::registry& registry, std::vector<entt::entity>& entities) {
+        keys_.clear();
+        visits_ = 0;
+        if (entities.empty())
+            return;
+        // vector checks its element-count limit before allocating either buffer.
+        keys_.reserve(entities.size());
+        for (const auto entity : entities) {
+            ++visits_;
+            const auto* identity =
+                registry.try_get<const Comp::SimulationIdentityComponent>(entity);
+            if (identity == nullptr || !::Luminumbra::simulation::IsValidSimulationId(identity->id))
+                throw std::logic_error("Social participant requires a valid simulation identity");
+            keys_.push_back({identity->id, entity});
+        }
+        scratch_.resize(keys_.size());
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            // Exactly 256 buckets, one per possible byte value, regardless of roster size.
+            std::array<std::size_t, 256> offsets{};
+            for (const auto& key : keys_)
+                ++offsets[static_cast<std::size_t>((key.id >> shift) & 255u)];
+            std::size_t offset = 0;
+            for (auto& bucket : offsets) {
+                const auto count = bucket;
+                bucket = offset;
+                offset += count;
+            }
+            for (const auto& key : keys_)
+                scratch_[offsets[static_cast<std::size_t>((key.id >> shift) & 255u)]++] = key;
+            keys_.swap(scratch_);
+        }
+        for (std::size_t index = 1; index < keys_.size(); ++index) {
+            if (keys_[index - 1].id == keys_[index].id)
+                throw std::logic_error("Duplicate social participant simulation identity");
+        }
+        for (std::size_t index = 0; index < entities.size(); ++index)
+            entities[index] = keys_[index].entity;
+    }
+
+    // Const diagnostic: identity lookups in the latest participating-roster pass.
+    [[nodiscard]] std::size_t participant_visits() const noexcept {
+        return visits_;
+    }
+
+private:
+    struct Key {
+        std::uint64_t id;
+        entt::entity entity;
+    };
+    std::vector<Key> keys_;
+    std::vector<Key> scratch_;
+    std::size_t visits_ = 0;
+};
 
 // Reserved seed-stream offset (registry:... pollination+19, disease+20, irrigation+21,
 // lifespan+22, wildlife+23, photo+24, herd-alarm+26). This system is deterministic and
@@ -95,9 +161,17 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg,
 
     // id-ordered participant list (deterministic traversal).
     std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    auto* identity_order = reg.ctx().find<SocialIdentityOrder>();
+    if (identity_order) {
+        if (admission)
+            std::erase_if(ents,
+                          [admission](entt::entity entity) { return !admission->Allows(entity); });
+        identity_order->Sort(reg, ents);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 

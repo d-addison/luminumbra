@@ -14,6 +14,7 @@
 #include "components/AlarmComponents.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
+#include "components/SimulationIdentityComponent.h"
 
 namespace {
 
@@ -303,6 +304,21 @@ TEST(HerdAlarm, RunEqualsReplay) {
         // Exact equality: deterministic math must reproduce identical bits.
         EXPECT_EQ(run[i], replay[i]) << "divergence at sample " << i;
     }
+}
+
+TEST(HerdAlarm, IdentityComponentsAloneKeepLegacyPath) {
+    entt::registry r;
+    const auto source = spawnCreature(r, 0.0f, 0.0f, false, 0.0f, 1);
+    const auto receiver = spawnCreature(r, 1.0f, 0.0f);
+    // Invalid duplicate IDs must remain unobserved until explicit activation.
+    r.emplace<Comp::SimulationIdentityComponent>(source,
+                                                 Comp::SimulationIdentityComponent{.id = 0});
+    r.emplace<Comp::SimulationIdentityComponent>(receiver,
+                                                 Comp::SimulationIdentityComponent{.id = 0});
+    const auto stats = RunHerdAlarmOnTick(r, kDt);
+    EXPECT_EQ(stats.participants, 2);
+    EXPECT_FLOAT_EQ(levelOf(r, source), 1.0f);
+    EXPECT_FLOAT_EQ(levelOf(r, receiver), 0.9f * (1.0f - 1.0f / 12.0f));
 }
 
 } // namespace
