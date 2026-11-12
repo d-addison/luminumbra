@@ -38,6 +38,7 @@
 #include "../components/CircadianComponents.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
+#include "LifespanSystem.h"
 
 namespace luminumbra::ai {
 
@@ -105,10 +106,20 @@ inline CircadianStats RunCircadianOnTick(entt::registry& reg,
     // id-ordered participant list (deterministic traversal). The per-creature writes are
     // independent (each reads only its own component + the shared time input), so ordering
     // cannot change the outcome, but we sort to keep traversal canonical.
-    std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    auto* traversal = reg.ctx().find<SimulationTraversalContext>();
+    std::vector<entt::entity> legacy_ents;
+    if (!traversal)
+        legacy_ents.assign(view.begin(), view.end());
+    auto& ents = traversal ? traversal->BeginParticipants() : legacy_ents;
+    if (traversal) {
+        for (const auto entity : view)
+            ents.push_back(entity);
+        traversal->OrderParticipants(reg);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 

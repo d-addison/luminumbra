@@ -24,6 +24,7 @@
 #include "../components/InstinctComponents.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
+#include "LifespanSystem.h"
 #include "ScentField.h"
 
 namespace luminumbra::ai {
@@ -58,7 +59,9 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
     if (cell_size <= 0.0f)
         return stats;
 
-    std::vector<entt::entity> agents;
+    auto* traversal = registry.ctx().find<SimulationTraversalContext>();
+    std::vector<entt::entity> legacy_agents;
+    auto& agents = traversal ? traversal->BeginParticipants() : legacy_agents;
     {
         auto view = registry.view<const TransformComponent,
                                   const ScentSenseComponent,
@@ -66,9 +69,13 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
                                   const LocomotionProfile>();
         for (auto e : view)
             agents.push_back(e);
-        std::sort(agents.begin(), agents.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
-        });
+        if (traversal) {
+            traversal->OrderParticipants(registry);
+        } else {
+            std::sort(agents.begin(), agents.end(), [](entt::entity a, entt::entity b) {
+                return entt::to_integral(a) < entt::to_integral(b);
+            });
+        }
     }
 
     for (auto e : agents) {
