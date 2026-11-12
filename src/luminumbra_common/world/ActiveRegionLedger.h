@@ -283,7 +283,13 @@ public:
     // Activate and wake a consumer-owned region without a persistent terrain edit.
     // The consumer must retain it through the scheduler's ownership probe.
     void activate_owned(RegionKey key, const WorldClock& clock);
+    // Wake an edited owner, retaining matching materialized-completion stamps
+    // while frozen_at still identifies an unacknowledged resume.
     void mark_edited(RegionKey key, const WorldClock& clock);
+    // A materialized field edit advances last_ticked as well as last_edit.
+    // Thaw immediately so this stamp remains encodable; retain frozen_at until
+    // the remaining resume consumers acknowledge their historical window.
+    void mark_materialized_edit(RegionKey key, const WorldClock& clock);
     // Wakes an existing Frozen record whose authority changed; never creates or alters others.
     void wake_frozen(RegionKey key) noexcept;
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
