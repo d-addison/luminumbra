@@ -31,6 +31,7 @@ namespace Luminumbra::Persistence {
 
 class CreatedWorldArtifacts;
 struct BoundPublicationStage;
+struct PlantSnapshot;
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -164,6 +165,31 @@ public:
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
                                     const std::stop_token& stop = {});
+
+    // Explicit candidate APIs; existing session callers continue selecting v1.
+    // Preparation owns the complete payload, including an empty roster's cursor.
+    // Indexed publication and session selection are supplied by later changes.
+    class PreparedPlantSnapshotWrite {
+    public:
+        bool prepare(const PlantSnapshot& snapshot, std::vector<std::string>* errors = nullptr);
+        [[nodiscard]] const std::string& bytes() const noexcept {
+            return m_bytes;
+        }
+
+    private:
+        // At most SavedInputLimits::kPlantFileBytes; refusal clears stale preparation.
+        std::string m_bytes;
+    };
+    // An absent envelope is refused; fresh-world detection belongs to the caller.
+    static bool load_plant_snapshot(PlantSnapshot& out,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr,
+                                    const std::stop_token& stop = {});
+    // Shared candidate member-integrity decoder. Both outputs stay unchanged on refusal.
+    static bool decode_plant_snapshot_member(std::string_view bytes,
+                                             PlantSnapshot& out,
+                                             MemberDigest& digest,
+                                             std::string& error);
 
     // Ground object store persisted as region/ground-objects.json (SIBLING to the chunk container).
     // Empty objects and delivery state write no file. Absent file clears both outputs.

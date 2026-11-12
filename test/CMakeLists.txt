@@ -1625,6 +1625,7 @@ add_executable(frontier_gates_test
     fields/energy_field_state_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
+    persistence/plant_snapshot_format_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/water_cursor_hash_test.cpp
