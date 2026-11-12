@@ -8165,9 +8165,11 @@ WorldSaveService::AuthorityWindowReader::~AuthorityWindowReader() = default;
 
 bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path& save_dir,
                                                     const AuthorityReadLimits& limits,
-                                                    std::string& error) {
+                                                    std::string& error,
+                                                    AdmissionRefusal* refusal) {
     const detail::SnapshotReadOwnership ownership;
     error.clear();
+    auto reason = AdmissionRefusal::InvalidSource;
     try {
         AuthorityReadBudget budget{limits, m_memory};
         if (!budget.valid())
@@ -8191,6 +8193,7 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
         // order independently of filesystem directory enumeration.
         std::sort(inventory.region_files.begin(), inventory.region_files.end());
         if (index.generation != 0) {
+            std::size_t present_regions = 0;
             for (const auto& member : index.members) {
                 int rx = 0, rz = 0;
                 const auto path = std::filesystem::path(member.path);
@@ -8201,7 +8204,36 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                     if (member.cls != MemberClass::Authoritative)
                         throw std::runtime_error("unsupported derived authority member");
                     candidate->members.emplace(std::pair{rx, rz}, Impl::Member{member, {}});
+                    present_regions += member.present ? 1u : 0u;
                 }
+            }
+            std::size_t found_regions = 0;
+            // Reconcile LOD-0 membership using the probe/member-bounded listing.
+            // Unindexed containers use the same bounded reader on Windows and POSIX:
+            // one probe plus header/record/compressed/decoded budgets per container.
+            // Admission costs O((I + R) log(I + 1) + sum(K log(K + 1)) + B), where
+            // K and B are unindexed record counts and compressed bytes. No directory
+            // pass is added to window reads, and only one bounded container is retained.
+            for (const auto& path : inventory.region_files) {
+                int rx = 0, rz = 0;
+                ParseRegionFileName(path, rx, rz);
+                const auto member = candidate->members.find({rx, rz});
+                if (member != candidate->members.end() && member->second.expected.present) {
+                    ++found_regions;
+                    continue;
+                }
+                std::vector<RegionRecord> records;
+                if (!ReadRegionFile(path, records, nullptr, {}, false, &budget) ||
+                    std::any_of(records.begin(), records.end(), [](const RegionRecord& record) {
+                        return record.lod_level == 0;
+                    })) {
+                    reason = AdmissionRefusal::InventoryMismatch;
+                    throw std::runtime_error("inconsistent authority region inventory");
+                }
+            }
+            if (found_regions != present_regions) {
+                reason = AdmissionRefusal::InventoryMismatch;
+                throw std::runtime_error("inconsistent authority region inventory");
             }
         } else {
             for (const auto& path : inventory.region_files) {
@@ -8216,6 +8248,10 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
                     throw std::runtime_error(errors.empty() ? "unreadable legacy authority"
                                                             : errors.front());
                 const auto digest = Lod0Fingerprint(records);
+                // Derived-only containers are mutable caches, not legacy LOD-0 members.
+                // Window reads still parse them and reject any newly introduced LOD-0 data.
+                if (!digest.present)
+                    continue;
                 for (const auto& record : records) {
                     if (record.lod_level == 0) {
                         const AuthorityReadScratch record_scratch(budget);
@@ -8242,9 +8278,13 @@ bool WorldSaveService::AuthorityWindowReader::admit(const std::filesystem::path&
         }
         budget.committed_storage = true;
         m_impl = std::move(candidate);
+        if (refusal)
+            *refusal = AdmissionRefusal::None;
         return true;
     } catch (const std::exception& failure) {
         error = m_memory ? "read refused" : failure.what();
+        if (refusal)
+            *refusal = reason;
         return false;
     }
 }

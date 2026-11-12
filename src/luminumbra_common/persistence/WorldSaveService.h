@@ -386,13 +386,19 @@ public:
     // scratch uses conservative envelopes; retained capacities follow every output alias.
     class AuthorityWindowReader {
     public:
+        enum class AdmissionRefusal {
+            None,
+            InvalidSource,
+            InventoryMismatch
+        };
         explicit AuthorityWindowReader(std::shared_ptr<World::FarVolumeMemoryPool> memory = {});
         ~AuthorityWindowReader();
         AuthorityWindowReader(const AuthorityWindowReader&) = delete;
         AuthorityWindowReader& operator=(const AuthorityWindowReader&) = delete;
         bool admit(const std::filesystem::path& save_dir,
                    const AuthorityReadLimits& limits,
-                   std::string& error);
+                   std::string& error,
+                   AdmissionRefusal* refusal = nullptr);
         // Includes a one-chunk XZ halo for shared face/edge/corner contributors,
         // and every Y layer. Outputs are owned and never enter the chunk-reader cache.
         [[nodiscard]] AuthorityWindowResult read(const AuthorityWindow& window,

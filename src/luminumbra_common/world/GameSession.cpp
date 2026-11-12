@@ -287,7 +287,7 @@ struct GameSession::FoliageStep {
     bool active = false, soil_staged = false, irrigation_staged = false;
 
     static FoliageStep* Prepare(GameSession& session) {
-        if (!session.m_activeRegionsEnabled)
+        if (!session.m_activeRegionsEnabled || session.m_regionSchedule.due.empty())
             return nullptr;
         auto& step = session.m_foliageStep;
         if (!step)
@@ -1161,12 +1161,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
                 budget.Next(Stage::Irrigation, [&] {
-                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(
-                               foliage_registry) != 0
+                    return (!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                                   SimParticipantCount<TelemetryComp::WaterSourceComponent>(
+                                       foliage_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
-                if (!foliage_registry.view<Comp::WaterSourceComponent>().empty()) {
+                if ((!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                    !foliage_registry.view<Comp::WaterSourceComponent>().empty()) {
                     if (!m_irrigationGrid)
                         m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(
                             kFoliageFieldCells, kFoliageFieldCells);
@@ -1174,15 +1176,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                              *m_irrigationGrid,
                                              foliageOriginX,
                                              foliageOriginZ,
-                                             kFoliageFieldCell);
+                                             kFoliageFieldCell,
+                                             foliage_gate);
                 }
                 budget.Next(Stage::Soil, [&] {
-                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(
-                               foliage_registry) != 0
+                    return (!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                                   SimParticipantCount<TelemetryComp::SoilFeederComponent>(
+                                       foliage_registry) != 0
                                ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
                                : 0ull;
                 });
-                if (!foliage_registry.view<Comp::SoilFeederComponent>().empty()) {
+                if ((!m_activeRegionsEnabled || !m_regionSchedule.due.empty()) &&
+                    !foliage_registry.view<Comp::SoilFeederComponent>().empty()) {
                     if (!m_soilGrid)
                         m_soilGrid =
                             std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
@@ -1439,7 +1444,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 });
                 if (!living_registry.view<Comp::DecayComponent>().empty())
                     luminumbra::ai::RunDecompositionOnTick(
-                        living_registry, current_tick, creature_admission);
+                        living_registry, current_tick, creature_admission, foliage_gate);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
