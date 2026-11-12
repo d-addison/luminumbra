@@ -835,6 +835,40 @@ bool WaterDepthValid(const Chunk& chunk) {
                        [](std::int32_t depth) { return depth >= 0; });
 }
 
+template<typename Integer>
+Integer
+WaterScalarIntegerFromJson(const nlohmann::json& state, const char* field, Integer minimum) {
+    static_assert(std::is_integral_v<Integer> && std::numeric_limits<Integer>::digits <= 32);
+    const auto found = state.find(field);
+    if (found == state.end() || !found->is_number_integer())
+        throw std::invalid_argument(std::string("Saved water scalar requires an integer: ") +
+                                    field);
+    const auto& value = *found;
+    // Keep unsigned values unsigned until their range is known; narrowing first would wrap them.
+    if ((value.is_number_unsigned() &&
+         value.get<std::uint64_t>() >
+             static_cast<std::uint64_t>(std::numeric_limits<Integer>::max())) ||
+        (!value.is_number_unsigned() &&
+         // Compare in int64: a negative value must not convert to an unsigned minimum.
+         (value.get<std::int64_t>() < static_cast<std::int64_t>(minimum) ||
+          value.get<std::int64_t>() >
+              static_cast<std::int64_t>(std::numeric_limits<Integer>::max()))))
+        throw std::invalid_argument(std::string("Saved water scalar integer range refused: ") +
+                                    field);
+    return value.get<Integer>();
+}
+
+float WaterScalarFloatFromJson(const nlohmann::json& state, const char* field) {
+    const auto found = state.find(field);
+    if (found == state.end() || !found->is_number())
+        throw std::invalid_argument(std::string("Saved water scalar requires a number: ") + field);
+    const double number = found->get<double>();
+    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
+        throw std::invalid_argument(std::string("Saved water scalar finite float range refused: ") +
+                                    field);
+    return found->get<float>();
+}
+
 template<typename Arrays>
 void ApplyChunkFields(const nlohmann::json& value,
                       const Arrays& arrays,
@@ -861,7 +895,7 @@ void ApplyChunkFields(const nlohmann::json& value,
     chunk.pending_mesh_failed.store(value.at("pending_mesh_failed").get<bool>(),
                                     std::memory_order_release);
     chunk.mesh_version.store(value.at("mesh_version").get<u32>(), std::memory_order_release);
-    chunk.water_mesh_version.store(value.at("water_mesh_version").get<u32>(),
+    chunk.water_mesh_version.store(WaterScalarIntegerFromJson(value, "water_mesh_version", u32{0}),
                                    std::memory_order_release);
     chunk.water_level_data = arrays.floats("water_level_data");
     chunk.water_flow_data = arrays.flow();
@@ -888,13 +922,18 @@ void ApplyChunkFields(const nlohmann::json& value,
                               std::memory_order_release);
     chunk.water_mesh_generated.store(water_state.at("water_mesh_generated").get<bool>(),
                                      std::memory_order_release);
-    chunk.current_water_resolution.store(water_state.at("current_water_resolution").get<int>(),
-                                         std::memory_order_release);
+    chunk.current_water_resolution.store(
+        WaterScalarIntegerFromJson(
+            water_state, "current_water_resolution", std::numeric_limits<int>::min()),
+        std::memory_order_release);
     chunk.is_water_sleeping.store(water_state.at("is_water_sleeping").get<bool>(),
                                   std::memory_order_release);
-    chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
-    chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
-    chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
+    chunk.max_water_delta_last_tick =
+        WaterScalarFloatFromJson(water_state, "max_water_delta_last_tick");
+    chunk.ticks_below_threshold =
+        WaterScalarIntegerFromJson(water_state, "ticks_below_threshold", 0);
+    chunk.water_mesh_dirty_ticks = WaterScalarIntegerFromJson(
+        water_state, "water_mesh_dirty_ticks", std::numeric_limits<int>::min());
     // Every accepted ownership encoding must agree with the region record header.
     const auto require_record_agreement = [&policy](bool terrain_edited, bool water_owned) {
         if (!policy.validate_record_authority)
@@ -1210,13 +1249,20 @@ void ValidateWaterStateObject(const nlohmann::json& chunk, std::vector<std::stri
     }
     for (const char* field :
          {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"}) {
-        if (!water_state.contains(field) || !IsJsonInteger(water_state.at(field))) {
-            errors.push_back(std::string("water_state.") + field + " must be an integer");
+        try {
+            WaterScalarIntegerFromJson(water_state,
+                                       field,
+                                       std::string_view(field) == "ticks_below_threshold"
+                                           ? 0
+                                           : std::numeric_limits<int>::min());
+        } catch (const std::invalid_argument& error) {
+            errors.push_back(error.what());
         }
     }
-    if (!water_state.contains("max_water_delta_last_tick") ||
-        !water_state.at("max_water_delta_last_tick").is_number()) {
-        errors.push_back("water_state.max_water_delta_last_tick must be numeric");
+    try {
+        WaterScalarFloatFromJson(water_state, "max_water_delta_last_tick");
+    } catch (const std::invalid_argument& error) {
+        errors.push_back(error.what());
     }
 }
 
@@ -1282,10 +1328,15 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
             errors.push_back(std::string(field) + " must be a boolean");
         }
     }
-    for (const char* field : {"current_lod", "pending_lod", "mesh_version", "water_mesh_version"}) {
+    for (const char* field : {"current_lod", "pending_lod", "mesh_version"}) {
         if (!chunk.contains(field) || !IsJsonInteger(chunk.at(field))) {
             errors.push_back(std::string(field) + " must be an integer");
         }
+    }
+    try {
+        WaterScalarIntegerFromJson(chunk, "water_mesh_version", u32{0});
+    } catch (const std::invalid_argument& error) {
+        errors.push_back(error.what());
     }
     ValidateWaterStateObject(chunk, errors);
     ValidateAuthorityMetadata(chunk);
