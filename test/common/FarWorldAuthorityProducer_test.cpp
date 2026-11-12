@@ -91,6 +91,36 @@ TEST(FarWorldAuthorityProducer, InvalidControlTokensAndAllocationSizesCannotBypa
     EXPECT_EQ(limits.memory->used(), 0u);
 }
 
+TEST(FarWorldAuthorityProducer, PoolAllocatorMovesKeepTheSourcePool) {
+    using Allocator = World::FarVolumePoolAllocator<std::uint64_t>;
+    const auto pool = SourceMemory();
+    Allocator source(pool);
+    const Allocator moved(std::move(source));
+    // Allocator requirements: a moved-from allocator still equals its previous value.
+    EXPECT_EQ(source.pool(), pool); // NOLINT(bugprone-use-after-move)
+    EXPECT_TRUE(source == moved);   // NOLINT(bugprone-use-after-move)
+    Allocator assigned;
+    assigned = std::move(source);
+    EXPECT_EQ(source.pool(), pool); // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(assigned.pool(), pool);
+    {
+        std::vector<std::uint64_t, Allocator> first(moved);
+        first.resize(64);
+        const auto charged = pool->used();
+        EXPECT_GE(charged, 64u * sizeof(std::uint64_t));
+        auto second = std::move(first);
+        EXPECT_EQ(second.get_allocator().pool(), pool);
+        EXPECT_EQ(first.get_allocator().pool(), pool); // NOLINT(bugprone-use-after-move)
+        first.assign(8, 1u);                           // NOLINT(bugprone-use-after-move)
+        EXPECT_GT(pool->used(), charged);
+        std::vector<std::uint64_t, Allocator> third(Allocator{pool});
+        third = std::move(second);
+        EXPECT_EQ(third.size(), 64u);
+    }
+    // Every charge, including MSVC Debug container proxies in moved-from vectors, is released.
+    EXPECT_EQ(pool->used(), 0u);
+}
+
 TEST(FarWorldAuthorityProducer, MembershipCapacityIsAdmittedBeforeAttachmentAndReusedOnClear) {
     auto limits = Limits();
     limits.index_records = 1;

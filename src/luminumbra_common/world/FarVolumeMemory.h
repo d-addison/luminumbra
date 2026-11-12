@@ -127,6 +127,18 @@ public:
     FarVolumePoolAllocator() noexcept = default;
     explicit FarVolumePoolAllocator(std::shared_ptr<FarVolumeMemoryPool> pool) noexcept
         : pool_(std::move(pool)) {}
+    // Moves copy the pool: allocator move construction and assignment must leave the
+    // source equal to its previous value, so a moved-from container can still release
+    // what it frees.
+    FarVolumePoolAllocator(const FarVolumePoolAllocator&) noexcept = default;
+    FarVolumePoolAllocator(FarVolumePoolAllocator&& other) noexcept
+        : pool_(other.pool_) {}
+    FarVolumePoolAllocator& operator=(const FarVolumePoolAllocator&) noexcept = default;
+    FarVolumePoolAllocator& operator=(FarVolumePoolAllocator&& other) noexcept {
+        pool_ = other.pool_;
+        return *this;
+    }
+    ~FarVolumePoolAllocator() = default;
     template<class U>
     FarVolumePoolAllocator(const FarVolumePoolAllocator<U>& other) noexcept
         : pool_(other.pool()) {}
@@ -139,13 +151,13 @@ public:
             throw FarVolumeMemoryRefused();
         }
         const auto bytes = count * sizeof(T);
-        if (pool_ && !pool_->TryReserve(bytes)) {
+        if (charged() && !pool_->TryReserve(bytes)) {
             throw FarVolumeMemoryRefused();
         }
         try {
             return std::allocator<T>{}.allocate(count);
         } catch (...) {
-            if (pool_) {
+            if (charged()) {
                 pool_->Release(bytes);
             }
             throw;
@@ -153,7 +165,7 @@ public:
     }
     void deallocate(T* pointer, std::size_t count) noexcept {
         std::allocator<T>{}.deallocate(pointer, count);
-        if (pool_) {
+        if (charged()) {
             pool_->Release(count * sizeof(T));
         }
     }
@@ -163,6 +175,16 @@ public:
     }
 
 private:
+#if defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL != 0
+    // MSVC iterator debugging allocates container proxies inside noexcept constructors
+    // and moves. A refusal there would terminate, so proxies bypass admission.
+    static constexpr bool kAdmitted = !std::is_same_v<T, std::_Container_proxy>;
+#else
+    static constexpr bool kAdmitted = true;
+#endif
+    bool charged() const noexcept {
+        return kAdmitted && pool_ != nullptr;
+    }
     std::shared_ptr<FarVolumeMemoryPool> pool_;
 };
 
