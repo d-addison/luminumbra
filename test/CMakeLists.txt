@@ -1612,6 +1612,7 @@ add_executable(frontier_gates_test
     ai/creature_brain_substrate_test.cpp
     ai/scent_steering_system_test.cpp
     ai/scent_deposit_system_test.cpp
+    ai/traversal_identity_permutation_test.cpp
     ai/ecology_demo_test.cpp
     ai/stimulus_channel_gate_test.cpp
     ai/aether_stimulus_test.cpp
