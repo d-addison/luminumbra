@@ -519,6 +519,19 @@ void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
     }
 }
 
+std::int64_t MaxDepthDelta(const std::vector<std::int32_t>& before,
+                           const std::vector<std::int32_t>& after) {
+    if (before.size() != after.size()) {
+        throw std::invalid_argument("Regional water seam changed grid shape");
+    }
+    std::int64_t delta = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        const auto change = static_cast<std::int64_t>(after[i]) - before[i];
+        delta = std::max(delta, change < 0 ? -change : change);
+    }
+    return delta;
+}
+
 std::int64_t CellArea(const Chunk& grid) {
     const auto resolution = static_cast<std::int64_t>(grid.current_water_resolution.load());
     return 4 * static_cast<std::int64_t>(CHUNK_SIZE_X) * CHUNK_SIZE_Z / (resolution * resolution);
@@ -581,7 +594,9 @@ void Transaction::Begin(ActiveRegionLedger& ledger,
                                  .authority_revision = chunk->authority_hash_revision(),
                                  .water_revision = chunk->water_revision(),
                                  .changed = false,
-                                 .mesh_invalidated = false});
+                                 .mesh_invalidated = false,
+                                 .interior_stepped = false,
+                                 .face_cadence_advanced = false});
         }
         std::sort(m_entries.begin(), m_entries.end(), [](const auto& a, const auto& b) {
             return a.live->get_id() < b.live->get_id();
@@ -635,6 +650,19 @@ Transaction::Entry& Transaction::FindEntry(ChunkID id) {
     return *found;
 }
 
+void Transaction::AdvanceFaceCadence(Entry& entry, const std::vector<std::int32_t>& before) {
+    // Interior steps own the cadence of their chunk; border-only endpoints see seam
+    // changes only, so one advance per transaction keeps their mesh from going stale.
+    if (entry.interior_stepped || entry.face_cadence_advanced ||
+        MaxDepthDelta(before, entry.grid->water_depth_mm) <= 1) {
+        return;
+    }
+    entry.face_cadence_advanced = true;
+    if (WaterKernels::AdvanceWaterMeshCadence(*entry.grid)) {
+        entry.mesh_invalidated = true;
+    }
+}
+
 Chunk& Transaction::Grid(ChunkID id) {
     return *FindEntry(id).grid;
 }
@@ -662,6 +690,7 @@ WaterKernels::Result Transaction::StepInterior(ChunkID id,
         const auto result = WaterKernels::StepInterior(grid, shield, inputs);
         Account(result, grid);
         entry.mesh_invalidated = entry.mesh_invalidated || result.water_mesh_invalidated;
+        entry.interior_stepped = true;
         return result;
     } catch (...) {
         Rollback();
@@ -671,10 +700,15 @@ WaterKernels::Result Transaction::StepInterior(ChunkID id,
 
 WaterKernels::Result Transaction::StepFace(ChunkID positive, ChunkID other, bool is_x) {
     try {
-        auto& a = Grid(positive);
-        auto& b = Grid(other);
+        auto& a_entry = FindEntry(positive);
+        auto& b_entry = FindEntry(other);
+        auto& a = *a_entry.grid;
+        auto& b = *b_entry.grid;
+        const auto before_a = a.water_depth_mm, before_b = b.water_depth_mm;
         const auto result = WaterKernels::StepSharedFace(a, b, is_x);
         Account(result, a);
+        AdvanceFaceCadence(a_entry, before_a);
+        AdvanceFaceCadence(b_entry, before_b);
         return result;
     } catch (...) {
         Rollback();

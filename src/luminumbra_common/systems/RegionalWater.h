@@ -163,9 +163,14 @@ private:
         std::uint32_t water_revision = 0;
         bool changed = false;
         bool mesh_invalidated = false;
+        // An endpoint without an interior step advances its remesh cadence once per
+        // transaction from its first seam change above 1 mm.
+        bool interior_stepped = false;
+        bool face_cadence_advanced = false;
     };
     Entry& FindEntry(ChunkID id);
     Chunk& Grid(ChunkID id);
+    void AdvanceFaceCadence(Entry& entry, const std::vector<std::int32_t>& before);
     void Account(const WaterKernels::Result& result, const Chunk& grid);
     std::vector<Entry> m_entries;
     std::vector<world::ActiveRegionLedger::WaterPatch> m_patches;

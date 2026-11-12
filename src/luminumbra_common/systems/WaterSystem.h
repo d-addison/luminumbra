@@ -95,6 +95,9 @@ Result StepSharedFace(Chunk& owner,
                       Chunk& neighbor,
                       bool is_x,
                       OverflowPolicy policy = OverflowPolicy::Refuse);
+// Advances the coalesced remesh cadence after a committed depth change above 1 mm.
+// Returns true when the interval is reached and the water mesh was invalidated.
+bool AdvanceWaterMeshCadence(Chunk& chunk) noexcept;
 
 } // namespace WaterKernels
 

@@ -3233,8 +3233,14 @@ void CheckBorderOnlyExecution(bool is_x, bool overflow) {
         EXPECT_TRUE(completed.empty());
         EXPECT_EQ(shield.far_lod_authority_revision(), 0u);
     } else {
+        // The border-only endpoint is one seam change short of its remesh interval.
+        b->water_mesh_generated.store(true);
+        b->water_mesh_dirty_ticks = 14;
         water.UpdateRegional(registry, chunks, ledger, schedule, completed, budget);
         EXPECT_EQ(Mass(*a) + Mass(*b), mass);
+        EXPECT_FALSE(b->water_mesh_generated.load());
+        EXPECT_EQ(b->water_mesh_dirty_ticks, 0);
+        EXPECT_TRUE(water.mesh_invalidations().contains(b->get_id()));
         EXPECT_EQ(water.regional_work().border_windows, 2u);
         EXPECT_EQ(water.regional_work().water_cells, 80u);
         EXPECT_EQ(a->ticks_below_threshold, 1);
