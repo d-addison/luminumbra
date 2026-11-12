@@ -1,6 +1,9 @@
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/persistence/ReplacementOutputFile.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
@@ -10,6 +13,7 @@
 #include <spdlog/sinks/ostream_sink.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -124,6 +128,176 @@ protected:
 
 class ReplayModeRoundtrip : public ReplayModeAdmission,
                             public testing::WithParamInterface<std::uint64_t> {};
+
+TEST_F(ReplayModeAdmission, FixtureMutationRecoversInterruptedPublicationBeforeReplacing) {
+    using Identity = std::array<std::uint64_t, 3>;
+    const auto identify = [](const fs::path& path) {
+        const Luminumbra::Persistence::SavedInputFile file(path);
+        Identity identity{};
+        EXPECT_TRUE(file.identity(identity));
+        return identity;
+    };
+    options.mutate_replay_fixture = options.record_path;
+    const auto companion = options.record_path + ".regions.json";
+    const auto journal = root / ".replay-pair.undo";
+    for (const bool committed : {false, true}) {
+        SCOPED_TRACE(committed);
+        options.ticks = 1;
+        ASSERT_EQ(RunRecord(options), 0);
+        std::string error;
+        replay::RegionScheduleTrace old_trace;
+        ASSERT_TRUE(replay::ReadRegionScheduleTrace(options.record_path, 1, old_trace, error));
+        const auto previous = identify(options.record_path);
+        const auto previous_trace = identify(companion);
+        const auto undo = ReadReplayModeFile(companion);
+        // Both generations must carry the schedule playback actually derives.
+        // Different tick counts make restoring the wrong companion observable.
+        auto incoming_options = options;
+        incoming_options.record_path = (root / "incoming").string();
+        incoming_options.ticks = 2;
+        ASSERT_EQ(RunRecord(incoming_options), 0);
+        replay::RegionScheduleTrace new_trace;
+        ASSERT_TRUE(
+            replay::ReadRegionScheduleTrace(incoming_options.record_path, 2, new_trace, error));
+        const auto incoming = identify(root / "incoming");
+        fs::remove(companion);
+        fs::rename(incoming_options.record_path + ".regions.json", companion);
+        const auto incoming_trace = identify(companion);
+        const nlohmann::json header{
+            {"schema", "luminumbra.replay_pair.v1"},
+            {"replay", "recording.lrec"},
+            {"previous", previous},
+            {"incoming", incoming},
+            {"old_trace", previous_trace},
+            {"new_trace", incoming_trace},
+            {"undo_bytes", undo.size()},
+            {"undo_checksum", Luminumbra::Persistence::fnv1a64_bytes(undo.data(), undo.size())}};
+        {
+            std::ofstream output(journal, std::ios::binary);
+            output << header.dump() << '\n' << undo;
+            ASSERT_TRUE(output.good());
+        }
+        if (committed) {
+            fs::rename(options.record_path, root / "previous");
+            fs::rename(root / "incoming", options.record_path);
+        }
+        ASSERT_EQ(RunMutateReplayFixture(options), 0);
+        EXPECT_FALSE(fs::exists(journal));
+        {
+            const Luminumbra::Persistence::ReplayPairReadGuard playback(options.replay_path);
+            ASSERT_TRUE(playback.is_open());
+            replay::RegionScheduleTrace actual;
+            ASSERT_TRUE(replay::ReadRegionScheduleTrace(
+                options.replay_path, committed ? 2 : 1, actual, error));
+            EXPECT_EQ(actual, committed ? new_trace : old_trace);
+        }
+        // Admission succeeds and reaches the deliberately corrupted checkpoint.
+        ASSERT_EQ(RunReplay(options), 1);
+        const auto artifact = Artifact();
+        EXPECT_EQ(artifact.at("diverged"), true);
+        EXPECT_EQ(artifact.at("divergence_tick"), committed ? 2 : 1);
+        EXPECT_EQ(artifact.at("divergence_section"), "terrain");
+    }
+}
+
+TEST_F(ReplayModeAdmission, FixtureMutationRefusalsPreserveReplayTraceAndJournal) {
+    options.ticks = 1;
+    options.mutate_replay_fixture = options.record_path;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto previous = ReadReplayModeFile(options.record_path);
+    const auto companion = options.record_path + ".regions.json";
+    const auto trace_bytes = ReadReplayModeFile(companion);
+    const auto journal = root / ".replay-pair.undo";
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard publisher(options.record_path);
+        ASSERT_TRUE(publisher.is_open());
+        EXPECT_EQ(RunMutateReplayFixture(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), previous);
+        EXPECT_EQ(ReadReplayModeFile(companion), trace_bytes);
+    }
+    for (const auto& record : {std::string{}, std::string{"{\"schema\":"}}) {
+        {
+            std::ofstream output(journal, std::ios::binary);
+            output << record;
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(RunMutateReplayFixture(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), previous);
+        EXPECT_EQ(ReadReplayModeFile(companion), trace_bytes);
+        EXPECT_TRUE(fs::exists(journal));
+        EXPECT_EQ(ReadReplayModeFile(journal), record);
+        fs::remove(journal);
+    }
+    // Failed source reads release ownership, including missing and partial files.
+    for (const bool missing : {false, true}) {
+        if (missing) {
+            fs::remove(options.record_path);
+        } else {
+            std::ofstream output(options.record_path, std::ios::binary);
+            output << "LREC1";
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(RunMutateReplayFixture(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(companion), trace_bytes);
+        const Luminumbra::Persistence::ReplayPairReadGuard released(options.record_path);
+        EXPECT_TRUE(released.is_open());
+        EXPECT_EQ(fs::exists(options.record_path), !missing);
+        if (!missing) {
+            EXPECT_EQ(ReadReplayModeFile(options.record_path), "LREC1");
+        }
+    }
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto empty = ReadReplayModeFile(options.record_path);
+    EXPECT_EQ(RunMutateReplayFixture(options), 1);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), empty);
+    const Luminumbra::Persistence::ReplayPairReadGuard released(options.record_path);
+    EXPECT_TRUE(released.is_open());
+}
+
+TEST_F(ReplayModeAdmission, FixtureMutationRefusesIncompleteStreamsWithoutReplacing) {
+    options.ticks = 1;
+    options.mutate_replay_fixture = options.record_path;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto companion = options.record_path + ".regions.json";
+    const auto trace_bytes = ReadReplayModeFile(companion);
+    auto bytes = ReadReplayModeFile(options.record_path);
+    constexpr std::size_t trailer_bytes = sizeof(replay::kLrec1Trailer) + 3 * sizeof(std::uint64_t);
+    ASSERT_GT(bytes.size(), trailer_bytes);
+    const auto complete_size = bytes.size();
+    bytes.push_back('\0');
+    // Missing trailer, partial magic, partial counts, and junk after a valid
+    // trailer must all refuse, even with a complete checkpoint to corrupt.
+    for (const auto length : {complete_size - trailer_bytes,
+                              complete_size - trailer_bytes + 1,
+                              complete_size - 1,
+                              complete_size + 1}) {
+        SCOPED_TRACE(length);
+        const auto partial = bytes.substr(0, length);
+        {
+            std::ofstream output(options.record_path, std::ios::binary | std::ios::trunc);
+            output << partial;
+            ASSERT_TRUE(output.good());
+        }
+        const auto contents = replay::ReadReplay(options.record_path);
+        ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value()) {
+            return;
+        }
+        ASSERT_TRUE(contents->truncated);
+        ASSERT_EQ(contents->trailer_present, length > complete_size);
+        ASSERT_FALSE(contents->checkpoints.empty());
+        logs.str("");
+        logs.clear();
+        EXPECT_EQ(RunMutateReplayFixture(options), 1);
+        EXPECT_NE(logs.str().find("truncated (no valid trailer)"), std::string::npos) << logs.str();
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), partial);
+        EXPECT_EQ(ReadReplayModeFile(companion), trace_bytes);
+        EXPECT_FALSE(fs::exists(root / ".replay-pair.undo"));
+        const Luminumbra::Persistence::ReplayPairReadGuard released(options.record_path);
+        EXPECT_TRUE(released.is_open());
+    }
+}
 
 TEST_P(ReplayModeRoundtrip, AuthenticatesEveryExecutedTickAndPreservesCadenceBytes) {
     options.ticks = GetParam();

@@ -69,6 +69,8 @@ public:
                              JobPriority priority = JobPriority::Normal);
     void wait(const JobHandle& handle);
     RuntimeStats get_runtime_stats() const;
+    // True only on a worker belonging to this pool, including shutdown draining.
+    bool is_current_worker() const noexcept;
 
 private:
     // a pooled, allocation-free job slot. The

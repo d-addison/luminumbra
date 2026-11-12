@@ -14,6 +14,8 @@
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 
+#include <array>
+#include <functional>
 #include <vector>
 
 namespace {
@@ -109,6 +111,101 @@ TEST(PlantGrowth, DeterministicReplay) {
         return PlantStateDigest(reg);
     };
     EXPECT_EQ(run(), run()); // identical inputs + tick sequence -> identical state
+}
+
+TEST(PlantGrowth, NoncopyableSamplerPreservesAdmissionOrderAndState) {
+    entt::registry concrete;
+    entt::registry erased;
+    for (auto* registry : {&concrete, &erased}) {
+        SpawnPlants(*registry, 6, 2024);
+        registry->emplace<C::PlantTag>(registry->create());
+        for (const auto entity : registry->view<C::PlantGrowthComponent>()) {
+            const auto& transform = registry->get<C::TransformComponent>(entity);
+            const int index = static_cast<int>(transform.position.x / 7.0f);
+            registry->emplace<C::PlantRegionComponent>(
+                entity,
+                C::PlantRegionComponent{.persistent_id = static_cast<std::uint64_t>(6 - index),
+                                        .owner_x = index % 2,
+                                        .owner_z = 0,
+                                        .region_stamp = 0});
+            registry->get<C::PlantGrowthComponent>(entity).tended = 20;
+        }
+    }
+
+    struct Sampler {
+        explicit Sampler(std::vector<float>& positions)
+            : visited(positions) {}
+        Sampler(const Sampler&) = delete;
+        Sampler& operator=(const Sampler&) = delete;
+        explicit operator bool() const {
+            return false;
+        }
+        F::PlantEnvSample operator()(const C::TransformComponent& transform) const {
+            visited.push_back(transform.position.x);
+            return EnvAt(transform);
+        }
+        std::vector<float>& visited;
+    };
+    std::vector<float> concrete_positions;
+    const Sampler sample(concrete_positions);
+    std::vector<float> erased_positions;
+    const F::EnvSampler reference = [&](const C::TransformComponent& transform) {
+        erased_positions.push_back(transform.position.x);
+        return EnvAt(transform);
+    };
+    const std::array<Luminumbra::world::RegionKey, 1> due{{{0, 0}}};
+    const Luminumbra::world::RegionConsumerGate concrete_gate(concrete, due);
+    const Luminumbra::world::RegionConsumerGate erased_gate(erased, due);
+    const auto actual = F::RunPlantGrowthSystemOnTick(concrete, 5, sample, concrete_gate);
+    const auto expected = F::RunPlantGrowthSystemOnTick(erased, 5, reference, erased_gate);
+    EXPECT_EQ(actual.updated, 3);
+    EXPECT_EQ(actual.updated, expected.updated);
+    EXPECT_EQ(actual.advanced, expected.advanced);
+    EXPECT_EQ(concrete_positions, (std::vector<float>{0.0f, 14.0f, 28.0f}));
+    EXPECT_EQ(concrete_positions, erased_positions);
+    EXPECT_EQ(concrete_gate.owner_visits(), 7u);
+    EXPECT_EQ(concrete_gate.owner_visits(), erased_gate.owner_visits());
+    EXPECT_EQ(PlantStateDigest(concrete), PlantStateDigest(erased));
+    for (const auto entity : concrete.view<C::PlantGrowthComponent>()) {
+        const auto& growth = concrete.get<C::PlantGrowthComponent>(entity);
+        const auto& identity = concrete.get<C::PlantRegionComponent>(entity);
+        const bool admitted = identity.owner_x == 0;
+        EXPECT_EQ(growth.last_tick, admitted ? 5u : 0u);
+        EXPECT_EQ(growth.tended, admitted ? 19u : 20u);
+        EXPECT_EQ(identity.region_stamp, admitted ? 5u : 0u);
+    }
+}
+
+TEST(PlantGrowth, NullableSamplersThrowOnlyForAdmittedPlants) {
+    const auto check = [](const auto& sample) {
+        entt::registry registry;
+        EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, 5, sample).updated, 0);
+        SpawnPlants(registry, 1, 2024);
+        const Luminumbra::world::RegionConsumerGate gate(registry, {});
+        EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, 5, sample, gate).updated, 0);
+        const auto before = PlantStateDigest(registry);
+        EXPECT_THROW(F::RunPlantGrowthSystemOnTick(registry, 5, sample), std::bad_function_call);
+        EXPECT_EQ(PlantStateDigest(registry), before);
+        for (const auto entity : registry.view<C::PlantGrowthComponent>()) {
+            EXPECT_EQ(registry.get<C::PlantGrowthComponent>(entity).last_tick, 0u);
+        }
+    };
+    check(F::EnvSampler{});
+    check(nullptr);
+    check(static_cast<decltype(&EnvAt)>(nullptr));
+    entt::registry registry;
+    EXPECT_EQ(F::RunPlantGrowthSystemOnTick(registry, 5, {}).updated, 0);
+    SpawnPlants(registry, 1, 2024);
+    EXPECT_THROW(F::RunPlantGrowthSystemOnTick(registry, 5, {}), std::bad_function_call);
+    entt::registry reference;
+    SpawnPlants(reference, 1, 2024);
+    const F::EnvSampler erased = EnvAt;
+    const auto expected = F::RunPlantGrowthSystemOnTick(reference, 5, erased);
+    const auto actual = F::RunPlantGrowthSystemOnTick(registry, 5, &EnvAt);
+    EXPECT_EQ(actual.updated, 1);
+    EXPECT_EQ(actual.updated, expected.updated);
+    EXPECT_EQ(actual.advanced, expected.advanced);
+    EXPECT_EQ(PlantStateDigest(registry), PlantStateDigest(reference));
 }
 
 // Grow one identical-genome plant under a fixed env for 300 ticks, return its state.

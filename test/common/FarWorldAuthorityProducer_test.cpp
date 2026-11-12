@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -914,6 +915,56 @@ TEST_F(FarWorldSourceCaptureTest, IndexedSourceWithDerivedOnlyRegionAdmitsCommit
     ASSERT_EQ(producer.capture()->committed.chunks.size(), 1u);
     EXPECT_EQ(producer.capture()->committed.generation, committed.generation);
     EXPECT_EQ(producer.capture()->committed.chunks.front()->sdf_data.front(), 7.0f);
+}
+
+TEST_F(FarWorldSourceCaptureTest, IndexedDerivedOnlyRegionScansReleaseScratchPerRegion) {
+    WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(Edited({0, 0, 0}, 7.0f)));
+    {
+        Persistence::SaveTransaction transaction(root, 0, {}, Save::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(Save{}.save_world(disk, root));
+        ASSERT_TRUE(Save::finalize_indexed_envelope(root, nullptr));
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    const auto save_derived = [this](int rx) {
+        World::FarLodTile tile;
+        tile.tier = World::FarLodTier::F2;
+        tile.rx = rx;
+        tile.rz = 10;
+        tile.samples_per_side = World::FarLodSamplesPerSide(tile.tier);
+        // Incompressible heights make each container's scan charge dominate the peak.
+        std::uint32_t state = 12345u;
+        tile.height_q.resize(tile.sample_count());
+        for (auto& height : tile.height_q) {
+            state = state * 1664525u + 1013904223u;
+            height = static_cast<std::uint16_t>(state >> 16);
+        }
+        tile.material.assign(tile.sample_count(), 0);
+        tile.flags.assign(tile.sample_count(), 0);
+        return World::FarLodStore(root).save_tile(tile);
+    };
+    const auto admission_peak = [this] {
+        const auto memory = std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+        Save::AuthorityWindowReader reader(memory);
+        std::string error;
+        EXPECT_TRUE(reader.admit(root, reads, error)) << error;
+        return memory->peak();
+    };
+    const auto base_peak = admission_peak();
+    ASSERT_TRUE(save_derived(10));
+    ASSERT_TRUE(Save::validate_save(root));
+    const auto one_region_peak = admission_peak();
+    ASSERT_GT(one_region_peak, base_peak);
+    for (int rx = 11; rx < 18; ++rx)
+        ASSERT_TRUE(save_derived(rx));
+    ASSERT_TRUE(Save::validate_save(root));
+    const auto eight_region_peak = admission_peak();
+    ASSERT_GE(eight_region_peak, one_region_peak);
+    // Identical derived-only containers are scanned one at a time. The per-region
+    // inventory bookkeeping that stays charged is much smaller than a scan, so seven
+    // more regions must add under half of seven retained scans (7x one region's cost).
+    EXPECT_LT(2 * (eight_region_peak - one_region_peak), 7 * (one_region_peak - base_peak));
 }
 
 TEST_F(FarWorldSourceCaptureTest, CopiesAllWindowsAtOneBoundaryAndCoalescesSuccessorEdits) {
