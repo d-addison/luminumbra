@@ -23,7 +23,7 @@ PLANNED IDs occupy `[1, 2^63)` with next cursor `[1, 2^63]`, zero invalid and `2
 PLANNED: a mandatory `luminumbra.plants.v2` envelope persists that cursor even for zero plants, replaces the v1 payload and sidecar entirely, and refuses pre-v2 saves rather than converting them; a truly absent world bootstraps normally.
 PLANNED: the envelope cursor and saved ledger allocator TLV must agree, while in-session adoption retains the greater live/saved cursor and checks incoming IDs against preserved authoritative residents before mutation.
 PLANNED creature IDs remain stable only within the current session until issue #137 adds creature persistence; reopening creates new wildlife incarnations with new IDs from the restored cursor.
-The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness; the earlier region-gated identity/hash plan is superseded only at activation in both region modes.
+The independent plant field inventory and the ecology projection inventory in [the distant-world guide](distant-world.md) define later codec/projection completeness; the earlier region-gated identity/hash plan is superseded only at activation in both region modes.
 PLANNED activation changes seeds, ordering, hashes and session persistence together with a then-current authority revision increment; this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity.
 
 ## Activation and ordering

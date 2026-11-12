@@ -5169,8 +5169,8 @@
     {
       "id": "sim.identity.098",
       "source": "docs/active-regions.md#planned-shared-simulation-identity",
-      "quote": "The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness;",
-      "text": "The [independent field inventory](distant-world.md#planned-independent-plant-field-inventory) and [ecology inventory](distant-world.md#planned-ecology-projection-inventory) define later codec/projection completeness;"
+      "quote": "The independent plant field inventory and the ecology projection inventory in [the distant-world guide](distant-world.md) define later codec/projection completeness;",
+      "text": "The independent plant field inventory and the ecology projection inventory in [the distant-world guide](distant-world.md) define later codec/projection completeness;"
     },
     {
       "id": "sim.identity.099",

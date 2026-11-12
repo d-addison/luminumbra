@@ -71,9 +71,8 @@ converter. A genuinely absent world remains a clean bootstrap. Creature IDs
 are stable within a session only until issue #137 provides creature persistence;
 reopening creates new wildlife incarnations from the restored cursor.
 
-The [plant field inventory](../distant-world.md#planned-independent-plant-field-inventory)
-and [ecology projection inventory](../distant-world.md#planned-ecology-projection-inventory)
-are independent requirements for the future codec and canonical `plant:v2` and
+The planned plant field inventory and ecology projection inventory in
+`docs/distant-world.md` are independent requirements for the future codec and canonical `plant:v2` and
 `ecology:v3` projections. Preparatory paths stay unselected by shipping sessions.
 Saved bytes, hashes, fixtures, `kAuthorityRulesRevision` and current configuration
 identity remain unchanged in this preparation.
