@@ -9,6 +9,7 @@
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "../fields/EnergyFieldState.h"
 #include "PlantPersistence.h"
+#include "PlantSnapshot.h"
 #include "SaveTransaction.h"
 #include "SavedInputFile.h"
 #include "SavedInputLimits.h"
@@ -4740,6 +4741,69 @@ std::filesystem::path WorldSaveService::world_manifest_path(const std::filesyste
 
 std::filesystem::path WorldSaveService::plant_entities_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / "plant-entities.json";
+}
+
+bool WorldSaveService::PreparedPlantSnapshotWrite::prepare(const PlantSnapshot& snapshot,
+                                                           std::vector<std::string>* errors) {
+    m_bytes.clear();
+    std::string error;
+    if (!EncodePlantSnapshot(snapshot, m_bytes, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    return true;
+}
+
+bool WorldSaveService::decode_plant_snapshot_member(std::string_view bytes,
+                                                    PlantSnapshot& out,
+                                                    MemberDigest& digest,
+                                                    std::string& error) {
+    PlantSnapshot candidate;
+    if (!DecodePlantSnapshot(bytes, candidate, error))
+        return false;
+    const MemberDigest admitted{
+        .present = true, .bytes = bytes.size(), .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
+    out = std::move(candidate);
+    digest = admitted;
+    return true;
+}
+
+bool WorldSaveService::load_plant_snapshot(PlantSnapshot& out,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors,
+                                           const std::stop_token& stop) {
+    const detail::SnapshotReadOwnership ownership;
+    const SavedInputFile input(plant_entities_path(save_dir));
+    const SavedInputFile sidecar(plant_identities_path(save_dir));
+    if (stop.stop_requested() || !sidecar.missing()) {
+        AddError(errors,
+                 stop.stop_requested() ? "Plant v2 load cancelled."
+                                       : std::string(kUnsupportedPlantSnapshot));
+        return false;
+    }
+    if (input.missing()) {
+        AddError(errors, std::string(kUnsupportedPlantSnapshot));
+        return false;
+    }
+    std::string bytes;
+    if (!input.read(bytes, SavedInputLimits::kPlantFileBytes, stop)) {
+        AddError(errors,
+                 "Plant v2 load refused: unreadable, non-regular, partial or oversized input.");
+        return false;
+    }
+    PlantSnapshot candidate;
+    MemberDigest digest;
+    std::string error;
+    if (!decode_plant_snapshot_member(bytes, candidate, digest, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    if (stop.stop_requested()) {
+        AddError(errors, "Plant v2 load cancelled.");
+        return false;
+    }
+    out = std::move(candidate);
+    return true;
 }
 
 std::filesystem::path
