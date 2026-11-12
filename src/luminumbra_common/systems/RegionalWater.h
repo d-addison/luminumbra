@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra::Systems::RegionalWater {
@@ -142,7 +143,9 @@ public:
     void PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolution);
     void Inject(const Source& source);
     void FinishInterior(ChunkID id);
-    void Publish(SHIELD_WorldSystem* shield = nullptr);
+    // Mesh additions share the water commit; refusal retains the caller's existing IDs.
+    void Publish(SHIELD_WorldSystem* shield = nullptr,
+                 std::unordered_set<ChunkID>* mesh_invalidations = nullptr);
     void Rollback() noexcept;
     [[nodiscard]] bool pending() const noexcept {
         return m_ledger != nullptr;
@@ -159,7 +162,9 @@ private:
         std::uint64_t authority_revision = 0;
         std::uint32_t water_revision = 0;
         bool changed = false;
+        bool mesh_invalidated = false;
     };
+    Entry& FindEntry(ChunkID id);
     Chunk& Grid(ChunkID id);
     void Account(const WaterKernels::Result& result, const Chunk& grid);
     std::vector<Entry> m_entries;

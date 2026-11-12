@@ -580,7 +580,8 @@ void Transaction::Begin(ActiveRegionLedger& ledger,
                                  .grid = {},
                                  .authority_revision = chunk->authority_hash_revision(),
                                  .water_revision = chunk->water_revision(),
-                                 .changed = false});
+                                 .changed = false,
+                                 .mesh_invalidated = false});
         }
         std::sort(m_entries.begin(), m_entries.end(), [](const auto& a, const auto& b) {
             return a.live->get_id() < b.live->get_id();
@@ -623,7 +624,7 @@ const Chunk* Transaction::staged(ChunkID id) const noexcept {
     return found == m_entries.end() || found->live->get_id() != id ? nullptr : found->grid.get();
 }
 
-Chunk& Transaction::Grid(ChunkID id) {
+Transaction::Entry& Transaction::FindEntry(ChunkID id) {
     const auto found = std::lower_bound(
         m_entries.begin(), m_entries.end(), id, [](const auto& entry, ChunkID key) {
             return entry.live->get_id() < key;
@@ -631,7 +632,11 @@ Chunk& Transaction::Grid(ChunkID id) {
     if (!pending() || found == m_entries.end() || found->live->get_id() != id) {
         Refuse();
     }
-    return *found->grid;
+    return *found;
+}
+
+Chunk& Transaction::Grid(ChunkID id) {
+    return *FindEntry(id).grid;
 }
 
 void Transaction::Account(const WaterKernels::Result& result, const Chunk& grid) {
@@ -652,9 +657,11 @@ WaterKernels::Result Transaction::StepInterior(ChunkID id,
         if (inputs.rain_mm < 0 || inputs.evap_mm < 0 || inputs.weather_scale_mm < 0) {
             Refuse();
         }
-        auto& grid = Grid(id);
+        auto& entry = FindEntry(id);
+        auto& grid = *entry.grid;
         const auto result = WaterKernels::StepInterior(grid, shield, inputs);
         Account(result, grid);
+        entry.mesh_invalidated = entry.mesh_invalidated || result.water_mesh_invalidated;
         return result;
     } catch (...) {
         Rollback();
@@ -708,7 +715,8 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
         if (!LegalResolution(resolution)) {
             Refuse();
         }
-        auto& grid = Grid(id);
+        auto& entry = FindEntry(id);
+        auto& grid = *entry.grid;
         const bool initialized = grid.has_water_sim.load();
         const int old_resolution = grid.current_water_resolution.load();
         if (initialized && old_resolution == resolution) {
@@ -767,6 +775,7 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
         grid.water_mesh_dirty_ticks = 0;
         ValidateStageGrid(grid);
         m_expectedVolume += Volume(grid) - before;
+        entry.mesh_invalidated = true;
     } catch (...) {
         Rollback();
         throw;
@@ -809,7 +818,11 @@ void Transaction::FinishInterior(ChunkID id) {
     }
 }
 
-void Transaction::Publish(SHIELD_WorldSystem* shield) {
+void Transaction::Publish(SHIELD_WorldSystem* shield,
+                          std::unordered_set<ChunkID>* mesh_invalidations) {
+    // At most one addition per captured participant (<= kMaxResidents). Never copy
+    // the pending work set: it can contain unrelated residents from earlier ticks.
+    std::vector<ChunkID> added_invalidations;
     try {
         if (!pending() || !m_lastTick || m_ledger->tick() != *m_lastTick) {
             Refuse();
@@ -842,11 +855,21 @@ void Transaction::Publish(SHIELD_WorldSystem* shield) {
             }
             authority.emplace(shield->prepare_water_authority_publication(changed));
         }
-        // Recheck ledger admission before the first live write. Everything below
-        // transfers prepared storage or writes scalars; there is no fallible tail.
+        // Recheck ledger admission before preparing mesh additions and committing water.
         if (!m_ledger->prepare_water_patch(m_patches, m_debts)) {
             Refuse();
         }
+        if (mesh_invalidations) {
+            added_invalidations.reserve(m_entries.size());
+            for (const auto& entry : m_entries) {
+                if (entry.mesh_invalidated &&
+                    mesh_invalidations->insert(entry.live->get_id()).second) {
+                    added_invalidations.push_back(entry.live->get_id());
+                }
+            }
+        }
+        // Owner-thread access keeps the prepared additions private until this
+        // nonthrowing tail publishes water. Allocation failure removes only new IDs.
         for (auto& entry : m_entries) {
             PublishWater(*entry.live, *entry.grid, entry.changed);
         }
@@ -856,6 +879,11 @@ void Transaction::Publish(SHIELD_WorldSystem* shield) {
         }
         Rollback();
     } catch (...) {
+        if (mesh_invalidations) {
+            for (const auto id : added_invalidations) {
+                mesh_invalidations->erase(id);
+            }
+        }
         Rollback();
         throw;
     }
@@ -1016,7 +1044,7 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         next_completed.push_back(work);
     }
     static_assert(std::is_nothrow_swappable_v<RegionalWork>);
-    stage.Publish(m_shield_system);
+    stage.Publish(m_shield_system, &m_mesh_invalidations);
     // Every allocation/refusal precedes this tail: only swaps and scalar writes remain.
     completed.swap(next_completed);
     m_debug_source_injected_mm += injected;
