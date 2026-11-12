@@ -77,6 +77,52 @@ struct FarFrozenRegion {
     std::uint8_t tier = 0;
     FarEditedFootprint support;
 };
+// Optional owner-supplied monotone clock and absolute transaction expiry. The
+// clock/context must outlive synchronous capture and any retained source image.
+// A null clock leaves the existing frame and operation allowances in force.
+struct FarFrozenCaptureDeadline {
+    std::uint64_t (*now)(const void*) noexcept = nullptr;
+    const void* context = nullptr;
+    std::uint64_t expires_at = 0;
+    bool expired() const {
+        return now && now(context) >= expires_at;
+    }
+};
+// Synchronous transaction accounting. Charge immediately before each callback,
+// including callbacks nested in a source adapter. Never retained by an image.
+class FarFrozenCaptureWork {
+public:
+    struct Counts {
+        std::uint64_t height = 0, density = 0, water = 0;
+    };
+    explicit FarFrozenCaptureWork(const Counts& limits,
+                                  FarFrozenCaptureWork* transaction = nullptr,
+                                  const FarFrozenCaptureDeadline& deadline = {},
+                                  const FarFrozenCaptureDeadline& source_deadline = {})
+        : limits_(limits)
+        , transaction_(transaction)
+        , deadline_(deadline)
+        , source_deadline_(source_deadline) {}
+    FarFrozenCaptureWork(const FarFrozenCaptureWork&) = delete;
+    FarFrozenCaptureWork& operator=(const FarFrozenCaptureWork&) = delete;
+    bool ChargeHeight();
+    bool ChargeDensity();
+    bool ChargeWater();
+    bool CheckDeadline();
+    bool deadline_exceeded() const {
+        return deadline_exceeded_ || (transaction_ && transaction_->deadline_exceeded());
+    }
+    Counts counts() const {
+        return counts_;
+    }
+
+private:
+    Counts limits_;
+    Counts counts_;
+    FarFrozenCaptureWork* transaction_;
+    FarFrozenCaptureDeadline deadline_, source_deadline_;
+    bool deadline_exceeded_ = false;
+};
 struct FarFrozenCaptureLimits {
     // Required finite caps; zero admits no work. Counts include rectangular halos
     // and worst-case callback invocations through every enabled override layer.
@@ -84,6 +130,10 @@ struct FarFrozenCaptureLimits {
     std::uint64_t max_height_samples = 0, max_density_samples = 0, max_water_samples = 0;
     // Image, shared ownership control block, and exact vector capacities.
     std::uint64_t max_bytes = 0;
+    // Optional shared transaction across images, with its own explicit caps.
+    // Per-image sample caps still apply; no callback or counter is retained.
+    FarFrozenCaptureWork* work = nullptr;
+    FarFrozenCaptureDeadline deadline{};
 };
 enum class FarFrozenCaptureError : std::uint8_t {
     None,
@@ -95,7 +145,8 @@ enum class FarFrozenCaptureError : std::uint8_t {
     Unavailable,
     NonFiniteSample,
     IdentityMismatch,
-    AllocationFailure
+    AllocationFailure,
+    DeadlineExceeded
 };
 
 class FarFrozenObservation final : public std::enable_shared_from_this<FarFrozenObservation> {
