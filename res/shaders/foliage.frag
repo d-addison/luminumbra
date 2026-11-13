@@ -134,14 +134,28 @@ float fol_cloudShadow(vec3 worldPos) {
     return clamp(coverage * u_cloudShadowStrength, 0.0, 1.0);
 }
 
+// Signed distance to one slender, curved blade within the existing card.
+// The finite tip height also cuts off the shorter side blades of the tuft.
+float bladeDistance(vec2 p, float root, float lean, float height) {
+    float t = clamp(p.y / height, 0.0, 1.0);
+    float center = root + lean * t * t;
+    float halfWidth = 0.11 * (1.0 - t * t);
+    return max(abs(p.x - center) - halfWidth, p.y - height);
+}
+
 void main() {
-    // Blade alpha mask: taper toward the tip and soften the vertical edges so
-    // the card reads as a tuft rather than a hard quad. texCoord.y: 0 base, 1 tip.
-    float x = abs(fs_in.texCoord.x * 2.0 - 1.0);
-    float halfWidth = fs_in.color.a > 0.5
-        ? pow(max(1.0 - fs_in.texCoord.y, 0.0), 0.8) : 1.0;
-    float edgeAA = max(fwidth(x), 0.015);
-    float alpha = (1.0 - smoothstep(halfWidth - edgeAA, halfWidth + edgeAA, x)) * fs_in.fade;
+    vec2 p = vec2(fs_in.texCoord.x * 2.0 - 1.0, fs_in.texCoord.y);
+    // Three separated blades per card instead of one full-width conical taper.
+    // Fixed work per fragment; placement, instance count and wind stay unchanged.
+    float grassDistance = min(bladeDistance(p, -0.55, -0.20, 0.78),
+                              min(bladeDistance(p, 0.0, 0.16, 1.0),
+                                  bladeDistance(p, 0.55, 0.20, 0.88)));
+    // Non-swaying pebbles/twigs also need a silhouette: their crossed cards
+    // previously had alpha 1 right out to all four rectangular corners.
+    float clutterDistance = length(vec2(p.x, p.y * 2.0 - 1.0)) - 1.0;
+    float silhouette = fs_in.color.a > 0.5 ? grassDistance : clutterDistance;
+    float edgeAA = max(fwidth(silhouette), 0.015);
+    float alpha = (1.0 - smoothstep(-edgeAA, edgeAA, silhouette)) * fs_in.fade;
     if (alpha < 0.02) {
         discard;
     }

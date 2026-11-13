@@ -113,6 +113,47 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
 }
 
+TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
+    const auto source = ReadShader("src/luminumbra_client/app/ProcgenPalettes.cpp");
+    for (const char* kind : {"Rock", "Bush"}) {
+        const auto palette =
+            ExtractBlock(source, std::string("void BuildProcgen") + kind + "Palette(");
+        ASSERT_FALSE(palette.empty());
+        for (int lod = 1; lod <= 3; ++lod) {
+            ExpectContains(palette,
+                           "rp.register_procgen_mesh(base + \".lod" + std::to_string(lod) +
+                               "\", build" + kind + "Hull(lo, hi));");
+        }
+        EXPECT_EQ(palette.find("Billboard"), std::string::npos);
+        const auto hull = ExtractBlock(palette, std::string("auto build") + kind + "Hull =");
+        ExpectContains(hull, "const int of[8][3]");
+        ExpectContains(hull, "for (int f = 0; f < 8; ++f)");
+    }
+}
+
+TEST(GroundCoverContract, GrassHasSeparatedCurvedBladesAndClutterHasCutoutCorners) {
+    const auto source = ReadShader("res/shaders/foliage.frag");
+    const auto blade = ExtractBlock(source, "float bladeDistance(");
+    ExpectContains(blade, "float t = clamp(p.y / height, 0.0, 1.0);");
+    ExpectContains(blade, "float center = root + lean * t * t;");
+    ExpectContains(blade, "float halfWidth = 0.11 * (1.0 - t * t);");
+    ExpectContains(blade, "return max(abs(p.x - center) - halfWidth, p.y - height);");
+    const auto main = ExtractBlock(source, "void main()");
+    EXPECT_EQ(CountOccurrences(main, "bladeDistance("), 3u);
+    ExpectContains(main, "bladeDistance(p, -0.55, -0.20, 0.78)");
+    ExpectContains(main, "bladeDistance(p, 0.0, 0.16, 1.0)");
+    ExpectContains(main, "bladeDistance(p, 0.55, 0.20, 0.88)");
+    ExpectContains(main, "length(vec2(p.x, p.y * 2.0 - 1.0)) - 1.0");
+    ExpectContains(main, "fs_in.color.a > 0.5 ? grassDistance : clutterDistance");
+    ExpectContains(main, "max(fwidth(silhouette), 0.015)");
+    ExpectContains(main, "smoothstep(-edgeAA, edgeAA, silhouette)) * fs_in.fade");
+    ExpectContains(ExtractBlock(main, "if (alpha < 0.02)"), "discard;");
+    // CPU, compute and frozen replay draw the same vertex/fragment pair.
+    const auto pass = ReadShader("src/luminumbra_client/rendering/passes/FoliagePass.cpp");
+    ExpectContains(pass, "res/shaders/foliage.vert");
+    ExpectContains(pass, "res/shaders/foliage.frag");
+}
+
 TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedHelper) {
     const char* files[]{"lighting_pass.frag",
                         "ssao.frag",

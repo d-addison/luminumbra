@@ -648,7 +648,7 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
     //   LOD: an octahedron hull (6 axis-extreme verts, 8 flat faces)
     // built from the deformed icosahedron's AABB — reads as the same boulder silhouette
     // at distance for ~8 tris (vs 20). Used for LOD1/LOD2 so distant rocks (>140m / >320m)
-    // shed geometry; LOD3 (>620m) collapses to a crossed billboard (~4 tris).
+    // shed geometry; LOD3 retains the same closed hull at the horizon.
     auto buildRockHull = [](const glm::vec3& lo, const glm::vec3& hi) {
         const glm::vec3 c = (lo + hi) * 0.5f;
         const glm::vec3 ex[6] = {{hi.x, c.y, c.z},
@@ -677,31 +677,6 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
             i.push_back(k + 1);
             i.push_back(k + 2);
         }
-        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
-    };
-    //  far-field billboard: two crossed vertical quads spanning the boulder AABB
-    // (~4 tris) — the stone triplanar material colours them, so a distant scree field
-    // stays in budget. Mirrors the tree LOD3 cross-billboard.
-    auto buildRockBillboard = [](const glm::vec3& lo, const glm::vec3& hi) {
-        const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.2f});
-        const float yLo = lo.y, yHi = std::max(hi.y, lo.y + 0.2f);
-        std::vector<V> v;
-        std::vector<std::uint32_t> i;
-        auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 n) {
-            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
-            v.push_back({a, n, {0, 0}});
-            v.push_back({b, n, {1, 0}});
-            v.push_back({c, n, {1, 1}});
-            v.push_back({d, n, {0, 1}});
-            i.push_back(k);
-            i.push_back(k + 1);
-            i.push_back(k + 2);
-            i.push_back(k);
-            i.push_back(k + 2);
-            i.push_back(k + 3);
-        };
-        quad({-W, yLo, 0}, {W, yLo, 0}, {W, yHi, 0}, {-W, yHi, 0}, {0, 0, 1});
-        quad({0, yLo, -W}, {0, yLo, W}, {0, yHi, W}, {0, yHi, -W}, {1, 0, 0});
         return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
     };
     int built = 0;
@@ -740,10 +715,10 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         rp.register_procgen_mesh(base,
                                  Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
         //  distance LODs (GBufferPass SelectTreeLod path picks these by camera
-        // distance; absent = fall back to LOD0). LOD1+LOD2 = octahedron hull, LOD3 = billboard.
+        // distance; absent = fall back to LOD0). All coarse LODs retain a closed hull.
         rp.register_procgen_mesh(base + ".lod1", buildRockHull(lo, hi));
         rp.register_procgen_mesh(base + ".lod2", buildRockHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod3", buildRockBillboard(lo, hi));
+        rp.register_procgen_mesh(base + ".lod3", buildRockHull(lo, hi));
         ++built;
     }
     state.rockPaletteCount = built;
@@ -791,9 +766,9 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
     //   LOD helpers (mirror the rock palette): an 8-face octahedron mound
-    // sized to the cluster AABB (~8 tris vs 40-60) for LOD1/LOD2, and a crossed billboard
-    // (~4 tris) for the far field. The grass/leaf material colours them, so distant
-    // undergrowth stays in budget. Selected by GBufferPass SelectTreeLod by camera distance.
+    // sized to the cluster AABB (8 tris vs 40-60) for every coarse LOD. A closed
+    // hull preserves the silhouette from above and avoids opaque rectangular cards.
+    // Selected by GBufferPass SelectTreeLod by camera distance.
     auto buildBushHull = [](const glm::vec3& lo, const glm::vec3& hi) {
         const glm::vec3 c = (lo + hi) * 0.5f;
         const glm::vec3 ex[6] = {{hi.x, c.y, c.z},
@@ -823,35 +798,13 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         }
         return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
     };
-    auto buildBushBillboard = [](const glm::vec3& lo, const glm::vec3& hi) {
-        const float W = std::max({hi.x, -lo.x, hi.z, -lo.z, 0.2f});
-        const float yLo = std::min(lo.y, 0.0f), yHi = std::max(hi.y, yLo + 0.2f);
-        std::vector<V> v;
-        std::vector<std::uint32_t> i;
-        auto quad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 n) {
-            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
-            v.push_back({a, n, {0, 0}});
-            v.push_back({b, n, {1, 0}});
-            v.push_back({c, n, {1, 1}});
-            v.push_back({d, n, {0, 1}});
-            i.push_back(k);
-            i.push_back(k + 1);
-            i.push_back(k + 2);
-            i.push_back(k);
-            i.push_back(k + 2);
-            i.push_back(k + 3);
-        };
-        quad({-W, yLo, 0}, {W, yLo, 0}, {W, yHi, 0}, {-W, yHi, 0}, {0, 0, 1});
-        quad({0, yLo, -W}, {0, yLo, W}, {0, yHi, W}, {0, yHi, -W}, {1, 0, 0});
-        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
-    };
     int built = 0;
     for (int p = 0; p < kBushPaletteSize; ++p) {
         std::vector<V> verts;
         std::vector<std::uint32_t> idx;
         verts.reserve(180);
         idx.reserve(180);
-        glm::vec3 lo(1.0e9f), hi(-1.0e9f); // cluster AABB for the LOD hull/billboard
+        glm::vec3 lo(1.0e9f), hi(-1.0e9f); // cluster AABB for the LOD hull
         // 2-3 overlapping lobes per bush; each a squashed, deformed icosphere.
         const int lobes = 2 + static_cast<int>(h01(p, 41) * 2.0f); // 2..3
         for (int l = 0; l < lobes; ++l) {
@@ -893,7 +846,7 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         //  distance LODs (GBufferPass picks by camera distance; absent -> LOD0).
         rp.register_procgen_mesh(base + ".lod1", buildBushHull(lo, hi));
         rp.register_procgen_mesh(base + ".lod2", buildBushHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod3", buildBushBillboard(lo, hi));
+        rp.register_procgen_mesh(base + ".lod3", buildBushHull(lo, hi));
         ++built;
     }
     state.bushPaletteCount = built;
