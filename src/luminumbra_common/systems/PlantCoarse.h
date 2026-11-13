@@ -7,6 +7,49 @@
 #include <utility>
 
 namespace luminumbra::foliage {
+// Promote a resident carrying a genome/transform into an authoritative plant. Merely
+// staging render residents never calls this operation and consumes no identity. An
+// existing authoritative role keeps its identity; repeat plant admission is idempotent.
+inline bool PromotePlantToSimulation(entt::registry& reg,
+                                     entt::entity entity,
+                                     std::uint16_t species_id,
+                                     std::uint64_t tick,
+                                     ::Luminumbra::world::ActiveRegionLedger& allocator) {
+    if (!reg.valid(entity) ||
+        !reg.all_of<Comp::TransformComponent, Comp::PlantGenomeComponent>(entity))
+        return false;
+    if (const auto* region = reg.try_get<const Comp::PlantRegionComponent>(entity)) {
+        if (region->persistent_id != RequirePlantSimulationId(reg, entity) ||
+            !reg.all_of<Comp::PlantGrowthComponent>(entity))
+            throw std::runtime_error("Inconsistent promoted plant ownership");
+    }
+    if (reg.all_of<Comp::PlantTag>(entity)) {
+        if (RequirePlantSimulationId(reg, entity) >= allocator.next_persistent_id())
+            throw std::runtime_error("Unissued plant simulation identity");
+        return true;
+    }
+    auto identity = Comp::SimulationIdentityComponent{};
+    if (const auto* existing = reg.try_get<const Comp::SimulationIdentityComponent>(entity)) {
+        if (RequirePlantSimulationId(reg, entity) >= allocator.next_persistent_id())
+            throw std::runtime_error("Unissued plant simulation identity");
+        identity = *existing;
+    } else {
+        const auto allocated = ::Luminumbra::simulation::AllocateSimulationIdentity(allocator);
+        if (!allocated.has_value())
+            return false;
+        identity = allocated.value();
+    }
+    reg.emplace_or_replace<Comp::SimulationIdentityComponent>(entity, identity);
+    if (!reg.all_of<Comp::PlantGrowthComponent>(entity)) {
+        reg.emplace<Comp::PlantGrowthComponent>(entity,
+                                                Comp::PlantGrowthComponent{.species_id = species_id,
+                                                                           .planted_tick = tick,
+                                                                           .last_tick = tick});
+    }
+    reg.emplace<Comp::PlantTag>(entity);
+    return true;
+}
+
 // Exact k single growth ticks for a fixed sampled environment and infection.
 // The caller samples once at the due tick; varying-environment trajectories are
 // qualified separately. Tending is consumed tick-by-tick (at most 255 iterations).

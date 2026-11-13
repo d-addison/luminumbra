@@ -16,12 +16,15 @@
 #include "../components/DiseaseComponents.h" // blight saps growth (opt-in PlantHealthComponent)
 #include "../components/PlantComponents.h"
 #include "../core/DeterministicRng.h"
+#include "../simulation/SimulationIdentity.h"
 #include "RegionConsumerGate.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -30,6 +33,56 @@ namespace luminumbra::foliage {
 // The component types live in the capital-L `Luminumbra::Components` namespace
 // (the engine mixes `luminumbra::` for ai/core and `Luminumbra::` for components).
 namespace Comp = ::Luminumbra::Components;
+
+// Candidate identity path. Missing/invalid identity is an admission failure, never a handle.
+inline std::uint64_t RequirePlantSimulationId(const entt::registry& registry, entt::entity entity) {
+    if (!registry.valid(entity))
+        throw std::runtime_error("Invalid plant simulation participant");
+    const auto* identity = registry.try_get<const Comp::SimulationIdentityComponent>(entity);
+    if (!identity || !::Luminumbra::simulation::IsValidSimulationId(identity->id))
+        throw std::runtime_error("Missing or invalid plant simulation identity");
+    return identity->id;
+}
+
+// Eight fixed passes, O(participants), with caller-owned reusable scratch. Both vectors
+// are bounded by EnTT's entity mask; no unrelated resident is visited.
+inline void OrderPlantsBySimulationIdentity(const entt::registry& registry,
+                                            std::vector<entt::entity>& entities,
+                                            std::vector<entt::entity>& scratch,
+                                            std::uint64_t* visits = nullptr) {
+    if (&entities == &scratch)
+        throw std::invalid_argument("Plant identity scratch must be distinct");
+    if (entities.size() > entt::entt_traits<entt::entity>::entity_mask)
+        throw std::length_error("Plant identity roster too large");
+    if (entities.empty())
+        return;
+    const auto id = [&](entt::entity entity) {
+        if (visits)
+            ++*visits;
+        return RequirePlantSimulationId(registry, entity);
+    };
+    for (const auto entity : entities)
+        (void)id(entity);
+    scratch.resize(entities.size());
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        std::array<std::size_t, 256> offsets{};
+        for (const auto entity : entities)
+            ++offsets[static_cast<std::size_t>((id(entity) >> shift) & 255u)];
+        std::size_t offset = 0;
+        for (auto& count : offsets) {
+            const auto size = count;
+            count = offset;
+            offset += size;
+        }
+        for (const auto entity : entities)
+            scratch[offsets[static_cast<std::size_t>((id(entity) >> shift) & 255u)]++] = entity;
+        entities.swap(scratch);
+    }
+    for (std::size_t index = 1; index < entities.size(); ++index) {
+        if (id(entities[index - 1]) == id(entities[index]))
+            throw std::runtime_error("Duplicate plant simulation identity");
+    }
+}
 
 inline std::uint64_t PlantPersistentId(const entt::registry& registry, entt::entity entity) {
     const auto* identity = registry.try_get<const Comp::PlantRegionComponent>(entity);
@@ -164,7 +217,11 @@ RunPlantGrowthSystemOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end());
+    if (gate.UsesSimulationPlantIdentity()) {
+        OrderPlantsBySimulationIdentity(reg, ents, gate.PlantIdentityScratch());
+    } else {
+        std::sort(ents.begin(), ents.end());
+    }
 
     for (auto e : ents) {
         auto& growth = view.get<Comp::PlantGrowthComponent>(e);

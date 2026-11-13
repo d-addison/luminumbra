@@ -67,14 +67,17 @@ void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot& i
                    in.draw_count <= in.draws.size();
     out.ladder_water_available = true;
     out.water_capability = FarWorldWaterCapability::ExplicitlyDry;
-    const bool selected = out.selection.effective == FarWorldMode::Ladder && out.selection.submit;
-    const bool submitted = selected && in.frame == out.frame;
-    out.draws = submitted ? in.submission.draws : 0;
-    out.indices = submitted ? in.submission.indices : 0;
-    out.submitted_water_indices = submitted ? in.submission.water_indices : 0;
-    out.submission_occurred = out.draws != 0;
-    if (submitted && in.submission.refused) {
-        out.submission_refusal = FarWorldSubmissionRefusal::DrawRejected;
+    // A Legacy fallback keeps the caller's totals; only Ladder submission comes from the handoff.
+    const bool ladder = out.selection.effective == FarWorldMode::Ladder;
+    const bool submitted = ladder && out.selection.submit && in.frame == out.frame;
+    if (ladder) {
+        out.draws = submitted ? in.submission.draws : 0;
+        out.indices = submitted ? in.submission.indices : 0;
+        out.submitted_water_indices = submitted ? in.submission.water_indices : 0;
+        out.submission_occurred = out.draws != 0;
+        if (submitted && in.submission.refused) {
+            out.submission_refusal = FarWorldSubmissionRefusal::DrawRejected;
+        }
     }
     out.tile_count = 0;
     out.tiers = {};
