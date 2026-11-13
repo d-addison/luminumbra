@@ -2675,7 +2675,8 @@ int main(int argc, char* argv[]) {
         }
         if (Luminumbra::Rendering::TreeImpostorsRequested(
                 Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS")) &&
-            !renderPipeline.tree_impostor_enabled())
+            !renderPipeline.tree_impostor_enabled() &&
+            !renderPipeline.tree_impostor_coverage().refused())
             return "Required tree impostor baking failed. Check the client log for the renderer "
                    "error.";
         return {};
