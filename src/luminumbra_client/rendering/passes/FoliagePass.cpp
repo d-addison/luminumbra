@@ -205,6 +205,9 @@ void FoliagePass::cache_draw_uniforms() {
         .sun_intensity = glGetUniformLocation(program, "u_sunIntensity"),
         .ambient_color = glGetUniformLocation(program, "u_ambientColor"),
         .moon_dir = glGetUniformLocation(program, "u_moonDir"),
+        .moon_radiance = glGetUniformLocation(program, "u_moonRadiance"),
+        .moon_illumination = glGetUniformLocation(program, "u_moonIllum"),
+        .exposure = glGetUniformLocation(program, "u_exposure"),
         .cloud_shadow_enabled = glGetUniformLocation(program, "u_cloudShadowEnabled"),
         .cloud_scroll_offset = glGetUniformLocation(program, "u_cloudScrollOffset"),
         .cloud_coverage_amount = glGetUniformLocation(program, "u_cloudCoverageAmount"),
@@ -2027,6 +2030,9 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     // pass keys its moon term off (moon-shadows workstream), so night blades pick up
     // the identical cool moonlit tone as the terrain instead of glowing.
     glUniform3fv(m_draw_uniforms.moon_dir, 1, glm::value_ptr(ctx.moon_light_dir));
+    glUniform3fv(m_draw_uniforms.moon_radiance, 1, glm::value_ptr(ctx.moon_radiance));
+    glUniform1f(m_draw_uniforms.moon_illumination, ctx.moon_illumination);
+    glUniform1f(m_draw_uniforms.exposure, ctx.exposure);
 
     //  feed the SAME projected cloud cast-shadow state the
     // lighting pass uses, so storm-overcast cells drive the blades DARK like the
