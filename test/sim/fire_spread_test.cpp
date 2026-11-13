@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -259,6 +260,70 @@ TEST(FireSpread, RunEqualsReplay) {
         return trace;
     };
     EXPECT_EQ(run(), run());
+}
+
+TEST(FireSpread, CandidateRefusesBrokenIdentityInEitherSourceListBeforeBurnDown) {
+    for (const bool explicit_source : {false, true}) {
+        for (const auto id :
+             {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{1} << 63, ~std::uint64_t{0}}) {
+            entt::registry registry;
+            const auto first =
+                spawnFuel(registry, 0.0f, 0.0f, Comp::BurnState::Burning, 0, 1000, 2.0f, 1);
+            registry.emplace<Comp::SimulationIdentityComponent>(first, std::uint64_t{1});
+            entt::entity second;
+            if (explicit_source) {
+                registry.emplace<Comp::IgnitionSourceComponent>(first);
+                second = registry.create();
+                registry.emplace<Comp::TransformComponent>(second);
+                registry.emplace<Comp::IgnitionSourceComponent>(second);
+            } else {
+                second = spawnFuel(registry, 1.0f, 0.0f, Comp::BurnState::Unburnt);
+            }
+            EXPECT_THROW(RunFireSpreadOnTick<true>(registry, 1), std::logic_error);
+            registry.emplace<Comp::SimulationIdentityComponent>(second, id);
+            EXPECT_THROW(RunFireSpreadOnTick<true>(registry, 1), std::logic_error);
+            EXPECT_EQ(stateOf(registry, first), Comp::BurnState::Burning);
+            EXPECT_EQ(registry.get<Comp::CombustibleComponent>(first).burn_ticks_remaining, 1u);
+        }
+    }
+}
+
+TEST(FireSpread, CandidateEmptyRosterAndExternalSourcesRetainTheirSemantics) {
+    entt::registry registry;
+    EXPECT_EQ(RunFireSpreadOnTick<true>(registry, 1).ordering_visits, 0u);
+    const auto dry = spawnFuel(registry, 1.0f, 0.0f, Comp::BurnState::Unburnt);
+    registry.emplace<Comp::SimulationIdentityComponent>(dry, std::uint64_t{1});
+    const std::array<luminumbra::sim::FireIgnitionSource, 1> strikes{{
+        {glm::vec2(0.0f), 2.0f, 1.0f},
+    }};
+    EXPECT_EQ(RunFireSpreadOnTick<true>(registry, 1, glm::vec2(0.0f), strikes).ignited, 1);
+    EXPECT_EQ(stateOf(registry, dry), Comp::BurnState::Burning);
+}
+
+TEST(FireSpread, CandidateChecksIdentityAcrossListsAndAllowsOneEntityWithBothRoles) {
+    entt::registry registry;
+    const auto burning =
+        spawnFuel(registry, 0.0f, 0.0f, Comp::BurnState::Burning, 0, 1000, 2.0f, 1);
+    registry.emplace<Comp::SimulationIdentityComponent>(burning, std::uint64_t{1});
+    const auto torch = registry.create();
+    registry.emplace<Comp::TransformComponent>(torch);
+    registry.emplace<Comp::IgnitionSourceComponent>(torch);
+    registry.emplace<Comp::SimulationIdentityComponent>(torch, std::uint64_t{1});
+    EXPECT_THROW(RunFireSpreadOnTick<true>(registry, 1), std::logic_error);
+    EXPECT_EQ(stateOf(registry, burning), Comp::BurnState::Burning);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(burning).burn_ticks_remaining, 1u);
+    EXPECT_EQ(registry.get<Comp::CombustibleComponent>(burning).fuel_milli, 1000u);
+
+    registry.destroy(torch);
+    registry.emplace<Comp::IgnitionSourceComponent>(burning);
+    const auto dry = spawnFuel(registry, 1.0f, 0.0f, Comp::BurnState::Unburnt);
+    registry.emplace<Comp::SimulationIdentityComponent>(dry, std::uint64_t{2});
+    const auto stats = RunFireSpreadOnTick<true>(registry, 1);
+    EXPECT_EQ(stats.ignited, 1);
+    EXPECT_EQ(stats.burnt_out, 1);
+    EXPECT_EQ(stats.ordering_visits, (18u * 2u - 1u) + (18u - 1u) + 1u);
+    EXPECT_EQ(stateOf(registry, dry), Comp::BurnState::Burning);
+    EXPECT_EQ(stateOf(registry, burning), Comp::BurnState::Burnt);
 }
 
 } // namespace

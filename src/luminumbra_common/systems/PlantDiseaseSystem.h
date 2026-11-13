@@ -13,8 +13,8 @@
 //      resistance (acquired immunity).
 //
 // DETERMINISM (this changes sim state -> world_hash):
-//   * id-ordered traversal (sort by entt::to_integral) so accumulation order is
-//     stable across machines.
+//   * Each source contribution becomes an integer before summation. Legacy
+//     traversal sorts runtime handles; the candidate validates common identities.
 //   * TWO-PHASE: we snapshot the infected set FIRST, then mutate health, so a
 //     plant infected THIS tick does not retroactively infect its neighbours within
 //     the same tick (order-independent spread).
@@ -40,6 +40,7 @@
 #include "../core/DeterministicMath.h" // Sqrt (IEEE-deterministic)
 #include "../core/DeterministicRng.h"  // reserved (offset +20) for a stochastic variant
 
+#include "../simulation/SimulationParticipantOrder.h"
 #include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
@@ -97,6 +98,12 @@ inline std::uint16_t SatSub(std::uint16_t a, std::uint32_t b) {
 // tick id. Returns telemetry (also useful for the world sub-hash). Deterministic,
 // id-ordered, two-phase. `world_seed` lets distinct worlds diverge (reserved for a
 // future stochastic variant); the default deterministic path ignores it.
+// The candidate traversal is permutation invariant: each source contribution is
+// converted to an integer before summation (unsigned addition is associative),
+// and each health write reads only the pre-tick source snapshot. There are no
+// ordered events or entity destruction here. Candidate ordering validates identity
+// admission before the snapshot; keep the legacy sort until activation.
+template<bool StableIdentity = false>
 inline PlantDiseaseStats
 RunPlantDiseaseOnTick(entt::registry& reg,
                       std::uint64_t tick,
@@ -116,9 +123,13 @@ RunPlantDiseaseOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    if constexpr (StableIdentity) {
+        ::Luminumbra::simulation::OrderSimulationParticipants(reg, ents);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
 
     if (ents.empty())
         return stats; // explicit no-op for the empty roster
