@@ -633,7 +633,7 @@ bool SkyAtmosphereLut::build_sky_lut_gpu_init(const glm::vec3& sun_dir_world) {
         Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute,
                                                     static_cast<GLuint>((w + 7) / 8),
                                                     static_cast<GLuint>((h + 7) / 8),
-                                                    1);
+                                                    1u);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_skyview_ssbo);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -680,7 +680,7 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute,
                                                 static_cast<GLuint>((kSkyViewWidth + 7) / 8),
                                                 static_cast<GLuint>((kSkyViewHeight + 7) / 8),
-                                                1);
+                                                1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
 
     // RGB16F is not image-store-able, so upload the SSBO into the sky-view texture through a

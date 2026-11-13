@@ -1221,6 +1221,22 @@ class UploadBudgetWiring(unittest.TestCase):
         for name in ('capture_frame_parity', 'capture_upscale_seam_parity', 'capture_ssao_parity'):
             self.assertRegex(compact(regression), r'EXPECT_FALSE\(\s*pipeline\.' + name + r'\(')
 
+    def test_parity_captures_refuse_frame_errors_before_allocations_can_consume_them(self):
+        for name in ("frame", "upscale_seam", "ssao"):
+            capture = body(self.pipeline, "bool RenderPipeline::capture_" + name + "_parity(")
+            check = capture.index("if (glGetError() != GL_NO_ERROR)")
+            refusal = body(capture, "if (glGetError() != GL_NO_ERROR)")
+            self.assertEqual(compact(refusal), "return false;")
+            self.assertLess(capture.index("CapturePixelBytes("), check)
+            first_work = "RenderContext ctx" if name == "ssao" else "auto make_target"
+            self.assertLess(check, capture.index(first_work))
+            self.assertLess(check, capture.index("std::filesystem::create_directories("))
+        resize = body(self.pipeline, "bool RenderPipeline::resize_graphics_targets(")
+        self.assertIn("m_render_registry.replace_targets(", resize)
+        registry = read(RENDERING / "RenderResourceRegistry.cpp")
+        allocation = body(registry, "bool allocate_texture_storage(")
+        self.assertIn("while (glGetError() != GL_NO_ERROR)", allocation)
+
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))
         self.assertIn('if (!WriteCaptureText(out_dir / "survey.json",', survey)
@@ -1328,6 +1344,166 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
 
+
+class SkyAppearanceWiring(unittest.TestCase):
+    def test_ambient_tag_is_confined_to_render_instances(self):
+        particles = read(RENDERING / "passes/ParticlePass.cpp")
+        update = compact(body(particles, "void ParticlePass::update("))
+        self.assertIn("rec.atlas_layer = emitter.data.atlas_layer;", update)
+        self.assertIn("rec.rotation = p.emitter_index == m_ambient_emitter_index ? "
+                      "std::numeric_limits<int8_t>::min() : "
+                      "static_cast<int8_t>(std::lround(angle_norm * 127.0f));", update)
+        setup = compact(body(particles, "void ParticlePass::init_buffers("))
+        self.assertIn("kMaxInstances * sizeof(InstanceRecord)", setup)
+        self.assertIn("glVertexAttribIFormat(6, 1, GL_BYTE, "
+                      "offsetof(InstanceRecord, rotation))", setup)
+        self.assertIn("glVertexAttribBinding(6, 0)", setup)
+        # The magical fixture and the authored ambient descriptor keep layer 0.
+        for filename in ("ambient_motes.json", "fixture_sparkle.json"):
+            self.assertRegex(read(ROOT / "data/common/particles" / filename),
+                             r'"atlas_layer"\s*:\s*0\b')
+        for stage in ("vert", "geom", "frag"):
+            source = read(ROOT / ("res/shaders/magical_particles." + stage))
+            self.assertIn("flat float atlasLayer;", source)
+            self.assertIn("flat uint ambientMote;", source)
+        vertex = read(ROOT / "res/shaders/magical_particles.vert")
+        self.assertIn("layout (location = 6) in int aAmbientMote;", vertex)
+        self.assertIn("vs_out.ambientMote = aAmbientMote == -128 ? 1u : 0u;", vertex)
+        geometry = read(ROOT / "res/shaders/magical_particles.geom")
+        self.assertIn("gs_out.ambientMote = gs_in[0].ambientMote;", geometry)
+        native = read(ROOT / "test/rendering/particle_determinism_test.cpp")
+        self.assertIn("TEST_F(ParticleLiveTest, AmbientFlagPreservesEveryAuthoredLayer)", native)
+        self.assertIn("layers{0, 1, 2, 3, 4, 65535}", native)
+
+    def test_ambient_dust_scattering_rejects_sky_and_fades_with_distance(self):
+        shader = read(ROOT / "res/shaders/magical_particles.frag")
+        self.assertIn("bool isAmbientMote = fs_in.ambientMote != 0u;", shader)
+        dust = compact(body(shader, "if (isAmbientMote)"))
+        self.assertIn("sceneDepthRaw > 0.0 ? 1.0 : 0.0", dust)
+        self.assertIn("1.0 - smoothstep(4.0, 24.0, fs_in.distanceToCamera)", dust)
+        self.assertIn("finalColor.rgb *= clamp(lit, vec3(0.0), vec3(1.0));", dust)
+        self.assertIn("finalColor.a *= shape * softFade * skyFade * distanceFade;", dust)
+        self.assertNotIn("+=", dust)
+        self.assertIn("else if (isRain || isSnow)", shader)
+        native = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                      "TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry)")
+        for assertion in ("EXPECT_FLOAT_EQ(alpha(0), 0.0f)",
+                          "EXPECT_FLOAT_EQ(alpha(32), 0.0f)",
+                          "EXPECT_NEAR(alpha(3000), 1.0f", "EXPECT_NEAR(alpha(32), 0.5f",
+                          "EXPECT_NEAR(probe.draw()[16].r, 0.25f",
+                          "for (GLuint layer : {0u, 1u, 2u, 3u, 4u, 65535u})"):
+            self.assertIn(assertion, native)
+
+    def test_star_cell_hash_mixes_all_coordinates_without_lattice_repetition(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        # Pin the complete integer algorithm so this mirror cannot silently drift.
+        self.assertEqual(compact(body(shader, "uint starCellSeed(")), compact("""
+            uvec3 p = uvec3(cell);
+            uint seed = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u) ^ (p.z * 0xcb1ab31fu);
+            seed ^= seed >> 16u;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15u;
+            seed *= 0x846ca68bu;
+            return seed ^ (seed >> 16u);
+        """))
+        self.assertEqual(compact(body(shader, "float starRandom(")), compact("""
+            seed ^= seed >> 16u;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15u;
+            seed *= 0x846ca68bu;
+            seed ^= seed >> 16u;
+            return float(seed >> 8u) * (1.0 / 16777216.0);
+        """))
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("vec3 p = viewDir * 320.0;", stars)
+        self.assertIn("uint seed = starCellSeed(ivec3(floor(p)));", stars)
+        self.assertIn("float brightness = starRandom(seed);", stars)
+        for salt in ("0x9e3779b9u", "0x85ebca6bu", "0xc2b2ae35u"):
+            self.assertIn("starRandom(seed ^ " + salt + ")", stars)
+
+        def mix(seed):
+            seed ^= seed >> 16
+            seed = (seed * 0x7feb352d) & 0xffffffff
+            seed ^= seed >> 15
+            seed = (seed * 0x846ca68b) & 0xffffffff
+            return seed ^ (seed >> 16)
+
+        def cell_seed(cell):
+            seed = 0
+            for coordinate, multiplier in zip(cell, (0x8da6b343, 0xd8163841, 0xcb1ab31f)):
+                seed ^= (coordinate * multiplier) & 0xffffffff
+            return mix(seed)
+
+        # Negative coordinates, zero and extrema around the old lattice
+        # collision. All grid samples and their partners fit the live range.
+        for x in range(-283, 321, 19):
+            for y in range(-249, 321, 19):
+                for z in range(-320, 320, 19):
+                    first = cell_seed((x, y, z))
+                    second = cell_seed((x - 37, y - 71, z + 1))
+                    self.assertNotEqual(first, second, (x, y, z))
+                    outputs = lambda seed: tuple(mix(seed ^ salt) >> 8 for salt in
+                                                 (0, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35))
+                    self.assertNotEqual(outputs(first), outputs(second), (x, y, z))
+        for offset in ((-37, -71, 1), (37, 71, 1)):
+            self.assertNotEqual(cell_seed((0, 0, 0)), cell_seed(offset), offset)
+        for axis in range(3):
+            for coordinate in range(-320, 321):
+                cell = [0, 0, 0]
+                cell[axis] = coordinate
+                self.assertNotEqual(cell_seed(cell), cell_seed(
+                    tuple(value - delta for value, delta in zip(cell, (37, 71, -1)))))
+
+    def test_stars_have_a_horizon_cutoff_in_both_sky_palette_paths(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("nightIntensity < 0.1 || viewDir.y <= 0.0", stars)
+        self.assertIn("float horizonFade = smoothstep(0.0, 0.1, viewDir.y);", stars)
+        self.assertIn("* nightIntensity * horizonFade;", stars)
+        # Stars use one path after LUT/fallback selection, rather than a capture override.
+        main = body(shader, "void main()")
+        self.assertGreater(main.index("skyColor += renderStars("),
+                           main.index("skyColor = legacyGradient("))
+
+    def test_stars_use_compact_radial_profiles_without_grid_noise_thresholds(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("starProfile(length(fract(p) - centre))", stars)
+        self.assertIn("* 0.5 + 0.25;", stars)
+        self.assertNotIn("noise(", stars)
+        profile = compact(body(shader, "float starProfile("))
+        # Evaluate the production scalar profile, including its support boundary.
+        expression = re.fullmatch(r"return (.*);", profile).group(1)
+
+        def smoothstep(low, high, value):
+            t = min(1.0, max(0.0, (value - low) / (high - low)))
+            return t * t * (3.0 - 2.0 * t)
+
+        def sample(radius):
+            return eval(expression, {"__builtins__": {}},
+                        {"radius": radius, "smoothstep": smoothstep})
+
+        self.assertEqual(sample(0.0), 1.0)
+        previous = 1.0
+        for index in range(1, 101):
+            value = sample(index * 0.003)
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLessEqual(value, previous)
+            previous = value
+        for radius in (0.18, 0.25, 0.5, 1.0):
+            self.assertEqual(sample(radius), 0.0)
+        self.assertGreater(sample(0.09), 0.0)
+
+    def test_aurora_and_stars_share_cloud_transmittance(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        main = body(shader, "void main()")
+        cloud = main.index("skyColor = renderClouds(viewDir, skyColor, dayFactor);")
+        for layer in ("renderAurora(viewDir, dayFactor)", "renderStars(viewDir, nightFactor)"):
+            self.assertEqual(main.count(layer), 1)
+            self.assertLess(main.index("skyColor += " + layer), cloud)
+        clouds = body(shader, "vec3 renderClouds(")
+        self.assertIn("return mix(baseColor, cloudColor, alpha);", clouds)
+        self.assertIn("return baseColor;", clouds)
 
 class NightLightingSourceTests(unittest.TestCase):
     def test_frame_scan_pins_override_live_clock_before_the_rendered_capture(self):
