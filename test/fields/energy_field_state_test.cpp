@@ -1442,6 +1442,9 @@ TEST(AetherEmitterDeterminism, NeutralSourceKeysMatchStableKeysForBothIntegerDep
     for (const bool regional : {false, true}) {
         for (const bool reverse : {false, true}) {
             EnergyFieldState stable(2), neutral(2);
+            // Anchor both fields so the legacy path retains every nonzero deposit.
+            stable.SetAnchorCell(0, 0);
+            neutral.SetAnchorCell(0, 0);
             auto reordered = deposits;
             if (reverse)
                 std::reverse(reordered.begin(), reordered.end());
@@ -1475,6 +1478,8 @@ TEST(AetherEmitterDeterminism, NeutralSourceKeysMatchStableKeysForBothIntegerDep
                 EXPECT_EQ(stable.Tick(1), neutral.Tick(1));
             }
             ASSERT_GT(stable.total_raw(), 0u);
+            ASSERT_GT(neutral.total_raw(), 0u);
+            EXPECT_EQ(stable.total_raw(), neutral.total_raw());
             EXPECT_EQ(stable.CanonicalBytes(), neutral.CanonicalBytes());
         }
     }

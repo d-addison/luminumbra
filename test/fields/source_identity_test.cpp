@@ -75,6 +75,7 @@ TEST(SourceIdentity, BothGathersOrderEveryIdentityByteAcrossHandleAndStoragePerm
                     return a.rate_raw_per_tick > b.rate_raw_per_tick;
                 });
                 EnergyFieldState field(2);
+                field.SetAnchorCell(0, 0);
                 luminumbra::ai::CreatureTickAdmission admission;
                 const auto stats =
                     Gather(registry, field, regional, admitted ? &admission : nullptr);
@@ -92,6 +93,7 @@ TEST(SourceIdentity, BothGathersOrderEveryIdentityByteAcrossHandleAndStoragePerm
                 }
                 EXPECT_FALSE(field.pending_deposit(ids.size()).has_value());
                 field.Tick(1);
+                ASSERT_EQ(field.total_raw(), 10u);
                 if (reference.empty())
                     reference = field.CanonicalBytes();
                 EXPECT_EQ(field.CanonicalBytes(), reference);
@@ -113,6 +115,7 @@ TEST(SourceIdentity, MissingInvalidAndDuplicateIdentitiesRefuseBeforeAnyDeposit)
                 if (missing)
                     registry.remove<C::SimulationIdentityComponent>(entity);
                 EnergyFieldState field;
+                field.SetAnchorCell(0, 0);
                 field.QueueDeposit(99, 0, 0, 0, 7);
                 auto reference = field;
                 EXPECT_THROW(Gather(registry, field, regional), std::logic_error);
@@ -125,6 +128,7 @@ TEST(SourceIdentity, MissingInvalidAndDuplicateIdentitiesRefuseBeforeAnyDeposit)
                 }
                 EXPECT_FALSE(field.pending_deposit(1).has_value());
                 EXPECT_EQ(field.Tick(1), reference.Tick(1));
+                ASSERT_EQ(field.total_raw(), 7u);
                 EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
             }
         }
@@ -221,6 +225,7 @@ TEST(SourceIdentity, RegionalRefusalPreservesPriorInputForLateInvalidFootprintsA
         if (invalid_footprint)
             registry.get<C::FieldEmitterComponent>(last).radius_cells = 32;
         EnergyFieldState field;
+        field.SetAnchorCell(0, 0);
         ASSERT_TRUE(field.QueueRegionalDeposit(99, 0, 0, 0, 7));
         auto reference = field;
         const auto stats = S::GatherRegionalFieldEmitterDeposits(
@@ -231,6 +236,7 @@ TEST(SourceIdentity, RegionalRefusalPreservesPriorInputForLateInvalidFootprintsA
         EXPECT_EQ(stats.visited_emitters, 2u);
         EXPECT_FALSE(field.pending_deposit(1).has_value());
         EXPECT_EQ(field.Tick(1), reference.Tick(1));
+        ASSERT_EQ(field.total_raw(), 7u);
         EXPECT_EQ(field.CanonicalBytes(), reference.CanonicalBytes());
         registry.get<C::FieldEmitterComponent>(last).radius_cells = 0;
         EXPECT_TRUE(S::GatherRegionalFieldEmitterDeposits(
