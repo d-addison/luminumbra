@@ -40,6 +40,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <span>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -69,7 +70,15 @@ constexpr std::array<CarveSphereSpec, 3> kPersistenceCarveSpheres{
 // Carves an air sphere into the chunk's signed density field. Positive
 // density is air, so each in-range sample is raised to at least
 // (radius - distance). Returns false when the chunk has no generated sdf.
-bool CarveSphereIntoChunk(Luminumbra::Chunk& chunk, const Luminumbra::Vec3& center, float radius) {
+bool CarveSphereIntoChunk(Luminumbra::Chunk& chunk,
+                          const Luminumbra::Vec3& center,
+                          float radius,
+                          std::span<float> samples = {},
+                          std::span<Luminumbra::u8> materials = {}) {
+    if (samples.empty()) {
+        samples = chunk.sdf_data;
+        materials = chunk.material_data;
+    }
     const int size_x = Luminumbra::CHUNK_SIZE_X + 1;
     const int size_y = Luminumbra::CHUNK_SIZE_Y + 1;
     const int size_z = Luminumbra::CHUNK_SIZE_Z + 1;
@@ -98,13 +107,13 @@ bool CarveSphereIntoChunk(Luminumbra::Chunk& chunk, const Luminumbra::Vec3& cent
                 const std::size_t index = static_cast<std::size_t>(x) +
                                           static_cast<std::size_t>(y) * size_x +
                                           static_cast<std::size_t>(z) * size_x * size_y;
-                if (carve_density > chunk.sdf_data[index]) {
-                    chunk.sdf_data[index] = carve_density;
+                if (carve_density > samples[index]) {
+                    samples[index] = carve_density;
                     // carving to air clears any authored structure
                     // material at this voxel so a mined structure voxel reads as
                     // plain air (sdf air + material 0), not lingering Stone.
-                    if (!chunk.material_data.empty() && index < chunk.material_data.size()) {
-                        chunk.material_data[index] = 0u;
+                    if (!materials.empty() && index < materials.size()) {
+                        materials[index] = 0u;
                     }
                     carved = true;
                 }
@@ -160,6 +169,14 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
         return result;
     }
     std::vector<std::shared_ptr<Luminumbra::Chunk>> edited_chunks;
+    // At most three full lattices and material channels. Keep every scripted carve
+    // private until the complete selected batch passes canonical/live preflight.
+    std::array<std::vector<float>, kPersistenceCarveSpheres.size()> staged_samples;
+    std::array<std::vector<Luminumbra::u8>, kPersistenceCarveSpheres.size()> staged_materials;
+    std::array<Luminumbra::Systems::SHIELD_WorldSystem::TerrainVoxelReplacement,
+               kPersistenceCarveSpheres.size()>
+        replacements{};
+    std::size_t staged_count = 0;
     for (const CarveSphereSpec& sphere : kPersistenceCarveSpheres) {
         // Anchor each carve to the column's surface chunk exactly the way the
         // streaming system selects it (terrain height sampled at the chunk
@@ -189,19 +206,55 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
                        chunk_base_y + static_cast<float>(Luminumbra::CHUNK_SIZE_Y) - sphere.radius);
         const Luminumbra::Vec3 center(sample_x, center_y, sample_z);
         const Luminumbra::Persistence::WorldSaveService::SaveOwnership ownership;
-        if (!CarveSphereIntoChunk(*chunk, center, sphere.radius)) {
-            result.failure_reason = "carve_edit_had_no_effect";
-            return result;
+        if (world_system->simulation_terrain()) {
+            // Validate exact sizes before the bounded staging copies (4913 samples/materials).
+            constexpr auto lattice_samples = Luminumbra::world::SimulationTerrain::kLatticeSamples;
+            if (chunk->sdf_data.size() != lattice_samples ||
+                (!chunk->material_data.empty() && chunk->material_data.size() != lattice_samples)) {
+                result.failure_reason = "carve_edit_publication_refused";
+                return result;
+            }
+            // Stage the exact scripted geometry before publishing either authority.
+            // Retain glm::distance and the original chunk-local clipping.
+            const auto previous = std::find_if(
+                replacements.begin(),
+                replacements.begin() + static_cast<std::ptrdiff_t>(staged_count),
+                [&chunk](const auto& replacement) { return replacement.chunk == chunk; });
+            const auto index = static_cast<std::size_t>(previous - replacements.begin());
+            if (index == staged_count) {
+                staged_samples[index] = chunk->sdf_data;
+                staged_materials[index] = chunk->material_data;
+                replacements[index] = {chunk, staged_samples[index], staged_materials[index]};
+                ++staged_count;
+            }
+            auto& samples = staged_samples[index];
+            auto& materials = staged_materials[index];
+            if (!CarveSphereIntoChunk(*chunk, center, sphere.radius, samples, materials)) {
+                result.failure_reason = "carve_edit_had_no_effect";
+                return result;
+            }
+        } else {
+            if (!CarveSphereIntoChunk(*chunk, center, sphere.radius)) {
+                result.failure_reason = "carve_edit_had_no_effect";
+                return result;
+            }
+            chunk->mark_voxel_data_dirty();
+            world_system->notify_far_lod_authority_changed(chunk->get_coords());
         }
-        chunk->mark_voxel_data_dirty();
-        world_system->notify_far_lod_authority_changed(chunk->get_coords());
         // Invalidate the LOD so the existing surface-horizon rebuild path
         // remeshes the edited voxel data (generation is skipped for chunks
         // that already carry sdf data, so the carve survives the rebuild).
-        chunk->current_lod.store(-1, std::memory_order_release);
+        if (!world_system->simulation_terrain())
+            chunk->current_lod.store(-1, std::memory_order_release);
         if (std::find(edited_chunks.begin(), edited_chunks.end(), chunk) == edited_chunks.end()) {
             edited_chunks.push_back(chunk);
         }
+    }
+    if (world_system->simulation_terrain() &&
+        world_system->PublishTerrainVoxelEdits(std::span(replacements.data(), staged_count)) !=
+            Luminumbra::world::SimulationTerrain::Admission::Accepted) {
+        result.failure_reason = "carve_edit_publication_refused";
+        return result;
     }
 
     if (!world_system->EnsureSurfaceReadyNear(spawn,

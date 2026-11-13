@@ -7,6 +7,7 @@
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
 #include "../world/FarVolume.h"
+#include "../world/SimulationTerrain.h"
 #include "../world/StructurePlacement.h"
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -34,7 +36,8 @@
 
 namespace Luminumbra::Persistence {
 struct RegionDigestInputs;
-}
+struct SimulationTerrainSource;
+} // namespace Luminumbra::Persistence
 
 namespace Luminumbra::Systems {
 
@@ -282,6 +285,40 @@ class WaterSystem;
 
 class SHIELD_WorldSystem {
 public:
+    // Explicit preparation seam; no session selects it. Pins the current resolved generation
+    // dependencies and one bounded committed source. Failed/repeated attachment changes nothing.
+    // Generation setters throw while selected; canonical edits survive live eviction.
+    // Resolved dependencies: 64 pools, 256 biomes/knots, 8 MiB copied payload.
+    // Source admission/read: 64 members, 4096 records, 8192 probes/headers, 64 MiB pool;
+    // payloads: 4 MiB/member and 16 MiB total compressed, 16/32 MiB decoded, 2 MiB controls.
+    bool EnableSimulationTerrain(const std::filesystem::path& saved_source,
+                                 const world::SimulationTerrain::Limits& limits,
+                                 std::string& error);
+    // At most 128 unique keys per call, each in +/-2000 on every axis. Existing canonical
+    // records are retained without source reads. Only proven absent full lattices regenerate.
+    // Refusal never changes retained records; no residency or render source is consulted.
+    [[nodiscard]] world::SimulationTerrain::Admission
+    AdmitSimulationTerrain(std::span<const world::SimulationTerrain::Key> keys);
+    [[nodiscard]] const world::SimulationTerrain* simulation_terrain() const;
+    struct SimulationTerrainWork {
+        std::size_t source_windows = 0;
+        std::size_t generated_lattices = 0;
+        bool operator==(const SimulationTerrainWork&) const = default;
+    };
+    // Lifetime preparation work only. Queries and retained-key admission do neither operation.
+    [[nodiscard]] SimulationTerrainWork simulation_terrain_work() const;
+    struct TerrainVoxelReplacement {
+        std::shared_ptr<Chunk> chunk;
+        std::span<const float> samples;
+        std::span<const u8> materials;
+    };
+    // Owner-thread atomic data publication, at most 128 full live lattices plus optional
+    // full material channels. Validates identity, finiteness, sizes, shared nodes and canonical
+    // capacity before either copy. Callers notify other observers after publication,
+    // under SaveOwnership.
+    // Without the service this preserves the historical live-only edit behavior.
+    [[nodiscard]] world::SimulationTerrain::Admission
+    PublishTerrainVoxelEdits(std::span<const TerrainVoxelReplacement> replacements);
     struct StreamingBudgetFrameStats {
         int update_interval_frames = 0;
         int requested_render_radius = 0;
@@ -1110,6 +1147,11 @@ public:
     }
 
 private:
+    int EditCanonicalTerrainVoxel(const Vec3& world_pos,
+                                  float radius_m,
+                                  bool fill,
+                                  PhysicsSystem* physics_system);
+    std::unique_ptr<Persistence::SimulationTerrainSource> m_simulation_terrain;
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
         // Per-lane batches retain handles, chunks and the original due tick.

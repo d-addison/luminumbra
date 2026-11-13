@@ -8,14 +8,17 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1395,3 +1398,429 @@ TEST(WorldDurableResidency, DryTerrainParksTheEditAndDiscardsRegenerableChunks) 
 }
 
 } // namespace
+
+namespace {
+using CanonicalTerrain = Luminumbra::world::SimulationTerrain;
+using TerrainAdmission = CanonicalTerrain::Admission;
+using TerrainSave = Luminumbra::Persistence::WorldSaveService;
+
+class CanonicalTerrainRoot {
+public:
+    fs::path path = Luminumbra::TestSupport::CreateUniqueTempDirectory("canonical_terrain_");
+    ~CanonicalTerrainRoot() {
+        std::error_code error;
+        fs::remove_all(path, error);
+    }
+};
+
+std::shared_ptr<Chunk> CanonicalPlane(IVec3 coords) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    chunk->sdf_data.resize(CanonicalTerrain::kLatticeSamples);
+    for (int z = 0; z < 17; ++z)
+        for (int y = 0; y < 17; ++y)
+            for (int x = 0; x < 17; ++x)
+                chunk->sdf_data[static_cast<std::size_t>(x + 17 * y + 289 * z)] =
+                    static_cast<float>(coords.y * 16 + y) - 8.0f;
+    chunk->set_state(ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+
+Luminumbra::Systems::TerrainGenParams CanonicalParams() {
+    Luminumbra::Systems::TerrainGenParams params;
+    params.biomes_enabled = false;
+    params.structures_enabled = false;
+    params.hydro_enabled = false;
+    params.caves_enabled = false;
+    params.surface_breaks_enabled = false;
+    params.island_mask_enabled = false;
+    params.cliffs_enabled = false;
+    params.rivers_enabled = false;
+    params.lakes_enabled = false;
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.domain_warp_amplitude = 0;
+    params.height_offset = 8;
+    return params;
+}
+} // namespace
+
+TEST(WorldDurableResidency, CanonicalAuthorityOwnsSavedBytesAcrossEvictionAndSourceRemoval) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    const auto first = CanonicalPlane({0, 0, 0});
+    const auto second = CanonicalPlane({1, 0, 0});
+    ASSERT_TRUE(disk.insert_chunk(first));
+    ASSERT_TRUE(disk.insert_chunk(second));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    EXPECT_EQ(world.simulation_terrain(), nullptr);
+    std::string error;
+    ASSERT_TRUE(world.EnableSimulationTerrain(root.path, {}, error)) << error;
+    EXPECT_FALSE(world.EnableSimulationTerrain(root.path / "missing", {}, error));
+    const std::array<CanonicalTerrain::Key, 2> keys{{{0, 0, 0}, {1, 0, 0}}};
+    ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+    ASSERT_TRUE(world.adopt_streamed_chunk(first));
+    ASSERT_TRUE(world.adopt_streamed_chunk(second));
+    const auto* terrain = world.simulation_terrain();
+    ASSERT_NE(terrain, nullptr);
+    EXPECT_EQ(terrain->first_surface(16000, 8000, 15000, 0).y_mm, 8000);
+    auto left = first->sdf_data;
+    auto right = second->sdf_data;
+    // Both copies of the shared node must change in one transaction.
+    left[16 + 17 * 8 + 289 * 8] = 2;
+    right[17 * 8 + 289 * 8] = 2;
+    const std::array<SHIELD_WorldSystem::TerrainVoxelReplacement, 2> edits{
+        {{first, left, {}}, {second, right, {}}}};
+    ASSERT_EQ(world.PublishTerrainVoxelEdits(edits), TerrainAdmission::Accepted);
+    EXPECT_TRUE(terrain->matches(keys[0], left));
+    EXPECT_TRUE(terrain->matches(keys[1], right));
+    EXPECT_EQ(first->sdf_data, left);
+    EXPECT_EQ(second->sdf_data, right);
+    const auto work = world.simulation_terrain_work();
+    EXPECT_EQ(work.source_windows, 2u);
+    EXPECT_EQ(work.generated_lattices, 0u);
+    const auto bytes = terrain->owned_bytes();
+    world.clear_world(nullptr);
+    ASSERT_FALSE(world.find_streamed_chunk({0, 0, 0}));
+    fs::remove_all(root.path);
+    // Retained admissions and settling queries cannot reopen the removed source or regenerate.
+    const auto expected = terrain->first_surface(16000, 8000, 15000, 0);
+    ASSERT_EQ(expected.status, CanonicalTerrain::Status::Surface);
+    for (int settle = 0; settle < 64; ++settle) {
+        ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+        const auto result = terrain->first_surface(16000, 8000, 15000, 0);
+        EXPECT_EQ(result.y_mm, expected.y_mm);
+        EXPECT_EQ(result.visits, expected.visits);
+        EXPECT_EQ(result.visits.samples, result.visits.cells * 8);
+    }
+    EXPECT_EQ(world.simulation_terrain_work(), work);
+    EXPECT_EQ(terrain->owned_bytes(), bytes);
+    EXPECT_THROW(world.set_seed(43), std::logic_error);
+    EXPECT_THROW(world.set_params(CanonicalParams()), std::logic_error);
+}
+
+TEST(WorldDurableResidency, CanonicalPublicationRefusesEveryInvalidBatchBeforeAnyLiveChange) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    const auto first = CanonicalPlane({0, 0, 0});
+    const auto second = CanonicalPlane({1, 0, 0});
+    ASSERT_TRUE(disk.insert_chunk(first));
+    ASSERT_TRUE(disk.insert_chunk(second));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    std::string error;
+    ASSERT_TRUE(world.EnableSimulationTerrain(root.path, {}, error)) << error;
+    const std::array<CanonicalTerrain::Key, 2> keys{{{0, 0, 0}, {1, 0, 0}}};
+    ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+    ASSERT_TRUE(world.adopt_streamed_chunk(first));
+    ASSERT_TRUE(world.adopt_streamed_chunk(second));
+    const auto original = first->sdf_data;
+    auto edited = original;
+    edited[16 + 17 * 8 + 289 * 8] = 2;
+    const auto revision = world.far_lod_authority_revision();
+    const auto voxel_revision = first->voxel_revision();
+    // A late malformed member cannot leave the earlier valid replacement behind.
+    const std::array<SHIELD_WorldSystem::TerrainVoxelReplacement, 2> partial{
+        {{first, edited, {}}, {second, std::span(original).first(1), {}}}};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(partial), TerrainAdmission::Unavailable);
+    const SHIELD_WorldSystem::TerrainVoxelReplacement seam{first, edited, {}};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(std::span(&seam, 1)), TerrainAdmission::Unavailable);
+    const std::array<SHIELD_WorldSystem::TerrainVoxelReplacement, 2> duplicate{{seam, seam}};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(duplicate), TerrainAdmission::Unavailable);
+    edited[0] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(std::span(&seam, 1)), TerrainAdmission::Unavailable);
+    edited = original;
+    const std::array<Luminumbra::u8, 1> material{{1}};
+    const SHIELD_WorldSystem::TerrainVoxelReplacement bad_material{first, edited, material};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(std::span(&bad_material, 1)),
+              TerrainAdmission::Unavailable);
+    const SHIELD_WorldSystem::TerrainVoxelReplacement wrong_identity{
+        CanonicalPlane({0, 0, 0}), edited, {}};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(std::span(&wrong_identity, 1)),
+              TerrainAdmission::Unavailable);
+    EXPECT_EQ(world.PublishTerrainVoxelEdits({}), TerrainAdmission::Unavailable);
+    std::array<SHIELD_WorldSystem::TerrainVoxelReplacement, CanonicalTerrain::kMaxBatch + 1>
+        excessive{};
+    EXPECT_EQ(world.PublishTerrainVoxelEdits(excessive), TerrainAdmission::WorkLimit);
+    EXPECT_EQ(first->sdf_data, original);
+    EXPECT_EQ(first->voxel_revision(), voxel_revision);
+    EXPECT_EQ(world.far_lod_authority_revision(), revision);
+    ASSERT_TRUE(world.simulation_terrain());
+    EXPECT_TRUE(world.simulation_terrain()->matches(keys[0], original));
+}
+
+TEST(WorldDurableResidency, CanonicalAdmissionDistinguishesAbsentPartialCorruptAndStaleSources) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    const auto saved = CanonicalPlane({0, 0, 0});
+    ASSERT_TRUE(disk.insert_chunk(saved));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    const auto params = CanonicalParams();
+    SHIELD_WorldSystem absent(nullptr, nullptr, params, 42);
+    SHIELD_WorldSystem stale(nullptr, nullptr, params, 42);
+    SHIELD_WorldSystem corrupt(nullptr, nullptr, params, 42);
+    std::string error;
+    ASSERT_TRUE(absent.EnableSimulationTerrain(root.path, {}, error)) << error;
+    ASSERT_TRUE(stale.EnableSimulationTerrain(root.path, {}, error)) << error;
+    ASSERT_TRUE(corrupt.EnableSimulationTerrain(root.path, {}, error)) << error;
+    const std::array<CanonicalTerrain::Key, 1> missing{{{4, 0, 0}}};
+    ASSERT_EQ(absent.AdmitSimulationTerrain(missing), TerrainAdmission::Accepted);
+    EXPECT_EQ(absent.simulation_terrain_work().generated_lattices, 1u);
+    ASSERT_TRUE(absent.simulation_terrain());
+    EXPECT_EQ(absent.simulation_terrain()->first_surface(72000, 8000, 15000, 0).status,
+              CanonicalTerrain::Status::Surface);
+    saved->sdf_data[0] -= 1;
+    saved->mark_voxel_data_dirty();
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    const std::array<CanonicalTerrain::Key, 1> present{{{0, 0, 0}}};
+    EXPECT_EQ(stale.AdmitSimulationTerrain(present), TerrainAdmission::Unavailable);
+    EXPECT_EQ(stale.simulation_terrain()->lattice_count(), 0u);
+    EXPECT_EQ(stale.simulation_terrain_work().generated_lattices, 0u);
+    const auto region = TerrainSave::region_file_path(root.path, 0, 0);
+    {
+        std::ofstream broken(region, std::ios::binary | std::ios::trunc);
+        broken << "partial";
+    }
+    EXPECT_EQ(corrupt.AdmitSimulationTerrain(present), TerrainAdmission::Unavailable);
+    EXPECT_EQ(corrupt.simulation_terrain()->lattice_count(), 0u);
+    EXPECT_EQ(corrupt.simulation_terrain_work().generated_lattices, 0u);
+    SHIELD_WorldSystem rejected(nullptr, nullptr, params, 42);
+    EXPECT_FALSE(rejected.EnableSimulationTerrain(root.path, {}, error));
+    EXPECT_EQ(rejected.simulation_terrain(), nullptr);
+
+    CanonicalTerrainRoot partial_root;
+    Luminumbra::WorldStreamingState partial_disk;
+    auto partial = CanonicalPlane({0, 0, 0});
+    partial->sdf_data.clear();
+    partial->heightmap_data.assign(17u * 17u, 8);
+    ASSERT_TRUE(partial_disk.insert_chunk(partial));
+    ASSERT_TRUE(TerrainSave{}.save_world(partial_disk, partial_root.path));
+    SHIELD_WorldSystem partial_world(nullptr, nullptr, params, 42);
+    // Legacy admission validates expected terrain authority before publishing the source.
+    EXPECT_FALSE(partial_world.EnableSimulationTerrain(partial_root.path, {}, error));
+    EXPECT_EQ(partial_world.simulation_terrain(), nullptr);
+    EXPECT_EQ(partial_world.simulation_terrain_work().generated_lattices, 0u);
+}
+
+TEST(WorldDurableResidency, CanonicalBoundsRefuseWithoutRetainingPartialAdmissions) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(CanonicalPlane({0, 0, 0})));
+    ASSERT_TRUE(disk.insert_chunk(CanonicalPlane({1, 0, 0})));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    std::string error;
+    ASSERT_TRUE(
+        world.EnableSimulationTerrain(root.path, {.lattices = 1, .owned_bytes = 100000}, error));
+    const std::array<CanonicalTerrain::Key, 2> keys{{{0, 0, 0}, {1, 0, 0}}};
+    EXPECT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::WorkLimit);
+    EXPECT_EQ(world.simulation_terrain()->lattice_count(), 0u);
+    EXPECT_EQ(world.AdmitSimulationTerrain(std::span(keys).first(1)), TerrainAdmission::Accepted);
+    const auto work = world.simulation_terrain_work();
+    const std::array<CanonicalTerrain::Key, 2> duplicate{{keys[0], keys[0]}};
+    const std::array<CanonicalTerrain::Key, 1> outside{{{2001, 0, 0}}};
+    std::array<CanonicalTerrain::Key, CanonicalTerrain::kMaxBatch + 1> excessive{};
+    EXPECT_EQ(world.AdmitSimulationTerrain(duplicate), TerrainAdmission::Unavailable);
+    EXPECT_EQ(world.AdmitSimulationTerrain(outside), TerrainAdmission::Unavailable);
+    EXPECT_EQ(world.AdmitSimulationTerrain(excessive), TerrainAdmission::WorkLimit);
+    EXPECT_EQ(world.AdmitSimulationTerrain({}), TerrainAdmission::Unavailable);
+    EXPECT_EQ(world.simulation_terrain_work(), work);
+    CanonicalTerrain tiny({.lattices = 2, .owned_bytes = 50000});
+    const auto first = CanonicalPlane({0, 0, 0});
+    const auto second = CanonicalPlane({1, 0, 0});
+    const std::array<CanonicalTerrain::Lattice, 2> records{
+        {{keys[0], first->sdf_data}, {keys[1], second->sdf_data}}};
+    ASSERT_EQ(tiny.admit(records), TerrainAdmission::Accepted);
+    // Two replacements require staging space as well as the two retained records.
+    EXPECT_EQ(tiny.admit(records), TerrainAdmission::WorkLimit);
+    EXPECT_TRUE(tiny.matches(keys[0], first->sdf_data));
+}
+
+TEST(WorldDurableResidency, CanonicalGenerationRetainsResolvedBiomeAndStructureDependencies) {
+    CanonicalTerrainRoot root;
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path);
+    Luminumbra::WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(CanonicalPlane({0, 0, 0})));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    auto params = CanonicalParams();
+    params.biomes_enabled = true;
+    params.structures_enabled = true;
+    params.biome_table_path = (root.path / "data/common/biomes.json").generic_string();
+    params.structures_data_dir = (root.path / "data/common/structures").generic_string();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 42);
+    ASSERT_TRUE(world.biomes_enabled());
+    ASSERT_TRUE(world.structures_enabled());
+    std::string error;
+    ASSERT_TRUE(world.EnableSimulationTerrain(root.path, {}, error)) << error;
+    const auto site = world.LocateStructure("cairn", 400, 400, 4);
+    if (!site) {
+        FAIL() << "expected a cairn site";
+        return;
+    }
+    const auto coords = SHIELD_WorldSystem::world_to_chunk_coords(
+        Vec3(static_cast<float>(site->origin.x), 8, static_cast<float>(site->origin.z)));
+    Chunk expected(coords);
+    world.GenerateChunkData(expected, 1);
+    ASSERT_FALSE(expected.material_data.empty());
+    fs::remove_all(root.path / "data");
+    const std::array<CanonicalTerrain::Key, 1> keys{{{coords.x, coords.y, coords.z}}};
+    ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+    ASSERT_TRUE(world.simulation_terrain());
+    EXPECT_TRUE(world.simulation_terrain()->matches(keys[0], expected.sdf_data));
+    EXPECT_EQ(world.simulation_terrain_work().generated_lattices, 1u);
+}
+
+TEST(WorldDurableResidency, CanonicalSelectedTerraformRefusesBeforeEditingAnUnpreparedLattice) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    const auto chunk = CanonicalPlane({0, 0, 0});
+    ASSERT_TRUE(disk.insert_chunk(chunk));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    std::string error;
+    ASSERT_TRUE(world.EnableSimulationTerrain(root.path, {}, error)) << error;
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const auto original = chunk->sdf_data;
+    const auto revision = world.far_lod_authority_revision();
+    EXPECT_EQ(world.EditTerrainVoxel(Vec3(8, 8, 8), 2, false, nullptr), 0);
+    EXPECT_EQ(chunk->sdf_data, original);
+    EXPECT_EQ(world.far_lod_authority_revision(), revision);
+    const std::array<CanonicalTerrain::Key, 1> keys{{{0, 0, 0}}};
+    ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+    EXPECT_EQ(
+        world.EditTerrainVoxel(Vec3(std::numeric_limits<float>::infinity()), 2, false, nullptr), 0);
+    EXPECT_EQ(chunk->sdf_data, original);
+    EXPECT_EQ(world.far_lod_authority_revision(), revision);
+}
+
+TEST(WorldDurableResidency, LivePublicationStagesAliasedInputsAndMaterialChannels) {
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    const auto first = CanonicalPlane({0, 0, 0});
+    const auto second = CanonicalPlane({1, 0, 0});
+    first->sdf_data[1] = 1;
+    second->sdf_data[1] = 2;
+    first->material_data.assign(CanonicalTerrain::kLatticeSamples, 3);
+    second->material_data.assign(CanonicalTerrain::kLatticeSamples, 4);
+    const auto original_first = first->sdf_data;
+    const auto original_second = second->sdf_data;
+    ASSERT_TRUE(world.adopt_streamed_chunk(first));
+    ASSERT_TRUE(world.adopt_streamed_chunk(second));
+    const std::array<SHIELD_WorldSystem::TerrainVoxelReplacement, 2> edits{
+        {{first, second->sdf_data, second->material_data},
+         {second, first->sdf_data, first->material_data}}};
+    ASSERT_EQ(world.PublishTerrainVoxelEdits(edits), TerrainAdmission::Accepted);
+    EXPECT_EQ(first->sdf_data, original_second);
+    EXPECT_EQ(second->sdf_data, original_first);
+    EXPECT_EQ(first->material_data,
+              std::vector<Luminumbra::u8>(CanonicalTerrain::kLatticeSamples, 4));
+    EXPECT_EQ(second->material_data,
+              std::vector<Luminumbra::u8>(CanonicalTerrain::kLatticeSamples, 3));
+}
+
+TEST(WorldDurableResidency, CanonicalTerraformPublishesTheSameCarveAndFillAsLiveTerrain) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(CanonicalPlane({0, 0, 0})));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    JobSystem jobs;
+    jobs.startup(2);
+    {
+        SHIELD_WorldSystem selected(&jobs, nullptr, CanonicalParams(), 42);
+        SHIELD_WorldSystem historical(&jobs, nullptr, CanonicalParams(), 42);
+        const auto canonical_chunk = CanonicalPlane({0, 0, 0});
+        const auto live_chunk = CanonicalPlane({0, 0, 0});
+        ASSERT_TRUE(selected.adopt_streamed_chunk(canonical_chunk));
+        ASSERT_TRUE(historical.adopt_streamed_chunk(live_chunk));
+        std::string error;
+        ASSERT_TRUE(selected.EnableSimulationTerrain(root.path, {}, error)) << error;
+        const std::array<CanonicalTerrain::Key, 1> keys{{{0, 0, 0}}};
+        ASSERT_EQ(selected.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+        for (const bool fill : {false, true}) {
+            EXPECT_EQ(selected.EditTerrainVoxel(Vec3(8, 8, 8), 2, fill, nullptr), 1);
+            EXPECT_EQ(historical.EditTerrainVoxel(Vec3(8, 8, 8), 2, fill, nullptr), 1);
+            EXPECT_EQ(canonical_chunk->sdf_data, live_chunk->sdf_data);
+            EXPECT_EQ(canonical_chunk->material_data, live_chunk->material_data);
+            EXPECT_TRUE(selected.simulation_terrain()->matches(keys[0], canonical_chunk->sdf_data));
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST(WorldDurableResidency, CanonicalTerraformIncludesTheNegativeSideOfAnExactMinimumFace) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    const auto left = CanonicalPlane({0, 0, 0});
+    const auto right = CanonicalPlane({1, 0, 0});
+    ASSERT_TRUE(disk.insert_chunk(left));
+    ASSERT_TRUE(disk.insert_chunk(right));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    JobSystem jobs;
+    jobs.startup(2);
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, CanonicalParams(), 42);
+        ASSERT_TRUE(world.adopt_streamed_chunk(left));
+        ASSERT_TRUE(world.adopt_streamed_chunk(right));
+        std::string error;
+        ASSERT_TRUE(world.EnableSimulationTerrain(root.path, {}, error)) << error;
+        const std::array<CanonicalTerrain::Key, 2> keys{{{0, 0, 0}, {1, 0, 0}}};
+        ASSERT_EQ(world.AdmitSimulationTerrain(keys), TerrainAdmission::Accepted);
+        // The minimum X is exactly 16, and the shared node is below the surface.
+        ASSERT_EQ(world.EditTerrainVoxel(Vec3(18, 7, 8), 2, false, nullptr), 2);
+        const auto left_node = static_cast<std::size_t>(16 + 17 * 7 + 289 * 8);
+        const auto right_node = static_cast<std::size_t>(17 * 7 + 289 * 8);
+        EXPECT_EQ(left->sdf_data[left_node], 0);
+        EXPECT_EQ(right->sdf_data[right_node], 0);
+        EXPECT_TRUE(world.simulation_terrain()->matches(keys[0], left->sdf_data));
+        EXPECT_TRUE(world.simulation_terrain()->matches(keys[1], right->sdf_data));
+    }
+    jobs.shutdown();
+}
+
+TEST(WorldDurableResidency, CanonicalAttachmentRejectsInvalidLimitsAndUnboundedDependencies) {
+    CanonicalTerrainRoot root;
+    Luminumbra::WorldStreamingState disk;
+    ASSERT_TRUE(disk.insert_chunk(CanonicalPlane({0, 0, 0})));
+    ASSERT_TRUE(TerrainSave{}.save_world(disk, root.path));
+    auto params = CanonicalParams();
+    params.continental_spline.assign(257, std::array<float, 2>{0, 0});
+    SHIELD_WorldSystem excessive(nullptr, nullptr, params, 42);
+    std::string error;
+    EXPECT_FALSE(excessive.EnableSimulationTerrain(root.path, {}, error));
+    EXPECT_EQ(excessive.simulation_terrain(), nullptr);
+    // Every dynamically retained biome label is bounded, including render-only content.
+    for (const std::string field : {"name", "reverb", "scatter"}) {
+        SCOPED_TRACE(field);
+        auto biome =
+            nlohmann::json{{"id", 0}, {"name", "bounded"}, {"surface", nlohmann::json::object()}};
+        if (field == "name")
+            biome["name"] = std::string(1025, 'x');
+        else if (field == "reverb")
+            biome["reverb"] = {{"preset", std::string(1025, 'x')}};
+        else
+            biome["vegetation"] = {{"scatter", {std::string(4097, 'x')}}};
+        const auto biome_path = root.path / "biomes.json";
+        {
+            std::ofstream output(biome_path);
+            output << nlohmann::json{{"biomes", {biome}}}.dump();
+            ASSERT_TRUE(output.good());
+        }
+        auto biome_params = CanonicalParams();
+        biome_params.biomes_enabled = true;
+        biome_params.biome_table_path = biome_path.generic_string();
+        SHIELD_WorldSystem bounded(nullptr, nullptr, biome_params, 42);
+        ASSERT_TRUE(bounded.biomes_enabled());
+        EXPECT_FALSE(bounded.EnableSimulationTerrain(root.path, {}, error));
+        EXPECT_EQ(bounded.simulation_terrain(), nullptr);
+    }
+    SHIELD_WorldSystem world(nullptr, nullptr, CanonicalParams(), 42);
+    EXPECT_FALSE(
+        world.EnableSimulationTerrain(root.path, {.lattices = 0, .owned_bytes = 100000}, error));
+    EXPECT_FALSE(world.EnableSimulationTerrain(root.path,
+                                               {.lattices = CanonicalTerrain::kMaxLattices + 1,
+                                                .owned_bytes = CanonicalTerrain::kMaxOwnedBytes},
+                                               error));
+    EXPECT_FALSE(world.EnableSimulationTerrain(
+        root.path, {.lattices = 1, .owned_bytes = CanonicalTerrain::kMaxOwnedBytes + 1}, error));
+    EXPECT_EQ(world.simulation_terrain(), nullptr);
+}

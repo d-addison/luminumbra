@@ -9,9 +9,12 @@
 
 #include "world/StructurePlacement.h"
 
+#include <array>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
@@ -186,4 +189,101 @@ TEST(StructurePlacementTest, AssembledRuinIsDeterministicAndUsesSockets) {
     std::printf("ruin assembled voxel hash (seed 0x1234567890ABCDEF): %016llx voxels=%zu\n",
                 static_cast<unsigned long long>(ComputeAssembledVoxelHash(a)),
                 a.size());
+}
+
+TEST(StructurePlacementTest, EnumerationAndCoordinateBoundsRefuseBeforeScanning) {
+    auto pool = LoadCairn();
+    ASSERT_TRUE(pool.ok());
+    EXPECT_TRUE(
+        SitesInArea(
+            pool, kSeed, std::numeric_limits<int>::min(), 0, std::numeric_limits<int>::max(), 100)
+            .empty());
+    EXPECT_FALSE(LocateNearestSite(pool, kSeed, 0, 0, -1));
+    EXPECT_FALSE(LocateNearestSite(pool, kSeed, 0, 0, 32));
+    EXPECT_FALSE(SiteInCell(pool, kSeed, std::numeric_limits<int>::max(), 0));
+    EXPECT_FALSE(SiteInCell(pool, kSeed, std::numeric_limits<int>::min(), 0));
+    pool.spacing = 0;
+    EXPECT_TRUE(SitesInArea(pool, kSeed, -1, -1, 1, 1).empty());
+    EXPECT_FALSE(LocateNearestSite(pool, kSeed, 0, 0));
+    EXPECT_FALSE(SiteInCell(pool, kSeed, 0, 0));
+    pool.spacing = 96;
+    pool.separation = std::numeric_limits<int>::max();
+    EXPECT_FALSE(SiteInCell(pool, kSeed, 0, 0));
+    pool.separation = 0;
+    pool.density = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(SiteInCell(pool, kSeed, 0, 0));
+}
+
+TEST(StructurePlacementTest, AssemblyRefusesOversizedOrOverflowingGeometryWithoutPartialOutput) {
+    auto pool = LoadCairn();
+    ASSERT_TRUE(pool.ok());
+    const StructureSite site{"cairn", {0, 0, 0}, 1};
+    ASSERT_FALSE(AssembleStructure(pool, site).empty());
+    auto oversized = pool;
+    oversized.pieces[0].boxes[0].size = Luminumbra::IVec3(1000000);
+    EXPECT_TRUE(AssembleStructure(oversized, site).empty());
+    auto negative = pool;
+    negative.pieces[0].boxes[0].size.x = -1;
+    EXPECT_TRUE(AssembleStructure(negative, site).empty());
+    auto too_many = pool;
+    too_many.pieces.resize(kMaxStructurePieces + 1);
+    EXPECT_TRUE(AssembleStructure(too_many, site).empty());
+    auto sockets = pool;
+    sockets.pieces[0].sockets.resize(kMaxStructureSockets + 1);
+    EXPECT_TRUE(AssembleStructure(sockets, site).empty());
+    auto boxes = pool;
+    boxes.pieces[0].boxes.resize(kMaxStructureBoxes + 1);
+    EXPECT_TRUE(AssembleStructure(boxes, site).empty());
+    auto translated = site;
+    translated.origin = Luminumbra::IVec3(std::numeric_limits<int>::max());
+    EXPECT_TRUE(AssembleStructure(pool, translated).empty());
+    // Even an unselected bad piece is rejected; root selection cannot hide malformed content.
+    pool.pieces.push_back(oversized.pieces[0]);
+    EXPECT_TRUE(AssembleStructure(pool, site).empty());
+}
+
+TEST(StructurePlacementTest, ParserBoundsTypesNumbersDepthAndInputBytes) {
+    const std::array<std::string, 7> invalid{{R"({"spacing":1e38})",
+                                              R"({"spacing":"bad"})",
+                                              R"({"separation":2147483647})",
+                                              R"({"density":2})",
+                                              R"({"salt":-1})",
+                                              R"({"salt":18446744073709551615})",
+                                              std::string(33, '[') + "0" + std::string(33, ']')}};
+    for (const auto& bytes : invalid) {
+        SCOPED_TRACE(bytes);
+        const auto pool =
+            LoadStructureTemplatePool(StructuresDir() / "cairn",
+                                      "cairn",
+                                      [&bytes](const fs::path& path, std::string& output) {
+                                          if (path.filename() == "placement.json") {
+                                              output = bytes;
+                                              return true;
+                                          }
+                                          return ReadStructureTemplateFile(path, output);
+                                      });
+        EXPECT_FALSE(pool.ok());
+        EXPECT_FALSE(pool.errors.empty());
+    }
+    const auto huge = LoadStructureTemplatePool(
+        StructuresDir() / "cairn", "cairn", [](const fs::path&, std::string& output) {
+            output.assign(1024u * 1024u + 1, ' ');
+            return true;
+        });
+    EXPECT_FALSE(huge.ok());
+    EXPECT_TRUE(huge.io_failed);
+    const auto unreadable = LoadStructureTemplatePool(
+        StructuresDir() / "cairn", "cairn", [](const fs::path&, std::string&) { return false; });
+    EXPECT_FALSE(unreadable.ok());
+    EXPECT_TRUE(unreadable.io_failed);
+    const auto invalid_box = LoadStructureTemplatePool(
+        StructuresDir() / "cairn", "cairn", [](const fs::path& path, std::string& output) {
+            if (path.filename() != "placement.json") {
+                output = R"({"boxes":[{"size":[1e38,1,1]}]})";
+                return true;
+            }
+            return ReadStructureTemplateFile(path, output);
+        });
+    EXPECT_FALSE(invalid_box.ok());
+    EXPECT_FALSE(invalid_box.errors.empty());
 }

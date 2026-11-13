@@ -6,6 +6,7 @@
 #include "../persistence/WorkerBoundary.h"
 #include "../persistence/WorldSaveService.h"
 #include "../world/FarLodStore.h"
+#include "../world/FarVolumeMemory.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
@@ -37,6 +38,29 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace Luminumbra::Persistence {
+struct SimulationTerrainSource {
+    // Parser envelopes and retained source metadata share one hard 64 MiB domain.
+    std::shared_ptr<World::FarVolumeMemoryPool> memory =
+        std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
+    WorldSaveService::AuthorityReadLimits reads{64,
+                                                4096,
+                                                8192,
+                                                8192,
+                                                4u * 1024u * 1024u,
+                                                16u * 1024u * 1024u,
+                                                16u * 1024u * 1024u,
+                                                32u * 1024u * 1024u,
+                                                2u * 1024u * 1024u};
+    WorldSaveService::AuthorityWindowReader reader{memory};
+    world::SimulationTerrain terrain;
+    Systems::SHIELD_WorldSystem::SimulationTerrainWork work{};
+    std::unique_ptr<Systems::SHIELD_WorldSystem> sampler;
+    explicit SimulationTerrainSource(const world::SimulationTerrain::Limits& limits)
+        : terrain(limits) {}
+};
+} // namespace Luminumbra::Persistence
 
 constexpr int BASE_WORK_BUDGET_EQUIVALENT = 320;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME =
@@ -5249,6 +5273,290 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
         m_water_system->SetSimWindowCursor(cursor);
 }
 
+namespace {
+std::array<std::pair<i32, i32>, 4> FarLodAffectedRegions(const IVec3& coords) {
+    constexpr int span = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    const auto region = [](int value) {
+        return value / span - (value % span < 0 ? 1 : 0);
+    };
+    const int home_x = region(coords.x);
+    const int home_z = region(coords.z);
+    const auto local_x =
+        static_cast<std::int64_t>(coords.x) - static_cast<std::int64_t>(home_x) * span;
+    const auto local_z =
+        static_cast<std::int64_t>(coords.z) - static_cast<std::int64_t>(home_z) * span;
+    const int other_x = home_x + (local_x == 0 ? -1 : (local_x == span - 1 ? 1 : 0));
+    const int other_z = home_z + (local_z == 0 ? -1 : (local_z == span - 1 ? 1 : 0));
+    return {{{home_x, home_z}, {other_x, home_z}, {home_x, other_z}, {other_x, other_z}}};
+}
+
+// Bound every copied resolved dependency before constructing the retained sampler. The
+// aggregate payload is at most 8 MiB; counts also bound all validation work below.
+bool SimulationDependenciesFit(const TerrainGenParams& params,
+                               const World::BiomeTable& biomes,
+                               const std::vector<World::StructureTemplatePool>& pools) {
+    if (params.continental_spline.size() > 256 || params.erosion_spline.size() > 256 ||
+        params.peaks_spline.size() > 256 || params.biome_table_path.size() > 32768 ||
+        params.structures_data_dir.size() > 32768 || biomes.size() > 256 || pools.size() > 64)
+        return false;
+    std::size_t remaining = 8u * 1024u * 1024u;
+    const auto charge = [&remaining](std::size_t count, std::size_t size) {
+        if (count > remaining / size)
+            return false;
+        remaining -= count * size;
+        return true;
+    };
+    const auto strings = [&charge](const auto& values) {
+        if (values.size() > 256 || !charge(values.size(), sizeof(std::string)))
+            return false;
+        for (const auto& value : values)
+            if (value.size() > 4096 || !charge(value.size() + 1, 1))
+                return false;
+        return true;
+    };
+    if (!charge(1, sizeof(TerrainGenParams) + sizeof(World::BiomeTable)) ||
+        !charge(params.continental_spline.size() + params.erosion_spline.size() +
+                    params.peaks_spline.size(),
+                sizeof(std::array<float, 2>)) ||
+        !charge(params.biome_table_path.size() + params.structures_data_dir.size() + 2, 1) ||
+        !charge(pools.size(), sizeof(World::StructureTemplatePool)) || !strings(biomes.errors()) ||
+        !strings(biomes.warnings()) || !charge(biomes.size(), sizeof(World::BiomeDefinition)))
+        return false;
+    for (const auto& biome : biomes.biomes())
+        if (biome.name.size() > 1024 || !charge(biome.name.size() + 1, 1) ||
+            biome.reverb.preset.size() > 1024 || !charge(biome.reverb.preset.size() + 1, 1) ||
+            !strings(biome.vegetation.scatter))
+            return false;
+    std::uint64_t remaining_work = 4u * World::kMaxStructureVoxels;
+    for (const auto& pool : pools) {
+        if (pool.type.size() > 1024 || pool.pieces.size() > World::kMaxStructurePieces ||
+            !charge(pool.type.size() + 1, 1) || !strings(pool.errors) || !strings(pool.warnings) ||
+            !charge(pool.pieces.size(), sizeof(World::StructurePiece)))
+            return false;
+        std::size_t expanded = 0;
+        for (const auto& piece : pool.pieces) {
+            if (piece.name.size() > 1024 || !charge(piece.name.size() + 1, 1) ||
+                piece.boxes.size() > World::kMaxStructureBoxes ||
+                piece.sockets.size() > World::kMaxStructureSockets ||
+                !charge(piece.boxes.size(), sizeof(World::StructureBox)) ||
+                !charge(piece.sockets.size(), sizeof(World::StructureSocket)))
+                return false;
+            for (const auto& box : piece.boxes) {
+                std::size_t volume = 1;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (box.size[axis] <= 0 || static_cast<std::size_t>(box.size[axis]) >
+                                                   World::kMaxStructureVoxels / volume)
+                        return false;
+                    volume *= static_cast<std::size_t>(box.size[axis]);
+                }
+                if (volume > World::kMaxStructureVoxels - expanded)
+                    return false;
+                expanded += volume;
+            }
+            for (const auto& socket : piece.sockets)
+                if (socket.name.size() > 1024 || !charge(socket.name.size() + 1, 1))
+                    return false;
+        }
+        // Bound the compound site/assembly work, not merely each outer collection.
+        // A full chunk may visit at most this pool's conservative padded cell rectangle.
+        if (pool.spacing <= 0 || pool.footprint_radius < 0 ||
+            pool.footprint_radius > World::kMaxStructureCoordinate)
+            return false;
+        const auto side = static_cast<std::uint64_t>(2ll * pool.footprint_radius + 17) /
+                              static_cast<unsigned int>(pool.spacing) +
+                          2;
+        const auto per_site =
+            std::max<std::size_t>(1, expanded) * (World::kMaxStructureSockets + 1);
+        if (side > World::kMaxStructureSites / side || per_site > remaining_work / side / side)
+            return false;
+        remaining_work -= per_site * side * side;
+    }
+    return true;
+}
+} // namespace
+
+bool SHIELD_WorldSystem::EnableSimulationTerrain(const std::filesystem::path& saved_source,
+                                                 const world::SimulationTerrain::Limits& limits,
+                                                 std::string& error) {
+    using Terrain = world::SimulationTerrain;
+    if (m_simulation_terrain ||
+        !SimulationDependenciesFit(m_params, m_biome_table, m_structure_pools) ||
+        limits.lattices == 0 || limits.lattices > Terrain::kMaxLattices ||
+        limits.owned_bytes > Terrain::kMaxOwnedBytes) {
+        error = "invalid or already selected simulation terrain";
+        return false;
+    }
+    wait_for_streaming_jobs();
+    const auto scope = acquire_worldgen_sample_scope();
+    try {
+        auto candidate = std::make_unique<Persistence::SimulationTerrainSource>(limits);
+        if (!candidate->reader.admit(saved_source, candidate->reads, error))
+            return false;
+        // Copy already resolved content, including rejected/fallback decisions. Never reload
+        // biome or structure paths for this sampler, even when no preset snapshot was supplied.
+        candidate->sampler.reset(new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{}));
+        candidate->sampler->m_params.worldgen_dependencies.reset();
+        candidate->sampler->m_biome_table = m_biome_table;
+        candidate->sampler->m_biomes_enabled = m_biomes_enabled;
+        candidate->sampler->m_structure_pools = m_structure_pools;
+        candidate->sampler->m_structures_enabled = m_structures_enabled;
+        m_simulation_terrain = std::move(candidate);
+        return true;
+    } catch (const std::bad_alloc&) {
+        error = "simulation terrain allocation limit";
+        return false;
+    }
+}
+
+const world::SimulationTerrain* SHIELD_WorldSystem::simulation_terrain() const {
+    return m_simulation_terrain ? &m_simulation_terrain->terrain : nullptr;
+}
+
+SHIELD_WorldSystem::SimulationTerrainWork SHIELD_WorldSystem::simulation_terrain_work() const {
+    return m_simulation_terrain ? m_simulation_terrain->work : SimulationTerrainWork{};
+}
+
+world::SimulationTerrain::Admission
+SHIELD_WorldSystem::AdmitSimulationTerrain(std::span<const world::SimulationTerrain::Key> keys) {
+    using Terrain = world::SimulationTerrain;
+    using Admission = Terrain::Admission;
+    if (!m_simulation_terrain || keys.empty())
+        return Admission::Unavailable;
+    if (keys.size() > Terrain::kMaxBatch)
+        return Admission::WorkLimit;
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        const auto key = keys[i];
+        if (key.x < -2000 || key.x > 2000 || key.y < -2000 || key.y > 2000 || key.z < -2000 ||
+            key.z > 2000)
+            return Admission::Unavailable;
+        for (std::size_t j = 0; j < i; ++j)
+            if (keys[j] == key)
+                return Admission::Unavailable;
+    }
+    auto& source = *m_simulation_terrain;
+    if (std::all_of(keys.begin(), keys.end(), [&source](const auto key) {
+            return source.terrain.contains(key);
+        }))
+        return Admission::Accepted;
+    try {
+        // At most 128 full lattices (2.4 MiB) of temporary sample storage. The bounded
+        // reader releases each window before reading the next; no world-sized snapshots.
+        std::vector<std::array<float, Terrain::kLatticeSamples>> samples;
+        samples.reserve(keys.size());
+        std::array<Terrain::Lattice, Terrain::kMaxBatch> staged{};
+        std::size_t count = 0;
+        for (const auto key : keys) {
+            if (source.terrain.contains(key))
+                continue;
+            ++source.work.source_windows;
+            const auto result = source.reader.read({key.x, key.x, key.z, key.z}, source.reads);
+            if (result.membership ==
+                Persistence::WorldSaveService::AuthorityMembership::Unavailable)
+                return Admission::Unavailable;
+            const IVec3 coords(key.x, key.y, key.z);
+            const auto found =
+                std::find_if(result.chunks.begin(),
+                             result.chunks.end(),
+                             [coords](const auto& chunk) { return chunk->get_coords() == coords; });
+            samples.emplace_back();
+            auto& lattice = samples.back();
+            if (found != result.chunks.end()) {
+                if ((*found)->sdf_data.size() != Terrain::kLatticeSamples)
+                    return Admission::Unavailable;
+                std::copy((*found)->sdf_data.begin(), (*found)->sdf_data.end(), lattice.begin());
+            } else {
+                // A complete, current committed window proved the identity absent. Partial,
+                // stale and corrupt records refuse above; resident/far data never supplies truth.
+                Chunk generated(coords);
+                ++source.work.generated_lattices;
+                source.sampler->GenerateChunkData(generated, 1);
+                if (generated.sdf_data.size() != Terrain::kLatticeSamples)
+                    return Admission::Unavailable;
+                std::copy(generated.sdf_data.begin(), generated.sdf_data.end(), lattice.begin());
+            }
+            staged[count++] = {key, lattice};
+        }
+        return count == 0 ? Admission::Accepted
+                          : source.terrain.admit(std::span(staged.data(), count));
+    } catch (const std::bad_alloc&) {
+        return Admission::WorkLimit;
+    }
+}
+
+world::SimulationTerrain::Admission SHIELD_WorldSystem::PublishTerrainVoxelEdits(
+    std::span<const TerrainVoxelReplacement> replacements) {
+    using Terrain = world::SimulationTerrain;
+    using Admission = Terrain::Admission;
+    if (replacements.empty())
+        return Admission::Unavailable;
+    if (replacements.size() > Terrain::kMaxBatch)
+        return Admission::WorkLimit;
+    std::array<Terrain::Lattice, Terrain::kMaxBatch> lattices{};
+    // Material staging is bounded by 128*4913 bytes; no allocations after canonical admission.
+    std::array<std::vector<u8>, Terrain::kMaxBatch> materials;
+    std::array<std::vector<float>, Terrain::kMaxBatch> samples;
+    try {
+        for (std::size_t i = 0; i < replacements.size(); ++i) {
+            const auto& replacement = replacements[i];
+            const auto& chunk = replacement.chunk;
+            if (!chunk || find_streamed_chunk(chunk->get_coords()) != chunk ||
+                chunk->sdf_data.size() != Terrain::kLatticeSamples ||
+                replacement.samples.size() != Terrain::kLatticeSamples ||
+                (!replacement.materials.empty() &&
+                 replacement.materials.size() != Terrain::kLatticeSamples) ||
+                !std::all_of(replacement.samples.begin(),
+                             replacement.samples.end(),
+                             [](float value) { return std::isfinite(value); }))
+                return Admission::Unavailable;
+            const auto coords = chunk->get_coords();
+            samples[i].assign(replacement.samples.begin(), replacement.samples.end());
+            lattices[i] = {{coords.x, coords.y, coords.z}, samples[i]};
+            for (std::size_t j = 0; j < i; ++j)
+                if (lattices[j].key == lattices[i].key)
+                    return Admission::Unavailable;
+            if (m_simulation_terrain &&
+                !m_simulation_terrain->terrain.matches(lattices[i].key, chunk->sdf_data))
+                return Admission::Unavailable;
+            materials[i].assign(replacement.materials.begin(), replacement.materials.end());
+        }
+    } catch (const std::bad_alloc&) {
+        return Admission::WorkLimit;
+    }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    // At most 512 region nodes. Allocate missing notification metadata privately so
+    // allocation refusal cannot follow canonical/live publication or bump a revision.
+    std::map<std::pair<i32, i32>, u64> regions;
+    try {
+        const std::lock_guard lock(m_far_lod_region_revision_mutex);
+        for (const auto& replacement : replacements)
+            for (const auto& region : FarLodAffectedRegions(replacement.chunk->get_coords()))
+                if (!m_far_lod_region_revisions.contains(region))
+                    regions.try_emplace(region, 0);
+    } catch (const std::bad_alloc&) {
+        return Admission::WorkLimit;
+    }
+    if (m_simulation_terrain) {
+        const auto admission =
+            m_simulation_terrain->terrain.admit(std::span(lattices.data(), replacements.size()));
+        if (admission != Admission::Accepted)
+            return admission;
+    }
+    {
+        const std::lock_guard lock(m_far_lod_region_revision_mutex);
+        m_far_lod_region_revisions.merge(regions);
+    }
+    for (std::size_t i = 0; i < replacements.size(); ++i) {
+        auto& chunk = *replacements[i].chunk;
+        std::copy(samples[i].begin(), samples[i].end(), chunk.sdf_data.begin());
+        chunk.material_data.swap(materials[i]);
+        chunk.mark_voxel_data_dirty();
+        chunk.current_lod.store(-1, std::memory_order_release);
+    }
+    for (const auto& replacement : replacements)
+        notify_far_lod_authority_changed(replacement.chunk->get_coords());
+    return Admission::Accepted;
+}
+
 bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m) {
     const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > 16.0f ||
@@ -5326,10 +5634,146 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
 // hashed + persisted directly (WorldPersistenceRoundtrip), and sqrt is IEEE-754
 // correctly-rounded — the same determinism contract the green persistence carve relies on.
 // Returns the number of chunks actually modified.
+int SHIELD_WorldSystem::EditCanonicalTerrainVoxel(const Vec3& world_pos,
+                                                  float radius_m,
+                                                  bool fill,
+                                                  PhysicsSystem* physics_system) {
+    if (m_durable_read_failed || !std::isfinite(radius_m) || radius_m <= 0 || radius_m > 16 ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z) ||
+        std::abs(world_pos.x) > 32000 || std::abs(world_pos.y) > 32000 ||
+        std::abs(world_pos.z) > 32000)
+        return 0;
+    const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+    const auto center = world_to_chunk_coords(world_pos);
+    std::size_t remesh_chunks = 0;
+    for (int dz = -rings; dz <= rings; ++dz)
+        for (int dx = -rings; dx <= rings; ++dx) {
+            const auto span = column_surface_span(center.x + dx, center.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, remesh_chunks))
+                return 0;
+        }
+    // The synchronous remesh may restore durable neighbours. Validate that bounded band
+    // before publishing any edit, using the same committed batch as the historical path.
+    const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
+    if (m_durable_residency)
+        for (int dz = -rings; dz <= rings; ++dz)
+            for (int dx = -rings; dx <= rings; ++dx) {
+                const auto span = column_surface_span(center.x + dx, center.z + dz);
+                for (int cy = span.min_y - 1; cy <= span.max_y + 1; ++cy) {
+                    const IVec3 coords(center.x + dx, cy, center.z + dz);
+                    if (!find_streamed_chunk(coords))
+                        restore_authoritative_chunk(coords);
+                    if (m_durable_read_failed)
+                        return 0;
+                }
+            }
+    const Vec3 minimum = world_pos - Vec3(radius_m);
+    auto lo = world_to_chunk_coords(minimum);
+    // Exact minimum faces also own the shared node on their negative-side neighbour.
+    // With radius <=16 this expands to at most 4^3=64 lattices, including edges/corners.
+    for (int axis = 0; axis < 3; ++axis)
+        if (minimum[axis] == static_cast<float>(lo[axis] * CHUNK_SIZE_X))
+            --lo[axis];
+    const auto hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    constexpr int size_x = CHUNK_SIZE_X + 1;
+    constexpr int size_y = CHUNK_SIZE_Y + 1;
+    constexpr int size_z = CHUNK_SIZE_Z + 1;
+    constexpr auto expected = world::SimulationTerrain::kLatticeSamples;
+    struct StagedEdit {
+        std::shared_ptr<Chunk> chunk;
+        std::vector<float> samples;
+        std::vector<u8> materials;
+        bool changed = false;
+    };
+    // Only the selected service stages edits: at most 64 lattices and material channels.
+    std::vector<StagedEdit> staged;
+    {
+        try {
+            staged.reserve(64);
+            for (int cz = lo.z; cz <= hi.z; ++cz)
+                for (int cy = lo.y; cy <= hi.y; ++cy)
+                    for (int cx = lo.x; cx <= hi.x; ++cx) {
+                        auto chunk = find_streamed_chunk({cx, cy, cz});
+                        if (!chunk ||
+                            !m_simulation_terrain->terrain.matches({cx, cy, cz}, chunk->sdf_data) ||
+                            (!chunk->material_data.empty() &&
+                             chunk->material_data.size() != expected))
+                            return 0;
+                        staged.push_back({chunk, chunk->sdf_data, chunk->material_data, false});
+                    }
+        } catch (const std::bad_alloc&) {
+            return 0;
+        }
+    }
+    std::size_t staged_index = 0;
+    int edited = 0;
+    for (int cz = lo.z; cz <= hi.z; ++cz)
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const auto chunk = staged[staged_index].chunk;
+                {
+                    auto& pending = staged[staged_index++];
+                    const IVec3 edit_base =
+                        chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                    for (int z = 0; z < size_z; ++z)
+                        for (int y = 0; y < size_y; ++y)
+                            for (int x = 0; x < size_x; ++x) {
+                                const float dx = static_cast<float>(edit_base.x + x) - world_pos.x;
+                                const float dy = static_cast<float>(edit_base.y + y) - world_pos.y;
+                                const float dz = static_cast<float>(edit_base.z + z) - world_pos.z;
+                                const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                                if (distance > radius_m)
+                                    continue;
+                                const auto index =
+                                    static_cast<std::size_t>(x + size_x * y + size_x * size_y * z);
+                                const float magnitude = radius_m - distance;
+                                const float value =
+                                    fill ? std::min(pending.samples[index], -magnitude)
+                                         : std::max(pending.samples[index], magnitude);
+                                if (value == pending.samples[index])
+                                    continue;
+                                pending.samples[index] = value;
+                                if (!fill && !pending.materials.empty())
+                                    pending.materials[index] = 0u;
+                                pending.changed = true;
+                            }
+                    continue;
+                }
+            }
+    {
+        std::array<TerrainVoxelReplacement, 64> replacements{};
+        std::size_t count = 0;
+        for (const auto& pending : staged)
+            if (pending.changed)
+                replacements[count++] = {pending.chunk, pending.samples, pending.materials};
+        if (count != 0 && PublishTerrainVoxelEdits(std::span(replacements.data(), count)) !=
+                              world::SimulationTerrain::Admission::Accepted)
+            return 0;
+        edited = static_cast<int>(count);
+        const Persistence::WorldSaveService::SaveOwnership ownership;
+        for (std::size_t i = 0; i < count; ++i) {
+            m_activation_index.content_changed(replacements[i].chunk->get_coords());
+            ++m_dirty_generation;
+            if (m_voxelEditObserver)
+                m_voxelEditObserver(replacements[i].chunk->get_coords());
+        }
+    }
+    if (edited > 0) {
+        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
+        if (!m_durable_read_failed)
+            EditTerrainBed(world_pos,
+                           static_cast<std::int32_t>((fill ? 1.0f : -1.0f) * radius_m * 1000.0f),
+                           radius_m);
+    }
+    return edited;
+}
+
 int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
+    if (m_simulation_terrain)
+        return EditCanonicalTerrainVoxel(world_pos, radius_m, fill, physics_system);
     const Persistence::WorldSaveService::ChunkReadBatch durable_reads;
     // The edit must fit its subsequent synchronous remesh before touching SDF.
     constexpr float max_edit_radius =
@@ -6602,6 +7046,8 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
+    if (m_simulation_terrain)
+        throw std::logic_error("simulation terrain pins generation dependencies");
     // the full sequenced drain — promotion stage-A jobs run
     // GenerateChunkData concurrently, so generator state must not be mutated
     // until the whole pipeline (including stage B) has settled.
@@ -6620,6 +7066,8 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
+    if (m_simulation_terrain)
+        throw std::logic_error("simulation terrain pins generation dependencies");
     wait_for_streaming_jobs();
 
     {
@@ -6752,31 +7200,7 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
 }
 
 void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
-    const auto floor_div = [](int value, int divisor) {
-        const int quotient = value / divisor;
-        const int remainder = value % divisor;
-        return remainder < 0 ? quotient - 1 : quotient;
-    };
-    constexpr int kChunksPerRegion = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    const int home_rx = floor_div(chunk_coords.x, kChunksPerRegion);
-    const int home_rz = floor_div(chunk_coords.z, kChunksPerRegion);
-    const int local_x = static_cast<int>(static_cast<std::int64_t>(chunk_coords.x) -
-                                         static_cast<std::int64_t>(home_rx) * kChunksPerRegion);
-    const int local_z = static_cast<int>(static_cast<std::int64_t>(chunk_coords.z) -
-                                         static_cast<std::int64_t>(home_rz) * kChunksPerRegion);
-
-    std::array<int, 2> affected_x{home_rx, home_rx};
-    std::array<int, 2> affected_z{home_rz, home_rz};
-    std::size_t x_count = 1;
-    std::size_t z_count = 1;
-    if (local_x == 0)
-        affected_x[x_count++] = home_rx - 1;
-    else if (local_x == kChunksPerRegion - 1)
-        affected_x[x_count++] = home_rx + 1;
-    if (local_z == 0)
-        affected_z[z_count++] = home_rz - 1;
-    else if (local_z == kChunksPerRegion - 1)
-        affected_z[z_count++] = home_rz + 1;
+    const auto affected = FarLodAffectedRegions(chunk_coords);
 
     // Serialize authority changes with the entire tile check/merge/publication.
     // Take ownership before the region mutex, matching the durable-save path.
@@ -6788,11 +7212,8 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
                        lock,
                        m_far_lod_region_revision_mutex,
                        "Far region revision lock wait");
-    for (std::size_t z = 0; z < z_count; ++z) {
-        for (std::size_t x = 0; x < x_count; ++x) {
-            m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
-        }
-    }
+    for (const auto& region : affected)
+        m_far_lod_region_revisions[region] = revision;
 }
 
 u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {

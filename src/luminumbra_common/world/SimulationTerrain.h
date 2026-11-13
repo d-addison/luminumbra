@@ -19,6 +19,7 @@ public:
     static constexpr std::size_t kMaxLattices = 4096;
     static constexpr std::size_t kMaxOwnedBytes = 96 * 1024 * 1024;
     static constexpr std::size_t kMaxVerticalCells = 65536;
+    static constexpr std::size_t kMaxBatch = 128;
 
     struct Key {
         std::int32_t x = 0, y = 0, z = 0;
@@ -68,6 +69,18 @@ public:
     // excluding allocator metadata.
     // All size checks precede allocation. Admission shifts at most 4096 pointers, never lattices.
     [[nodiscard]] Admission admit(Key key, std::span<const float> samples);
+    struct Lattice {
+        Key key{};
+        std::span<const float> samples;
+    };
+    // Atomic multi-lattice admission, including shared nodes between replacements.
+    // At most 128 staged records; their bytes and any new index count against owned_bytes.
+    // Empty/duplicate/partial/nonfinite/inconsistent batches return Unavailable. No mutation
+    // occurs until every record and allocation succeeds. WorkLimit includes allocation failure.
+    [[nodiscard]] Admission admit(std::span<const Lattice> lattices);
+    [[nodiscard]] bool contains(Key key) const;
+    // Bounded const diagnostic for publication preflight (exactly 4913 comparisons).
+    [[nodiscard]] bool matches(Key key, std::span<const float> samples) const;
 
     // First downward air-to-solid crossing within inclusive [min_y_mm, start_y_mm]. Air is
     // positive density, solid is nonpositive. Interpolate in double, X then Z (explicit fma),
@@ -98,7 +111,8 @@ private:
     using Entry = std::unique_ptr<Record>;
     [[nodiscard]] std::size_t lower_bound(Key key) const;
     [[nodiscard]] const Record* find(Key key) const;
-    [[nodiscard]] bool agrees(Key key, std::span<const float> samples) const;
+    [[nodiscard]] bool
+    agrees(Key key, std::span<const float> samples, std::span<const Lattice> replacements) const;
 
     Limits m_limits;
     // Allocated lazily, once, with exactly limits.lattices pointers; no vector growth slack.
