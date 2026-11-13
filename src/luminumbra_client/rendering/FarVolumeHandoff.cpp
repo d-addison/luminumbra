@@ -1,4 +1,5 @@
 #include "FarVolumeHandoff.h"
+#include "FarWorldDiagnostics.h"
 #include "core/JobSystem.h"
 #include "luminumbra_client/rendering/FarVolumeBuildQueue.h"
 #include "luminumbra_client/rendering/FarVolumeResidency.h"
@@ -111,28 +112,7 @@ World::FarVolumeMemoryLease AdmitControl(World::FarVolumeTierMemory& memory) {
     return control;
 }
 FarWorldRefusal SourceRefusal(World::FarWorldAuthorityProducer::Error error) {
-    using SourceError = World::FarWorldAuthorityProducer::Error;
-    switch (error) {
-        case SourceError::None:
-            return FarWorldRefusal::None;
-        case SourceError::InvalidLimits:
-            return FarWorldRefusal::MissingLimits;
-        case SourceError::IndexCapacity:
-        case SourceError::CopyLimit:
-        case SourceError::AllocationFailure:
-        case SourceError::DeadlineExceeded:
-        case SourceError::SourceReadExpired:
-        // The committed reader has no typed failure category. Preserve its
-        // admission refusal rather than claiming resource exhaustion is absence.
-        case SourceError::CommittedReadRefused:
-            return FarWorldRefusal::AdmissionFailed;
-        case SourceError::WaterUnavailable:
-            return FarWorldRefusal::WaterUnavailable;
-        case SourceError::InvalidWindow:
-            return FarWorldRefusal::SpanRejected;
-        default:
-            return FarWorldRefusal::ImmutableAuthorityUnavailable;
-    }
+    return FarWorldProducerRefusal({error, World::FarFrozenCaptureError::None});
 }
 } // namespace
 std::optional<FarHandoffTileInput>
@@ -507,18 +487,7 @@ bool FarVolumeHandoff::StageSessionTarget(
                 if (result.source != World::FarWorldAuthorityProducer::Error::None) {
                     return refuse(SourceRefusal(result.source));
                 }
-                switch (result.capture) {
-                    case World::FarFrozenCaptureError::WorkLimit:
-                    case World::FarFrozenCaptureError::ByteLimit:
-                    case World::FarFrozenCaptureError::AllocationFailure:
-                    case World::FarFrozenCaptureError::DeadlineExceeded:
-                        return refuse(FarWorldRefusal::AdmissionFailed);
-                    case World::FarFrozenCaptureError::InvalidRegion:
-                    case World::FarFrozenCaptureError::CoordinateRange:
-                        return refuse(FarWorldRefusal::SpanRejected);
-                    default:
-                        return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
-                }
+                return refuse(FarWorldProducerRefusal(result));
             }
             auto wanted = item.wanted;
             wanted.identity.world_epoch = world_epoch;
