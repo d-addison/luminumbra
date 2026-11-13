@@ -1,4 +1,5 @@
 #include "rendering/DiagnosticCapture.h"
+#include "rendering/DiagnosticDrawTable.h"
 #include "rendering/DiagnosticTargets.h"
 
 #include <gtest/gtest.h>
@@ -836,6 +837,186 @@ TEST_F(DiagnosticTargetDriver, PartialAllocationAndIncompleteResizeKeepPreviousT
         EXPECT_EQ(state().clears, 1U);
         ExpectBindings();
     }
+}
+
+} // namespace
+
+namespace {
+
+DiagnosticSubmission Submission() {
+    return {.mesh_path = "res/meshes/terrain.mesh",
+            .shader_variant = "gbuffer/ladder",
+            .chunk = {-2, 0, 7},
+            .lod = 3,
+            .ownership = DiagnosticOwnership::LadderFar,
+            .pass = DiagnosticPass::GBuffer,
+            .provenance = DiagnosticProvenance::Sdf};
+}
+
+TEST(DiagnosticDrawTable, SubmissionOrderSharedMeshesExactMetadataAndReset) {
+    DiagnosticDrawTable table;
+    DiagnosticId first{};
+    ASSERT_TRUE(table.submit(Submission(), first));
+    EXPECT_EQ(first, (DiagnosticId{1, 1, 3, 0x103}));
+    auto submission = Submission();
+    submission.lod = 0;
+    submission.chunk = {4, 5, 6};
+    DiagnosticId second{};
+    ASSERT_TRUE(table.submit(submission, second));
+    EXPECT_EQ(second, (DiagnosticId{2, 1, 0, 0x103}));
+    submission.mesh_path = "res/meshes/other.mesh";
+    ASSERT_TRUE(table.submit(submission, second));
+    EXPECT_EQ(second[0], 3U);
+    EXPECT_EQ(second[1], 2U);
+    const auto bytes = table.json();
+    EXPECT_EQ(bytes, table.json());
+    const auto doc = nlohmann::json::parse(bytes);
+    ASSERT_EQ(doc.at("meshes").size(), 2U);
+    ASSERT_EQ(doc.at("draws").size(), 3U);
+    EXPECT_EQ(doc.at("meshes")[0].at("path"), Submission().mesh_path);
+    EXPECT_EQ(doc.at("meshes")[0].at("provenance"), 2);
+    EXPECT_EQ(doc.at("draws")[0].at("chunk"), nlohmann::json(Submission().chunk));
+    EXPECT_EQ(doc.at("draws")[0].at("shader_variant"), Submission().shader_variant);
+    EXPECT_EQ(doc.at("draws")[0].at("pass"), 1);
+    EXPECT_EQ(doc.at("draws")[0].at("ownership"), 3);
+    ASSERT_NE(table.resolve(1), nullptr);
+    EXPECT_EQ(*table.resolve(1), first);
+    EXPECT_EQ(table.resolve(0), nullptr);
+    EXPECT_EQ(table.resolve(4), nullptr);
+    EXPECT_TRUE(table.complete_coverage());
+    table.clear();
+    EXPECT_EQ(table.resolve(1), nullptr);
+    EXPECT_TRUE(nlohmann::json::parse(table.json()).at("draws").empty());
+    ASSERT_TRUE(table.submit(Submission(), second));
+    EXPECT_EQ(second, first);
+}
+
+TEST(DiagnosticDrawTable, InvalidMetadataAndHostilePathsRefuseWithoutChangingIdsOrTables) {
+    DiagnosticDrawTable table;
+    DiagnosticId id{9, 8, 7, 6};
+    const auto original = table.json();
+    for (const std::string& path : std::vector<std::string>{"",
+                                                            "/private/a",
+                                                            "C:/a",
+                                                            "C:a",
+                                                            "a\\b",
+                                                            "../a",
+                                                            "a/../b",
+                                                            "a/./b",
+                                                            "a//b",
+                                                            "a/",
+                                                            "a\nb",
+                                                            std::string(1025, 'a'),
+                                                            std::string("res/\xff")}) {
+        auto submission = Submission();
+        submission.mesh_path = path;
+        EXPECT_FALSE(table.submit(submission, id));
+        EXPECT_EQ(id, (DiagnosticId{9, 8, 7, 6}));
+        EXPECT_EQ(table.json(), original);
+    }
+    for (unsigned int field = 0; field < 7; ++field) {
+        auto submission = Submission();
+        const std::string oversized(1025, 'a');
+        if (field == 0) {
+            submission.lod = 256;
+        } else if (field == 1) {
+            submission.ownership = static_cast<DiagnosticOwnership>(0);
+        } else if (field == 2) {
+            submission.pass = static_cast<DiagnosticPass>(5);
+        } else if (field == 3) {
+            submission.provenance = static_cast<DiagnosticProvenance>(255);
+        } else if (field == 4) {
+            submission.shader_variant = "";
+        } else if (field == 5) {
+            submission.shader_variant = oversized;
+        } else {
+            submission.shader_variant = "\xff";
+        }
+        EXPECT_FALSE(table.submit(submission, id));
+        EXPECT_EQ(table.json(), original);
+        EXPECT_EQ(id, (DiagnosticId{9, 8, 7, 6}));
+    }
+    ASSERT_TRUE(table.submit(Submission(), id));
+    EXPECT_EQ(id[0], 1U);
+    EXPECT_EQ(id[1], 1U);
+}
+
+TEST(DiagnosticDrawTable, UnsupportedProducerIsExplicitAndProvenanceSeparatesMeshEntries) {
+    DiagnosticDrawTable table;
+    auto submission = Submission();
+    DiagnosticId id{};
+    ASSERT_TRUE(table.submit(submission, id));
+    submission.provenance = DiagnosticProvenance::Heightfield;
+    ASSERT_TRUE(table.submit(submission, id));
+    EXPECT_EQ(id[1], 2U);
+    submission.provenance = DiagnosticProvenance::Unsupported;
+    submission.mesh_path = "";
+    submission.pass = DiagnosticPass::Forward;
+    ASSERT_TRUE(table.submit(submission, id));
+    EXPECT_EQ(id[0], 3U);
+    EXPECT_FALSE(table.complete_coverage());
+    const auto doc = nlohmann::json::parse(table.json());
+    EXPECT_EQ(doc.at("draws")[2].at("supported"), false);
+    EXPECT_EQ(doc.at("meshes")[2].at("provenance"), 4);
+    table.clear();
+    EXPECT_TRUE(table.complete_coverage());
+}
+
+TEST(DiagnosticDrawTable, EntryAndEscapedJsonBudgetsRefuseAtomically) {
+    DiagnosticDrawTable table;
+    DiagnosticId id{};
+    for (std::uint32_t index = 1; index <= 65536; ++index) {
+        ASSERT_TRUE(table.submit(Submission(), id));
+        ASSERT_EQ(id[0], index);
+        ASSERT_EQ(id[1], 1U);
+    }
+    const auto before = table.json();
+    EXPECT_FALSE(table.submit(Submission(), id));
+    EXPECT_EQ(table.json(), before);
+    EXPECT_EQ(id[0], 65536U);
+    table.clear();
+    const std::string escaped(1024, '\n');
+    auto submission = Submission();
+    submission.shader_variant = escaped;
+    std::uint32_t accepted = 0;
+    // Escaped shader bytes make the JSON cap win before the entry-count cap.
+    for (std::uint32_t attempt = 0; attempt < 65536; ++attempt) {
+        if (!table.submit(submission, id)) {
+            break;
+        }
+        ++accepted;
+    }
+    ASSERT_GT(accepted, 0U);
+    ASSERT_LT(accepted, 65536U);
+    EXPECT_LE(table.json().size(), 16U * 1024U * 1024U);
+    const auto capped = table.json();
+    const auto previous = id;
+    EXPECT_FALSE(table.submit(submission, id));
+    EXPECT_EQ(id, previous);
+    EXPECT_EQ(table.json(), capped);
+}
+
+TEST(DiagnosticDrawTable, UniqueMeshesAndMaximumUtf8PathsRetainFirstSubmissionOrder) {
+    DiagnosticDrawTable table;
+    DiagnosticId id{};
+    auto submission = Submission();
+    submission.shader_variant = "v";
+    for (std::uint32_t index = 1; index <= 65536; ++index) {
+        const auto path = "m/" + std::to_string(index);
+        submission.mesh_path = path;
+        ASSERT_TRUE(table.submit(submission, id));
+        ASSERT_EQ(id[0], index);
+        ASSERT_EQ(id[1], index);
+    }
+    submission.mesh_path = "m/65536";
+    EXPECT_FALSE(table.submit(submission, id));
+    EXPECT_LE(table.json().size(), 16U * 1024U * 1024U);
+    table.clear();
+    const std::string path = "res/" + std::string(1018, 'a') + "\xc3\xa9";
+    ASSERT_EQ(path.size(), 1024U);
+    submission.mesh_path = path;
+    ASSERT_TRUE(table.submit(submission, id));
+    EXPECT_EQ(nlohmann::json::parse(table.json()).at("meshes")[0].at("path"), path);
 }
 
 } // namespace

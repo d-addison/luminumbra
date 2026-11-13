@@ -12,12 +12,13 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
-| GPU attribution, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
+| Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
+| GPU attribution, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
-The codecs and standalone target do not create scenario bundles or enable a runtime
+The codecs, standalone draw registry and standalone target do not create scenario bundles or enable a runtime
 flag. The capture test target models GL entry points for target lifecycle regressions;
 rendering does not call these helpers yet. The client source manifest includes the codecs.
 
