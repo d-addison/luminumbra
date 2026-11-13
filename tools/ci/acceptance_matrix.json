@@ -29,6 +29,28 @@
       "requirements": []
     },
     {
+      "id": "render.capture-feature-capabilities",
+      "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
+      "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline controls. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, isolation consumers, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeatureProfile.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeaturePolicy.*",
+          "planned": "Implement and qualify shared app/scenario policy and feature presence in later slices; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.ui-layout-sidecar",
       "source": "docs/visual-regression.md#ui-layout-sidecars",
       "statement": "CLI UI screenshots add schema-1 layout sidecars without changing existing image formats or simulation state. Capture-only collection records Rml document trees eligible for rendering, pruning visibility:hidden and display:none subtrees even with locally visible descendants, including non-DOM controls and visible direct text from populated text inputs, primary border boxes (including opacity-zero, zero-size and offscreen boxes) and rectangular clipping regions with mask presence. Single and batch captures pass no ImGui context because readback precedes the ImGui composite, so imgui_windows is empty and the sidecar matches the UI layer in the image. The collector API retains optional ImGui window geometry and drawing order for other callers. Rml effective paint order is unavailable in the pinned public API, so z is null. The GL-free serializer fixes key order, precision and locale, and refuses invalid geometry, parent links and capture limits. Source wiring and registered serializer, ImGui and hidden-window regressions cover input text, non-DOM child order, hidden documents, nested visibility overrides, hidden DOM and non-DOM text, visited-node budgets and clipping with explicit fixture layout and fonts; native execution and rendered qualification remain pending.",

@@ -233,3 +233,9 @@ if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
 endif()
+
+# GL-free capture feature resolution and capability serialization.
+list(APPEND CLIENT_INTERNAL_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureFeatureProfile.cpp)
+list(APPEND CLIENT_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureFeatureProfile.cpp)
