@@ -476,6 +476,17 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
                     break;
                 }
                 float refinedGap = length(refinedPoint) - length(refinedPosition);
+                // Empty-sample recovery accepts only overhead back-side geometry,
+                // like its coarse endpoint; foreground below the origin is
+                // unobserved for this bracket and cannot become the ceiling.
+                if (emptyCrossing && refinedGap > 0.05 &&
+                    dot(refinedPosition - ro, skyDirView) <= 0.0) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
                 if (refinedGap <= 0.05) {
                     frontDistance = midpoint;
                     originBracket = false;

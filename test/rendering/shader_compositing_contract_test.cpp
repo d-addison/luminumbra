@@ -882,6 +882,13 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
                     }
                     break;
                 }
+                if (emptyCrossing && refined.gap > 0.05 && refined.surfaceRise <= 0) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
                 if (refined.gap <= 0.05) {
                     frontDistance = midpoint;
                     originBracket = false;
@@ -929,6 +936,8 @@ void ExpectCanopyMirrorContract() {
     ExpectContains(body, "dot(sampPos - ro, skyDirView) > 0.0;");
     ExpectContains(body, "crossing = crossing || emptyCrossing;");
     ExpectContains(body, "originBracket = originBracket || emptyCrossing;");
+    ExpectContains(body, "if (emptyCrossing && refinedGap > 0.05 &&");
+    ExpectContains(body, "dot(refinedPosition - ro, skyDirView) <= 0.0) {");
     const auto empty = ExtractBlock(body, "if (!valid || dot(sampPos, sampPos) < 1e-6)");
     ExpectContains(empty, "previousDistance = distanceAlongRay;");
 }
@@ -1055,6 +1064,24 @@ TEST(CanopyAmbientContract, EmptyCoarseRecoveryRequiresObservedOverheadBandHit) 
     const auto bounded = ProbeCanopy(exhausted, 24, 1.5, 64);
     EXPECT_DOUBLE_EQ(bounded.visibility, 1);
     EXPECT_EQ(bounded.taps, 40) << "empty recovery shares the eight-read refinement budget";
+    // An overhead coarse endpoint outside the band followed by refined
+    // in-band foreground below the origin must not darken the fragment.
+    for (double refinedRise : {-1.0, 0.0, 1.0}) {
+        const auto belowOrigin = [refinedRise](double distance) {
+            if (distance == 6) {
+                return CanopySample{8, 1, true, true, 5};
+            }
+            return CanopySample{0.5, 1, distance != 3, true, refinedRise};
+        };
+        const auto result = ProbeCanopy(belowOrigin, 6, 1.5, 2);
+        EXPECT_EQ(result.taps, 10);
+        if (refinedRise > 0) {
+            EXPECT_LT(result.visibility, 1) << "overhead refined band hits still occlude";
+        } else {
+            EXPECT_DOUBLE_EQ(result.visibility, 1)
+                << "below-origin refined foreground cannot become the ceiling";
+        }
+    }
 }
 
 TEST(CanopyAmbientContract, CrossingWeightsAreContinuousAtThicknessCutoff) {
