@@ -1,0 +1,32 @@
+{
+  "defines": [],
+  "encoding": "linear_rgb_bottom_first",
+  "fixtures": [
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "material",
+      "reference": "references/material.ppm"
+    }
+  ],
+  "inputs": {
+    "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",
+    "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
+    "test/rendering/shader_scene_render_test.cpp": "dd629fc7dcb1218aa1f59affa364b6ad6d27f7cbc22acb033f1c526d5fa43e9b"
+  },
+  "reference_capture": {
+    "origin": "analytical",
+    "renderer": "analytical material fixture",
+    "version": "not captured"
+  },
+  "reference_sha256": "a7b13d68514eae8135d6f6b4921a85157476061fee5e1e70807978daba64b855",
+  "schema": 1,
+  "size": [
+    128,
+    128
+  ]
+}
