@@ -4993,6 +4993,18 @@ void RenderPipeline::init_terrain_textures() {
         return false;
     };
 
+    // All three terrain channels need the same grazing-angle footprint.
+    GLfloat terrain_anisotropy = 1.0f;
+    const bool terrain_anisotropy_supported =
+        GLAD_GL_VERSION_4_6 ||
+        glfwExtensionSupported("GL_ARB_texture_filter_anisotropic") == GLFW_TRUE ||
+        glfwExtensionSupported("GL_EXT_texture_filter_anisotropic") == GLFW_TRUE;
+    if (terrain_anisotropy_supported) {
+        GLfloat maximum_anisotropy = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maximum_anisotropy);
+        terrain_anisotropy = std::clamp(maximum_anisotropy, 1.0f, 8.0f);
+    }
+
     // --- Albedo array (sRGB) ---
     glGenTextures(1, &m_terrainTextureArray);
     label_gl_object(GL_TEXTURE, m_terrainTextureArray, "terrain.texture_array");
@@ -5015,6 +5027,9 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10); // 1024 -> 1 is 11 levels
+    if (terrain_anisotropy_supported) {
+        glTexParameterf(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy);
+    }
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // build full mip chain from level 0
 
     // --- Normal-map array (linear RGBA8, tangent space) ---
@@ -5039,6 +5054,9 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
+    if (terrain_anisotropy_supported) {
+        glTexParameterf(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy);
+    }
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
 
     // --- Roughness-map array (linear RGBA8; roughness in.r) — terrain PBR roughness-map ---
@@ -5107,6 +5125,9 @@ void RenderPipeline::init_terrain_textures() {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
+    if (terrain_anisotropy_supported) {
+        glTexParameterf(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy);
+    }
     glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     m_terrainRoughnessValid = (roughness_fallbacks == 0) ? 1 : 0;
 
