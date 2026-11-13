@@ -2237,7 +2237,10 @@ class TerrainMaterialWiring(unittest.TestCase):
         self.assertIn("worldN = normalize(worldN);", blend)
         surface = block(self.fragment, "void terrainSurface(")
         self.assertIn("float matIndex = float(materialId) / 255.0;", surface)
-        self.assertIn("albedo = baseAlbedo * albedoScale * albedoTint;", surface)
+        self.assertIn("baseAlbedo *= albedoScale * albedoTint;", surface)
+        self.assertLess(surface.index("baseAlbedo *= albedoScale * albedoTint;"),
+                        surface.index("baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);"))
+        self.assertIn("albedo = baseAlbedo;", surface)
         # No new coverage path can change the material-ID attachment or water ownership.
         self.assertIn("float material_id_normalized = float(fs_in.MaterialID) / 255.0;", main)
         self.assertIn("farLiveOwns(local, fs_in.MaterialID)", main)
