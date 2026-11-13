@@ -1347,6 +1347,58 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertEqual(final_scans, 1)
         self.assertEqual(target.read_bytes(), b"source")
 
+    def test_inventory_counts_each_directory_before_reading_entry_metadata(self):
+        options = ({}, {"live_git": True}, {"ignore_git": True},
+                   {"allowed_directories": {"entries"}})
+        for kwargs, nested, count in itertools.product(options, (False, True), (0, 2, 3, 4)):
+            with self.subTest(options=kwargs, nested=nested, count=count), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                parent = root / "entries" if nested else root
+                parent.mkdir(exist_ok=True)
+                leaves = {parent / str(index) for index in range(count)}
+                for path in leaves:
+                    path.touch()
+                lstat, inspected = os.lstat, []
+                def inspect(candidate, *args, **fields):
+                    if Path(candidate) in leaves:
+                        inspected.append(Path(candidate))
+                    return lstat(candidate, *args, **fields)
+                with mock.patch.object(M, "STORAGE_ENTRIES", 3 + int(nested)), \
+                        mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    if count > 3:
+                        with self.assertRaisesRegex(M.Refusal, "source entry bound exceeded"):
+                            M.inventory(root, **kwargs)
+                        self.assertEqual(inspected, [])
+                    else:
+                        actual = M.inventory(root, **kwargs)
+                        self.assertEqual(set(actual), {p.relative_to(root).as_posix() for p in leaves})
+                        self.assertCountEqual(inspected, leaves)
+
+    def test_inventory_partial_directory_reads_refuse_before_entry_metadata(self):
+        for live, partial, error in itertools.product((False, True), (False, True),
+                                                     (FileNotFoundError, PermissionError)):
+            with self.subTest(live=live, partial=partial, error=error), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "file").touch()
+                scandir = os.scandir
+                class InterruptedScan:
+                    def __enter__(self):
+                        self.entries = scandir(root)
+                        return self
+                    def __exit__(self, *args):
+                        return self.entries.__exit__(*args)
+                    def __iter__(self):
+                        if partial:
+                            yield next(self.entries)
+                        raise error("controlled directory read failure")
+                with mock.patch.object(M.os, "scandir", return_value=InterruptedScan()), \
+                        mock.patch.object(M, "safe_relative") as validate:
+                    with self.assertRaisesRegex(error, "controlled directory read failure"):
+                        M.inventory(root, live_git=live)
+                    validate.assert_not_called()
+
     def test_live_git_inventory_link_counts_are_scoped_to_ordinary_admin_files(self):
         cases = (("source", (1,)), ("nested/.git/object", (1,)),
                  (".git-object", (1,)), (".git/objects/xx/tmp_obj_1", (0, 1, 2)))
@@ -2963,6 +3015,17 @@ class OwnedCommandLifetime(unittest.TestCase):
             process.kill = mock.Mock(side_effect=AssertionError("replaced kill must not run"))
             process.wait = mock.Mock(side_effect=AssertionError("replaced wait must not run"))
         self.stop_command_tree()
+
+    def test_deadline_diagnostics_refuse_oversized_directory_before_metadata_walk(self):
+        lstat, inspected = os.lstat, []
+        entries = self.root / "entries"
+        def inspect(candidate, *args, **kwargs):
+            if Path(candidate).parent == entries:
+                inspected.append(Path(candidate))
+            return lstat(candidate, *args, **kwargs)
+        with mock.patch.object(M.os, "lstat", side_effect=inspect):
+            self.test_deadline_diagnostics_capture_the_actual_owned_parent_stack()
+        self.assertEqual(inspected, [], "oversized directory delayed command retirement")
 
     def test_deadline_diagnostics_report_missing_progress_without_waiting(self):
         details = self.command_diagnostics(threading.current_thread())

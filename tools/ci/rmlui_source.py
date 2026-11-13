@@ -139,9 +139,15 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                 continue
             raise
         with scan:
+            # At most STORAGE_ENTRIES retained entries. Reject an oversized
+            # directory before path validation and metadata reads can delay
+            # command retirement across thousands of already doomed entries.
+            directory_entries = []
             for entry in scan:
                 entries += 1
                 require(entries <= STORAGE_ENTRIES, "source entry bound exceeded")
+                directory_entries.append(entry)
+            for entry in directory_entries:
                 name = Path(entry.path).relative_to(root).as_posix()
                 safe_relative(name)
                 transient_git = live_git and name.startswith(".git/")
