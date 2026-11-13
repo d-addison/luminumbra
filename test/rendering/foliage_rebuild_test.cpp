@@ -2031,6 +2031,12 @@ protected:
         reference.setFloat("u_sunIntensity", context.sun.intensity);
         reference.setVec3("u_ambientColor", context.sky_ambient_color);
         reference.setVec3("u_moonDir", context.moon_light_dir);
+        reference.setVec3("u_moonRadiance", context.moon_radiance);
+        reference.setFloat("u_moonIllum", context.moon_illumination);
+        reference.setFloat("u_exposure", context.exposure);
+        for (const char* name : {"u_moonRadiance", "u_moonIllum", "u_exposure"}) {
+            ASSERT_GE(glGetUniformLocation(pass.shader()->Id(), name), 0) << name;
+        }
         const auto& cloud = context.cloud_state;
         reference.setInt("u_cloudShadowEnabled", cloud.enabled && cloud.shadow_enabled ? 1 : 0);
         reference.setVec2("u_cloudScrollOffset", cloud.scroll_offset);
@@ -2039,7 +2045,7 @@ protected:
         reference.setFloat("u_cloudPlaneHeight", cloud.plane_height);
         reference.setFloat("u_cloudShadowStrength", cloud.shadow_strength);
         reference.setVec3("u_cloudSunDir", cloud.sun_travel_dir);
-        // Twenty uniforms, at most sixteen float components each. Unused
+        // Twenty-three uniforms, at most sixteen float components each. Unused
         // uniforms (including a stripped sun intensity) must agree as absent.
         for (const char* name : {"u_view",
                                  "u_projection",
@@ -2054,6 +2060,9 @@ protected:
                                  "u_sunIntensity",
                                  "u_ambientColor",
                                  "u_moonDir",
+                                 "u_moonRadiance",
+                                 "u_moonIllum",
+                                 "u_exposure",
                                  "u_cloudShadowEnabled",
                                  "u_cloudScrollOffset",
                                  "u_cloudCoverageAmount",
@@ -2188,6 +2197,9 @@ TEST_F(FoliagePaletteReloadTest, DrawUniformCacheSurvivesReloadResetAndInvalidSh
         context.sun.intensity = 0.7f;
         context.sky_ambient_color = {0.05f, 0.1f, 0.15f};
         context.moon_light_dir = {0.4f, 0.7f, 0.2f};
+        context.moon_radiance = {0.2f, 0.3f, 0.4f};
+        context.moon_illumination = 0.5f;
+        context.exposure = 0.65f;
         context.cloud_state.enabled = context.cloud_state.shadow_enabled = true;
         context.cloud_state.scroll_offset = {1, 2};
         context.cloud_state.coverage_amount = 0.6f;
@@ -2200,7 +2212,7 @@ TEST_F(FoliagePaletteReloadTest, DrawUniformCacheSurvivesReloadResetAndInvalidSh
             const RebuildGlCalls calls;
             pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
             ASSERT_TRUE(pass.shader()->IsValid());
-            EXPECT_EQ(calls.uniform_queries(), 20u);
+            EXPECT_EQ(calls.uniform_queries(), 23u);
         }
         for (int draw = 0; draw < 4; ++draw) {
             SCOPED_TRACE(draw);
@@ -2224,7 +2236,7 @@ TEST_F(FoliagePaletteReloadTest, DrawUniformCacheSurvivesReloadResetAndInvalidSh
                 const RebuildGlCalls calls;
                 pass.execute(context, camera);
                 EXPECT_EQ(pass.last_draw_calls(), 1u);
-                EXPECT_EQ(calls.uniform_queries(), draw == 1 ? 20u : 0u);
+                EXPECT_EQ(calls.uniform_queries(), draw == 1 ? 23u : 0u);
             }
             ExpectUniformsMatchNamedSetters(pass, context, camera);
         }

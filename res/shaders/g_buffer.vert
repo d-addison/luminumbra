@@ -24,6 +24,8 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE (triplanar blend weights + normal mapping)
     vec2 UV;           // mesh UV (terrain has none -> 0; )
     flat uint MaterialID;
+    vec4 GroundWeights; // interpolated Stone, Soil, Grass, Sand coverage
+    float DeepslateWeight;
     vec3 Tint;         // per-instance tint (terrain: white = no-op, matches g_buffer.frag VS_OUT)
     vec3 PrevWorldPos; //  TAAU: terrain is static -> == WorldPos (camera-only reprojection)
     vec3 FarRelativeWorldPos; // ladder-only, unbiased and never view-rotated
@@ -105,6 +107,8 @@ void main()
     vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
     vs_out.MaterialID = aMaterialID;
+    vs_out.GroundWeights = vec4(equal(uvec4(aMaterialID), uvec4(1u, 2u, 3u, 4u)));
+    vs_out.DeepslateWeight = aMaterialID == 5u ? 1.0 : 0.0;
     vs_out.Tint = vec3(1.0);  // terrain is never per-instance tinted
 
     // Far-region radial clip band: positive only between the near and far radii.
