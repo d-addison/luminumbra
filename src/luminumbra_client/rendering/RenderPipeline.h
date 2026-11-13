@@ -2,6 +2,8 @@
 #include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
+#include "CaptureManifest.h"
+#include "DiagnosticCapture.h"
 #include "luminumbra_common/core/SimulationClock.h"
 #include "luminumbra_common/world/WorldClock.h"
 #include <optional>
@@ -53,6 +55,7 @@ struct TerrainGenParams;
 } // namespace Luminumbra::Systems
 namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
+class DiagnosticFrameCapture;
 
 class Shader;
 class Camera;
@@ -620,6 +623,50 @@ public:
     // writes sim state or feeds world_hash. Defined in the.cpp because GBufferPass
     // is forward-declared here.
     const GBuffer& gbuffer() const;
+    // Explicit developer capture setup only; options are resolved once at admission.
+    void set_capture_diagnostics(const DiagnosticCaptureOptions& options);
+    void end_diagnostic_capture();
+    bool capture_diagnostics(const std::filesystem::path& capture);
+    bool capture_diagnostics_enabled() const {
+        return m_capture_diagnostics.enabled;
+    }
+    class CaptureCleanup {
+    public:
+        explicit CaptureCleanup(RenderPipeline& pipeline)
+            : pipeline_(&pipeline) {}
+        ~CaptureCleanup() {
+            if (pipeline_) {
+                pipeline_->end_diagnostic_capture();
+            }
+        }
+        CaptureCleanup(const CaptureCleanup&) = delete;
+        CaptureCleanup& operator=(const CaptureCleanup&) = delete;
+        void retain() {
+            pipeline_ = nullptr;
+        }
+
+    private:
+        RenderPipeline* pipeline_;
+    };
+    CaptureManifestInput diagnostic_capture_manifest() const;
+    template<class Observe, class Capture>
+    bool with_diagnostic_capture(const std::filesystem::path& path,
+                                 const Observe& observe,
+                                 const Capture& write_capture) {
+        if (!m_capture_diagnostics.enabled) {
+            return write_capture();
+        }
+        try {
+            if (WithCaptureManifest(path, observe(), write_capture)) {
+                return capture_diagnostics(path);
+            }
+        } catch (...) {
+            end_diagnostic_capture();
+            throw;
+        }
+        end_diagnostic_capture();
+        return false;
+    }
     // Read-only scene target access for attachment diagnostics and capture tests.
     const FrameBufferObject& lighting_fbo() const;
     // SSAO parity: run the ORIGINAL pipeline-sourced SSAO+blur
@@ -1002,7 +1049,9 @@ public:
         return m_waterfall_pass->build_geometry(world);
     }
     void begin_waterfall_adoption(WaterfallPass::PreparedGeometry geometry) {
+        const bool has_sheets = !geometry.sites.empty();
         m_waterfall_pass->begin_adoption(std::move(geometry));
+        m_capture_waterfall_geometry = has_sheets;
     }
     bool adopt_waterfalls() {
         return m_waterfall_pass->adopt_next(m_particle_pass.get(), m_root_path);
@@ -1266,6 +1315,9 @@ private:
     std::uint64_t m_dayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
     bool m_todTickDriven = false;
 
+    DiagnosticCaptureOptions m_capture_diagnostics;
+    std::unique_ptr<DiagnosticFrameCapture> m_diagnostic_capture;
+    bool m_capture_waterfall_geometry = false;
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
 

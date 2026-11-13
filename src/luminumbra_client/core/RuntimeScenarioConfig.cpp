@@ -199,8 +199,17 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
         diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
                                : std::nullopt);
     if (diagnostics.enabled) {
-        throw std::invalid_argument(
-            "capture diagnostics require the completed-frame scenario readback adapter");
+        const auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+        const bool benchmark =
+            !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
+            !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
+        if ((!scenario.empty() && scenario != "world_visual_sweep") ||
+            (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
+             !benchmark)) {
+            throw std::invalid_argument(
+                "capture diagnostics require world_visual_sweep, --frame-scan "
+                "or --render-benchmark with --render-benchmark-screenshot");
+        }
     }
     int surface_radius = 0;
     int collision_radius = 0;
@@ -208,6 +217,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
     ParseSurfaceRadiusOptions(
         argc, argv, surface_radius, collision_radius, benchmark_stream_radius);
     RuntimePathOptions options;
+    options.diagnostics = diagnostics;
     for (const char* flag : {"--runtime-root", "--save-root"}) {
         std::filesystem::path& path =
             std::string(flag) == "--runtime-root" ? options.runtime_root : options.save_root;

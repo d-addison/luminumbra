@@ -1,7 +1,8 @@
 #include "RenderPipeline.h"
 #include "../../include/luminumbra/core/Types.h"
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
-#include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
+#include "DiagnosticReadback.h"
+#include "ExposureModel.h" //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
 #include "FarVolumeGlBackend.h"
 #include "FarWorldReplay.h"
@@ -20,6 +21,7 @@
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "UploadBudget.h"
 #include "WeatherOverlayModel.h"
+#include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -269,6 +271,7 @@ void RenderPipeline::set_debug_view(int mode) {
         m_debug_view_pass->set_mode(mode);
 }
 RenderPipeline::~RenderPipeline() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
 }
 
@@ -406,7 +409,52 @@ bool RenderPipeline::startup(u32 screen_width,
 }
 
 void RenderPipeline::shutdown() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
+}
+
+void RenderPipeline::set_capture_diagnostics(const DiagnosticCaptureOptions& options) {
+    end_diagnostic_capture();
+    m_capture_diagnostics = options;
+}
+
+void RenderPipeline::end_diagnostic_capture() {
+    m_diagnostic_capture.reset();
+}
+
+CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
+    CaptureManifestInput input;
+    input.build_id = {std::string(luminumbra::core::GetEngineVersionString()),
+                      "engine_version_string_empty"};
+    input.asset_hash.unavailable = "not observed by scenario capture";
+    input.shader_hash.unavailable = "not observed by scenario capture";
+    input.world_hash.unavailable = "not observed by scenario capture";
+    input.width = static_cast<int>(m_screen_width);
+    input.height = static_cast<int>(m_screen_height);
+    const auto* snapshot = capture_camera();
+    if (!snapshot || !SetCaptureManifestCamera(input, *snapshot)) {
+        input.near_plane = 0;
+    }
+    return input;
+}
+
+bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
+    if (!m_capture_diagnostics.enabled) {
+        return true;
+    }
+    auto ending = std::move(m_diagnostic_capture);
+    if (!ending || !m_frame_prepared.valid) {
+        return false;
+    }
+    DiagnosticBundleFrame frame;
+    frame.extent = {m_internal_width, m_internal_height};
+    frame.frame = m_far_world_frame;
+    frame.view = m_frame_prepared.replay_camera.view;
+    frame.projection = m_frame_prepared.replay_camera.projection;
+    frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
+    frame.manifest_filename =
+        Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+    return ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
 }
 
 void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
@@ -1317,6 +1365,7 @@ void RenderPipeline::wait_for_world_readers() {
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_particle_pass->clear_waterfall_spray();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
@@ -2457,6 +2506,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   float deltaTime,
                                   bool wireframe,
                                   UploadPresentation presentation) {
+    end_diagnostic_capture();
     if (!m_started) {
         return;
     }
@@ -2491,7 +2541,33 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_far_world_pair_jitter_frame = m_taau_frame;
     m_far_world_pair_jitter = m_taau_jitter_ndc;
     m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
+    std::unique_ptr<DiagnosticFrameCapture> diagnostic_frame;
+    if (m_capture_diagnostics.enabled && purpose == FarWorldPurpose::World) {
+        std::size_t retained = 0;
+        // The current manifest contract describes unjittered output-sized planes.
+        // Refuse scaled/jittered captures rather than mislabel their pixel camera.
+        if (!m_taau_enabled && m_internal_width == m_screen_width &&
+            m_internal_height == m_screen_height &&
+            DiagnosticFrameCapture::Admitted({m_internal_width, m_internal_height}, retained)) {
+            diagnostic_frame = std::make_unique<DiagnosticFrameCapture>(
+                DiagnosticExtent{m_internal_width, m_internal_height});
+        }
+    }
     dispatch_stages(camera);
+    if (auto* scope = GBufferDiagnosticCapture::Current(); diagnostic_frame && scope) {
+        if ((m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
+             m_plant_procgen_pass->index_count() > 0) ||
+            (m_ground_decal_pass && m_ground_decal_pass->active())) {
+            scope->unsupported("later_deferred_contributors");
+        }
+        // Forward contributors are not represented by the deferred surface plane.
+        // Until separate planes exist, their presence prevents complete publication.
+        if (m_last_render_pass_stats.water_draws || m_last_render_pass_stats.foliage_draws ||
+            m_last_render_pass_stats.particle_draws || !m_glass_pane_items.empty() ||
+            m_capture_waterfall_geometry) {
+            scope->unsupported("forward_contributors");
+        }
+    }
     m_far_world_pair_taau_after = m_taau_pass->history_state();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2527,6 +2603,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
+    m_diagnostic_capture = std::move(diagnostic_frame);
     m_foliage_pass->begin_ground_frame();
 }
 
@@ -4288,6 +4365,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     // Release the remaining pass-owned volumes and geometry.
     m_froxel_pass->destroy();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
         m_particle_pass->destroy_buffers();
@@ -4378,13 +4456,17 @@ void RenderPipeline::cleanup_gpu_resources() {
 // Bake the live waterfall dressing in the pass that owns its geometry and draw.
 void RenderPipeline::cancel_waterfall_adoption() {
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_waterfall_pass->waterfall_cache().clear();
     if (m_particle_pass)
         m_particle_pass->clear_emitters();
 }
 
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
+    m_capture_waterfall_geometry = true;
     m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
+    // prepare populated this exact key; this is an O(1) cache lookup at setup.
+    m_capture_waterfall_geometry = !m_waterfall_pass->waterfall_sites(world).empty();
 }
 
 // --- RESOURCE MANAGEMENT ---

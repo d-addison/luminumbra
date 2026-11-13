@@ -2400,6 +2400,7 @@ int main(int argc, char* argv[]) {
 
     render_pipeline_owner = std::make_unique<Luminumbra::Rendering::RenderPipeline>();
     auto& renderPipeline = *render_pipeline_owner;
+    renderPipeline.set_capture_diagnostics(path_options.diagnostics);
     //  isolation/layer mode: parse CLI strings -> IsolationConfig (default
     // {All, Scene} when both empty = no-op). Drives the SkyboxPass backdrop override
     // + (next slice) scenario spawn-suppression.
@@ -6218,115 +6219,127 @@ int main(int argc, char* argv[]) {
                         } else if (wait_for_uploads(scan_upload_wait,
                                                     "frame_scan",
                                                     g_app.capture.frame_scan_path)) {
-                            const bool capture_finished =
-                                Luminumbra::Rendering::WithCaptureManifest(
-                                    std::filesystem::path(g_app.capture.frame_scan_path),
-                                    frame_scan_manifest,
-                                    [&] {
-                                        bool capture_ok = true;
-                                        if (g_app.capture.render_parity_active) {
-                                            bool parity_ok = false;
-                                            if (g_app.capture.render_parity_pass == "ssao" &&
-                                                g_camera)
-                                                parity_ok = renderPipeline.capture_ssao_parity(
-                                                    g_app.capture.render_parity_dir, *g_camera);
-                                            else if (g_app.capture.render_parity_pass ==
-                                                         "upscale_seam" &&
-                                                     g_camera)
-                                                parity_ok =
-                                                    renderPipeline.capture_upscale_seam_parity(
-                                                        *g_camera, g_app.capture.render_parity_dir);
-                                            else if (g_app.capture.render_parity_pass == "frame" &&
-                                                     g_camera)
-                                                // whole-frame A/B — dispatch the settled
-                                                // prepared frame twice, in-process FLIP must be
-                                                // 0.0.
-                                                parity_ok = renderPipeline.capture_frame_parity(
-                                                    *g_camera, g_app.capture.render_parity_dir);
-                                            else
-                                                parity_ok = false;
-                                            if (parity_ok)
-                                                LUMINUMBRA_CORE_INFO(
-                                                    "{} parity captured -> {}",
-                                                    g_app.capture.render_parity_pass,
-                                                    g_app.capture.render_parity_dir.string());
-                                            else {
-                                                LUMINUMBRA_CORE_ERROR(
-                                                    "{} parity capture FAILED",
-                                                    g_app.capture.render_parity_pass);
-                                                capture_ok = false;
-                                            }
-                                        }
-                                        const Luminumbra::Rendering::FrameScanReport rep =
-                                            Luminumbra::Rendering::ScanFrame(
-                                                renderPipeline,
-                                                vw,
-                                                vh,
-                                                root_dir / "data/common/materials.json");
-                                        if (rep.ok) {
+                            Luminumbra::Rendering::RenderPipeline::CaptureCleanup
+                                diagnostic_cleanup(renderPipeline);
+                            bool capture_finished = Luminumbra::Rendering::WithCaptureManifest(
+                                std::filesystem::path(g_app.capture.frame_scan_path),
+                                frame_scan_manifest,
+                                [&] {
+                                    bool capture_ok = true;
+                                    if (g_app.capture.render_parity_active) {
+                                        bool parity_ok = false;
+                                        if (g_app.capture.render_parity_pass == "ssao" && g_camera)
+                                            parity_ok = renderPipeline.capture_ssao_parity(
+                                                g_app.capture.render_parity_dir, *g_camera);
+                                        else if (g_app.capture.render_parity_pass ==
+                                                     "upscale_seam" &&
+                                                 g_camera)
+                                            parity_ok = renderPipeline.capture_upscale_seam_parity(
+                                                *g_camera, g_app.capture.render_parity_dir);
+                                        else if (g_app.capture.render_parity_pass == "frame" &&
+                                                 g_camera)
+                                            // whole-frame A/B — dispatch the settled
+                                            // prepared frame twice, in-process FLIP must be
+                                            // 0.0.
+                                            parity_ok = renderPipeline.capture_frame_parity(
+                                                *g_camera, g_app.capture.render_parity_dir);
+                                        else
+                                            parity_ok = false;
+                                        if (parity_ok)
                                             LUMINUMBRA_CORE_INFO(
-                                                "Frame-scan measured -> {} ({}x{}): {} materials, "
-                                                "water "
-                                                "{:.1f}%, foliage {} inst (capacity {}), mean luma "
-                                                "{:.3f}",
-                                                g_app.capture.frame_scan_path,
-                                                rep.width,
-                                                rep.height,
-                                                rep.materials.size(),
-                                                rep.water_coverage * 100.0,
-                                                rep.foliage_instance_count_known
-                                                    ? std::to_string(rep.foliage_instances)
-                                                    : "unknown",
-                                                rep.foliage_instance_capacity,
-                                                rep.mean_frame_luminance);
-                                            // Also dump the scanned back buffer as a PPM next to
-                                            // the JSON, so the scan is a full diagnostic (numbers +
-                                            // the exact image they describe).
-                                            std::size_t pixel_bytes = 0;
-                                            if (Luminumbra::Rendering::CapturePixelBytes(
-                                                    vw, vh, 3, pixel_bytes)) {
-                                                std::vector<unsigned char> px(pixel_bytes);
-                                                glReadBuffer(GL_BACK);
-                                                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                                glReadPixels(0,
-                                                             0,
-                                                             vw,
-                                                             vh,
-                                                             GL_RGB,
-                                                             GL_UNSIGNED_BYTE,
-                                                             px.data());
-                                                std::filesystem::path img(
-                                                    g_app.capture.frame_scan_path);
-                                                img.replace_extension(".ppm");
-                                                const bool image_written =
-                                                    glGetError() == GL_NO_ERROR &&
-                                                    WritePixelBufferPpm(img, vw, vh, px);
-                                                capture_ok = image_written && capture_ok;
-                                                if (image_written)
-                                                    LUMINUMBRA_CORE_INFO("Frame-scan image -> {}",
-                                                                         img.string());
+                                                "{} parity captured -> {}",
+                                                g_app.capture.render_parity_pass,
+                                                g_app.capture.render_parity_dir.string());
+                                        else {
+                                            LUMINUMBRA_CORE_ERROR("{} parity capture FAILED",
+                                                                  g_app.capture.render_parity_pass);
+                                            capture_ok = false;
+                                        }
+                                    }
+                                    const Luminumbra::Rendering::FrameScanReport rep =
+                                        Luminumbra::Rendering::ScanFrame(
+                                            renderPipeline,
+                                            vw,
+                                            vh,
+                                            root_dir / "data/common/materials.json");
+                                    if (rep.ok) {
+                                        LUMINUMBRA_CORE_INFO(
+                                            "Frame-scan measured -> {} ({}x{}): {} materials, "
+                                            "water "
+                                            "{:.1f}%, foliage {} inst (capacity {}), mean luma "
+                                            "{:.3f}",
+                                            g_app.capture.frame_scan_path,
+                                            rep.width,
+                                            rep.height,
+                                            rep.materials.size(),
+                                            rep.water_coverage * 100.0,
+                                            rep.foliage_instance_count_known
+                                                ? std::to_string(rep.foliage_instances)
+                                                : "unknown",
+                                            rep.foliage_instance_capacity,
+                                            rep.mean_frame_luminance);
+                                        // Also dump the scanned back buffer as a PPM next to
+                                        // the JSON, so the scan is a full diagnostic (numbers +
+                                        // the exact image they describe).
+                                        std::size_t pixel_bytes = 0;
+                                        if (Luminumbra::Rendering::CapturePixelBytes(
+                                                vw, vh, 3, pixel_bytes)) {
+                                            std::vector<unsigned char> px(pixel_bytes);
+                                            glReadBuffer(GL_BACK);
+                                            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                            glReadPixels(
+                                                0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                                            std::filesystem::path img(
+                                                g_app.capture.frame_scan_path);
+                                            img.replace_extension(".ppm");
+                                            const bool image_written =
+                                                glGetError() == GL_NO_ERROR &&
+                                                WritePixelBufferPpm(img, vw, vh, px);
+                                            capture_ok = image_written && capture_ok;
+                                            if (image_written)
+                                                LUMINUMBRA_CORE_INFO("Frame-scan image -> {}",
+                                                                     img.string());
 
-                                                // Frame-HEALTH verdict on the SAME settled frame
-                                                // (reuses px; render-only, no sim). Auto-flags
-                                                // black/unlit/blown/NaN so a broken frame is caught
-                                                // WITHOUT a human eyeballing the PPM — the 'detect
-                                                // what's wrong' capability.
-                                                std::vector<float> pos_rgb16f;
-                                                std::vector<unsigned char> albedo_rgb8;
-                                                const auto& gb_h = renderPipeline.gbuffer();
-                                                if (gb_h.position_texture != 0 &&
-                                                    renderPipeline.internal_width() ==
-                                                        static_cast<std::uint32_t>(vw) &&
-                                                    renderPipeline.internal_height() ==
-                                                        static_cast<std::uint32_t>(vh)) {
-                                                    pos_rgb16f.resize(static_cast<std::size_t>(vw) *
-                                                                      static_cast<std::size_t>(vh) *
-                                                                      3u);
+                                            // Frame-HEALTH verdict on the SAME settled frame
+                                            // (reuses px; render-only, no sim). Auto-flags
+                                            // black/unlit/blown/NaN so a broken frame is caught
+                                            // WITHOUT a human eyeballing the PPM — the 'detect
+                                            // what's wrong' capability.
+                                            std::vector<float> pos_rgb16f;
+                                            std::vector<unsigned char> albedo_rgb8;
+                                            const auto& gb_h = renderPipeline.gbuffer();
+                                            if (gb_h.position_texture != 0 &&
+                                                renderPipeline.internal_width() ==
+                                                    static_cast<std::uint32_t>(vw) &&
+                                                renderPipeline.internal_height() ==
+                                                    static_cast<std::uint32_t>(vh)) {
+                                                pos_rgb16f.resize(static_cast<std::size_t>(vw) *
+                                                                  static_cast<std::size_t>(vh) *
+                                                                  3u);
+                                                glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
+                                                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                                glGetTextureSubImage(
+                                                    gb_h.position_texture,
+                                                    0,
+                                                    0,
+                                                    0,
+                                                    0,
+                                                    vw,
+                                                    vh,
+                                                    1,
+                                                    GL_RGB,
+                                                    GL_FLOAT,
+                                                    static_cast<GLsizei>(pixel_bytes *
+                                                                         sizeof(float)),
+                                                    pos_rgb16f.data());
+                                                if (gb_h.albedo_texture != 0) {
+                                                    albedo_rgb8.resize(
+                                                        static_cast<std::size_t>(vw) *
+                                                        static_cast<std::size_t>(vh) * 3u);
                                                     glBindTexture(GL_TEXTURE_2D,
-                                                                  gb_h.position_texture);
-                                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                                                                  gb_h.albedo_texture);
                                                     glGetTextureSubImage(
-                                                        gb_h.position_texture,
+                                                        gb_h.albedo_texture,
                                                         0,
                                                         0,
                                                         0,
@@ -6335,88 +6348,70 @@ int main(int argc, char* argv[]) {
                                                         vh,
                                                         1,
                                                         GL_RGB,
-                                                        GL_FLOAT,
-                                                        static_cast<GLsizei>(pixel_bytes *
-                                                                             sizeof(float)),
-                                                        pos_rgb16f.data());
-                                                    if (gb_h.albedo_texture != 0) {
-                                                        albedo_rgb8.resize(
-                                                            static_cast<std::size_t>(vw) *
-                                                            static_cast<std::size_t>(vh) * 3u);
-                                                        glBindTexture(GL_TEXTURE_2D,
-                                                                      gb_h.albedo_texture);
-                                                        glGetTextureSubImage(
-                                                            gb_h.albedo_texture,
-                                                            0,
-                                                            0,
-                                                            0,
-                                                            0,
-                                                            vw,
-                                                            vh,
-                                                            1,
-                                                            GL_RGB,
-                                                            GL_UNSIGNED_BYTE,
-                                                            static_cast<GLsizei>(pixel_bytes),
-                                                            albedo_rgb8.data());
-                                                    }
-                                                    glBindTexture(GL_TEXTURE_2D, 0);
+                                                        GL_UNSIGNED_BYTE,
+                                                        static_cast<GLsizei>(pixel_bytes),
+                                                        albedo_rgb8.data());
                                                 }
-                                                const auto health =
-                                                    Luminumbra::Rendering::AnalyzeFrameHealth(
-                                                        vw, vh, px, pos_rgb16f, albedo_rgb8);
-                                                {
-                                                    std::filesystem::path hp(
-                                                        g_app.capture.frame_scan_path);
-                                                    hp.replace_extension(".health.json");
-                                                    std::ofstream hf(
-                                                        hp, std::ios::binary | std::ios::trunc);
-                                                    const std::string j =
-                                                        Luminumbra::Rendering::FrameHealthToJson(
-                                                            health);
-                                                    hf.write(
-                                                        j.data(),
-                                                        static_cast<std::streamsize>(j.size()));
-                                                    const bool health_written =
-                                                        Luminumbra::Rendering::CloseCaptureFile(hf);
-                                                    capture_ok = health_written && capture_ok;
-                                                }
-                                                if (health.verdict.anomalous) {
-                                                    LUMINUMBRA_CORE_ERROR(
-                                                        "Frame-health ANOMALY: {} (mean "
-                                                        "luma {:.4f}, coverage "
-                                                        "{:.1f}%, black {:.1f}%)",
-                                                        health.verdict.reason,
-                                                        health.mean_luminance,
-                                                        health.gbuffer_coverage * 100.0,
-                                                        health.black_fraction * 100.0);
-                                                } else {
-                                                    LUMINUMBRA_CORE_INFO(
-                                                        "Frame-health OK (mean luma "
-                                                        "{:.4f}, coverage {:.1f}%)",
-                                                        health.mean_luminance,
-                                                        health.gbuffer_coverage * 100.0);
-                                                }
-                                                capture_ok =
-                                                    glGetError() == GL_NO_ERROR && capture_ok;
-                                            } else {
-                                                capture_ok = false;
+                                                glBindTexture(GL_TEXTURE_2D, 0);
                                             }
+                                            const auto health =
+                                                Luminumbra::Rendering::AnalyzeFrameHealth(
+                                                    vw, vh, px, pos_rgb16f, albedo_rgb8);
+                                            {
+                                                std::filesystem::path hp(
+                                                    g_app.capture.frame_scan_path);
+                                                hp.replace_extension(".health.json");
+                                                std::ofstream hf(
+                                                    hp, std::ios::binary | std::ios::trunc);
+                                                const std::string j =
+                                                    Luminumbra::Rendering::FrameHealthToJson(
+                                                        health);
+                                                hf.write(j.data(),
+                                                         static_cast<std::streamsize>(j.size()));
+                                                const bool health_written =
+                                                    Luminumbra::Rendering::CloseCaptureFile(hf);
+                                                capture_ok = health_written && capture_ok;
+                                            }
+                                            if (health.verdict.anomalous) {
+                                                LUMINUMBRA_CORE_ERROR(
+                                                    "Frame-health ANOMALY: {} (mean "
+                                                    "luma {:.4f}, coverage "
+                                                    "{:.1f}%, black {:.1f}%)",
+                                                    health.verdict.reason,
+                                                    health.mean_luminance,
+                                                    health.gbuffer_coverage * 100.0,
+                                                    health.black_fraction * 100.0);
+                                            } else {
+                                                LUMINUMBRA_CORE_INFO("Frame-health OK (mean luma "
+                                                                     "{:.4f}, coverage {:.1f}%)",
+                                                                     health.mean_luminance,
+                                                                     health.gbuffer_coverage *
+                                                                         100.0);
+                                            }
+                                            capture_ok = glGetError() == GL_NO_ERROR && capture_ok;
                                         } else {
                                             capture_ok = false;
-                                            LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
-                                                                  g_app.capture.frame_scan_path);
                                         }
-                                        // Publish the scan only after every required sibling
-                                        // artifact.
-                                        if (capture_ok)
-                                            capture_ok =
-                                                Luminumbra::Rendering::WriteFrameScanReport(
-                                                    rep,
-                                                    std::filesystem::path(
-                                                        g_app.capture.frame_scan_path));
-                                        return capture_ok;
-                                    });
+                                    } else {
+                                        capture_ok = false;
+                                        LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
+                                                              g_app.capture.frame_scan_path);
+                                    }
+                                    // Publish the scan only after every required sibling
+                                    // artifact.
+                                    if (capture_ok)
+                                        capture_ok = Luminumbra::Rendering::WriteFrameScanReport(
+                                            rep,
+                                            std::filesystem::path(g_app.capture.frame_scan_path));
+                                    return capture_ok;
+                                });
+                            if (capture_finished && renderPipeline.capture_diagnostics_enabled()) {
+                                auto image = std::filesystem::path(g_app.capture.frame_scan_path);
+                                image.replace_extension(".ppm");
+                                capture_finished = renderPipeline.capture_diagnostics(image);
+                            }
                             frame_scan_complete = capture_finished;
+                            renderPipeline.end_diagnostic_capture();
                             if (!capture_finished)
                                 capture_failure(g_app.capture.frame_scan_path,
                                                 "frame_capture_incomplete");
@@ -6562,6 +6557,8 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
             renderPipeline.render_uploads_settled() &&
             !g_app.capture.render_benchmark_screenshot.empty()) {
+            Luminumbra::Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(
+                renderPipeline);
             int width = 0, height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             bool screenshot_complete = false;
@@ -6575,13 +6572,23 @@ int main(int argc, char* argv[]) {
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 std::vector<unsigned char> pixels(pixel_bytes);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-                screenshot_complete =
-                    glGetError() == GL_NO_ERROR &&
-                    WritePixelBufferPpm(
-                        std::filesystem::path(g_app.capture.render_benchmark_screenshot),
-                        width,
-                        height,
-                        pixels);
+                if (glGetError() == GL_NO_ERROR) {
+                    const auto screenshot =
+                        std::filesystem::path(g_app.capture.render_benchmark_screenshot);
+                    screenshot_complete = renderPipeline.with_diagnostic_capture(
+                        screenshot,
+                        [&] {
+                            return Luminumbra::Rendering::ObserveCaptureManifest(
+                                *gameSession,
+                                renderPipeline,
+                                width,
+                                height,
+                                resolved_graphics,
+                                g_app.overlay.wireframe_mode,
+                                true);
+                        },
+                        [&] { return WritePixelBufferPpm(screenshot, width, height, pixels); });
+                }
                 glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
                 if (screenshot_complete)
@@ -6591,6 +6598,7 @@ int main(int argc, char* argv[]) {
                         width,
                         height);
             }
+            renderPipeline.end_diagnostic_capture();
             if (!screenshot_complete)
                 capture_failure(g_app.capture.render_benchmark_screenshot + ".json",
                                 "benchmark_screenshot_incomplete");

@@ -4,6 +4,7 @@
 #include "core/CaptureScale.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "nlohmann/json.hpp"
+#include "rendering/DiagnosticCapture.h"
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -25,6 +26,7 @@ GetCommandLineUInt64Option(int argc, char* argv[], const std::string& flag, uint
 struct RuntimePathOptions {
     std::filesystem::path runtime_root;
     std::filesystem::path save_root;
+    Rendering::DiagnosticCaptureOptions diagnostics;
 };
 
 // Parse before asset discovery. Explicit options must be absolute and nonempty;
