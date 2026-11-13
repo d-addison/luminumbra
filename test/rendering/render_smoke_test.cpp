@@ -2388,11 +2388,21 @@ uniform sampler2D gPosition, u_sceneDepth;
 uniform mat4 u_inverseView, u_projection;
 uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
 uniform int u_caveSkySteps;
-)" + positions + source.substr(begin, end - begin) +
+uniform vec3 probePosition;
+#define farWorldPosition decodePosition
+)" + positions + R"(
+#undef farWorldPosition
+int positionTaps = 0;
+bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
+                      inout vec3 position) {
+    ++positionTaps;
+    return decodePosition(storedPosition, floatDepth, uv, position);
+}
+)" + source.substr(begin, end - begin) +
                                  R"(
 void main() {
-    float visibility = computeSkyVisibility(vec3(0, 0, -10), vec3(0, 1, 0));
-    FragColor = vec4(visibility, visibility, visibility, 1);
+    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
+    FragColor = vec4(visibility, float(positionTaps), 0, 1);
 })";
     const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
     const char* fragmentText = fragmentSource.c_str();
@@ -2429,6 +2439,7 @@ void main() {
                        GL_FALSE,
                        &inverseProjection[0][0]);
     glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
     const auto settings = [&](float distance, float thickness, int steps) {
         glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), distance);
         glUniform1f(glGetUniformLocation(program, "u_caveThickness"), thickness);
@@ -2482,6 +2493,108 @@ void main() {
             EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1)
                 << "cleared depth refuses an occluder even if position is stale";
         }
+    }
+
+    // A level perspective camera sees the underside of a horizontal plane at
+    // y=1.5. Each texel stores its camera-ray/plane intersection, not a constant
+    // position. The fixed 4096-row buffer resolves the thin acceptance band.
+    constexpr int planeRows = 4096;
+    std::vector<glm::vec4> planePositions(planeRows, glm::vec4(0));
+    std::vector<glm::vec4> planeDepths(planeRows, glm::vec4(0));
+    projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    inverseProjection = glm::inverse(projection);
+    for (int row = 0; row < planeRows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 1.5f, -1.5f * projection[1][1] / ndcY, 1);
+        const glm::vec4 clip = projection * position;
+        if (clip.z <= 0) {
+            continue;
+        }
+        planePositions[static_cast<std::size_t>(row)] = position;
+        planeDepths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        probe.texture(0, planePositions, planeRows);
+        probe.texture(1, planeDepths, planeRows);
+        settings(24, 1.5f, 8);
+        const auto ceiling = probe.draw()[16];
+        EXPECT_LT(ceiling.r, 0.3f) << "the default 3 m steps must retain a real ceiling";
+        EXPECT_GT(ceiling.g, 2) << "the two on-screen coarse taps need crossing refinement";
+        EXPECT_LE(ceiling.g, 40);
+        settings(24, 0.12f, 8);
+        const auto canopy = probe.draw()[16];
+        EXPECT_GT(canopy.r, 0.85f) << "a thin band must retain its thickness falloff";
+        EXPECT_LT(canopy.r, 0.99f) << "a thin crossing must still be found between coarse taps";
+        EXPECT_LE(canopy.g, 40);
+        settings(24, 0.05f, 8);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "a band inside the self-bias stays open";
+
+        settings(24, 1.5f, 8);
+        // The first midpoint lies at y=2.85. Missing geometry must abort the
+        // bracket rather than inventing a crossing from its endpoints.
+        const float midpointUv = 0.5f + 0.5f * projection[1][1] * 2.85f / 12;
+        const auto midpointRow = static_cast<std::size_t>(midpointUv * planeRows);
+        auto missing = planePositions;
+        missing[midpointRow] = glm::vec4(0);
+        probe.texture(0, missing, planeRows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1);
+        if (ladder != 0) {
+            probe.texture(0, planePositions, planeRows);
+            auto cleared = planeDepths;
+            cleared[midpointRow] = glm::vec4(0);
+            probe.texture(1, cleared, planeRows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                << "cleared depth invalidates a refined sample even with stale position";
+        }
+        probe.texture(1, planeDepths, planeRows);
+        auto silhouette = planePositions;
+        for (int row = 0; row < planeRows; ++row) {
+            const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+            silhouette[static_cast<std::size_t>(row)] =
+                glm::vec4(0, 0, uv < 0.7f ? -100.0f : -2.0f, 1);
+        }
+        probe.texture(0, silhouette, planeRows);
+        const auto discontinuity = probe.draw()[16];
+        EXPECT_FLOAT_EQ(discontinuity.r, 1)
+            << "a silhouette depth jump never supplies a sample inside the thickness band";
+        EXPECT_FLOAT_EQ(discontinuity.g, 10) << "two coarse taps plus eight failed refinements";
+    }
+
+    // Alternating foreground/background stripes make repeated false brackets.
+    // The refinement budget is shared across the whole march, not per bracket.
+    projection = glm::mat4(1);
+    projection[1][1] = 0.01f;
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    for (int row = 0; row < planeRows; ++row) {
+        const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+        const float viewY = (2 * uv - 1) / projection[1][1];
+        const int band = static_cast<int>(std::floor((viewY - 0.05f) / 0.75f + 0.5f));
+        planePositions[static_cast<std::size_t>(row)] =
+            glm::vec4(0, 0, band % 2 == 0 ? -2.0f : -100.0f, 1);
+    }
+    probe.texture(0, planePositions, planeRows);
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 64);
+        const auto bounded = probe.draw()[16];
+        EXPECT_FLOAT_EQ(bounded.r, 1);
+        EXPECT_FLOAT_EQ(bounded.g, 40) << "32 coarse taps and at most eight refinements total";
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);

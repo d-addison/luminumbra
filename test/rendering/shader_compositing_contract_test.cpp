@@ -120,7 +120,7 @@ TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedH
                         "ssao_bilateral_upsample.frag",
                         "scent_decal.frag",
                         "debug_view.frag"};
-    const std::size_t expected_calls[]{2, 2, 3, 2, 1, 1};
+    const std::size_t expected_calls[]{3, 2, 3, 2, 1, 1};
     for (std::size_t i = 0; i < 6; ++i) {
         SCOPED_TRACE(files[i]);
         const auto source = ReadShader(std::filesystem::path("res/shaders") / files[i]);
@@ -427,6 +427,12 @@ TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
     ExpectContains(body, "int steps = min(u_caveSkySteps, 32);");
     ExpectContains(body, "float stepLen = u_caveSkyMaxDist / float(steps);");
     ExpectContains(body, "if (s > steps) break;");
+    ExpectContains(body, "previousValid && previousDepthGap <= 0.0 && depthGap >= u_caveThickness");
+    ExpectContains(body, "for (int refinement = 0; refinement < 8; ++refinement)");
+    ExpectContains(body, "if (refinementTaps >= 8) break;");
+    ExpectContains(body, "float midpoint = 0.5 * (frontDistance + backDistance);");
+    ExpectContains(body, "previousValid = false;");
+    ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition)");
     ExpectContains(body, "depthGap > 0.05 && depthGap < u_caveThickness");
     ExpectContains(body, "length(sampPos - ro) / u_caveSkyMaxDist");
     ExpectContains(body, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
