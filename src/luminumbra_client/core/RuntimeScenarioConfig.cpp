@@ -191,6 +191,7 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
+    (void)ParseCaptureFeatureProfile(argc, argv);
     // Admission precedes --save-root directory creation.
     int surface_radius = 0;
     int collision_radius = 0;
@@ -235,6 +236,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
     RuntimeScenarioConfig config;
+    config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
     config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
@@ -408,6 +410,34 @@ nlohmann::json Vec3ToJson(const Luminumbra::Vec3& value) {
 
 nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value) {
     return {{"x", value.x}, {"y", value.y}, {"z", value.z}};
+}
+
+// Capture feature selection: keep admission independent of world/output setup.
+RuntimeScenarioConfig::FeatureProfile ParseCaptureFeatureProfile(int argc, char* argv[]) {
+    constexpr std::string_view flag = "--capture-feature-profile";
+    auto profile = RuntimeScenarioConfig::FeatureProfile::None;
+    bool seen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument = argv[index];
+        std::string_view value;
+        if (argument == flag) {
+            if (index + 1 < argc) {
+                value = argv[++index];
+            }
+        } else if (argument.starts_with("--capture-feature-profile=")) {
+            value = argument.substr(flag.size() + 1);
+        } else {
+            continue;
+        }
+        if (seen || (value != "none" && value != "all_features")) {
+            throw std::invalid_argument(
+                "--capture-feature-profile requires one selection: none or all_features");
+        }
+        seen = true;
+        profile = value == "all_features" ? RuntimeScenarioConfig::FeatureProfile::AllFeatures
+                                          : RuntimeScenarioConfig::FeatureProfile::None;
+    }
+    return profile;
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness
