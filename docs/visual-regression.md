@@ -111,7 +111,7 @@ Pin a threshold against a known-good vs known-bad pair when you add a new golden
 
 ## Planned temporal audits
 
-[Visual diagnostics Layer E](development/visual-diagnostics.md#e-temporal-audits-and-all-features-captures)
+[Visual diagnostics](development/visual-diagnostics.md), section "E: temporal audits and all-features captures"
 inventories current capture feature gaps and designs fixed-camera day/night,
 clear–storm–clear and multi-day sequences, temporal metrics and an all-features
 profile with non-vacuous presence evidence. These are planned capabilities;
