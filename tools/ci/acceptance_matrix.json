@@ -8104,6 +8104,39 @@
         "sim.identity.100",
         "sim.identity.101"
       ]
+    },
+    {
+      "id": "render.far-volume-page-planner",
+      "source": "issue #239",
+      "statement": "The dormant constant-size page planner admits brick-aligned signed-grid windows with a 4096 metre maximum stride and an explicit cap of at most 1024 pages. Indexed windows clip outer bounds and retain stable interiors during extension. Exact ordered acknowledgements reject skipped, duplicate, reordered, overlapping, shortened or identity-mismatched requests. Single-page admission bounds canonical candidate and sample work, contiguous buffers and mesher cache entry counts including normal halos before callbacks or allocation. Map-node bytes remain subject to the charged APIs. Only tests call the planner; explicit-span compilation, equivalence and seam qualification, production ownership and native execution remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.Pages*",
+          "planned": "Run registered signed-grid, maximum stride and cap regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.InvalidAndOverflowingPagePlansPreserveDescriptor",
+          "planned": "Run registered invalid-span and overflow regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.Page*",
+          "planned": "Run registered interior stability, completeness and admission regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.RefusedPageAdmissionPrecedesCanonicalCallbacksAndAllocation",
+          "planned": "Run registered transactional pre-callback admission regression; owner: rendering"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-volume-memory.md"
+        }
+      ],
+      "requirements": []
     }
   ]
 }
