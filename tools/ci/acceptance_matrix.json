@@ -5,12 +5,16 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Native execution, GPU attribution, draw tables, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Native execution, GPU attribution, draw tables, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
       "status": "partial",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "DiagnosticCapture.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticTargetDriver.*"
         },
         {
           "kind": "ctest",

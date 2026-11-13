@@ -11,13 +11,32 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capability | State | Evidence / remaining work |
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
-| GPU ID attachment, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
+| Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
+| GPU attribution, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
-The codecs alone do not create scenario bundles or enable a runtime flag. They are
-compiled in the existing GL-free capture test target; rendering does not call them yet.
+The codecs and standalone target do not create scenario bundles or enable a runtime
+flag. The capture test target models GL entry points for target lifecycle regressions;
+rendering does not call these helpers yet. The client source manifest includes the codecs.
+
+`DiagnosticTargets` owns a lazy RGBA32UI texture and standalone framebuffer, capped
+at 16,777,216 pixels (256 MiB; transactional resize peaks at 512 MiB). Capabilities,
+dimensions and framebuffer completeness are checked before replacing existing
+storage; failed allocation retains the previous handles and restores caller bindings.
+Before attaching `texture()` to any caller framebuffer, acquire an
+`AttachmentLease` with `acquire_attachment_lease()` and retain it until all protected
+attachments have been detached, including attachments on unbound framebuffers.
+Leases are move-only; `reset()` and destruction release once, and repeated release
+is harmless. The owner must outlive every lease, on the creating context's thread.
+An empty target returns an empty lease. `ensure()` returns false before replacing
+storage while leased; same-extent reuse succeeds. Owner `reset()` and disabling
+`ensure(false, ...)` return false without deleting or changing storage while leased.
+Releasing the last lease permits replacement; existing bound texture/image-unit
+and owned-framebuffer refusal checks still apply to resize. Destroying the owner
+with live leases asserts in debug builds and terminates in every build before GL
+deletion. Callers must detach before releasing or move-assigning over a live lease.
 The acceptance matrix records this partial state. No new runtime asset is added.
 
 ## A: capture bundle and pixel identity
