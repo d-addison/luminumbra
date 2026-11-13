@@ -34,14 +34,18 @@ MANIFEST = ROOT / 'test/rendering/shader_scenes/scenes.json'
 
 class ShaderScenesTests(unittest.TestCase):
     def capture(self, directory, value=.25):
-        for name in ('static_asset.vert', 'static_asset.frag', 'tree_impostor.vert', 'tree_impostor.frag'):
-            (directory / name).write_bytes((ROOT / 'res/shaders' / name).read_bytes())
+        for name in sorted(scene.INPUTS - {'test/rendering/shader_scene_render_test.cpp'}):
+            (directory / Path(name).name).write_bytes((ROOT / name).read_bytes())
         fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_bytes().replace(b'\r\n', b'\n')
         (directory / 'fixture-sha256.txt').write_text(scene.digest(fixture), encoding='ascii')
         (directory / 'material.pfm').write_bytes(b'PF\n128 128\n-1.0\n' +
                                                struct.pack('<f', value) * scene.CHANNELS)
         (directory / 'tree-cutout.pfm').write_bytes(
             b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *self.cutout()))
+        for name, values in (('night-sky', self.night()), ('terrain-blend', self.terrain()),
+                             ('dusk-sky', [.1] * scene.CHANNELS)):
+            (directory / (name + '.pfm')).write_bytes(
+                b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *values))
         (directory / 'renderer.txt').write_text('llvmpipe (test fixture)\n', encoding='utf-8')
         (directory / 'version.txt').write_text('4.5 Mesa fixture\n', encoding='utf-8')
 
@@ -51,15 +55,31 @@ class ShaderScenesTests(unittest.TestCase):
                 for value in ((.0625, .125, .1875) if (x // 32 + y // 32) % 4 < 2
                               else (.25, .5, .75))]
 
+    @staticmethod
+    def night():
+        return [max(0, .7 * (1 - ((x % 32 - 16) ** 2 + (y - 96) ** 2) / 100))
+                if y >= 64 else 0
+                for y in range(128) for x in range(128) for channel in range(3)]
+
+    @staticmethod
+    def terrain():
+        return [.5 + delta * (x + .5) / 128 for y in range(128) for x in range(128)
+                for delta in (.4, .3, 0)]
+
     def test_inventory_and_analytical_reference(self):
         manifest, data = scene.load_manifest(MANIFEST)
         values = scene.rgb(data['material'], False)
         self.assertEqual(len(values), scene.CHANNELS)
         self.assertEqual(scene.metrics(values, values, manifest['fixtures'][0]['mask']), (0, 0))
-        self.assertIn(manifest['reference_capture']['origin'], ('analytical', 'llvmpipe'))
+        for metadata in manifest['reference_capture'].values():
+            self.assertIn(metadata['origin'], ('analytical', 'llvmpipe'))
         tree = scene.rgb(data['tree-cutout'], False)
         self.assertLessEqual(max(abs(a - b) for a, b in zip(tree, self.cutout())), .5 / 255)
-        self.assertEqual(set(data), {'material', 'tree-cutout'})
+        self.assertEqual(set(data), {'material', 'tree-cutout', 'night-sky', 'terrain-blend'})
+        self.assertLessEqual(max(abs(a - b) for a, b in zip(
+            scene.rgb(data['terrain-blend'], False), self.terrain())), .5 / 255)
+        self.assertNotIn('dusk-sky', data)
+        self.assertEqual(manifest['diagnostics'], scene.DIAGNOSTICS)
 
     def test_exact_thresholds_and_mask(self):
         zeros = (0.,) * scene.CHANNELS
@@ -125,7 +145,7 @@ class ShaderScenesTests(unittest.TestCase):
 
     def test_manifest_refuses_partial_unknown_and_changed_inputs(self):
         original = json.loads(MANIFEST.read_text(encoding='utf-8'))
-        mutations = [dict(schema=1), dict(schema=3), dict(schema=True), dict(size=[128., 128]), dict(size=[129, 128]), dict(defines=['UNKNOWN 1']),
+        mutations = [dict(schema=1), dict(schema=2), dict(schema=True), dict(size=[128., 128]), dict(size=[129, 128]), dict(defines=['UNKNOWN 1']),
                      dict(encoding='srgb'), dict(fixtures=[]), dict(inputs={}),
                      dict(reference_sha256='0' * 64), dict(reference_sha256={}),
                      dict(reference_sha256={'material': '0' * 64, 'tree-cutout': '0' * 64}), dict(reference_capture={}), dict(inputs=None),
@@ -174,7 +194,8 @@ class ShaderScenesTests(unittest.TestCase):
                 self.capture(capture)
             self.assertEqual(scene.run(args), 0)
             regenerated, unused = scene.load_manifest(output / 'scenes.json')
-            self.assertEqual(regenerated['reference_capture']['origin'], 'llvmpipe')
+            self.assertTrue(all(value['origin'] == 'llvmpipe'
+                                for value in regenerated['reference_capture'].values()))
             with self.assertRaises(FileExistsError):
                 scene.run(args)
             args.command = 'compare'
@@ -307,6 +328,145 @@ class ShaderScenesTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'cutout/background invariant'):
                     scene.run(args)
                 self.assertFalse(output.exists())
+
+    def test_sky_and_terrain_metrics_detect_single_pixel_and_triangle_regressions(self):
+        night, terrain = self.night(), self.terrain()
+        scene.check_scene_invariants({'night-sky': night, 'terrain-blend': terrain})
+        self.assertEqual(scene.terrain_blend_metrics(terrain)[:2], (102, 102))
+        for value, passes in ((.0000009, True), (.0000011, False)):
+            changed = night.copy()
+            changed[63 * 128 * 3] = value  # The exact horizon row is included.
+            self.assertEqual(scene.night_sky_metrics(changed)[0] <= .000001, passes)
+        for channel in range(3):
+            changed = terrain.copy()
+            changed[(100 * 128 + 20) * 3 + channel] += .001
+            with self.assertRaisesRegex(ValueError, 'terrain blend'):
+                scene.check_scene_invariants({'night-sky': night, 'terrain-blend': changed})
+        for tile in range(4):
+            changed = night.copy()
+            for y in range(95, 98):
+                for x in range(tile * 32 + 15, tile * 32 + 18):
+                    changed[(y * 128 + x) * 3:(y * 128 + x + 1) * 3] = [.7] * 3
+            with self.subTest(tile=tile), self.assertRaisesRegex(ValueError, 'night sky'):
+                scene.check_scene_invariants({'night-sky': changed, 'terrain-blend': terrain})
+        boundary = night.copy()
+        boundary[(64 * 128) * 3:(64 * 128) * 3 + 3] = [1] * 3
+        with self.assertRaisesRegex(ValueError, 'boundary'):
+            scene.night_sky_metrics(boundary)
+        flat = [.5] * scene.CHANNELS
+        with self.assertRaises(ValueError):
+            scene.check_scene_invariants({'night-sky': flat, 'terrain-blend': terrain})
+        # Old provoking-vertex assignment makes a diagonal two-triangle step.
+        triangles = [.5 + delta * int(x + y >= 128) for y in range(128) for x in range(128)
+                     for delta in (.4, .3, 0)]
+        with self.assertRaisesRegex(ValueError, 'terrain blend'):
+            scene.check_scene_invariants({'night-sky': night, 'terrain-blend': triangles})
+        for invalid in ([], terrain[:-1], terrain + [0],
+                        [math.nan] + terrain[1:], [math.inf] + terrain[1:],
+                        [-.1] + terrain[1:], [1.1] + terrain[1:]):
+            for metric in (scene.night_sky_metrics, scene.terrain_blend_metrics, scene.horizontal_step):
+                with self.subTest(metric=metric.__name__), self.assertRaises(ValueError):
+                    metric(invalid)
+
+    def test_dusk_continuity_includes_full_azimuth_and_wrap(self):
+        flat = [.1] * scene.CHANNELS
+        self.assertEqual(scene.horizontal_step(flat), 0)
+        for x in (0, 64, 127):
+            changed = flat.copy()
+            for y in range(128):
+                changed[(y * 128 + x) * 3:(y * 128 + x + 1) * 3] = [.2] * 3
+            self.assertAlmostEqual(scene.horizontal_step(changed), .1)
+        # A ramp makes the 127->0 wrap larger than every interior step.
+        ramp = [x / 128 for y in range(128) for x in range(128) for channel in range(3)]
+        self.assertAlmostEqual(scene.horizontal_step(ramp), 127 / 128)
+
+    def test_new_scene_evidence_and_invariants_precede_candidate_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture = root / 'capture'
+            capture.mkdir()
+            output = root / 'candidate'
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST,
+                                      capture=capture, output=output)
+            for filename in ('enhanced_skybox.frag', 'SkyAtmosphereLut.ipp',
+                             'g_buffer.vert', 'g_buffer.frag', 'night-sky.pfm',
+                             'terrain-blend.pfm', 'dusk-sky.pfm'):
+                for bad in (None, b'', b'partial'):
+                    self.capture(capture)
+                    if bad is None:
+                        (capture / filename).unlink()
+                    else:
+                        (capture / filename).write_bytes(bad)
+                    with self.subTest(filename=filename, bad=bad), self.assertRaises((OSError, ValueError)):
+                        scene.run(args)
+                    self.assertFalse(output.exists())
+            for name, values in (('night-sky', self.night()), ('terrain-blend', self.terrain())):
+                # One wrong pixel is too small for MAE/p99, but must prevent even regeneration.
+                values[0] += .01
+                self.capture(capture)
+                (capture / (name + '.pfm')).write_bytes(
+                    b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *values))
+                for command in ('compare', 'regenerate'):
+                    args.command = command
+                    args.output = root / (name + '-' + command)
+                    with self.subTest(name=name, command=command):
+                        with self.assertRaisesRegex(ValueError, 'invariant'):
+                            scene.run(args)
+                        self.assertFalse(args.output.exists())
+            # Dusk remains measured evidence without a failing/reference expectation.
+            self.capture(capture)
+            (capture / 'dusk-sky.pfm').write_bytes(
+                b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS,
+                    *[.8 if x < 64 else .1 for y in range(128) for x in range(128) for channel in range(3)]))
+            args.command = 'regenerate'
+            args.output = output
+            self.assertEqual(scene.run(args), 0)
+            self.assertFalse((output / 'references/dusk-sky.ppm').exists())
+            manifest, _ = scene.load_manifest(output / 'scenes.json')
+            self.assertNotIn('dusk-sky', manifest['reference_sha256'])
+
+    def test_new_inventory_metadata_and_last_reference_write_failure(self):
+        original = json.loads(MANIFEST.read_text(encoding='utf-8'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'references').mkdir()
+            for fixture in scene.FIXTURES:
+                (root / fixture['reference']).write_bytes((MANIFEST.parent / fixture['reference']).read_bytes())
+            changes = [{'diagnostics': []}]
+            for name in ('night-sky', 'terrain-blend'):
+                for field in ('fixtures', 'reference_sha256', 'reference_capture', 'inputs'):
+                    data = copy.deepcopy(original)
+                    if field == 'fixtures':
+                        data[field] = [value for value in data[field] if value['name'] != name]
+                    else:
+                        key = 'res/shaders/enhanced_skybox.frag' if field == 'inputs' else name
+                        del data[field][key]
+                    changes.append(data)
+                for metadata in (None, {}, {'origin': 'llvmpipe', 'renderer': 'hardware', 'version': '4.5'}):
+                    data = copy.deepcopy(original)
+                    data['reference_capture'][name] = metadata
+                    changes.append(data)
+            for changed in changes:
+                data = dict(original, **changed)
+                path = root / 'scenes.json'
+                path.write_text(json.dumps(data), encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    scene.load_manifest(path)
+            capture = root / 'capture'
+            capture.mkdir()
+            self.capture(capture)
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST,
+                                      capture=capture, output=root / 'candidate')
+            write = Path.write_bytes
+
+            def fail_last(path, payload):
+                if path.name == 'terrain-blend.ppm':
+                    raise OSError('last reference failed')
+                return write(path, payload)
+
+            with patch.object(Path, 'write_bytes', fail_last), self.assertRaises(OSError):
+                scene.run(args)
+            self.assertFalse((args.output / 'scenes.json').exists())
 
     def test_every_rendering_and_harness_path_routes_and_docs_do_not(self):
         sensitive = ('res/shaders/new.frag', 'src/luminumbra_client/rendering/new.cpp',
