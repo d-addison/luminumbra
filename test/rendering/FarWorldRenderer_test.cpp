@@ -2643,6 +2643,35 @@ TEST_F(SessionRendererTest, SessionProjectionRefusesMalformedBoundsAndStaleFrame
     EXPECT_FALSE(output->complete);
 }
 
+TEST_F(SessionRendererTest, SessionProjectionKeepsLegacyFallbackTotals) {
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
+    ASSERT_TRUE(Settle());
+    Capture();
+    auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>(*renderer.SessionDiagnostic());
+    auto output = std::make_unique<FarWorldDiagnosticSnapshot>(renderer.Diagnostic());
+    input->submission.draws = 3;
+    input->submission.indices = 9;
+    input->submission.water_indices = 4;
+    output->selection.effective = FarWorldMode::Legacy;
+    output->draws = 7;
+    output->indices = 21;
+    output->submitted_water_indices = 0;
+    output->submission_occurred = true;
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_EQ(output->draws, 7u);
+    EXPECT_EQ(output->indices, 21u);
+    EXPECT_EQ(output->submitted_water_indices, 0u);
+    EXPECT_TRUE(output->submission_occurred);
+    output->selection.effective = FarWorldMode::Ladder;
+    output->selection.submit = true;
+    output->frame = input->frame;
+    ProjectFarWorldSessionDiagnostic(*input, policy.numeric, *output);
+    EXPECT_EQ(output->draws, 3u);
+    EXPECT_EQ(output->indices, 9u);
+    EXPECT_EQ(output->submitted_water_indices, 4u);
+    EXPECT_TRUE(output->submission_occurred);
+}
+
 TEST_F(SessionRendererTest, SessionAdmissionKeepsTypedBindingAndInputRefusals) {
     auto invalid = policy;
     invalid.caves = FarCaveMode::BoxFiltered;
