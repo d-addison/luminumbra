@@ -1,4 +1,5 @@
 #include "NearTerrainRefinement.h"
+#include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,23 +40,7 @@ bool HeightLike(const std::span<const float>& densities) {
     // Pure generated height densities increase by one per vertical metre.
     // Checking the entire bounded lattice also rejects caves/multiple crossings
     // away from the visible triangles, without relying on surface normals alone.
-    for (int z = 0; z < kSide; ++z) {
-        for (int x = 0; x < kSide; ++x) {
-            float previous = densities[static_cast<std::size_t>(x + z * kSide * kSide)];
-            if (!std::isfinite(previous)) {
-                return false;
-            }
-            for (int y = 1; y < kSide; ++y) {
-                const float current =
-                    densities[static_cast<std::size_t>(x + y * kSide + z * kSide * kSide)];
-                if (!std::isfinite(current) || std::abs((current - previous) - 1.0f) > 0.0001f) {
-                    return false;
-                }
-                previous = current;
-            }
-        }
-    }
-    return true;
+    return World::IsHeightLikeNearTerrainSdf(densities);
 }
 
 bool ValidMesh(const NearTerrainRefinementInput& input) {

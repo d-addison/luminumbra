@@ -8,6 +8,7 @@
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
+#include "../world/NearTerrainMeshSnapshot.h"
 #include "WaterSystem.h"
 #include "core/Profiler.h"
 #include "entt/entity/fwd.hpp"
@@ -156,6 +157,49 @@ std::size_t PadToNoiseSimd(std::size_t count) {
 namespace Luminumbra::Systems {
 
 namespace {
+
+std::shared_ptr<const World::NearTerrainMeshSnapshot> CaptureNearTerrainMeshEvidence(
+    const SHIELD_WorldSystem& world, const Chunk& chunk, int step, u32 mesh_version) {
+    auto evidence = std::make_shared<World::NearTerrainMeshSnapshot>();
+    evidence->mesh_version = mesh_version;
+    evidence->sample_step = step;
+    evidence->generated_current_params =
+        chunk.sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
+        !chunk.has_terrain_authority() && chunk.voxel_revision() == 0;
+    evidence->unedited_halo = true;
+    const auto coords = chunk.get_coords();
+    std::size_t index = 0;
+    // Exactly 27 lookups per mesh job; no world scan or live data read by workers.
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x, ++index) {
+                const IVec3 adjacent = coords + IVec3(x, y, z);
+                if (adjacent.x < Chunk::kPackedMinXz || adjacent.x > Chunk::kPackedMaxXz ||
+                    adjacent.z < Chunk::kPackedMinXz || adjacent.z > Chunk::kPackedMaxXz ||
+                    adjacent.y < Chunk::kPackedMinY || adjacent.y > Chunk::kPackedMaxY) {
+                    evidence->unedited_halo = false;
+                    continue;
+                }
+                const auto neighbour = world.find_streamed_chunk(adjacent);
+                if (!neighbour || neighbour->get_state() == ChunkState::Loading ||
+                    neighbour->get_state() == ChunkState::Unloaded ||
+                    neighbour->get_state() == ChunkState::Unloading) {
+                    evidence->unedited_halo = false;
+                    continue;
+                }
+                evidence->halo[index] = {
+                    neighbour, neighbour->near_terrain_epoch.load(std::memory_order_acquire)};
+                if (neighbour->sdf_provenance() != ChunkSdfProvenance::GeneratedCurrentParams ||
+                    neighbour->has_terrain_authority() || neighbour->voxel_revision() != 0 ||
+                    (neighbour->sdf_data.size() != kFullSdfLattice &&
+                     neighbour->heightmap_data.size() != kHeightmapCells)) {
+                    evidence->unedited_halo = false;
+                }
+            }
+        }
+    }
+    return evidence;
+}
 
 std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk, bool terrain_required) {
     std::size_t bytes = 0;
@@ -671,6 +715,10 @@ std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     // Teardown fences every owned callback without publishing or admitting work.
     quiesce_streaming_jobs_for_save();
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        chunk->invalidate_near_terrain_snapshot();
+    }
     if (m_far_world_changes) {
         m_far_world_changes->clear();
     }
@@ -4414,6 +4462,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         m_activation_index.erase(*chunk);
                         note_digest_chunk(it->second, false, false);
                         invalidate_renderable_chunks();
+                        chunk->invalidate_near_terrain_snapshot();
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4459,6 +4508,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             m_activation_index.erase(*it->second);
             note_digest_chunk(it->second, false, false);
             invalidate_renderable_chunks();
+            it->second->invalidate_near_terrain_snapshot();
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -4699,6 +4749,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             chunk->water_mesh_indices.clear();
             chunk->water_mesh_generated.store(false, std::memory_order_release);
             chunk->current_lod.store(build_chunk.lod);
+            chunk->near_terrain_snapshot.store({}, std::memory_order_release);
             chunk->mesh_version++;
             chunk->has_collision.store(false);
             set_renderable_chunk_state(*chunk, ChunkState::Ready);
@@ -4806,6 +4857,19 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             surface_chunk.chunk->applied_transition_faces.fetch_or(transition_faces,
                                                                    std::memory_order_acq_rel);
         }
+    }
+
+    // All synchronous mesh and skirt writers have drained. Publish evidence on
+    // the owner thread, against the exact version produced by those writers.
+    for (const auto& built : chunks_to_build) {
+        const auto& chunk = built.chunk;
+        const auto evidence = CaptureNearTerrainMeshEvidence(
+            *this, *chunk, built.step, chunk->mesh_version.load(std::memory_order_acquire));
+        std::vector<float> empty_densities;
+        auto& densities = built.step == 1 ? chunk->sdf_data : empty_densities;
+        chunk->near_terrain_snapshot.store(
+            World::CompleteNearTerrainMeshSnapshot(*evidence, densities),
+            std::memory_order_release);
     }
 
     std::size_t collision_count = 0;
@@ -6344,6 +6408,10 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
             if (chunk->material_data.size() == kFullSdfLattice) {
                 snapshot.material_data = chunk->material_data;
             }
+            snapshot.near_terrain_snapshot.store(
+                CaptureNearTerrainMeshEvidence(
+                    *this, *chunk, step, chunk->mesh_version.load(std::memory_order_acquire) + 1u),
+                std::memory_order_release);
         }
         mesh_batch.chunks.push_back({chunk,
                                      terrain_mesh_required,
@@ -6390,6 +6458,13 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                 }
 
                 if (terrain_mesh_required) {
+                    const auto evidence =
+                        scratch.near_terrain_snapshot.load(std::memory_order_acquire);
+                    if (evidence) {
+                        scratch.near_terrain_snapshot.store(
+                            World::CompleteNearTerrainMeshSnapshot(*evidence, scratch.sdf_data),
+                            std::memory_order_release);
+                    }
                     chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
                     chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
                 }
@@ -6511,6 +6586,9 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 chunk->applied_transition_faces.store(job_chunk.transition_faces,
                                                       std::memory_order_release);
                 chunk->mesh_version++;
+                chunk->near_terrain_snapshot.store(
+                    job_chunk.scratch->near_terrain_snapshot.load(std::memory_order_acquire),
+                    std::memory_order_release);
                 chunk->has_collision.store(false, std::memory_order_release);
                 //  a remesh / LOD0 promotion just cleared this chunk's collider, so
                 // re-open the gated collision scan (Step 4) to rebuild it. Main-thread store.
@@ -6611,6 +6689,7 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
         const Persistence::WorldSaveService::SaveOwnership ownership;
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             (void)id;
+            chunk->invalidate_near_terrain_snapshot();
             bump_far_lod_authority_revision(chunk->get_coords());
         }
     }
@@ -6626,6 +6705,7 @@ void SHIELD_WorldSystem::set_seed(int seed) {
         const Persistence::WorldSaveService::SaveOwnership ownership;
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             (void)id;
+            chunk->invalidate_near_terrain_snapshot();
             bump_far_lod_authority_revision(chunk->get_coords());
         }
     }
@@ -6647,6 +6727,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
 
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
+        chunk->invalidate_near_terrain_snapshot();
         chunk->bind_water_changes(nullptr);
     }
     for (const auto& [id, parked] : m_parked) {
@@ -6806,6 +6887,9 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_changed(const IVec3& chunk_coords) {
+    if (const auto chunk = find_streamed_chunk(chunk_coords)) {
+        chunk->invalidate_near_terrain_snapshot();
+    }
     bump_far_lod_authority_revision(chunk_coords);
 }
 
@@ -7277,6 +7361,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         if (resident == m_streaming_state.chunks.end())
             return;
         if (resident->second) {
+            resident->second->invalidate_near_terrain_snapshot();
             m_activation_index.erase(*resident->second);
             note_digest_chunk(resident->second, false, false);
         }
@@ -7481,6 +7566,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         bump_far_lod_authority_revision(chunk->get_coords());
     }
     if (adopted) {
+        chunk->invalidate_near_terrain_snapshot();
         note_digest_chunk(chunk, false, true);
         // Derived payloads belong to the producing world, never to a saved or
         // externally adopted chunk (world-local generation numbers can coincide).
