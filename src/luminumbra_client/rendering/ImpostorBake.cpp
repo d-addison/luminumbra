@@ -1,4 +1,5 @@
 #include "ImpostorBake.h"
+#include "ImpostorBakePath.h"
 #include "app/FrameAttribution.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
@@ -216,7 +217,7 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     GLuint fbo = 0, depthRb = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    auto makeColor = [&](GLuint& tex, int attach) {
+    auto makeColor = [&](GLuint& tex, GLenum attach) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexImage2D(
@@ -293,9 +294,9 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
                 glBindVertexArray(lp.mesh->vao);
                 Luminumbra::Rendering::AttributedGl::Submit(
                     glDrawElements,
-                    GL_TRIANGLES,
+                    static_cast<GLenum>(GL_TRIANGLES),
                     static_cast<GLsizei>(lp.mesh->indexCount),
-                    GL_UNSIGNED_INT,
+                    static_cast<GLenum>(GL_UNSIGNED_INT),
                     nullptr);
             }
         }
@@ -326,9 +327,12 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
     const int atlas = ra.size;
     const int n = std::max(1, grid.gridResolution);
     const int tile = std::max(1, grid.tileResolution);
-    std::vector<unsigned char> rgb(static_cast<std::size_t>(atlas) * atlas * 3u);
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(atlas) * atlas * 4u);
-    std::vector<unsigned char> nrm(static_cast<std::size_t>(atlas) * atlas * 3u);
+    std::vector<unsigned char> rgb(static_cast<std::size_t>(atlas) *
+                                   static_cast<std::size_t>(atlas) * 3u);
+    std::vector<unsigned char> rgba(static_cast<std::size_t>(atlas) *
+                                    static_cast<std::size_t>(atlas) * 4u);
+    std::vector<unsigned char> nrm(static_cast<std::size_t>(atlas) *
+                                   static_cast<std::size_t>(atlas) * 3u);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, ra.albedo);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
@@ -343,7 +347,7 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
                     : static_cast<unsigned char>(kPreviewBackground[channel] * 255.0f);
         }
     }
-    std::vector<float> tileCov(static_cast<std::size_t>(n) * n, 0.0f);
+    std::vector<float> tileCov(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0f);
     double covSum = 0.0;
     out.min_coverage = 1.0f;
     for (int tj = 0; tj < n; ++tj)
@@ -351,26 +355,22 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
             long covered = 0;
             for (int py = 0; py < tile; ++py)
                 for (int px = 0; px < tile; ++px) {
-                    const std::size_t idx =
-                        (static_cast<std::size_t>(tj * tile + py) * atlas + (ti * tile + px)) * 4u;
+                    const std::size_t idx = (static_cast<std::size_t>(tj * tile + py) *
+                                                 static_cast<std::size_t>(atlas) +
+                                             static_cast<std::size_t>(ti * tile + px)) *
+                                            4u;
                     if (rgba[idx + 3] >= 128)
                         ++covered;
                 }
             const float cov = static_cast<float>(covered) / static_cast<float>(tile * tile);
-            tileCov[static_cast<std::size_t>(tj) * n + ti] = cov;
+            tileCov[static_cast<std::size_t>(tj) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(ti)] = cov;
             covSum += cov;
             out.min_coverage = glm::min(out.min_coverage, cov);
         }
     out.mean_coverage = static_cast<float>(covSum / (static_cast<double>(n) * n));
 
-    std::string normalPath = outPpmPath;
-    {
-        const auto dot = normalPath.find_last_of('.');
-        if (dot != std::string::npos)
-            normalPath.insert(dot, "_normal");
-        else
-            normalPath += "_normal";
-    }
+    const std::string normalPath = ImpostorNormalAtlasPath(outPpmPath).string();
     const bool normal_written = WritePpm(normalPath, atlas, atlas, nrm);
     out.ok = WritePpm(outPpmPath, atlas, atlas, rgb) && normal_written;
     if (!out.ok)

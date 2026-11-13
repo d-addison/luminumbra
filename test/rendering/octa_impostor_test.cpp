@@ -3,6 +3,7 @@
 // math that both the atlas BAKE (tile -> capture direction) and the runtime impostor
 // SHADER (view direction -> tile) rely on, so the two can never drift apart.
 
+#include "luminumbra_client/rendering/ImpostorBakePath.h"
 #include "luminumbra_client/rendering/OctaImpostor.h"
 
 #include <gtest/gtest.h>
@@ -127,6 +128,23 @@ TEST(OctaImpostor, TileCoordMatchesNearestTileFloor) {
         EXPECT_EQ(std::min(grid.gridResolution - 1, static_cast<int>(std::floor(tc.x))), ni);
         EXPECT_EQ(std::min(grid.gridResolution - 1, static_cast<int>(std::floor(tc.y))), nj);
     }
+}
+
+TEST(OctaImpostor, NormalAtlasPathPreservesDirectoryAndFilenameExtension) {
+    using Luminumbra::Rendering::ImpostorNormalAtlasPath;
+    EXPECT_EQ(ImpostorNormalAtlasPath("capture.v1/atlas").generic_string(),
+              "capture.v1/atlas_normal");
+    EXPECT_EQ(ImpostorNormalAtlasPath("/capture.v1/atlas").generic_string(),
+              "/capture.v1/atlas_normal");
+    EXPECT_EQ(ImpostorNormalAtlasPath("out/atlas.png").generic_string(), "out/atlas_normal.png");
+    EXPECT_EQ(ImpostorNormalAtlasPath("out/atlas.v2.png").generic_string(),
+              "out/atlas.v2_normal.png");
+    EXPECT_EQ(ImpostorNormalAtlasPath("atlas").generic_string(), "atlas_normal");
+    EXPECT_EQ(ImpostorNormalAtlasPath("atlas.png").generic_string(), "atlas_normal.png");
+    EXPECT_EQ(ImpostorNormalAtlasPath("capture.v1/atlas.png").generic_string(),
+              "capture.v1/atlas_normal.png");
+    EXPECT_EQ(ImpostorNormalAtlasPath("out/.atlas").generic_string(), "out/.atlas_normal");
+    EXPECT_EQ(ImpostorNormalAtlasPath("out/atlas.").generic_string(), "out/atlas_normal.");
 }
 
 } // namespace
