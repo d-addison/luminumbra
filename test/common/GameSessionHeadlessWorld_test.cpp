@@ -9156,7 +9156,8 @@ void LoadScheduledFieldFixture(GameSession& session,
         ASSERT_TRUE(transaction.begin(&errors));
         auto saved_ledger = ledger;
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), saved_ledger, input, &errors));
+            metadata.dump(), saved_ledger, input, &errors))
+            << ::testing::PrintToString(errors);
         ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
         if (energy && !energy->empty()) {
             ASSERT_TRUE(transaction.protect({"aether_state.efs"}, &errors));
@@ -9326,8 +9327,19 @@ void CheckScheduledFieldFaultRollback(bool standard_exception) {
     EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
     const auto save = root.path() / "faulted-field-state";
-    ASSERT_TRUE(session.SaveWorldStateTo(save));
-    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, fields));
+    const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+    // The fields rolled back, but the unpublished foliage tick is incomplete.
+    EXPECT_FALSE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(save));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectIndexedSessionFields(root.path() / "scheduled-field-input", fields));
 }
 
 void CheckScheduledFieldFreeze(bool corrupt_digest) {
@@ -14925,12 +14937,13 @@ void BuildOrdinaryFoliageGap(GameSession& session,
         owners.emplace(RegionKey{x, 0}, RegionState::Frozen);
         ASSERT_TRUE(fields.set_soil({x * 512 + 8, 8}, 17));
     }
+    // Frozen owners require last_ticked < frozen_at, so begin after tick zero.
     const auto ledger =
-        ScheduledFieldLedger(0, owners, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+        ScheduledFieldLedger(1, owners, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
     auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
     record.first_active = 0;
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
-    for (unsigned tick = 0; tick < 32; ++tick) {
+    for (std::uint64_t tick = ledger.tick(); tick < 32; ++tick) {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
     }

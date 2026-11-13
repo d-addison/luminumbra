@@ -5340,14 +5340,14 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
         // Recovery refusal leaves the faulted session available for another replacement.
-        if (m_regionFault)
-            return false;
-        if (!state.input_refused) {
-            ++m_worldRevision;
-            m_lastLoadedChunkCount = 0;
-            m_worldUsable = false;
-            // Refused snapshots invalidate resident chunks, but never publish staged members.
-            m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!m_regionFault) {
+            if (!state.input_refused) {
+                ++m_worldRevision;
+                m_lastLoadedChunkCount = 0;
+                m_worldUsable = false;
+                // Refused snapshots invalidate resident chunks, but never publish staged members.
+                m_worldSystem->clear_world(m_physicsSystem.get());
+            }
         }
         return false;
     }
