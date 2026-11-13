@@ -976,6 +976,65 @@ TEST(ExposureModel, AutoExposureCurveMatchesPrimitivesAndAnchors) {
               R::kManualExposureM0); // golden band dips below day
 }
 
+TEST(MoonLightModel, PhaseAndElevationBoundTheKeyAndAmbient) {
+    namespace R = Luminumbra::Rendering;
+    const auto full = R::NightAmbientColor(1.0f, 1.0f);
+    const auto dark = R::NightAmbientColor(0.0f, 1.0f);
+    EXPECT_GT(full.b, full.g);
+    EXPECT_GT(full.g, full.r);
+    EXPECT_LT(full.b, 0.05f);
+    EXPECT_LT(dark.b, full.b * 0.03f);
+    EXPECT_GT(dark.r, 0.0f);
+    for (float phase : {0.0f, 0.08f, 0.5f, 1.0f}) {
+        float previous = -1.0f;
+        for (float up : {-1.0f, 0.0f, 0.1f, 0.2f, 0.35f, 1.0f}) {
+            const float factor = R::MoonLightFactor(phase, up);
+            EXPECT_GE(factor, previous);
+            EXPECT_LE(factor, phase);
+            EXPECT_GE(factor, 0.0f);
+            if (up <= 0.0f) {
+                EXPECT_FLOAT_EQ(factor, 0.0f);
+                EXPECT_EQ(R::NightAmbientColor(phase, up), dark);
+            }
+            previous = factor;
+        }
+    }
+    EXPECT_FLOAT_EQ(R::MoonLightFactor(-1.0f, 1.0f), 0.0f);
+    EXPECT_FLOAT_EQ(R::MoonLightFactor(2.0f, 1.0f), 1.0f);
+    EXPECT_FLOAT_EQ(R::MoonLightFactor(0.5f, 1.0f), 0.5f);
+    EXPECT_LT(R::NightAmbientColor(R::kNewMoonFloor, 1.0f).b, full.b * 0.1f);
+}
+
+TEST(ExposureModel, AutomaticNightAdaptationCannotRestoreDaylight) {
+    namespace R = Luminumbra::Rendering;
+    // Both the analytic 1.75 night lift and the GPU servo's maximum must be capped.
+    for (float automatic : {0.25f, 1.12f, 1.75f, 4.0f}) {
+        for (float phase : {0.0f, 0.08f, 0.5f, 1.0f}) {
+            for (float up : {-1.0f, 0.0f, 0.1f, 1.0f}) {
+                const float night = R::MoonScaledAutoExposure(automatic, -1.0f, phase, up);
+                EXPECT_LE(night, 0.85f);
+                EXPECT_LE(night, automatic);
+                EXPECT_GT(night, 0.0f);
+                EXPECT_FLOAT_EQ(R::MoonScaledAutoExposure(automatic, 1.0f, phase, up), automatic);
+                EXPECT_FLOAT_EQ(R::SelectRenderExposure(2.0f, night), 2.0f);
+                EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, night), night);
+            }
+        }
+    }
+    EXPECT_FLOAT_EQ(R::MoonScaledAutoExposure(4.0f, -1.0f, 0.0f, 1.0f), 0.45f);
+    EXPECT_FLOAT_EQ(R::MoonScaledAutoExposure(4.0f, -1.0f, 1.0f, -1.0f), 0.45f);
+    EXPECT_FLOAT_EQ(R::MoonScaledAutoExposure(4.0f, -1.0f, 1.0f, 1.0f), 0.85f);
+    EXPECT_GT(R::MoonScaledAutoExposure(4.0f, -1.0f, 1.0f, 0.2f),
+              R::MoonScaledAutoExposure(4.0f, -1.0f, 0.5f, 0.2f));
+    float previous = 0.0f;
+    for (float sun : {-1.0f, -0.1f, 0.0f, 0.1f, 0.15f, 1.0f}) {
+        const float exposure = R::MoonScaledAutoExposure(1.12f, sun, 1.0f, 1.0f);
+        EXPECT_GE(exposure, previous);
+        EXPECT_LE(exposure, 1.12f);
+        previous = exposure;
+    }
+}
+
 // the SEASON facet extracted from update_time_of_day
 // (TimeOfDayModel::ComputeSeason) — the SAME function the frame runs. Byte-exact extraction
 // guard: each output is asserted == the same expression rebuilt from the CANONICAL primitive
