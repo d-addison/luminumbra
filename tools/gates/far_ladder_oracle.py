@@ -327,6 +327,8 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
     poses = {}
     names, previous_frame, binding = set(), 0, None
     previous_publication = None
+    # Retain one tile map per distinct publication, bounded by serials times tiles.
+    publication_tiles = {}
     for row in a["stations"]:
         fields = ("name", "camera", "settle_seconds", "ready_within_deadline", "paired_capture_preserved", "snapshot", "ladder")
         obj(row, fields + (("legacy",) if renderer == "legacy" else ()), "station")
@@ -370,6 +372,19 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
                     (publication[0] >= previous_publication[0] and publication[1] >= previous_publication[1] and
                      (publication[0] != previous_publication[0] or publication[1] == previous_publication[1])),
                     "out-of-order session publication")
+            tiles = {
+                tuple(tile["desired"]["key"]): (
+                    tile["accepted_content_identity"], tile["built_field_identity"],
+                    tuple(tile["desired"][f] for f in IDENTITY if f != "key"),
+                    tuple(tile["built"][f] for f in IDENTITY if f != "key"),
+                    None if tile["requested_span"] is None else tuple(tile["requested_span"]),
+                    tuple(tile["built_span"]))
+                for tile in s["tiles"]
+            }
+            if publication in publication_tiles:
+                require(publication_tiles[publication] == tiles, "changed session publication tile identity/span")
+            else:
+                publication_tiles[publication] = tiles
             previous_publication = publication
         if renderer == "legacy":
             legacy = obj(row["legacy"], ("regions_wanted", "regions_resident", "regions_missing"), "legacy")
