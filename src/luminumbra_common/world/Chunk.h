@@ -275,6 +275,9 @@ public:
     }
     // Sticky: set once the chunk's water state has diverged from worldgen initialisation.
     void set_water_authority() {
+        if (sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited || voxel_revision() == 0) {
+            invalidate_near_terrain_snapshot();
+        }
         notify_far_world_change(World::FarWorldAuthorityChange::Water);
         m_water_authority.store(true, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),

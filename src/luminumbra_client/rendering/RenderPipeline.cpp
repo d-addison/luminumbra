@@ -2413,7 +2413,7 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         snapshot.source_chunk = chunk;
         snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
         snapshot.near_terrain_snapshot =
-            World::CurrentNearTerrainMeshSnapshot(*chunk, snapshot.mesh_version);
+            chunk->near_terrain_snapshot.load(std::memory_order_acquire);
         snapshot.water_mesh_version = chunk->water_mesh_version.load(std::memory_order_acquire);
         snapshot.terrain_vertex_count = chunk->mesh_vertices.size();
         snapshot.terrain_index_count = chunk->mesh_indices.size();

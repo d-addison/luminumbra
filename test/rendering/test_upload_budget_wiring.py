@@ -59,6 +59,9 @@ class UploadBudgetWiring(unittest.TestCase):
         boot_publish = body(boot, "for (const auto& built : chunks_to_build) {\n        const auto& chunk")
         self.assertIn("chunk->mesh_version.load(std::memory_order_acquire)", boot_publish)
         self.assertIn("World::CompleteNearTerrainMeshSnapshot(*evidence, densities)", boot_publish)
+        self.assertIn("auto& densities = built.step == 1 ? chunk->sdf_data : empty_densities;",
+                      boot_publish)
+        self.assertNotIn("densities = chunk->sdf_data", boot_publish)
         self.assertGreater(boot.index(boot_publish), boot.index("AddBoundaryTransitionSkirts("))
         dispatch = body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
         self.assertLess(dispatch.index("CaptureNearTerrainMeshEvidence("),
@@ -74,10 +77,17 @@ class UploadBudgetWiring(unittest.TestCase):
                         terrain.index("chunk->near_terrain_snapshot.store("))
         self.assertIn("job_chunk.scratch->near_terrain_snapshot.load(", terrain)
         snapshots = body(self.pipeline, "RenderPipeline::build_chunk_snapshots(")
-        self.assertIn("World::CurrentNearTerrainMeshSnapshot(*chunk, snapshot.mesh_version)", snapshots)
+        self.assertIn("chunk->near_terrain_snapshot.load(std::memory_order_acquire)", snapshots)
         self.assertIn("snapshot.near_terrain_snapshot.reset();",
                       body(snapshots, "if (version_after_metadata != snapshot.mesh_version)"))
         self.assertEqual(self.header.count("std::shared_ptr<const World::NearTerrainMeshSnapshot>"), 2)
+
+    def test_near_terrain_frame_capture_defers_dependency_validation(self):
+        snapshots = body(self.pipeline, "RenderPipeline::build_chunk_snapshots(")
+        self.assertIn("chunk->near_terrain_snapshot.load(std::memory_order_acquire)", snapshots)
+        for validation in ("CurrentNearTerrainMeshSnapshot(", "dependencies_current(",
+                           "->matches(", "->eligible(", ".halo", "->halo"):
+            self.assertNotIn(validation, snapshots)
 
     def test_near_terrain_edits_invalidate_self_and_every_halo_neighbour(self):
         chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
@@ -101,6 +111,50 @@ class UploadBudgetWiring(unittest.TestCase):
         carve = read(ROOT / "src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp")
         self.assertIn("chunk->mark_voxel_data_dirty();", carve)
         self.assertIn("world_system->notify_far_lod_authority_changed(chunk->get_coords());", carve)
+
+    def test_near_terrain_water_promotion_invalidates_before_changing_provenance(self):
+        chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
+        promotion = body(chunk, "void set_water_authority()")
+        self.assertIn("sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited", promotion)
+        self.assertIn("voxel_revision() == 0", promotion)
+        self.assertLess(promotion.index("invalidate_near_terrain_snapshot();"),
+                        promotion.index("m_sdf_provenance.store("))
+        self.assertIn("set_water_authority();", body(chunk, "void publish_water_state()"))
+
+    def test_near_terrain_retirement_precedes_every_resident_removal(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        activation = body(world, "bool SHIELD_WorldSystem::update_chunk_activation(")
+        removals = activation.split("m_streaming_state.chunks.erase(it)")
+        self.assertEqual(len(removals), 4)
+        for prefix in removals[:-1]:
+            self.assertTrue("invalidate_near_terrain_snapshot();" in prefix or
+                            "normalize_for_park();" in prefix)
+        restore = body(world, "bool SHIELD_WorldSystem::restore_authoritative_chunk(")
+        discard = body(restore, "const auto discard_placeholder =")
+        self.assertLess(discard.index("resident->second->invalidate_near_terrain_snapshot();"),
+                        discard.index("m_streaming_state.chunks.erase(resident)"))
+        for marker in ("void SHIELD_WorldSystem::clear_world(",
+                       "SHIELD_WorldSystem::~SHIELD_WorldSystem()"):
+            self.assertIn("chunk->invalidate_near_terrain_snapshot();", body(world, marker))
+        streaming = read(ROOT / "src/luminumbra_common/world/WorldStreamingState.cpp")
+        erase = body(streaming, "bool WorldStreamingState::erase_chunk(ChunkID id)")
+        self.assertIn("it->second->invalidate_near_terrain_snapshot();", erase)
+        self.assertLess(erase.index("it->second->invalidate_near_terrain_snapshot();"),
+                        erase.index("m_chunks.erase(it)"))
+        clear = body(streaming, "void WorldStreamingState::clear()")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", clear)
+        self.assertLess(clear.index("chunk->invalidate_near_terrain_snapshot();"),
+                        clear.index("m_chunks.clear()"))
+        self.assertNotIn("WorldStreamingState::~WorldStreamingState()", streaming)
+
+    def test_near_terrain_lattice_retention_requires_explicit_refinement_request(self):
+        contract = read(ROOT / "src/luminumbra_common/world/NearTerrainMeshSnapshot.h")
+        self.assertIn("bool retain_densities = false", contract)
+        complete = body(contract, "CompleteNearTerrainMeshSnapshot(")
+        retention = body(complete, "if (retain_densities &&")
+        self.assertIn("snapshot->densities = std::move(densities);", retention)
+        self.assertEqual(complete.count("snapshot->densities ="), 1)
+        self.assertNotIn("densities.size()", body(contract, "bool\n    eligible("))
 
     def test_near_terrain_stale_records_are_rejected_through_upload_queue(self):
         contract_path = ROOT / "src/luminumbra_common/world/NearTerrainMeshSnapshot.h"
@@ -129,6 +183,11 @@ class UploadBudgetWiring(unittest.TestCase):
         native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
         for regression in ("PublishesMatchingMeshVersionAndOwnsItsLattice",
                            "EveryEditInvalidatesSelfAndAllHaloNeighbours",
+                           "WaterPromotionInvalidatesSourceAndEveryHaloNeighbour",
+                           "ResidentRemovalRefusesRetainedOwnersAfterReplacement",
+                           "LiveWorldEvictionRefusesRetainedOwnersAfterReplacement",
+                           "EvidenceWithoutRefinementRetainsNoLattice",
+                           "TemporaryViewsPreserveResidentEvidence",
                            "RejectsStaleQueuedRecordsAndRetiredOwners",
                            "RefusesMissingPartialEditedCoarseAndCaveEvidence"):
             self.assertIn("TEST(NearTerrainEligibility, " + regression + ")", native)
