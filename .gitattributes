@@ -34,3 +34,6 @@ tools/ci/jolt_startup.py text eol=lf
 tools/ci/path_safety.py text eol=lf
 cmake/jolt_startup.cmake text eol=lf
 vendor/CMakeLists.txt text eol=lf
+
+# Linear image reference bytes are identical on every checkout.
+test/rendering/shader_scenes/references/*.ppm -text
