@@ -674,6 +674,43 @@ class ReplaySourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_concrete_ecology_admission(self, source):
+        self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
+        self.assertNotRegex(source, r"\bEnvSampler\b")
+        self.assertRegex(
+            source,
+            r"RunPlantGrowthSystemOnTick\(\s*foliage_registry, current_tick, plant_env, foliage_gate\)")
+        initialize = self.function(source, "InitializeScentField")
+        self.assertIn("m_scentField->BindSessionAdmission(*this);", initialize)
+        self.assertNotIn("BindDepositGate", initialize)
+        admission = self.function(source, "SessionCellAllowed", "luminumbra::ai::ScentField::")
+        self.assertIn("return m_admissionSession->ScentCellDue(x, z);", admission)
+
+    def test_shipping_plant_and_scent_admission_use_concrete_dispatch(self):
+        self.assert_concrete_ecology_admission(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        header = read_source("src/luminumbra_common/ai/ScentField.h")
+        self.assertIn("const ::Luminumbra::world::GameSession* m_admissionSession", header)
+        admission = self.function(header, "SimulationCellAllowed", "")
+        self.assertRegex(admission, r"if \(m_admissionSession\)\s*\{\s*"
+                         r"return SessionCellAllowed\(x, z\);\s*\}")
+        deposit = self.function(header, "Deposit", "")
+        self.assertIn("!SimulationCellAllowed(x, z)", deposit)
+        self.assertNotIn("m_deposit_gate", deposit)
+
+    def test_concrete_ecology_guard_rejects_erased_shipping_regressions(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for before, after in (
+            ("const auto plant_env", "const luminumbra::foliage::EnvSampler plant_env"),
+            ("m_scentField->BindSessionAdmission(*this);",
+             "m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });"),
+            ("return m_admissionSession->ScentCellDue(x, z);", "return m_deposit_gate(x, z);"),
+        ):
+            with self.subTest(regression=after):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_ecology_admission(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
