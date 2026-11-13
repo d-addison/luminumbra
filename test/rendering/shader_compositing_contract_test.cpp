@@ -418,6 +418,26 @@ TEST(FarWorldShadowContract, NegativeAOBypassesOnlyTheThreeCascadeLookups) {
     ExpectContains(body, "skyVis = computeSkyVisibility(viewPos, viewNormal);");
 }
 
+TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
+    const auto source = ReadShader("res/shaders/lighting_pass.frag");
+    const auto body = ExtractBlock(source, "float computeSkyVisibility(");
+    ASSERT_FALSE(body.empty());
+    ExpectContains(body,
+                   "u_caveSkyMaxDist <= 0.0 || u_caveThickness <= 0.0 || u_caveSkySteps <= 0");
+    ExpectContains(body, "int steps = min(u_caveSkySteps, 32);");
+    ExpectContains(body, "float stepLen = u_caveSkyMaxDist / float(steps);");
+    ExpectContains(body, "if (s > steps) break;");
+    ExpectContains(body, "depthGap > 0.05 && depthGap < u_caveThickness");
+    ExpectContains(body, "length(sampPos - ro) / u_caveSkyMaxDist");
+    ExpectContains(body, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
+    ExpectContains(body, "occluded = max(occluded, distanceWeight * thicknessWeight);");
+    EXPECT_EQ(body.find("float(s - 1)"), std::string::npos);
+    // Legacy and Ladder G-buffers share this march; authored studio bypasses it.
+    ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)");
+    ExpectContains(ExtractBlock(source, "void main()"),
+                   "skyVis = computeSkyVisibility(viewPos, viewNormal);");
+}
+
 TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawAccess) {
     for (const char* source : {
              "shadow_ctx.frozen_replay = m_far_world_paired;",

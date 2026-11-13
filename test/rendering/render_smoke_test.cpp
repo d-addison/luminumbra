@@ -2367,6 +2367,126 @@ private:
 };
 } // namespace
 
+TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    std::string source, positions, diagnostic;
+    ASSERT_TRUE(
+        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(ReadShaderSource(
+        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
+        << diagnostic;
+    const auto begin = source.find("float computeSkyVisibility(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    // Compile the shipping march and position decoder with controlled geometry.
+    std::string fragmentSource = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2D gPosition, u_sceneDepth;
+uniform mat4 u_inverseView, u_projection;
+uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
+uniform int u_caveSkySteps;
+)" + positions + source.substr(begin, end - begin) +
+                                 R"(
+void main() {
+    float visibility = computeSkyVisibility(vec3(0, 0, -10), vec3(0, 1, 0));
+    FragColor = vec4(visibility, visibility, visibility, 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragmentText = fragmentSource.c_str();
+    glShaderSource(fragment, 1, &fragmentText, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    probe.texture(1, {glm::vec4(0.5f)});
+    SetMat4Identity(program, "u_inverseView");
+    glm::mat4 projection(1);
+    projection[1][1] = 0.01f; // Keep the entire 24 m upward march in view.
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glm::mat4 inverseProjection(1);
+    inverseProjection[2][2] = -1; // Valid depth reconstruction; the near lane reads gPosition.
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    const auto settings = [&](float distance, float thickness, int steps) {
+        glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), distance);
+        glUniform1f(glGetUniformLocation(program, "u_caveThickness"), thickness);
+        glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+    };
+    const auto visibility = [&](const glm::vec3& position) {
+        probe.texture(0, {glm::vec4(position, 1)});
+        return probe.draw()[16].r;
+    };
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 8);
+        EXPECT_FLOAT_EQ(visibility({0, 0, -2}), 1)
+            << "foreground foliage eight metres from the ray is not a roof";
+        EXPECT_FLOAT_EQ(visibility({0, 0, 0}), 1) << "missing geometry leaves the sky open";
+        const float ceiling = visibility({0, 1.5f, -10});
+        EXPECT_GT(ceiling, 0.06f);
+        EXPECT_LT(ceiling, 0.3f) << "a nearby ceiling must still block sky ambient";
+        const float movedCeiling = visibility({0, 1.6f, -10});
+        EXPECT_GT(movedCeiling - ceiling, 0.003f)
+            << "occlusion must track observed distance within one march step";
+        settings(3, 1.5f, 1);
+        const float rayDepth = glm::length(glm::vec3(0, 3.05f, -10));
+        for (float gap : {-0.1f, 0.01f, 1.5f, 1.6f}) {
+            EXPECT_NEAR(visibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
+                << "only the open depth interval (0.05, thickness) occludes: " << gap;
+        }
+        const float innerBand = visibility({0, 0, -(rayDepth - 0.8f)});
+        const float outerBand = visibility({0, 0, -(rayDepth - 1.4f)});
+        EXPECT_LT(innerBand, outerBand);
+        EXPECT_LT(outerBand, 1);
+        settings(24, 1.5f, 32);
+        const float bounded = visibility({0, 20, -10});
+        EXPECT_LT(bounded, 0.9f);
+        settings(24, 1.5f, 64);
+        EXPECT_FLOAT_EQ(visibility({0, 20, -10}), bounded)
+            << "the capped march must still cover the requested distance";
+        for (float invalid : {0.0f, -1.0f}) {
+            settings(invalid, 1.5f, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+            settings(24, invalid, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        for (int invalid : {0, -1}) {
+            settings(24, 1.5f, invalid);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        settings(24, 1.5f, 8);
+        if (ladder != 0) {
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1)
+                << "cleared depth refuses an occluder even if position is stale";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();

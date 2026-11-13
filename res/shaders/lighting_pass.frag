@@ -389,6 +389,9 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
 // fragment is roofed over (cave/overhang). Cheap: u_caveSkySteps depth taps.
 // Only called when u_caveAmbientOcclusion > 0.5 (see main); zero cost when OFF.
 float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
+    if (u_caveSkyMaxDist <= 0.0 || u_caveThickness <= 0.0 || u_caveSkySteps <= 0) {
+        return 1.0;
+    }
     // Sky direction in VIEW space (world +Y rotated by the view rotation). The
     // upper-left 3x3 of u_inverseView maps view->world; its transpose maps the
     // world up vector into view space.
@@ -396,13 +399,14 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     vec3 skyDirView = normalize(transpose(mat3(u_inverseView)) * worldUp);
     // Start a bit off the surface along the normal to avoid self-occlusion, then
     // march toward the sky. Sample the G-buffer view-space position; if a sampled
-    // surface is CLOSER to the eye than the ray point by more than u_caveThickness,
-    // the ray is blocked.
+    // surface lies just in front of the ray point within u_caveThickness, the
+    // ray is blocked. More distant foreground geometry is unrelated to the ray.
     vec3 ro = viewPosFrag + viewNrm * 0.05;
     float occluded = 0.0;
-    float stepLen = u_caveSkyMaxDist / float(max(u_caveSkySteps, 1));
+    int steps = min(u_caveSkySteps, 32);
+    float stepLen = u_caveSkyMaxDist / float(steps);
     for (int s = 1; s <= 32; ++s) {
-        if (s > u_caveSkySteps) break;          // dynamic bound (const loop cap)
+        if (s > steps) break;                 // at most 32 depth taps
         vec3 p = ro + skyDirView * (stepLen * float(s));
         // Project to screen.
         vec4 clip = u_projection * vec4(p, 1.0);
@@ -417,11 +421,15 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // pixel. If the stored surface is in FRONT of the ray sample (closer to
         // the eye) within the thickness band, a ceiling/overhang occludes this
         // upward sample.
-        float rayDepth  = length(p);
-        float surfDepth = length(sampPos);
-        if (surfDepth < rayDepth - 0.05 && (rayDepth - surfDepth) < u_caveSkyMaxDist) {
-            // Weight nearer occluders more (closer ceiling = darker).
-            occluded = max(occluded, 1.0 - float(s - 1) / float(u_caveSkySteps));
+        float depthGap = length(p) - length(sampPos);
+        if (depthGap > 0.05 && depthGap < u_caveThickness) {
+            // A foreground silhouette is not a ceiling along this ray. Limit
+            // hits to the configured depth band, not the entire march length.
+            // Use the observed distance instead of the discrete march index so
+            // foliage cannot stamp eight constant-strength bands on the ground.
+            float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
+            float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
+            occluded = max(occluded, distanceWeight * thicknessWeight);
         }
     }
     // occluded in [0,1]; map to a sky-visibility multiplier in [floor,1].
