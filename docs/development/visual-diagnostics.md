@@ -13,7 +13,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | GPU ID attachment, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
-| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material/alpha-cutout fixtures registered; analytical references checked; software-GL execution pending; no required-check or ruleset changes |
+| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
 The codecs alone do not create scenario bundles or enable a runtime flag. They are
@@ -181,16 +181,23 @@ and 8 MiB expanded source per translation unit; refuse budgets before compilatio
 
 ### Scene catalogue
 
-The schema-2 scene manifest is the reference inventory: it pins both 128x128 PPM
-hashes, all four consumed shader sources and the capture translation unit, including
-its fixed uniforms and generated textures. References are analytical, quantized
-linear RGB with bottom-first rows; renderer metadata must not imply a GL capture.
-The existing binary PPM attribute covers every reference in this directory.
+The schema-3 scene manifest inventories four 128x128 PPM references, all eight
+consumed source files and the capture translation unit, including its fixed
+uniforms and generated textures. Each reference records its own origin: material,
+tree cutout and terrain are analytical; night is a surfaceless llvmpipe shader
+replay. Native scene target execution remains pending because the local display
+server could not bind. Images store linear RGB, bottom-first; sky samples undo
+the shader's explicit gamma after the display clamp. The existing binary PPM
+attribute covers every reference in this directory. These test assets are outside
+the runtime asset inventory.
 
 | Scene | Real shader pair | Metric and tolerance |
 | --- | --- | --- |
 | `material` | `static_asset.vert/.frag` | Full-image linear RGB MAE <= 0.005 and channel-error p99 <= 0.02; existing exact material assertions retained |
 | `tree-cutout` | `tree_impostor.vert/.frag` | Same reference thresholds; maximum RGB error against independent atlas categories <= 0.000001; the GL test checks unchanged background on all six attachments for discarded texels |
+| `night-sky` | `enhanced_skybox.frag` with fixed point directions | Same reference thresholds; maximum star RGB at/below horizon <= 0.000001; each of four stellar peaks >= 0.01 luma, above its eight-neighbour ring mean by >= 0.001 and every ring pixel by >= 0.00001 |
+| `terrain-blend` | `g_buffer.vert/.frag` | Same reference thresholds; every row has exactly 102 pixels between 10% and 90% Sand; weight backstep <= 0.000001, adjacent weight step <= 0.008, maximum RGB error against the analytical ramp <= 0.000001 |
+| `dusk-sky` (diagnostic only) | `enhanced_skybox.frag`, production atmospheric compute kernels | Maximum adjacent column-mean luminance step across all 128 azimuth columns, including wrap; proposed <= 0.005 remains pending issue #918; no reference or passing expectation |
 
 The tree fixture selects one tile from a generated 2x2 atlas. Its 4x4 tile repeats
 alpha 0, 0.499, 0.5 and 1, giving exactly 50% discarded pixels. Other tiles are
@@ -198,13 +205,32 @@ opaque red to expose incorrect tile selection. Surviving albedo is checked after
 coverage division. This isolates the shader's alpha cutoff; it does not qualify
 the production atlas bake, binding or distant-tree submission.
 
-Sky horizon and radial-star expectations are deferred: at the pinned source
-revision, `renderStars` adds thresholded noise without a horizon mask or a radial
-profile. The harness has
-no known-failure mode, so those defects must not become accepted baselines. Dusk
-azimuth continuity and the reported sky seam still require software-GL evidence.
-Terrain material-transition coverage is deferred; the flat material ID does not
-provide an interpolated transition between provoking vertices.
+Night fixes time at zero and sun direction at (0,-1,0). Atmospheric radiance,
+moon and aurora are zero; stars remain enabled. Rows 0..63 cover the complete
+azimuth below and exactly on the horizon; the upper half resolves four fixed
+3D star cells at 0.02 cell units per pixel. Their independent peak/ring checks
+reject absent stars and square plateaus even if image-average errors are small.
+
+Dusk fixes the sun at (0,-0.08,0.9967949), day factor 0.43 and exposure 38.
+A full-azimuth panorama samples elevations 0.001..0.019 radians, below the
+shader's cloud cutoff and above the sun disc. The three unmodified compute
+kernels embedded in `SkyAtmosphereLut.ipp` generate the 256x64 transmittance,
+32x32 multiscatter and 192x108 sky-view LUTs with production RGB16F storage and
+sampler state. This isolates LUT continuity from clouds. A surfaceless llvmpipe
+replay measured a maximum column-mean step of 0.00596312 at columns 111/112;
+an experimental bilinear input-sampling replay measured 0.00353783. This is
+software evidence of an A17-style discontinuity, not qualification of the
+production camera or the separate fix. The proposed 0.005 threshold is recorded
+as pending issue #918. Dusk capture remains mandatory and finite, but comparison
+and regeneration cannot accept a dusk baseline.
+
+Terrain draws two triangles with Stone on the left vertices and Sand on the
+right, exercising the real vertex coverage interpolation across a diagonal with
+different provoking materials. A zero texture flag selects fixed reflectances;
+macro mottle and rock overlay are isolated out. The expected RGB is
+(0.5+0.4t, 0.5+0.3t, 0.5), t=(x+0.5)/128. A llvmpipe replay's maximum RGB
+error was below 0.00000005. This qualifies the material-coverage path, not the
+terrain mesh producer or textured sand detail.
 
 To compare or regenerate, first configure the existing opt-in scene target with
 `LUMINUMBRA_SHADER_SCENES=ON` and build `shader_scene_render_test`. Capture to a
@@ -217,9 +243,9 @@ python3 -I -B tools/gates/shader-scenes.py compare --capture build/scene-capture
 python3 -I -B tools/gates/shader-scenes.py regenerate --capture build/scene-capture --output build/scene-candidates
 ```
 
-Regeneration checks both captures, source identities, renderer evidence and the
-categorical cutout invariant before creating the candidate directory. It writes
-both reference payloads before `scenes.json`; an I/O failure cannot publish a
+Regeneration checks all five captures, source identities, renderer evidence and
+the cutout, night and terrain invariants before creating the candidate directory.
+It writes all four reference payloads before `scenes.json`; an I/O failure cannot publish a
 complete candidate manifest. Review and copy the candidate manifest and references
 together. Their hashes are refreshed in that manifest; rerun the scene contracts
 and acceptance/public-tree validators. Never regenerate to bless a shader defect.
