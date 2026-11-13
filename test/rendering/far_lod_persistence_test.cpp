@@ -1129,9 +1129,74 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*ready, true));
 }
 
-TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads) {
+namespace {
+void ExpectSnapshotPublicationAndEviction(int region, const IVec3& offset) {
     constexpr std::size_t kSamples =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    constexpr int kSpan = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    const auto before = world.capture_far_lod_sdf_snapshot(region, region);
+    ASSERT_TRUE(before);
+    ASSERT_TRUE(before->entries.empty());
+    auto chunk = std::make_shared<Chunk>(offset + IVec3(region * kSpan, 0, region * kSpan));
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    // Missing/partial SDF and material lattices are still ineligible.
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
+    chunk->sdf_data.assign(kSamples - 1, -1.0f);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
+    chunk->sdf_data.push_back(-1.0f);
+    chunk->material_data.assign(kSamples - 1, 7u);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
+    chunk->material_data.push_back(7u);
+    const bool inside = offset.x >= -1 && offset.x <= kSpan && offset.z >= -1 && offset.z <= kSpan;
+    EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before), !inside);
+    EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before, true), !inside);
+    const auto after = world.capture_far_lod_sdf_snapshot(region, region);
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->entries.size(), inside ? 1u : 0u);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
+    if (inside) {
+        chunk->set_state(ChunkState::Loading);
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.pop_back();
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
+        chunk->sdf_data.push_back(-1.0f);
+        chunk->material_data.pop_back();
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
+        chunk->material_data.push_back(7u);
+        EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+        EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
+    }
+    // Eviction preserves captured authority without requiring live storage.
+    world.clear_world(nullptr);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
+    if (inside) {
+        EXPECT_EQ(after->entries.front().payload->sdf_data.size(), kSamples);
+    }
+
+    auto invalid = *after;
+    for (const int bad : {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+        invalid.min_chunk_coords = IVec2(bad, 0);
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
+        invalid.min_chunk_coords = IVec2(0, bad);
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
+    }
+}
+} // namespace
+
+TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads) {
     constexpr int kSpan = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     // Both signs, all four halo corners, and all immediately-outside edges.
     for (const int region : {-1, 0}) {
@@ -1143,67 +1208,7 @@ TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvicte
                                    IVec3(kSpan + 1, 0, 0),
                                    IVec3(0, 0, -2),
                                    IVec3(0, 0, kSpan + 1)}) {
-            Systems::SHIELD_WorldSystem world(
-                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
-            const auto before = world.capture_far_lod_sdf_snapshot(region, region);
-            ASSERT_TRUE(before);
-            ASSERT_TRUE(before->entries.empty());
-            auto chunk = std::make_shared<Chunk>(offset + IVec3(region * kSpan, 0, region * kSpan));
-            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
-            // Missing/partial SDF and material lattices are still ineligible.
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
-            chunk->sdf_data.assign(kSamples - 1, -1.0f);
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
-            chunk->sdf_data.push_back(-1.0f);
-            chunk->material_data.assign(kSamples - 1, 7u);
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before, true));
-            chunk->material_data.push_back(7u);
-            const bool inside =
-                offset.x >= -1 && offset.x <= kSpan && offset.z >= -1 && offset.z <= kSpan;
-            EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before), !inside);
-            EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*before, true), !inside);
-            const auto after = world.capture_far_lod_sdf_snapshot(region, region);
-            ASSERT_TRUE(after);
-            EXPECT_EQ(after->entries.size(), inside ? 1u : 0u);
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
-            if (inside) {
-                chunk->set_state(ChunkState::Loading);
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
-                chunk->set_state(ChunkState::Idle);
-                chunk->sdf_data.pop_back();
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
-                chunk->sdf_data.push_back(-1.0f);
-                chunk->material_data.pop_back();
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after));
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*after, true));
-                chunk->material_data.push_back(7u);
-                EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
-                EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
-            }
-            // Eviction preserves captured authority without requiring live storage.
-            world.clear_world(nullptr);
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after));
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*after, true));
-            if (inside) {
-                EXPECT_EQ(after->entries.front().payload->sdf_data.size(), kSamples);
-            }
-
-            auto invalid = *after;
-            for (const int bad :
-                 {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
-                invalid.min_chunk_coords = IVec2(bad, 0);
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
-                invalid.min_chunk_coords = IVec2(0, bad);
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid));
-                EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
-            }
+            ASSERT_NO_FATAL_FAILURE(ExpectSnapshotPublicationAndEviction(region, offset));
         }
     }
 }

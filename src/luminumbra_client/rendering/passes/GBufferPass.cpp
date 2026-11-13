@@ -174,7 +174,7 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glGenVertexArrays(1, &m_impostorVAO);
     glBindVertexArray(m_impostorVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
-    for (int column = 0; column < 5; ++column) {
+    for (GLuint column = 0; column < 5; ++column) {
         glEnableVertexAttribArray(column);
         glVertexAttribPointer(
             column,
@@ -726,8 +726,28 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (cp.impostorTree && !authoredTree) {
             lod = std::min(lod, 2);
         }
-        if (impostorsOn && authoredTree && lod == 3 &&
-            cp.impostorTree) {     // a tree part -> impostor replaces it at LOD3
+        bool impostor_candidate = false;
+        if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {
+            impostor_candidate = true; // a tree part -> impostor replaces it at LOD3
+        }
+        // Submitted chunks are resident too; culling the ground must not remove
+        // support while its canopy is still visible (including the authored LOD3 band).
+        const bool live_terrain_owned =
+            impostor_candidate &&
+            ((input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)) ||
+             (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position)));
+        // Ladder exposes no per-position coverage here; unknown support refuses.
+        // Never substitute the inactive Legacy owner for selected Ladder terrain.
+        const bool far_terrain_resident =
+            impostor_candidate && !live_terrain_owned && input.far_selection.submit &&
+            input.far_selection.effective == FarWorldMode::Legacy && input.legacy_far &&
+            input.legacy_far->terrain_resident_at(cp.position);
+        const auto submission = SelectStaticPropSubmission(
+            input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
+        if (submission == StaticPropSubmission::Refused) {
+            continue;
+        }
+        if (submission == StaticPropSubmission::Impostor) {
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
                                    // billboard
                 const glm::vec3 c =
@@ -747,8 +767,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const std::uint64_t rkey =
-            cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) * 0x9E3779B97F4A7C15ull);
+        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
+                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
         auto rit = m_resolveMemo.find(rkey);
         if (rit == m_resolveMemo.end()) {
             const std::string& basePath = m_propMeshPaths[cp.pathIndex];
@@ -775,7 +795,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             continue;
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
-            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * 0x100000001B3ull);
+            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
         auto& batch = m_visibleGroups[gkey];
         if (batch.mesh == nullptr) { // first ever sighting fixes the group metadata
             batch.mesh = mesh;
@@ -858,9 +878,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
-                            static_cast<GLsizeiptr>(instance_count) * sizeof(glm::mat4),
+                            static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
+                                                    sizeof(glm::mat4)),
                             matrices.data() + offset);
-            for (int i = 0; i < 4; i++) {
+            for (GLuint i = 0; i < 4; ++i) {
                 glEnableVertexAttribArray(3 + i);
                 glVertexAttribPointer(3 + i,
                                       4,
@@ -874,15 +895,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceTintVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
-                            static_cast<GLsizeiptr>(instance_count) * sizeof(glm::vec3),
+                            static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
+                                                    sizeof(glm::vec3)),
                             batch.tints.data() + offset);
             glEnableVertexAttribArray(7);
             glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
             glVertexAttribDivisor(7, 1);
             Luminumbra::Rendering::AttributedGl::Submit(glDrawElementsInstanced,
-                                                        GL_TRIANGLES,
-                                                        mesh->indexCount,
-                                                        GL_UNSIGNED_INT,
+                                                        GLenum{GL_TRIANGLES},
+                                                        static_cast<GLsizei>(mesh->indexCount),
+                                                        GLenum{GL_UNSIGNED_INT},
                                                         nullptr,
                                                         instance_count);
             glBindVertexArray(0);
@@ -919,14 +941,15 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             const GLsizei count = static_cast<GLsizei>(
                 std::min<size_t>(impostorInstances.size() - offset, kStaticInstanceCapacity));
             glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
-            glBufferSubData(GL_ARRAY_BUFFER,
-                            0,
-                            static_cast<GLsizeiptr>(count) * sizeof(ImpostorInstance),
-                            impostorInstances.data() + offset);
+            glBufferSubData(
+                GL_ARRAY_BUFFER,
+                0,
+                static_cast<GLsizeiptr>(static_cast<std::size_t>(count) * sizeof(ImpostorInstance)),
+                impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
             Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArraysInstanced, GL_TRIANGLE_STRIP, 0, 4, count);
+                glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);
         }
         if (cull_was_enabled)
@@ -1076,8 +1099,11 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_jointPaletteSSBO);
 
         glBindVertexArray(mesh->vao);
-        Luminumbra::Rendering::AttributedGl::Submit(
-            glDrawElements, GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GLenum{GL_TRIANGLES},
+                                                    static_cast<GLsizei>(mesh->indexCount),
+                                                    GLenum{GL_UNSIGNED_INT},
+                                                    nullptr);
         glBindVertexArray(0);
         stats.skinned_draws++;
         stats.skinned_indices += mesh->indexCount;
