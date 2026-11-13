@@ -6,9 +6,10 @@
 // without pulling the RenderPipeline god-object. Definitions are VERBATIM — the
 // four isolated per-pass recipes (RenderFrameTypes/RenderFrameState/
 // RenderLightTypes/RenderLightState) overlapped on these types (ODR conflict) and
-// are consolidated into this ONE shared header. Layout is unchanged.
+// are consolidated into this ONE shared header.
 
 #include "../../include/luminumbra/core/Types.h"
+#include "LiveStrikeFlash.h"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -84,29 +85,29 @@ struct CloudRenderState {
 // injected through the lighting pass + a screen-space BOLT polyline rasterized in
 // the same pass (no new GL objects). Nothing here is hashed or written back to sim.
 //
-//  - pulse_intensity  scales a localized, scene-relative luminance pulse (the 1-to-few-
-//    frame flash); 0 == the zero-cost OFF path (no added lighting work).
+//  - pulse_intensity  the strongest strike pulse, preserving bolt brightness and
+//    gating the overlay; 0 == the zero-cost OFF path (no added lighting work).
 //  - pulse_color      the flash tint (cool white-blue by default).
-//  - strike_ndc       the projected strike ground point (possibly outside the
-//    viewport), centring the bounded, scene-relative flash.
+//  - flashes          bounded per-strike centres, pulses and viewport flags;
+//    the shader takes their strongest contribution at each pixel.
 //  - bolt_points_ndc  the bolt polyline (main channel + branches, flattened with
 //    kLiveBoltPenUp separators) in NDC; the lighting frag adds bright pixels near any
 //    segment so the capture shows a thin high-gradient structure.
 inline constexpr int kMaxBoltSegmentPoints = 96; // GLSL uniform array cap
 struct LightningRenderState {
     bool active = false;          // master toggle (false == zero added cost)
-    float pulse_intensity = 0.0f; // [0,~3] localized flash strength
+    float pulse_intensity = 0.0f; // [0,~3] strongest strike pulse
     glm::vec3 pulse_color = glm::vec3(0.72f, 0.82f, 1.0f); // cool flash tint
-    glm::vec2 strike_ndc = glm::vec2(0.0f);                // strike point in NDC (radial centre)
-    float bolt_width_ndc = 0.004f;                         // bolt core half-width in NDC units
-    float bolt_glow_ndc = 0.018f;                          // bolt glow falloff radius in NDC units
+    LiveStrikeFlashList flashes;
+    float bolt_width_ndc = 0.004f; // bolt core half-width in NDC units
+    float bolt_glow_ndc = 0.018f;  // bolt glow falloff radius in NDC units
     //  GROUND-IMPACT bloom at the bolt touchdown point so
     // the strike visibly CONNECTS to terrain. ground_ndc is the projected terminus;
     // ground_flash scales the radial impact glow (0 = off, keeps gates byte-stable).
     glm::vec2 ground_ndc = glm::vec2(0.0f, -1.0f);
     float ground_flash = 0.0f;
     // Flattened NDC polyline points. kLiveBoltPenUp (-3, -3), declared in
-    // LiveStrikeComposer.h, is the exact PEN-UP separator between disjoint polylines
+    // LiveStrikeFlash.h, is the exact PEN-UP separator between disjoint polylines
     // (main channel / each branch). Points are clipped to the view with a glow margin.
     // Drawn as connected segments between consecutive non-separator points.
     std::vector<glm::vec2> bolt_points_ndc;

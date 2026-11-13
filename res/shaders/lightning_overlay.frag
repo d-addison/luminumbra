@@ -7,13 +7,17 @@ in vec2 TexCoords;
 uniform sampler2D u_scene;   // the composited (lit + sky) tonemapped color
 
 #define MAX_BOLT_POINTS 96
-// Matches Rendering::kLiveBoltPenUp and IsLiveBoltPenUp in LiveStrikeComposer.h.
+#define MAX_STRIKE_FLASHES 8
+// Matches Rendering::kLiveBoltPenUp and IsLiveBoltPenUp in LiveStrikeFlash.h.
 // Bolt endpoints are clipped to the view with a glow margin before upload.
 const vec2 kLiveBoltPenUp = vec2(-3.0, -3.0);
 uniform int   u_active = 0;
-uniform float u_pulse = 0.0;             // localized, scene-relative flash strength
+uniform float u_pulse = 0.0;             // strongest pulse: overlay gate and bolt brightness
 uniform vec3  u_color = vec3(0.72, 0.82, 1.0);
-uniform vec2  u_strikeNdc = vec2(0.0);   // strike point in NDC (radial centre)
+uniform int   u_flashCount = 0;
+uniform vec2  u_flashNdc[MAX_STRIKE_FLASHES];
+uniform float u_flashPulse[MAX_STRIKE_FLASHES];
+uniform int   u_flashOnscreen[MAX_STRIKE_FLASHES];
 uniform float u_boltWidth = 0.012;       // bolt core half-width (NDC)
 uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
@@ -30,10 +34,8 @@ float flashResponse(float distanceToStrike, float sceneLuma) {
     return (1.0 - smoothstep(0.0, 1.6, distanceToStrike)) * clamp(sceneLuma * 4.0, 0.0, 1.0);
 }
 
-// The flash centre is the strongest strike. When that centre lies outside the
-// view, including the kLiveBoltPenUp sentinel used for strikes behind the
-// camera, a bounded scene-wide floor remains so a stronger offscreen strike
-// cannot remove the flash of a weaker visible bolt. strikeExtent is the larger
+// Only offscreen strikes receive a bounded scene-wide floor, including the
+// kLiveBoltPenUp sentinel used for strikes behind the camera. strikeExtent is the larger
 // absolute NDC component of the centre; the floor ramps in smoothly past the edge.
 float offscreenFlashFloor(float strikeExtent, float sceneLuma) {
     return 0.35 * smoothstep(1.0, 1.3, strikeExtent) * clamp(sceneLuma * 4.0, 0.0, 1.0);
@@ -68,12 +70,23 @@ void main() {
     if (u_active == 1 && u_pulse > 0.0) {
         vec2 ndc = TexCoords * 2.0 - 1.0;
 
-        float distanceToStrike = length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0));
         float sceneLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-        float strikeExtent = max(abs(u_strikeNdc.x), abs(u_strikeNdc.y));
-        float flash = max(flashResponse(distanceToStrike, sceneLuma),
-                          offscreenFlashFloor(strikeExtent, sceneLuma));
-        color += u_color * (u_pulse * flash);
+        float flash = 0.0;
+        for (int i = 0; i < MAX_STRIKE_FLASHES; ++i) {
+            if (i >= u_flashCount) break;
+            vec2 centre = u_flashNdc[i];
+            float response = 0.0;
+            if (!all(equal(centre, kLiveBoltPenUp))) {
+                float distanceToStrike = length((ndc - centre) * vec2(u_aspect, 1.0));
+                response = flashResponse(distanceToStrike, sceneLuma);
+            }
+            if (u_flashOnscreen[i] == 0) {
+                float strikeExtent = max(abs(centre.x), abs(centre.y));
+                response = max(response, offscreenFlashFloor(strikeExtent, sceneLuma));
+            }
+            flash = max(flash, u_flashPulse[i] * response);
+        }
+        color += u_color * flash;
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
         // halo along the polyline. The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits
