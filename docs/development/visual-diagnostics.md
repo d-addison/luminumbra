@@ -13,8 +13,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| Deferred attribution producers | Implemented without an ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
-| G-buffer ID attachment | Pending | Attachment integration must hold an `AttachmentLease` for the entire caller attachment lifetime, including rollback, resize and teardown; producer scopes currently always report incomplete coverage |
+| Deferred attribution producers | Implemented with a scoped ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
+| G-buffer ID attachment | Implemented with a move-only lease | Storage is ensured before lease acquisition; attachment, incomplete-FBO rollback, recreation and teardown retain the lease until detachment and caller-state restoration. Registered `DiagnosticAttribution.*` source contracts cover ordering and unbound resize protection; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
@@ -47,20 +47,31 @@ The acceptance matrix records this partial state. No new runtime asset is added.
 Shader files are outside the roots classified by `public-asset-inventory.json`, so
 their guarded edits do not change that inventory.
 
-An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
-collects deferred submission identities. It neither accepts nor retains a diagnostic
-target texture, and never changes framebuffer attachments. `GBufferTargets.cpp`
-remains unchanged. `complete()` always returns false: producer records alone cannot
-qualify pixels or authorize bundle publication. G-buffer ID attachment, its lease
-lifetime, capability refusal, state restoration, resize and teardown regressions
-remain pending. Capture scopes cannot nest or reuse a nonempty draw table; an empty
-live-terrain submission adds no unsupported record.
+An explicitly constructed `GBufferDiagnosticCapture` accepts target storage and a
+fresh draw table; both must outlive the scope on the creating context's thread.
+Construction performs no GL work. `GBufferPass` creates an attachment scope around
+deferred submission. It checks dimensions, integer-target capabilities and the
+availability of attachment six, snapshots all draw buffers (at most 32) and the
+indexed color mask, ensures storage, then acquires a move-only `AttachmentLease`
+before attaching the ID texture. The lease protects the attachment even while the
+G-buffer is unbound, so target resize, reset and disable refuse without changing
+storage or caller bindings. Refused attachment preserves caller state and records
+explicit unsupported coverage.
 
-Only an explicit producer scope compiles diagnostic programs, capped at six deferred
+Incomplete-FBO rollback, normal and exceptional scope exit, capture destruction,
+and G-buffer recreation or registry deletion detach first, restore draw buffers,
+color mask and caller draw-framebuffer binding, then release the lease. Recreation
+and exceptions invalidate coverage. `complete()` requires a successful capture,
+completed detachment, a released lease and a complete draw table without refusals;
+it covers only the deferred pass, not later contributors or bundle publication.
+Capture scopes cannot nest or reuse a nonempty draw table; an empty live-terrain
+submission adds no unsupported record.
+
+Only an attached capture scope compiles diagnostic programs, capped at six deferred
 vertex/ladder combinations. Default and ladder variants retain the existing alpha
-discard and depth output. The guarded integer output uses location six; without an
-ID attachment that output is discarded. With diagnostics disabled, removing the
-conditional blocks reproduces the base fragment shader text byte for byte.
+discard and depth output. The guarded integer output uses location six. With
+diagnostics disabled, removing the conditional blocks reproduces the base fragment
+shader text byte for byte; no target allocation or attachment operation runs.
 During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback

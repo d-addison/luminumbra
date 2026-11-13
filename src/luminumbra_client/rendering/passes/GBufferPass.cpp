@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <chrono> // CPU submit cost of the static-prop pass
 #include <cstddef>
+#include <exception>
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
@@ -37,44 +38,38 @@
 
 namespace Luminumbra::Rendering {
 
-namespace {
-GBufferDiagnosticCapture*& ActiveCapture() {
-    static thread_local GBufferDiagnosticCapture* capture = nullptr;
-    return capture;
-}
-} // namespace
-
-GBufferDiagnosticCapture* GBufferDiagnosticCapture::Current() {
-    return ActiveCapture();
-}
-
-void GBufferDiagnosticCapture::SetCurrent(GBufferDiagnosticCapture* capture) {
-    ActiveCapture() = capture;
-}
-
-GBufferDiagnosticCapture::State::State(DiagnosticDrawTable& draw_table)
-    : table(draw_table) {}
+GBufferDiagnosticCapture::State::State(DiagnosticTargets& target_storage,
+                                       DiagnosticDrawTable& draw_table)
+    : targets(target_storage)
+    , table(draw_table) {}
 
 GBufferDiagnosticCapture::State::~State() = default;
 
-GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticDrawTable& table) {
+GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
+                                                   DiagnosticDrawTable& table) {
     if (Current()) {
         throw std::logic_error("Diagnostic capture scopes cannot nest");
     }
     if (table.resolve(1)) {
         throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
     }
-    state_ = std::make_unique<State>(table);
+    state_ = std::make_unique<State>(targets, table);
     SetCurrent(this);
 }
 
 GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
+    try {
+        detach();
+    } catch (...) {
+        abort();
+    }
     SetCurrent(nullptr);
 }
 
 void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            std::uint32_t lod,
                                            DiagnosticOwnership ownership) {
+    state_->failed = true;
     DiagnosticId unused{};
     if (!state_->table.submit({.mesh_path = {},
                                .shader_variant = producer,
@@ -89,12 +84,16 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
 }
 
 bool GBufferDiagnosticCapture::complete() const {
-    // Producer identities alone cannot qualify pixels without a leased ID attachment.
-    return false;
+    return state_->captured && !state_->framebuffer && !state_->failed &&
+           !state_->attachment_lease && state_->table.complete_coverage();
+}
+
+void GBufferDiagnosticCapture::abort() noexcept {
+    state_->failed = true;
 }
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
-    if (!shader || !shader->IsValid()) {
+    if (!state_->framebuffer || !shader || !shader->IsValid()) {
         return shader;
     }
     for (const auto& entry : state_->variants) {
@@ -127,11 +126,17 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
 }
 
 void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
+    if (!state_->framebuffer) {
+        return;
+    }
     for (const auto& entry : state_->variants) {
         if (entry.shader.get() != &shader) {
             continue;
         }
         DiagnosticId id{};
+        if (submission.provenance == DiagnosticProvenance::Unsupported) {
+            state_->failed = true;
+        }
         if (!state_->table.submit(submission, id)) {
             unsupported("diagnostic_identity_refused", submission.lod, submission.ownership);
             throw std::runtime_error("Diagnostic identity submission refused");
@@ -140,6 +145,47 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
         return;
     }
     unsupported("diagnostic_writer_without_variant", submission.lod, submission.ownership);
+}
+
+GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(const GBuffer& gbuffer,
+                                                         const DiagnosticExtent& extent)
+    : capture_(GBufferDiagnosticCapture::Current()) {
+    if (capture_) {
+        exceptions_ = std::uncaught_exceptions();
+    }
+    if (capture_ && !capture_->attach(gbuffer, extent)) {
+        capture_ = nullptr;
+    }
+}
+
+GBufferDiagnosticAttachment::~GBufferDiagnosticAttachment() {
+    if (capture_) {
+        try {
+            capture_->detach();
+        } catch (...) {
+            capture_->abort();
+        }
+        if (std::uncaught_exceptions() > exceptions_) {
+            capture_->abort();
+        }
+    }
+}
+
+bool GBufferDiagnosticCapture::attach(const GBuffer& gbuffer, const DiagnosticExtent& extent) {
+    if (!attach_target(gbuffer, extent)) {
+        const auto reason = std::exchange(state_->failure, {});
+        unsupported(reason);
+        return false;
+    }
+    return true;
+}
+
+void GBufferDiagnosticCapture::detach() {
+    detach_target();
+    if (!state_->failure.empty()) {
+        const auto reason = std::exchange(state_->failure, {});
+        unsupported(reason);
+    }
 }
 
 // capacity of the shared per-(mesh,material) instance-matrix VBO. The draw
@@ -433,6 +479,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     glDepthMask(GL_TRUE);
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
+                                                      {ctx.internal_w(), ctx.internal_h()});
 
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
