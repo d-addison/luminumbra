@@ -455,6 +455,12 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
+
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -589,6 +595,12 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -1235,6 +1247,12 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
 
     RenderContext ctx = make_ssao_context(camera);
     // (1) Mapping check: ctx fields must equal the raw pipeline sources.

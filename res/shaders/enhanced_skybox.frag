@@ -334,23 +334,48 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     return mix(baseColor, cloudColor, alpha);
 }
 
-// Enhanced star field
+// Compact radial stars. The centre stays at least 0.25 from each cell edge,
+// beyond the 0.18 support radius, so adjacent cells meet at zero radiance.
+float starProfile(float radius) {
+    return 1.0 - smoothstep(0.0, 0.18, radius);
+}
+
+// Integer cells span [-320, 320]; conversion is exact before unsigned mixing.
+uint starCellSeed(ivec3 cell) {
+    uvec3 p = uvec3(cell);
+    uint seed = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u) ^ (p.z * 0xcb1ab31fu);
+    seed ^= seed >> 16u;
+    seed *= 0x7feb352du;
+    seed ^= seed >> 15u;
+    seed *= 0x846ca68bu;
+    return seed ^ (seed >> 16u);
+}
+
+float starRandom(uint seed) {
+    seed ^= seed >> 16u;
+    seed *= 0x7feb352du;
+    seed ^= seed >> 15u;
+    seed *= 0x846ca68bu;
+    seed ^= seed >> 16u;
+    return float(seed >> 8u) * (1.0 / 16777216.0);
+}
+
+// A 3D field avoids projection seams and axis-aligned noise peaks. Intersecting
+// each spherical spot with the view sphere gives a round, soft stellar disc.
 vec3 renderStars(vec3 viewDir, float nightIntensity) {
-    if(nightIntensity < 0.1) return vec3(0.0);
-
-    float stars1 = noise(viewDir.xy * 800.0);
-    float stars2 = noise(viewDir.xz * 1200.0 + vec2(100.0, 200.0));
-    float stars3 = noise(viewDir.yz * 600.0 + vec2(300.0, 400.0));
-
-    float brightStars = smoothstep(0.99, 1.0, stars1);
-    float mediumStars = smoothstep(0.985, 0.995, stars2) * 0.7;
-    float dimStars = smoothstep(0.97, 0.98, stars3) * 0.4;
-
-    float twinkle = 0.8 + 0.4 * sin(u_time * 3.0 + viewDir.x * 1000.0);
-
+    if (nightIntensity < 0.1 || viewDir.y <= 0.0) return vec3(0.0);
+    vec3 p = viewDir * 320.0;
+    uint seed = starCellSeed(ivec3(floor(p)));
+    float brightness = starRandom(seed);
+    vec3 centre = vec3(starRandom(seed ^ 0x9e3779b9u),
+                       starRandom(seed ^ 0x85ebca6bu),
+                       starRandom(seed ^ 0xc2b2ae35u)) * 0.5 + 0.25;
+    float radial = starProfile(length(fract(p) - centre));
+    float horizonFade = smoothstep(0.0, 0.1, viewDir.y);
+    float twinkle = 0.8 + 0.2 * sin(u_time * 3.0 + brightness * 1000.0);
     vec3 starColor = vec3(0.9, 0.9, 1.0);
-    float totalStars = (brightStars + mediumStars + dimStars) * twinkle * nightIntensity;
-
+    float totalStars = radial * smoothstep(0.94, 1.0, brightness) * twinkle
+                       * nightIntensity * horizonFade;
     return starColor * totalStars;
 }
 
@@ -372,10 +397,8 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
 // envelope so the curtain hangs from the upper dome and feathers out at the
 // horizon and the zenith. The result is band/sheet structure, not splotches.
 vec3 renderAurora(vec3 viewDir, float dayFactor) {
-    // aurora must NOT show through a STORM/overcast
-    // sky. The night gate (u_auroraStrength) alone let the green curtains bleed up
-    // THROUGH a heavy night-storm deck (the aurora is added AFTER the cloud layer,
-    // so a high-coverage overcast did not occlude it). Gate the aurora OFF as the
+    // Suppress aurora in a STORM/overcast sky in addition to the local cloud
+    // occlusion applied in main(). Gate the aurora OFF as the
     // sky-wide cloud coverage rises into the overcast band: clear/fair-weather night
     // keeps its full green curtains (the night-aurora gate), a storm night shows
     // NONE. Keyed on the same u_cloudCoverageAmount the cloud deck uses, so the gate
@@ -619,6 +642,9 @@ void main()
     // wherever there is cloud, and leaves them where the sky is clear.
     skyColor += renderStars(viewDir, nightFactor);
 
+    // Aurora lies above the cloud slab and shares its occlusion with stars.
+    skyColor += renderAurora(viewDir, dayFactor);
+
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
 
@@ -634,9 +660,6 @@ void main()
         vec3 stormMurk = vec3(0.020, 0.024, 0.034);
         skyColor += stormMurk * stormNight * aboveHorizon;
     }
-
-    // --- 6. MAGICAL AURORA (NIGHT-ONLY; gated by the deep-night envelope) ---
-    skyColor += renderAurora(viewDir, dayFactor);
 
     // --- 7. HDR TONEMAPPING ---
     skyColor = skyColor * (2.51 * skyColor + 0.03) / (skyColor * (2.43 * skyColor + 0.59) + 0.14);
