@@ -1,6 +1,14 @@
 #version 450 core
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 0)
+#endif
 out vec4 o_frag_color;
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 
 in VS_OUT {
     vec3 world_pos;
@@ -403,4 +411,7 @@ void main()
     // the band stays bright over any background.
     alpha = clamp(alpha + foam_factor * 0.25, 0.58, 0.97);
     o_frag_color = vec4(final_color, alpha);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }

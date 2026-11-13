@@ -12,8 +12,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target and capture-local draw registry | Implemented as standalone helpers | `DiagnosticTargets.h`; `DiagnosticDrawTable.h`; registered `DiagnosticTargetDriver.*` and `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag`, `static_asset.frag`, `tree_impostor.frag`, `plant_procgen.frag`, `scent_decal.frag` and `foliage.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
-| Exact producer coverage | Partial | Original submissions attribute live terrain MDI, file and procedural statics, skinned meshes, authored surfaces, tree impostors, Ladder and legacy far terrain/water, and uploaded plant/marker batches. Five foliage submission paths and the additive scent decal use separate contributor storage when supplied; without it, exact per-draw records carry a `:contributor_only` label and completion remains false. Water, glass, particles and waterfall forward submissions remain uninstrumented |
+| Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag`, `static_asset.frag`, `tree_impostor.frag`, `plant_procgen.frag`, `scent_decal.frag`, `water.frag`, `glass_oit.frag`, `waterfall.frag` and `foliage.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
+| Exact producer coverage | Partial | Original submissions attribute live terrain MDI, file and procedural statics, skinned meshes, authored surfaces, tree impostors, Ladder and legacy far terrain/water, and uploaded plant/marker batches. Five foliage submission paths and the additive scent decal use separate contributor storage when supplied; without it, exact per-draw records carry a `:contributor_only` label and completion remains false. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions. Particles remain uninstrumented |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
@@ -46,8 +46,21 @@ write no contributor ID. Later attachments preserve their original color routing
 continuations refuse extent changes before resizing storage. Foliage can then resume
 the contributor plane without clearing decal IDs. This plane identifies the last
 contributing submission at a pixel, not every layer of a blend. Per-draw table entries
-retain all instrumented submissions. The adapter must still account for uninstrumented
-forward passes and refuse incomplete captures before publishing a bundle.
+retain all instrumented submissions. Water surfaces resume this same contributor
+plane after offscreen caustics generation;
+existing dry-ground discards preserve earlier IDs. Generated water keys identify the
+submitted chunk translation and index count, with Live ownership, Forward pass and
+LOD zero. Non-translation models, nonfinite/fractional/out-of-range chunk coordinates
+and float origins that can alias adjacent chunks explicitly refuse attribution.
+Glass accumulation records each original unit-pane draw on its OIT framebuffer;
+its fixed nonzero coverage always contributes after depth testing. An unavailable
+resolve shader or fullscreen quad explicitly refuses capture completion. The resolve
+keeps those pane IDs and does not substitute a fullscreen identity. Waterfall draws
+record the immutable uploaded sheet/pool slot only after the live-water skip; zero
+alpha fragments preserve earlier IDs. Glass and waterfalls use Live ownership,
+Forward pass and LOD zero; their generated geometry is not chunk-owned.
+The adapter must still account for uninstrumented forward passes, including particles,
+and refuse incomplete captures before publishing a bundle.
 Capture scopes cannot nest or reuse a nonempty draw table. Exception unwinding
 invalidates the frame; an empty live-terrain submission adds no unsupported record.
 
@@ -63,13 +76,12 @@ submissions. Normal rendering keeps its batched draws and original attachments.
 
 Remaining unsupported records cover missing/invalid producer metadata, attachment and
 capability refusal, shader variant failures and registry bounds. Without contributor
-storage, foliage and scent decal records preserve the original identity, Forward pass
-and LOD zero, append `:contributor_only` to the producer label, and invalidate
+storage, foliage, scent decal, water, glass and waterfall records preserve the original
+identity, Forward pass and LOD zero, append `:contributor_only` to the producer label, and invalidate
 completion. Invalid contributor labels or identities explicitly refuse. The former
 `foliage_forward_contributor_target_unavailable` placeholder is no longer emitted.
-Water, glass/transparent, particles and waterfall forward submissions still need
-instrumentation; scenario opt-in/readback remains separate work. None of these gaps
-is represented as a guessed mesh or successful background coverage.
+Particle forward submissions still need instrumentation; scenario opt-in/readback
+remains separate work. None of these gaps is represented as a guessed mesh or successful background coverage.
 
 ## A: capture bundle and pixel identity
 

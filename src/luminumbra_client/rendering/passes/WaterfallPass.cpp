@@ -1,4 +1,6 @@
 #include "WaterfallPass.h"
+#include "../DiagnosticDrawTable.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -12,7 +14,10 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
+
+#include <optional>
 
 namespace Luminumbra::Rendering {
 
@@ -70,25 +75,46 @@ void WaterfallPass::execute(const RenderContext& ctx) {
         const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
         const GLboolean poly_off_was = glIsEnabled(GL_POLYGON_OFFSET_FILL);
 
-        m_shader->use();
-        m_shader->setMat4("model", glm::mat4(1.0f));
-        m_shader->setMat4("view", ctx.view);
-        m_shader->setMat4("projection", ctx.projection);
-        m_shader->setMat3("normalMatrix", glm::mat3(1.0f));
+        Shader* draw_shader = m_shader.get();
+        std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            GLint color_texture = 0;
+            GLint attachment_type = 0;
+            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                       GL_COLOR_ATTACHMENT0,
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                       &attachment_type);
+            if (attachment_type == GL_TEXTURE) {
+                glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                           GL_COLOR_ATTACHMENT0,
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                           &color_texture);
+            }
+            diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                          static_cast<GLuint>(color_texture),
+                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+            draw_shader = capture->variant(draw_shader, false);
+        }
+
+        draw_shader->use();
+        draw_shader->setMat4("model", glm::mat4(1.0f));
+        draw_shader->setMat4("view", ctx.view);
+        draw_shader->setMat4("projection", ctx.projection);
+        draw_shader->setMat3("normalMatrix", glm::mat3(1.0f));
         // The per-frame wall-clock SNAPSHOT (prepare_frame), not a live
         // glfwGetTime read — dispatch must be bit-idempotent per prepared frame
         // (sub-µs sway phase shift; render-only).
-        m_shader->setFloat("u_time", ctx.time_seconds);
-        m_shader->setVec3("u_camera_pos", ctx.camera->Position);
+        draw_shader->setFloat("u_time", ctx.time_seconds);
+        draw_shader->setVec3("u_camera_pos", ctx.camera->Position);
         const glm::vec3 sun_color =
             (ctx.sun.color != glm::vec3(0.0f)) ? ctx.sun.color : glm::vec3(1.0f);
-        m_shader->setVec3("u_sun_color", sun_color);
+        draw_shader->setVec3("u_sun_color", sun_color);
         // Scene-light the waterfall (bright-waterfall fix): drive u_scene_light from the
         // sun-up factor with a small night floor so the cascade is LIT by the scene and
         // darkens at dusk/night instead of emitting near-white.  (the standalone
         // WaterfallVisual gate never sets this uniform -> it keeps the shader default 1.0).
         const float waterfall_scene_lit = 0.10f + 0.90f * glm::clamp(ctx.sun.intensity, 0.0f, 1.0f);
-        m_shader->setVec3("u_scene_light", glm::vec3(waterfall_scene_lit));
+        draw_shader->setVec3("u_scene_light", glm::vec3(waterfall_scene_lit));
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -118,9 +144,22 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             if (live < 0.02f) {
                 continue; // extinguished: no sheet, no plunge pool
             }
-            m_shader->setFloat("u_live_factor", live);
-            m_shader->setFloat("u_crest_y", s.crest.y);
-            m_shader->setFloat("u_foot_y", s.foot.y);
+            draw_shader->setFloat("u_live_factor", live);
+            draw_shader->setFloat("u_crest_y", s.crest.y);
+            draw_shader->setFloat("u_foot_y", s.foot.y);
+            if (auto* capture = GBufferDiagnosticCapture::Current()) {
+                // The immutable uploaded page and its 12-vertex slot identify this mesh.
+                // A size_t ordinal needs at most 20 decimal digits (key under 64 bytes).
+                const std::string mesh_key = "waterfall/sheet-pool/" + std::to_string(i);
+                capture->write_current({.mesh_path = {},
+                                        .shader_variant = "waterfall",
+                                        .chunk = {},
+                                        .lod = 0,
+                                        .ownership = DiagnosticOwnership::Live,
+                                        .pass = DiagnosticPass::Forward,
+                                        .provenance = DiagnosticProvenance::Mesh,
+                                        .generated_mesh = mesh_key});
+            }
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArrays, GL_TRIANGLES, static_cast<GLint>((i % kSitesPerPage) * 12), 12);

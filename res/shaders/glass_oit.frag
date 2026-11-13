@@ -12,6 +12,11 @@
 layout (location = 0) out vec4 outAccum;
 layout (location = 1) out vec4 outReveal;
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
+
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in float vViewDepth;
@@ -49,4 +54,7 @@ void main() {
 
     outAccum = vec4(color * alpha * w, alpha * w);
     outReveal = vec4(0.0, 0.0, 0.0, alpha); // ZERO/ONE_MINUS_SRC_ALPHA -> product
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }
