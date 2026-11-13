@@ -181,6 +181,28 @@ bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
                              FarVolumeCompilation& output,
                              FarVolumeFacadeFailure* failure = nullptr);
 
+// Dormant explicit-span compilation; only tests call these paths. The request
+// must have a valid key and brick-aligned nonempty span with its complete normal
+// halo in the exact-coordinate domain; identity must equal authority.field_identity.
+// FarVolumePagePlan supplies such requests. No discovery or span extension is
+// performed. Height columns are cached on demand in the same AuthoritySession.
+// Tile/mesh requests retain the exact input; output.intent is {request.key, {}}.
+// Limits cover this entire span, even when it contains several planner windows.
+// Invalid requests, identity/memory bindings and insufficient generation work
+// budgets refuse before callbacks. Other limits are enforced during compilation.
+// Charged/uncharged paths have the same transactional guarantees as above.
+bool CompileFarVolumeSpan(const FarVolumeRequest& request,
+                          const FarVolumeAuthority& authority,
+                          const FarVolumeCompilationLimits& limits,
+                          FarVolumeCompilation& output,
+                          FarVolumeFacadeFailure* failure = nullptr);
+bool CompileFarVolumeSpanCharged(const FarVolumeRequest& request,
+                                 const FarVolumeAuthority& authority,
+                                 const FarVolumeCompilationLimits& limits,
+                                 const FarVolumeMemory& memory,
+                                 FarVolumeCompilation& output,
+                                 FarVolumeFacadeFailure* failure = nullptr);
+
 // Validates the canonical sparse stream before forming its legacy integrity
 // view. Refuses non-encoded density, invalid keys/spans/order, or broken shared
 // sample identity. Does not read/write or declare a new world format.
@@ -224,5 +246,24 @@ bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
                                      const FarVolumeMemory& memory,
                                      FarVolumeCompilation& output,
                                      FarVolumeFacadeFailure* failure = nullptr);
+
+// Explicit-span counterparts using the same pristine adapter and one worldgen
+// sampling scope through generation, meshing, normal halos and checksum work.
+// request.field_identity is the caller-owned pristine authority identity.
+bool CompilePristineFarVolumeSpan(const Systems::SHIELD_WorldSystem& world,
+                                  const FarVolumeRequest& request,
+                                  FarCaveMode caves,
+                                  FarVolumeNumericProfile numeric,
+                                  const FarVolumeCompilationLimits& limits,
+                                  FarVolumeCompilation& output,
+                                  FarVolumeFacadeFailure* failure = nullptr);
+bool CompilePristineFarVolumeSpanCharged(const Systems::SHIELD_WorldSystem& world,
+                                         const FarVolumeRequest& request,
+                                         FarCaveMode caves,
+                                         FarVolumeNumericProfile numeric,
+                                         const FarVolumeCompilationLimits& limits,
+                                         const FarVolumeMemory& memory,
+                                         FarVolumeCompilation& output,
+                                         FarVolumeFacadeFailure* failure = nullptr);
 
 } // namespace Luminumbra::World
