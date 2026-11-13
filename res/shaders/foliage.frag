@@ -62,6 +62,9 @@ uniform vec3  u_ambientColor;  // == u_skyAmbientColor (already PI-scaled)
 // moon term + night cascades off (moon-shadows workstream). Defaults to overhead
 // (anti-sun at midnight) so a missing-uniform path still lights blades sanely.
 uniform vec3  u_moonDir;        // toward-light dir of the moon (anti-sun)
+uniform vec3  u_moonRadiance;   // includes horizon attenuation
+uniform float u_moonIllum;
+uniform float u_exposure = 1.0;
 
 // projected cloud cast-shadow uniforms, mirroring the
 // lighting pass so a storm-overcast cell darkens the blades like the terrain.
@@ -221,27 +224,24 @@ void main() {
 
     vec3 color = (ambient + direct) * ao;
 
-    // MOON FILL (foliage-night): mirror the deferred moon in lighting_pass.frag so
-    // night grass reads with the SAME dim cool moonlit tone as the terrain beside it,
-    // not near-black and not a glowing card. The deferred path uses a DIFFUSE moon
-    // with kMoonColor = vec3(0.24, 0.32, 0.58), lit from the moon's toward-light
-    // direction; we replicate it here keyed off nightFactor (the sun-colour ramp
-    // above) so it fades in precisely as the directional sun fades out. Lit through
-    // the blade's green albedo + a desaturated cool moon hue: low-saturation /
-    // blue-shifted (Purkinje) night vision, and never a saturated green tip that
-    // could trip the GREEN_SKY_SPECKLE gate.
-    const vec3 kMoonColor = vec3(0.24, 0.32, 0.58);
+    // Share the deferred key's radiance and scale, including phase and elevation.
+    const float kMoonKeyScale = 0.12;
     float ndlMoon = max(dot(N, -normalize(u_moonDir)), 0.0);
     // Wrap the moon Lambert a little (half-lit) so vertical blade backs aren't pure
     // black under an overhead midnight moon; keep it dim. Hue = blade albedo crossed
     // with the cool moon colour so it stays desaturated + blue-leaning.
     float moonWrap = ndlMoon * 0.7 + 0.3;
-    vec3 moonFill = (albedo * kMoonColor) * moonWrap;
+    vec3 moonFill = (albedo / PI) * u_moonRadiance *
+                    (kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE) * moonWrap;
+    float moonLuma = dot(moonFill, LUMA);
+    moonFill = mix(moonFill, moonLuma * vec3(0.70, 0.80, 1.05), 0.55);
     color += moonFill * (nightFactor * ao) * (1.0 - lightLoss);
 
     // Filmic tonemap + gamma, byte-identical to lighting_pass.frag, so the lit
     // blade lands in the same sRGB space as the surrounding tonemapped terrain
     // (the lighting FBO this pass blends into is already tonemapped).
+    // Preserve the authored daylight grass grade; follow scene exposure at night.
+    color *= mix(1.0, u_exposure, nightFactor);
     color = color * (2.51 * color + 0.03) / (color * (2.43 * color + 0.59) + 0.14);
     color = pow(color, vec3(1.0 / 2.2));
 
