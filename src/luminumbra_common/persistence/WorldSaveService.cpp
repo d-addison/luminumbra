@@ -6057,6 +6057,19 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
     return diagnostics.empty();
 }
 
+bool WorldSaveService::inspect_save(const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors,
+                                    const std::stop_token& stop) {
+    WorldStreamingState state;
+    std::vector<std::string> diagnostics;
+    const std::unordered_set<ChunkID> retain_none;
+    WorldSaveService{}.load_world_impl(
+        state, save_dir, diagnostics, stop, &retain_none, nullptr, nullptr, true);
+    for (const auto& message : diagnostics)
+        AddError(errors, message);
+    return diagnostics.empty();
+}
+
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
@@ -8609,13 +8622,14 @@ WorldSaveService::chunk_save_acknowledgement(const std::vector<std::shared_ptr<C
     };
 }
 
-bool WorldSaveService::load_world(WorldStreamingState& state,
-                                  const std::filesystem::path& save_dir,
-                                  std::vector<std::string>& errors,
-                                  const std::stop_token& stop,
-                                  const std::unordered_set<ChunkID>* retain_chunks,
-                                  std::vector<IVec3>* authoritative_inventory,
-                                  std::size_t* decoded_chunk_count) const {
+bool WorldSaveService::load_world_impl(WorldStreamingState& state,
+                                       const std::filesystem::path& save_dir,
+                                       std::vector<std::string>& errors,
+                                       const std::stop_token& stop,
+                                       const std::unordered_set<ChunkID>* retain_chunks,
+                                       std::vector<IVec3>* authoritative_inventory,
+                                       std::size_t* decoded_chunk_count,
+                                       bool catalog_only) const {
     const detail::SnapshotReadOwnership ownership;
     const SavedJsonReadScope json_reads;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
@@ -8741,6 +8755,11 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (record.lod_level == 0) {
                     // A decoded record carries its own id (DecodeChunkRecord checks it).
                     const bool retain = !retain_chunks || retain_chunks->contains(record.id);
+                    // ReadRegionFile has already admitted every header and payload length.
+                    // Catalogs need no chunk objects; the index below checks their exact bytes.
+                    // Complete validation must still admit cold payloads outside the retain set.
+                    if (catalog_only && indexed && !retain)
+                        continue;
                     std::shared_ptr<Chunk> chunk;
                     ChunkRecordFacts facts;
                     if (!AdmitChunkRecord(record,
@@ -8865,6 +8884,23 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
+}
+
+bool WorldSaveService::load_world(WorldStreamingState& state,
+                                  const std::filesystem::path& save_dir,
+                                  std::vector<std::string>& errors,
+                                  const std::stop_token& stop,
+                                  const std::unordered_set<ChunkID>* retain_chunks,
+                                  std::vector<IVec3>* authoritative_inventory,
+                                  std::size_t* decoded_chunk_count) const {
+    return load_world_impl(state,
+                           save_dir,
+                           errors,
+                           stop,
+                           retain_chunks,
+                           authoritative_inventory,
+                           decoded_chunk_count,
+                           false);
 }
 
 std::string WorldSaveService::world_hash(const WorldStreamingState& state,

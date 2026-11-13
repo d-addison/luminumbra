@@ -3142,10 +3142,14 @@ TEST(GameSessionHeadlessWorldTest,
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), newer_metadata);
     EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), newer_ledger);
     ASSERT_TRUE(session.SaveWorld());
-    const auto inspected = P::InspectSavedWorld(root.path(), session.GetMetadata().worldId);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    const auto inspected = P::InspectSavedWorld(root.path(),
+                                                root.path(),
+                                                session.GetMetadata().worldId,
+                                                {},
+                                                P::SavedWorldValidation::Catalog);
     EXPECT_TRUE(inspected.error.empty());
     EXPECT_EQ(inspected.clock.tick(), 1u);
-    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
     EXPECT_EQ(saved_ledger.tick(), 1u);
     EXPECT_EQ(saved_ledger.canonical_bytes(), restored_ledger);
@@ -3169,7 +3173,13 @@ TEST(GameSessionHeadlessWorldTest,
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
     EXPECT_FALSE(interrupted_save);
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
-    EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
+    EXPECT_EQ(P::InspectSavedWorld(root.path(),
+                                   root.path(),
+                                   session.GetMetadata().worldId,
+                                   {},
+                                   P::SavedWorldValidation::Catalog)
+                  .clock.tick(),
+              2u);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
     EXPECT_EQ(saved_ledger.tick(), 1u);
     ASSERT_NO_FATAL_FAILURE(
@@ -3223,10 +3233,14 @@ TEST(GameSessionHeadlessWorldTest, InterruptedSessionRewindRestoresCommittedSnap
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), newer_metadata);
     EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), newer_ledger);
     ASSERT_TRUE(session.SaveWorld());
-    const auto inspected = P::InspectSavedWorld(root.path(), session.GetMetadata().worldId);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    const auto inspected = P::InspectSavedWorld(root.path(),
+                                                root.path(),
+                                                session.GetMetadata().worldId,
+                                                {},
+                                                P::SavedWorldValidation::Catalog);
     EXPECT_TRUE(inspected.error.empty());
     EXPECT_EQ(inspected.clock.tick(), 1u);
-    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
     EXPECT_EQ(saved_ledger.tick(), 1u);
     EXPECT_EQ(saved_ledger.canonical_bytes(), restored_ledger);
@@ -3251,7 +3265,13 @@ TEST(GameSessionHeadlessWorldTest, InterruptedSessionRewindRestoresCommittedSnap
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
     EXPECT_FALSE(interrupted_save);
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
-    EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
+    EXPECT_EQ(P::InspectSavedWorld(root.path(),
+                                   root.path(),
+                                   session.GetMetadata().worldId,
+                                   {},
+                                   P::SavedWorldValidation::Catalog)
+                  .clock.tick(),
+              2u);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
     EXPECT_EQ(saved_ledger.tick(), 2u);
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before_rewind_metadata);

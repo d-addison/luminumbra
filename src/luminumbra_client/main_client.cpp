@@ -4539,10 +4539,12 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved =
-                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
-                                                               root_path_str,
-                                                               gameSession->GetMetadata().worldId);
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    gameSession->GetSaveRootPath(),
+                    root_path_str,
+                    gameSession->GetMetadata().worldId,
+                    {},
+                    Luminumbra::Persistence::SavedWorldValidation::Catalog);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 const auto preset = nlohmann::json::parse(saved.preset_json);

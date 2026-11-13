@@ -38,7 +38,10 @@ struct SavedWorldCatalog {
 
 enum class SavedWorldValidation {
     Complete,
-    // Preparation must call load_world before adopting any state. Catalog callers use Complete.
+    // Indexed listings check structure and fingerprints without decoding chunk payloads.
+    // Legacy saves still require complete validation. Opening always validates payloads.
+    Catalog,
+    // Preparation must call load_world before adopting any state.
     DeferredToPreparation
 };
 
