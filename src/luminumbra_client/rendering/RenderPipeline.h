@@ -109,6 +109,7 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+    int diagnostic_lod = -1; // LOD of the resident upload, including retained stale geometry.
 
     void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
                                    const ChunkGeometryPool& pool) const noexcept {
@@ -1051,6 +1052,7 @@ private:
 
     struct ChunkMeshPayload {
         u32 mesh_version = 0;
+        int diagnostic_lod = -1;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
 

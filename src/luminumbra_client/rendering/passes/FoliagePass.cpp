@@ -1,7 +1,9 @@
 #include "FoliagePass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
 #include "../FoliageGroundMesh.h"
 #include "../FoliageGroundWork.h"
+#include "../GBufferTargets.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
 #include "rendering/BenchmarkGpuQueries.h"
@@ -60,6 +62,48 @@ struct FoliagePass::EvidenceQueries {
 };
 
 namespace {
+
+template<typename Uniforms>
+Uniforms CacheFoliageDrawUniforms(GLuint program) {
+    return {
+        .view = glGetUniformLocation(program, "u_view"),
+        .projection = glGetUniformLocation(program, "u_projection"),
+        .camera_pos = glGetUniformLocation(program, "u_cameraPos"),
+        .time = glGetUniformLocation(program, "u_time"),
+        .sway_amplitude = glGetUniformLocation(program, "u_swayAmplitude"),
+        .sway_speed = glGetUniformLocation(program, "u_swaySpeed"),
+        .fade_start = glGetUniformLocation(program, "u_fadeStart"),
+        .fade_end = glGetUniformLocation(program, "u_fadeEnd"),
+        .sun_direction = glGetUniformLocation(program, "u_sunDirection"),
+        .sun_color = glGetUniformLocation(program, "u_sunColor"),
+        .sun_intensity = glGetUniformLocation(program, "u_sunIntensity"),
+        .ambient_color = glGetUniformLocation(program, "u_ambientColor"),
+        .moon_dir = glGetUniformLocation(program, "u_moonDir"),
+        .moon_radiance = glGetUniformLocation(program, "u_moonRadiance"),
+        .moon_illumination = glGetUniformLocation(program, "u_moonIllum"),
+        .exposure = glGetUniformLocation(program, "u_exposure"),
+        .cloud_shadow_enabled = glGetUniformLocation(program, "u_cloudShadowEnabled"),
+        .cloud_scroll_offset = glGetUniformLocation(program, "u_cloudScrollOffset"),
+        .cloud_coverage_amount = glGetUniformLocation(program, "u_cloudCoverageAmount"),
+        .cloud_biome_variation = glGetUniformLocation(program, "u_cloudBiomeVariation"),
+        .cloud_plane_height = glGetUniformLocation(program, "u_cloudPlaneHeight"),
+        .cloud_shadow_strength = glGetUniformLocation(program, "u_cloudShadowStrength"),
+        .cloud_sun_dir = glGetUniformLocation(program, "u_cloudSunDir"),
+    };
+}
+
+void WriteFoliageIdentity(std::string_view producer) {
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        capture->write_current({.mesh_path = {},
+                                .shader_variant = producer,
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::Forward,
+                                .provenance = DiagnosticProvenance::Unknown,
+                                .generated_mesh = "foliage/crossed-cards"});
+    }
+}
 
 // Construct before the stage timers so every early return publishes completed
 // timings. A frame scope also catches callers outside the main scatter helper.
@@ -191,31 +235,7 @@ void FoliagePass::cache_draw_uniforms() {
     if (!m_shader || !m_shader->IsValid())
         return;
     const auto program = m_shader->Id();
-    m_draw_uniforms = {
-        .view = glGetUniformLocation(program, "u_view"),
-        .projection = glGetUniformLocation(program, "u_projection"),
-        .camera_pos = glGetUniformLocation(program, "u_cameraPos"),
-        .time = glGetUniformLocation(program, "u_time"),
-        .sway_amplitude = glGetUniformLocation(program, "u_swayAmplitude"),
-        .sway_speed = glGetUniformLocation(program, "u_swaySpeed"),
-        .fade_start = glGetUniformLocation(program, "u_fadeStart"),
-        .fade_end = glGetUniformLocation(program, "u_fadeEnd"),
-        .sun_direction = glGetUniformLocation(program, "u_sunDirection"),
-        .sun_color = glGetUniformLocation(program, "u_sunColor"),
-        .sun_intensity = glGetUniformLocation(program, "u_sunIntensity"),
-        .ambient_color = glGetUniformLocation(program, "u_ambientColor"),
-        .moon_dir = glGetUniformLocation(program, "u_moonDir"),
-        .moon_radiance = glGetUniformLocation(program, "u_moonRadiance"),
-        .moon_illumination = glGetUniformLocation(program, "u_moonIllum"),
-        .exposure = glGetUniformLocation(program, "u_exposure"),
-        .cloud_shadow_enabled = glGetUniformLocation(program, "u_cloudShadowEnabled"),
-        .cloud_scroll_offset = glGetUniformLocation(program, "u_cloudScrollOffset"),
-        .cloud_coverage_amount = glGetUniformLocation(program, "u_cloudCoverageAmount"),
-        .cloud_biome_variation = glGetUniformLocation(program, "u_cloudBiomeVariation"),
-        .cloud_plane_height = glGetUniformLocation(program, "u_cloudPlaneHeight"),
-        .cloud_shadow_strength = glGetUniformLocation(program, "u_cloudShadowStrength"),
-        .cloud_sun_dir = glGetUniformLocation(program, "u_cloudSunDir"),
-    };
+    m_draw_uniforms = CacheFoliageDrawUniforms<DrawUniforms>(program);
     m_draw_shader_generation = m_shader->ProgramGeneration();
 }
 
@@ -1984,6 +2004,8 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         m_evidence_queries->queries.begin_pass(8); // Foliage pass timestamp index.
     }
 
+    GBufferDiagnosticAttachment diagnostic_attachment(
+        ctx.lit_scene.id, ctx.lit_scene_color.id, {ctx.internal_w(), ctx.internal_h()});
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
     glViewport(0,
                0,
@@ -2003,9 +2025,21 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         glDisable(GL_CULL_FACE); // two-sided cards
     }
 
-    m_shader->use();
-    if (m_draw_shader_generation != m_shader->ProgramGeneration())
+    Shader* draw_shader = m_shader.get();
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        draw_shader = capture->variant(
+            draw_shader, false, {"VS_OUT.worldPos", "VS_OUT.heightT", "gl_Position"});
+    }
+    draw_shader->use();
+    if (m_draw_shader_generation != m_shader->ProgramGeneration()) {
         cache_draw_uniforms();
+    }
+    const auto default_uniforms = m_draw_uniforms;
+    ReplayRollback restore_uniforms(
+        [this, default_uniforms]() noexcept { m_draw_uniforms = default_uniforms; });
+    if (draw_shader != m_shader.get()) {
+        m_draw_uniforms = CacheFoliageDrawUniforms<DrawUniforms>(draw_shader->Id());
+    }
     const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
                                                       static_cast<float>(ctx.screen_width) /
                                                           static_cast<float>(ctx.screen_height),
@@ -2057,6 +2091,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         glBindVertexBuffer(0, m_blade_ssbo, 0, sizeof(InstanceRecord));
         if (!vertex_due || !capture_vertices(projection * view)) {
             glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
+            WriteFoliageIdentity("foliage_gpu");
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysIndirect,
                 GLenum{GL_TRIANGLES},
@@ -2068,6 +2103,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
         //  12 verts/instance = two crossed quads (6 verts
         // each) so a blade reads as upright cover from any angle, not a flat decal.
+        WriteFoliageIdentity("foliage_cpu");
         Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
                                                     GLenum{GL_TRIANGLES},
                                                     0,
@@ -2242,6 +2278,7 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
     // These three ranges partition the ORIGINAL draw. Rasterization remains ON;
     // there is no replacement shader, duplicate draw, or synthetic geometry.
     if (first) {
+        WriteFoliageIdentity("foliage_qualification_prefix");
         Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstancedBaseInstance,
                                                     GLenum{GL_TRIANGLES},
                                                     0,
@@ -2250,6 +2287,7 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
                                                     0u);
         ++m_last_draw_calls;
     }
+    WriteFoliageIdentity("foliage_qualification_sample");
     glBeginTransformFeedback(GL_TRIANGLES);
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstancedBaseInstance,
                                                 GLenum{GL_TRIANGLES},
@@ -2261,6 +2299,7 @@ bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
     ++m_last_draw_calls;
     const auto after = first + sample_count;
     if (after < m_instances.size()) {
+        WriteFoliageIdentity("foliage_qualification_suffix");
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawArraysInstancedBaseInstance,
             GLenum{GL_TRIANGLES},

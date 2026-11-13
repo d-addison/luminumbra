@@ -11,6 +11,11 @@ layout (location = 2) out vec4 gAlbedoRoughness; // RGBA8: albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;      // RG16F: metallic + AO
 layout (location = 4) out vec2 gMotionVector;    // RG16F: screen motion (0 for static far trees)
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
+
 in vec2 vQuadUV;
 in vec3 vViewDir;
 in vec3 vWorldPos;
@@ -66,4 +71,7 @@ void main() {
     gAlbedoRoughness = vec4((alb.rgb / alb.a) * vTint, normalSample.b);
     gMetallicAO = vec2(0.0, normalSample.a);
     gMotionVector = vec2(0.0);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }

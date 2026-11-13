@@ -77,6 +77,9 @@ uniform float u_cloudPlaneHeight;     // world Y of the cloud sheet
 uniform float u_cloudShadowStrength;  // [0,1] max darkening under a cloud core
 uniform vec3  u_cloudSunDir;          // sun TRAVEL direction (== u_sunDirection)
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 0)
+#endif
 out vec4 FragColor;
 
 #ifdef LUMIN_DIAG_IDS

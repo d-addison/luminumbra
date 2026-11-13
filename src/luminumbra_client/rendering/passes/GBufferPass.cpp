@@ -47,14 +47,19 @@ GBufferDiagnosticCapture::State::State(DiagnosticTargets& target_storage,
 GBufferDiagnosticCapture::State::~State() = default;
 
 GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
-                                                   DiagnosticDrawTable& table) {
+                                                   DiagnosticDrawTable& table,
+                                                   DiagnosticTargets* forward_targets) {
     if (Current()) {
         throw std::logic_error("Diagnostic capture scopes cannot nest");
     }
     if (table.resolve(1)) {
         throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
     }
+    if (forward_targets == &targets) {
+        throw std::invalid_argument("Forward identities require distinct storage");
+    }
     state_ = std::make_unique<State>(targets, table);
+    state_->forward_targets = forward_targets;
     SetCurrent(this);
 }
 
@@ -69,7 +74,8 @@ GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
 
 void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            std::uint32_t lod,
-                                           DiagnosticOwnership ownership) {
+                                           DiagnosticOwnership ownership,
+                                           DiagnosticPass pass) {
     state_->failed = true;
     DiagnosticId unused{};
     if (!state_->table.submit({.mesh_path = {},
@@ -77,7 +83,7 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                .chunk = {},
                                .lod = lod,
                                .ownership = ownership,
-                               .pass = DiagnosticPass::GBuffer,
+                               .pass = pass,
                                .provenance = DiagnosticProvenance::Unsupported},
                               unused)) {
         throw std::runtime_error("Diagnostic unsupported record exceeds registry bounds");
@@ -93,42 +99,63 @@ void GBufferDiagnosticCapture::abort() noexcept {
     state_->failed = true;
 }
 
-Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
+Shader* GBufferDiagnosticCapture::variant(Shader* shader,
+                                          bool ladder,
+                                          const std::vector<std::string>& feedback_varyings) {
     if (!state_->framebuffer || !shader || !shader->IsValid()) {
         return shader;
     }
     for (const auto& entry : state_->variants) {
         if (entry.vertex == shader->VertexPath() && entry.fragment == shader->FragmentPath() &&
-            entry.ladder == ladder) {
+            entry.ladder == ladder && entry.feedback_varyings == feedback_varyings) {
             return entry.shader.get();
         }
     }
-    if (state_->variants.size() == 6) {
-        unsupported("diagnostic_shader_variant_limit");
+    // At most eight programs and three 64-byte feedback names per program.
+    if (state_->variants.size() == 8 || feedback_varyings.size() > 3 ||
+        std::any_of(feedback_varyings.begin(), feedback_varyings.end(), [](const auto& name) {
+            return name.size() > 64;
+        })) {
+        unsupported("diagnostic_shader_variant_limit",
+                    0,
+                    DiagnosticOwnership::Live,
+                    state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
         return shader;
     }
     std::vector<std::string> defines{"LUMIN_DIAG_IDS 1"};
     if (ladder) {
         defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
     }
-    auto diagnostic = std::make_unique<Shader>(shader->VertexPath().c_str(),
-                                               shader->FragmentPath().c_str(),
-                                               std::vector<std::string>{},
-                                               defines);
+    auto diagnostic = std::make_unique<Shader>(
+        shader->VertexPath().c_str(), shader->FragmentPath().c_str(), feedback_varyings, defines);
     const GLint identity =
         diagnostic->IsValid() ? glGetUniformLocation(diagnostic->Id(), "u_diagnosticIds") : -1;
     if (identity < 0) {
-        unsupported("diagnostic_shader_variant_unavailable");
+        unsupported("diagnostic_shader_variant_unavailable",
+                    0,
+                    DiagnosticOwnership::Live,
+                    state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
         return shader;
     }
-    state_->variants.push_back(
-        {shader->VertexPath(), shader->FragmentPath(), ladder, std::move(diagnostic), identity});
+    state_->variants.push_back({shader->VertexPath(),
+                                shader->FragmentPath(),
+                                ladder,
+                                feedback_varyings,
+                                std::move(diagnostic),
+                                identity});
     return state_->variants.back().shader.get();
 }
 
 void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
     if (!state_->framebuffer) {
         return;
+    }
+    if (submission.pass != (state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer)) {
+        unsupported("diagnostic_contributor_pass_mismatch",
+                    submission.lod,
+                    submission.ownership,
+                    submission.pass);
+        throw std::runtime_error("Diagnostic contributor plane mismatch");
     }
     for (const auto& entry : state_->variants) {
         if (entry.shader.get() != &shader) {
@@ -139,13 +166,58 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
             state_->failed = true;
         }
         if (!state_->table.submit(submission, id)) {
-            unsupported("diagnostic_identity_refused", submission.lod, submission.ownership);
+            unsupported("diagnostic_identity_refused",
+                        submission.lod,
+                        submission.ownership,
+                        submission.pass);
             throw std::runtime_error("Diagnostic identity submission refused");
         }
         glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
         return;
     }
-    unsupported("diagnostic_writer_without_variant", submission.lod, submission.ownership);
+    unsupported(
+        "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
+}
+
+void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submission) {
+    if (!state_->framebuffer) {
+        return;
+    }
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    for (const auto& entry : state_->variants) {
+        if (entry.shader->Id() == static_cast<GLuint>(program)) {
+            write(*entry.shader, submission);
+            return;
+        }
+    }
+    unsupported(
+        "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
+}
+
+bool GBufferDiagnosticCapture::deferred_attached() const {
+    return state_->framebuffer != 0 && !state_->forward;
+}
+
+bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
+                                              std::uint32_t color_texture,
+                                              const DiagnosticExtent& extent) {
+    if (!state_->forward_targets) {
+        unsupported("foliage_forward_contributor_target_unavailable",
+                    0,
+                    DiagnosticOwnership::Live,
+                    DiagnosticPass::Forward);
+        return false;
+    }
+    GBuffer target{};
+    target.fbo_id = framebuffer;
+    target.position_texture = color_texture;
+    if (!attach_target(target, extent, true)) {
+        const auto reason = std::exchange(state_->failure, {});
+        unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
+        return false;
+    }
+    return true;
 }
 
 GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(const GBuffer& gbuffer,
@@ -156,6 +228,18 @@ GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(const GBuffer& gbuffer,
     }
     if (capture_ && !capture_->attach(gbuffer, extent)) {
         capture_ = nullptr;
+    }
+}
+
+GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(std::uint32_t framebuffer,
+                                                         std::uint32_t color_texture,
+                                                         const DiagnosticExtent& extent)
+    : capture_(GBufferDiagnosticCapture::Current()) {
+    if (capture_) {
+        exceptions_ = std::uncaught_exceptions();
+        if (!capture_->attach_forward(framebuffer, color_texture, extent)) {
+            capture_ = nullptr;
+        }
     }
 }
 
@@ -626,9 +710,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -1128,18 +1209,21 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+        Shader* impostor_shader = m_tree_impostor_shader.get();
+        if (capture) {
+            impostor_shader = capture->variant(impostor_shader, false);
+        }
+        if (!UseDrawProgram(impostor_shader, stats))
             return;
-        m_tree_impostor_shader->setMat4("u_view", static_view);
-        m_tree_impostor_shader->setMat4("u_proj", static_proj);
-        m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
-        m_tree_impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
-        m_tree_impostor_shader->setVec3("u_center", input.tree_impostor_center);
-        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
-        m_tree_impostor_shader->setFloat("u_materialId",
-                                         static_cast<float>(impostorMatId) / 255.0f);
-        m_tree_impostor_shader->setInt("u_albedo", 0);
-        m_tree_impostor_shader->setInt("u_normal", 1);
+        impostor_shader->setMat4("u_view", static_view);
+        impostor_shader->setMat4("u_proj", static_proj);
+        impostor_shader->setVec3("u_cameraPos", cameraPos);
+        impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
+        impostor_shader->setVec3("u_center", input.tree_impostor_center);
+        impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
+        impostor_shader->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
+        impostor_shader->setInt("u_albedo", 0);
+        impostor_shader->setInt("u_normal", 1);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, input.tree_impostor_albedo);
         glActiveTexture(GL_TEXTURE1);
@@ -1156,10 +1240,27 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
             if (capture) {
-                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+                for (GLsizei instance = 0; instance < count; ++instance) {
+                    capture->write(*impostor_shader,
+                                   {.mesh_path = {},
+                                    .shader_variant = "tree_impostor",
+                                    .chunk = {},
+                                    .lod = 3,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::GBuffer,
+                                    .provenance = DiagnosticProvenance::Unknown,
+                                    .generated_mesh = "tree-small-02/octahedral-atlas"});
+                    Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstancedBaseInstance,
+                                                                GLenum{GL_TRIANGLE_STRIP},
+                                                                0,
+                                                                4,
+                                                                1,
+                                                                static_cast<GLuint>(instance));
+                }
+            } else {
+                Luminumbra::Rendering::AttributedGl::Submit(
+                    glDrawArraysInstanced, GL_TRIANGLE_STRIP, 0, 4, count);
             }
-            Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArraysInstanced, GL_TRIANGLE_STRIP, 0, 4, count);
             glBindVertexArray(0);
         }
         if (cull_was_enabled)
