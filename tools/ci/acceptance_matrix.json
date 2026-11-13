@@ -36,6 +36,27 @@
       "requirements": []
     },
     {
+      "id": "render.visual-lint",
+      "source": "docs/visual-regression.md#world-sweep-review-sheets",
+      "statement": "The offline PNG checker emits deterministic JSON and a human summary for sentinel clusters, below-horizon sky candidates, gradient banding, opaque rectangles, unchanged matched weather captures and optional baseline histogram drift. Bounded inputs and synthetic regressions cover diagnostics and input refusals; heuristic findings do not establish rendering causes or visual approval.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "VisualLintCaptures"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_visual_lint.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/visual-regression.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.deterministic-work-budgets",
       "source": "docs/deterministic-work-budgets.md",
       "statement": "Issue #396 uses pinned integer work ceilings in the existing native suites for foliage idle, dirty sampling, copies, transfers, simulation counters, activation, backlog growth and eventual drain. Terrain and water upload policy fixtures attain their pinned byte/count/backlog/drain ceilings without graphics calls or clock reads and require current queued revisions. SimBudgetGateContract pins fixture values, counter producers and registration; all capture consumers refuse malformed work-item extensions while accepting older artifacts that omit them. Native execution remains pending.",
