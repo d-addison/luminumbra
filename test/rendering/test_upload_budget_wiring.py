@@ -41,6 +41,78 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_peak_station_records_rendered_centre_and_target_mesh_diagnostics(self):
+        capture = read(ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        player = body(capture, "void ScenarioRunnerImpl::capturePlayerView(")
+        self.assertIn('if (capture.station.name == "peak")', player)
+        peak = compact(body(player, 'if (capture.station.name == "peak")'))
+        self.assertEqual(peak, "capture.terrain_peak = "
+                         "renderPipeline.terrain_peak_diagnostics(capture.station.target);")
+        self.assertLess(player.index("terrain_peak_diagnostics("),
+                        player.index("WritePixelBufferPpm("))
+        writer = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")
+        self.assertIn('{"terrain_peak", capture.terrain_peak}', writer)
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        diagnostic = body(source, "nlohmann::json RenderPipeline::terrain_peak_diagnostics(")
+        self.assertIn('out["target"] = describe({target.x, target.y, target.z});', diagnostic)
+        self.assertIn('out["centre"] = describe({position.x, position.y, position.z});', diagnostic)
+        for key in ("lod", "sample_step_m", "mesh_path", "terrain_owner",
+                    "mesh_metadata_status", "far_mode", "far_draws"):
+            self.assertIn('"' + key + '"', diagnostic)
+        self.assertIn("const ReadbackState restore(gbuffer().fbo_id);", diagnostic)
+        self.assertNotIn("glGetError(", diagnostic)
+        self.assertIn("static_cast<double>(pixel_x) + 0.5", diagnostic)
+        self.assertIn("projection[2][0] += m_taau_jitter_ndc.x;", diagnostic)
+        self.assertIn("projection[2][1] += m_taau_jitter_ndc.y;", diagnostic)
+        self.assertNotIn("get_renderable_chunks(", diagnostic)
+        self.assertIn("std::min(snapshots.size(), kFarWorldLiveCellLimit)", diagnostic)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for regression in ("PeakDiagnosticsObserveCentreDepthAndStableMeshInputs",
+                           "PeakDiagnosticsDoNotGuessPendingUnknownOrInvalidMeshPaths"):
+            self.assertIn("TEST_F(FarWorldWaterGl, " + regression + ")", native)
+
+    def test_peak_ownership_preserves_legacy_overlap_and_incomplete_evidence(self):
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        self.assertIn("nlohmann::json RenderPipeline::terrain_peak_diagnostics(", source)
+        diagnostic = compact(body(source, "nlohmann::json RenderPipeline::terrain_peak_diagnostics("))
+        live = re.search(r"const bool exclusive_live = (.*?);", diagnostic).group(1)
+        far = re.search(r'else if \((!presented.*?)\) \{ '
+                        r'point\["terrain_owner"\] = "far";', diagnostic).group(1)
+
+        def expression(text):
+            for before, after in (
+                ("m_frame_far_selection.effective == FarWorldMode::Ladder", "ladder"),
+                ("m_frame_far_selection.effective != FarWorldMode::Ladder", "(not ladder)"),
+                ("m_last_render_pass_stats.far_region_draws", "draws"),
+                ("snapshots.size() == count", "complete_search"),
+                ("ownership.complete()", "complete_mask"),
+                ("&&", " and "), ("||", " or "),
+            ):
+                text = text.replace(before, after)
+            return re.sub(r"!(?!=)", " not ", text).strip()
+
+        live, far = expression(live), expression(far)
+        # All 128 boolean combinations, including absent/stale uploads,
+        # incomplete masks/searches and Legacy overlap, use the shipping predicates.
+        for bits in range(128):
+            presented, inner, ladder, ladder_owned, complete_mask, complete_search, drawn = (
+                bool(bits & (1 << bit)) for bit in range(7))
+            state = dict(presented=presented, inner=inner, ladder=ladder,
+                         ladder_owned=ladder_owned, complete_mask=complete_mask,
+                         complete_search=complete_search, draws=int(drawn))
+            actual = "unresolved"
+            if presented and eval(live, {"__builtins__": {}}, state):
+                actual = "live"
+            elif eval(far, {"__builtins__": {}}, state):
+                actual = "far"
+            expected = "unresolved"
+            if presented and (inner or not drawn or (ladder and ladder_owned)):
+                expected = "live"
+            elif (not presented and complete_search and not inner and drawn and
+                  (not ladder or (complete_mask and not ladder_owned))):
+                expected = "far"
+            self.assertEqual(actual, expected, state)
+
     def test_wiring_regression_runs_in_ctest_and_python_ci(self):
         registration = read(ROOT / "test/CMakeLists.txt")
         self.assertEqual(registration.count("add_test(NAME UploadBudgetWiringPython "), 1)
