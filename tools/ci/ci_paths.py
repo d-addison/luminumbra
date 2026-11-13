@@ -13,6 +13,8 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "test/tools/test_regenerate_region_fixtures.py",
+
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
@@ -81,6 +83,8 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/regenerate_region_fixtures.py",
+
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",

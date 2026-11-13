@@ -1994,6 +1994,125 @@ class FrameAttributionWiring(unittest.TestCase):
                                          requested in (2, 4, 8, 16) and resolution == requested)
 
 
+class TerrainMaterialWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.shaders = ROOT / "res/shaders"
+        cls.fragment = read(cls.shaders / "g_buffer.frag")
+        cls.terrain = read(cls.shaders / "g_buffer.vert")
+
+    def test_material_interface_matches_all_shipping_vertex_paths(self):
+        fragment_interface = compact(block(self.fragment, "in VS_OUT"))
+        for name in ("g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"):
+            source = read(self.shaders / name)
+            with self.subTest(vertex=name):
+                # Ignore comments when comparing the complete linked interface.
+                interface = lambda value: compact(re.sub(r"//[^\n]*", "", value))
+                self.assertEqual(interface(block(source, "out VS_OUT")),
+                                 interface(block(self.fragment, "in VS_OUT")))
+                self.assertIn("vec4 GroundWeights;", fragment_interface)
+                self.assertIn("float DeepslateWeight;", fragment_interface)
+                if name != "g_buffer.vert":
+                    self.assertIn("vs_out.GroundWeights = vec4(0.0);", source)
+                    self.assertIn("vs_out.DeepslateWeight = 0.0;", source)
+        self.assertIn("vec4(equal(uvec4(aMaterialID), uvec4(1u, 2u, 3u, 4u)))",
+                      self.terrain)
+        self.assertIn("vs_out.DeepslateWeight = aMaterialID == 5u ? 1.0 : 0.0;",
+                      self.terrain)
+        self.assertNotIn("flat vec4 GroundWeights", self.fragment)
+        self.assertNotIn("flat float DeepslateWeight", self.fragment)
+
+    def test_natural_materials_blend_all_surface_channels_before_lighting(self):
+        main = block(self.fragment, "void main()")
+        blend = block(main, "if (naturalCoverage)")
+        self.assertIn("fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u", main)
+        self.assertIn("dot(fs_in.GroundWeights, vec4(1.0)) + fs_in.DeepslateWeight", main)
+        self.assertIn("for (int lane = 0; lane < 5; ++lane)", blend)
+        lane = block(blend, "if (weight > 0.0)")
+        self.assertIn("weight / coverage", lane)
+        self.assertIn("terrainSurface(uint(lane + 1)", lane)
+        self.assertIn("vec3 laneN = geomN;", lane)
+        for output, sampled in (("albedo", "laneAlbedo"), ("worldN", "laneN"),
+                                ("roughness", "laneRoughness"),
+                                ("metallic", "laneMetallic"), ("ao", "laneAO")):
+            with self.subTest(channel=output):
+                self.assertRegex(blend, rf"{output} = (vec3\()?0\.0")
+                self.assertIn(f"{output} += {sampled} * normalizedWeight;", lane)
+        self.assertIn("worldN = normalize(worldN);", blend)
+        surface = block(self.fragment, "void terrainSurface(")
+        self.assertIn("float matIndex = float(materialId) / 255.0;", surface)
+        self.assertIn("albedo = baseAlbedo * albedoScale * albedoTint;", surface)
+        # No new coverage path can change the material-ID attachment or water ownership.
+        self.assertIn("float material_id_normalized = float(fs_in.MaterialID) / 255.0;", main)
+        self.assertIn("farLiveOwns(local, fs_in.MaterialID)", main)
+        self.assertIn("discard;", block(main, "if (fs_in.MaterialID == 7u)"))
+        fallback = compact(block(main, "} else if ((texInfo.a > 0.5"))
+        self.assertIn("terrainSurface(fs_in.MaterialID, fs_in.WorldPos, worldDx, worldDy,", fallback)
+        self.assertIn("(texInfo.a > 0.5 || naturalCoverage) && u_forceFlat == 0", main)
+        self.assertLess(main.index("if (proceduralLeaf)"), main.index("if (naturalCoverage)"))
+        self.assertLess(main.index("u_skinnedAlbedoLayer >= 0"), main.index("if (naturalCoverage)"))
+        self.assertIn("albedo = materialAlbedo(materialId);", surface)
+        self.assertLess(surface.index("albedo = materialAlbedo(materialId);"),
+                        surface.index("if (texInfo.a <= 0.5) return;"))
+        self.assertIn("if (texInfo.a <= 0.5) return;", surface)
+        self.assertIn("(u_terrainRoughnessValid == 1)", surface)
+
+    def test_coverage_guard_keeps_partial_and_non_ground_surfaces_on_fallback(self):
+        main = block(self.fragment, "void main()")
+        match = re.search(r"bool naturalCoverage = ([^;]+);", main)
+        self.assertIsNotNone(match)
+        predicate = re.sub(r"(\d+)u\b", r"\1", match.group(1))
+        for material_id in (0, 1, 2, 3, 4, 5, 6, 7, 200, 255, 2**32 - 1):
+            for coverage in (0.0, 0.25, 0.5, 0.998, 1.0, 1.0000001):
+                with self.subTest(material=material_id, coverage=coverage):
+                    accepts = cpp_expression(predicate, coverage=coverage,
+                                             **{"fs_in.MaterialID": material_id})
+                    self.assertEqual(accepts, 1 <= material_id <= 5 and coverage >= 1.0)
+
+    def test_material_blend_gradients_precede_divergence_and_keep_mip_bias(self):
+        main = block(self.fragment, "void main()")
+        self.assertLess(main.index("dFdx(fs_in.WorldPos)"), main.index("if ("))
+        self.assertLess(main.index("dFdy(fs_in.WorldPos)"), main.index("if ("))
+        sample = block(self.fragment, "vec4 sampleTerrain(")
+        self.assertIn("exp2(u_lodBias)", sample)
+        self.assertIn("textureGrad(image, uvw, dx * biasScale, dy * biasScale)", sample)
+        for name in ("albedo", "normal", "roughness"):
+            surface = block(self.fragment, "triplanar_" + name + "(")
+            self.assertNotIn("sampleBias(", surface)
+            self.assertNotIn("textureQueryLod(", surface)
+            for axis in ("zy", "xz", "xy"):
+                self.assertIn(f"dx.{axis} * scale, dy.{axis} * scale", surface)
+        self.assertIn("baseLod + kDetailBlurLod + u_lodBias", self.fragment)
+
+    def test_sand_detail_is_world_anchored_and_uses_all_three_arrays(self):
+        sand = block(self.fragment, "if (materialId == 4u)")
+        self.assertIn("worldPos * 4.17 + vec3(37.0, 17.0, 53.0)", sand)
+        self.assertIn("dx * 4.17, detailDy = dy * 4.17", sand)
+        self.assertIn("vnoise(worldPos * 0.13)", sand)
+        for name in ("albedo", "normal", "roughness"):
+            self.assertIn("triplanar_" + name + "(detailPos,", sand)
+        self.assertEqual(sand.count("detailDx, detailDy)"), 3)
+        self.assertIn("if (u_terrainRoughnessValid == 1)", sand)
+        self.assertNotIn("gl_FragCoord", sand)
+        self.assertNotIn("u_time", sand)
+
+    def test_all_terrain_arrays_enable_bounded_anisotropy_only_when_supported(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        terrain = block(pipeline, "void RenderPipeline::init_terrain_textures()")
+        self.assertIn("GLAD_GL_VERSION_4_6", terrain)
+        self.assertIn('glfwExtensionSupported("GL_ARB_texture_filter_anisotropic")', terrain)
+        self.assertIn('glfwExtensionSupported("GL_EXT_texture_filter_anisotropic")', terrain)
+        enabled = block(terrain, "if (terrain_anisotropy_supported)")
+        self.assertIn("glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY", enabled)
+        self.assertIn("std::clamp(maximum_anisotropy, 1.0f, 8.0f)", enabled)
+        self.assertEqual(terrain.count("if (terrain_anisotropy_supported)"), 4)
+        for binding in ("m_terrainTextureArray", "m_terrainNormalArray", "m_terrainRoughnessArray"):
+            # Each setting belongs to its array, before the next array binding.
+            after_bind = terrain.split("glBindTexture(GL_TEXTURE_2D_ARRAY, " + binding + ");", 1)[1]
+            settings = after_bind.split("glBindTexture(GL_TEXTURE_2D_ARRAY,", 1)[0]
+            guarded = block(settings, "if (terrain_anisotropy_supported)")
+            self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
+
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

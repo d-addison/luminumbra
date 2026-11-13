@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <tuple>
 
 namespace Luminumbra::Rendering {
@@ -95,6 +97,161 @@ struct ReadbackState {
     }
 };
 } // namespace
+
+nlohmann::json RenderPipeline::terrain_peak_diagnostics(const glm::vec3& target) const {
+    Json out = {{"status", "no_prepared_frame"},
+                {"centre", nullptr},
+                {"target", nullptr},
+                {"ownership_scope", "terrain_fragment_policy_not_prop_draw_identity"}};
+    const auto* world = m_frame_prepared.world_system;
+    if (!m_frame_prepared.valid || !world || !gbuffer().fbo_id || !m_internal_width ||
+        !m_internal_height) {
+        return out;
+    }
+    out["far_mode"] = FarWorldModeName(m_frame_far_selection.effective);
+    out["far_draws"] = m_last_render_pass_stats.far_region_draws;
+    if (const auto* legacy = legacy_far_compatibility(); legacy && legacy->preview_anchored()) {
+        out["status"] = "preview_ownership_unavailable";
+        return out;
+    }
+    const auto& ownership = m_far_world->LiveOwnership();
+    out["live_ownership_complete"] = ownership.complete();
+    const auto inverse_view = glm::inverse(glm::dmat4(m_frame_prepared.view));
+    const auto describe = [&](const std::array<double, 3>& position) {
+        Json point = {{"position", position},
+                      {"lod", nullptr},
+                      {"sample_step_m", nullptr},
+                      {"mesh_path", "unknown"},
+                      {"mesh_metadata_status", "no_snapshot"},
+                      {"live_upload_present", false},
+                      {"live_upload_current", false},
+                      {"terrain_owner", "unresolved"}};
+        FarWorldLiveCell cell;
+        if (!FarWorldChunkCell(position, cell)) {
+            point["mesh_metadata_status"] = "invalid_position";
+            return point;
+        }
+        point["chunk"] = {cell.x, cell.y, cell.z};
+        bool presented = false;
+        // Capture-only: at most two searches of the admitted 8192 live cells.
+        // Do not copy meshes or traverse the world's requested/resident store.
+        const auto& snapshots = m_frame_prepared.renderable_chunk_snapshots;
+        const auto count = std::min(snapshots.size(), kFarWorldLiveCellLimit);
+        point["snapshot_search_truncated"] = snapshots.size() > count;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& snapshot = snapshots[index];
+            if (snapshot.coords != IVec3(cell.x, cell.y, cell.z)) {
+                continue;
+            }
+            const auto found = m_chunk_render_data.find(snapshot.id);
+            presented = found != m_chunk_render_data.end() &&
+                        m_chunk_geometry_pool.valid_allocation(found->second.pool_handle,
+                                                               found->second.element_count) &&
+                        found->second.element_count != 0;
+            const bool current = presented && found->second.mesh_version == snapshot.mesh_version;
+            point["live_upload_present"] = presented;
+            point["live_upload_current"] = current;
+            point["snapshot_mesh_version"] = snapshot.mesh_version;
+            const auto* source = snapshot.source_chunk;
+            if (!current || !source ||
+                source->mesh_version.load(std::memory_order_acquire) != snapshot.mesh_version) {
+                point["mesh_metadata_status"] = "mesh_version_unavailable";
+                break;
+            }
+            if (source->pending_lod.load(std::memory_order_acquire) >= 0 ||
+                source->get_state() != ChunkState::Ready) {
+                point["mesh_metadata_status"] = "mesh_publication_pending";
+                break;
+            }
+            const int lod = source->current_lod.load(std::memory_order_acquire);
+            point["mesh_metadata_status"] = "unknown_lod";
+            for (const auto& level : world->get_lod_levels()) {
+                if (level.level != lod) {
+                    continue;
+                }
+                point["lod"] = lod;
+                point["sample_step_m"] = level.step;
+                constexpr std::size_t full_lattice =
+                    (CHUNK_SIZE_X + 1u) * (CHUNK_SIZE_Y + 1u) * (CHUNK_SIZE_Z + 1u);
+                point["sdf_samples"] = source->sdf_data.size();
+                if (source->sdf_data.size() == full_lattice) {
+                    point["mesh_path"] = "sdf";
+                    point["mesh_metadata_status"] = "current";
+                } else if (source->sdf_data.empty() && level.step > 1) {
+                    point["mesh_path"] = "heightfield";
+                    point["mesh_metadata_status"] = "current";
+                } else {
+                    point["mesh_metadata_status"] = "invalid_lattice";
+                }
+                break;
+            }
+            break;
+        }
+        const glm::dvec3 relative =
+            glm::dvec3(position[0], position[1], position[2]) - glm::dvec3(inverse_view[3]);
+        const bool inner =
+            glm::dot(relative, relative) < kFarWorldInnerRadiusMeters * kFarWorldInnerRadiusMeters;
+        const bool ladder_owned = ownership.complete() && ownership.Owns(position);
+        point["far_excluded_by_inner_radius"] = inner;
+        point["ladder_live_owned"] = ladder_owned;
+        // Legacy has depth-biased overlap rather than a cell mask. Outside the
+        // inner sphere, a live upload alone cannot prove which surface won.
+        const bool exclusive_live =
+            inner || m_last_render_pass_stats.far_region_draws == 0 ||
+            (m_frame_far_selection.effective == FarWorldMode::Ladder && ladder_owned);
+        if (presented && exclusive_live) {
+            point["terrain_owner"] = "live";
+        } else if (!presented && snapshots.size() == count && !inner &&
+                   m_last_render_pass_stats.far_region_draws != 0 &&
+                   (m_frame_far_selection.effective != FarWorldMode::Ladder ||
+                    (ownership.complete() && !ladder_owned))) {
+            point["terrain_owner"] = "far";
+        }
+        return point;
+    };
+    out["target"] = describe({target.x, target.y, target.z});
+    float depth = std::numeric_limits<float>::quiet_NaN();
+    const u32 pixel_x = m_internal_width / 2u;
+    const u32 pixel_y = m_internal_height / 2u;
+    {
+        const ReadbackState restore(gbuffer().fbo_id);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer().fbo_id);
+        glReadPixels(static_cast<GLint>(pixel_x),
+                     static_cast<GLint>(pixel_y),
+                     1,
+                     1,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     &depth);
+    }
+    // Leave GL errors available to the existing gates. A failed one-pixel read
+    // leaves the NaN sentinel; no error-queue drain can hide a frame failure.
+    out["status"] = "invalid_depth";
+    if (!std::isfinite(depth) || depth < 0.0f || depth > 1.0f) {
+        return out;
+    }
+    out["centre_depth"] = depth;
+    out["centre_pixel"] = {pixel_x, pixel_y};
+    if (depth == 0.0f) {
+        out["status"] = "background";
+        return out;
+    }
+    auto projection = m_frame_prepared.projection;
+    projection[2][0] += m_taau_jitter_ndc.x;
+    projection[2][1] += m_taau_jitter_ndc.y;
+    const glm::dvec4 clip(2.0 * (static_cast<double>(pixel_x) + 0.5) / m_internal_width - 1.0,
+                          2.0 * (static_cast<double>(pixel_y) + 0.5) / m_internal_height - 1.0,
+                          depth,
+                          1.0);
+    const auto homogeneous = inverse_view * glm::inverse(glm::dmat4(projection)) * clip;
+    if (!std::isfinite(homogeneous.w) || homogeneous.w == 0.0) {
+        return out;
+    }
+    const auto position = glm::dvec3(homogeneous) / homogeneous.w;
+    out["centre"] = describe({position.x, position.y, position.z});
+    out["status"] = "observed";
+    return out;
+}
 
 void RenderPipeline::set_terrain_coverage_diagnostics_enabled(bool enabled,
                                                               bool bypass_camera_region_guard) {

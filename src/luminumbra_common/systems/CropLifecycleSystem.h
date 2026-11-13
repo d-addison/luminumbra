@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -56,24 +58,29 @@ struct LegacyPlantIdentityAllocator {
     }
 };
 
+namespace crop_detail {
+
 // Advance every CropLifecycleComponent plant one tick. world_seed lets distinct worlds diverge
 // (GameSession passes the default 0, mirroring the reproduction/pollination systems).
 // An installed allocator supplies a shared persistent ID or refuses before parent mutation.
-template<typename IdentityAllocator = LegacyPlantIdentityAllocator>
-inline CropLifecycleStats
-RunCropLifecycleOnTick(entt::registry& reg,
-                       std::uint64_t tick,
-                       std::uint64_t world_seed = 0,
-                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
-                       const IdentityAllocator& allocate_identity = {}) {
+template<typename IdentityAllocator>
+inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
+                                           std::uint64_t tick,
+                                           std::uint64_t world_seed,
+                                           const ::Luminumbra::world::RegionConsumerGate& gate,
+                                           const IdentityAllocator& allocate_identity,
+                                           ::Luminumbra::world::ActiveRegionLedger* allocator) {
     namespace Comp = ::Luminumbra::Components;
     namespace dm = ::Luminumbra::DeterministicMath;
     CropLifecycleStats stats;
+    if (gate.UsesSimulationPlantIdentity() != (allocator != nullptr))
+        throw std::invalid_argument("Plant reproduction identity and allocator must agree");
 
     auto view = reg.view<Comp::CropLifecycleComponent,
                          Comp::PlantGrowthComponent,
                          const Comp::PlantGenomeComponent,
                          const Comp::TransformComponent>();
+    // The participating component pools are bounded by EnTT's entity mask.
     std::vector<entt::entity> ents;
     for (auto e : view) {
         if (gate.Allows(e)) {
@@ -82,24 +89,61 @@ RunCropLifecycleOnTick(entt::registry& reg,
     }
     if (ents.empty())
         return stats; // opt-in: no participants -> byte-identical no-op
-    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
-        return gate.UsesPersistentPlantIdentity() ? PlantIdentityLess(reg, a, b)
-                                                  : entt::to_integral(a) < entt::to_integral(b);
-    });
+    if (allocator) {
+        OrderPlantsBySimulationIdentity(reg, ents, gate.PlantIdentityScratch());
+        // All participants must already have issued IDs before any parent changes.
+        for (const auto entity : ents) {
+            if (RequirePlantSimulationId(reg, entity) >= allocator->next_persistent_id())
+                throw std::runtime_error("Unissued plant reproduction identity");
+        }
+    } else {
+        std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+            return gate.UsesPersistentPlantIdentity() ? PlantIdentityLess(reg, a, b)
+                                                      : entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
 
     const std::uint8_t kFruiting = static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
 
     struct Birth {
+        entt::entity parent;
+        std::uint32_t ripe_ticks;
         ::Luminumbra::Vec3 pos;
         Comp::PlantGenomeComponent genome;
         bool perennial;
         std::uint32_t lifespan;
         std::uint16_t species;
         bool grazeable;
+        bool owned;
         Comp::PlantRegionComponent identity;
     };
     std::vector<Birth> births;
     std::vector<entt::entity> deaths;
+    // Each admitted parent contributes at most one birth and one death. Candidate
+    // publication needs no vector growth after allocating an offspring identity.
+    if (allocator) {
+        births.reserve(ents.size());
+        deaths.reserve(ents.size());
+    }
+    const auto complete_senescence = [&](entt::entity parent, std::uint32_t ripe_ticks) {
+        auto& lc = reg.get<Comp::CropLifecycleComponent>(parent);
+        auto& growth = reg.get<Comp::PlantGrowthComponent>(parent);
+        ++stats.ripening;
+        lc.ripe_ticks = ripe_ticks;
+        ++lc.generations;
+        ++stats.reseeded;
+        if (lc.perennial) {
+            growth.stage = static_cast<std::uint8_t>(Comp::PlantStage::Juvenile);
+            growth.growth_points =
+                StageThreshold(static_cast<std::uint8_t>(Comp::PlantStage::Sprout));
+            growth.stress_points /= 2u;
+            lc.ripe_ticks = 0;
+            ++stats.reset;
+        } else {
+            deaths.push_back(parent);
+            ++stats.died;
+        }
+    };
 
     for (auto e : ents) {
         auto& lc = view.get<Comp::CropLifecycleComponent>(e);
@@ -109,7 +153,10 @@ RunCropLifecycleOnTick(entt::registry& reg,
             lc.ripe_ticks = 0;
             continue;
         } // still growing
-        const std::uint32_t ripe_ticks = lc.ripe_ticks + 1u;
+        const std::uint32_t ripe_ticks =
+            allocator && lc.ripe_ticks == std::numeric_limits<std::uint32_t>::max()
+                ? lc.ripe_ticks
+                : lc.ripe_ticks + 1u;
         if (ripe_ticks < lc.lifespan_ticks) {
             ++stats.ripening;
             lc.ripe_ticks = ripe_ticks;
@@ -126,8 +173,10 @@ RunCropLifecycleOnTick(entt::registry& reg,
         // Deterministic seed DISPERSAL: a nearby cell from a per-plant integer-seeded RNG.
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
             kGerminationSeedOffset ^ world_seed,
-            (gate.UsesPersistentPlantIdentity() ? PlantSimulationId(reg, e)
-                                                : static_cast<std::uint64_t>(entt::to_integral(e))),
+            allocator ? RequirePlantSimulationId(reg, e)
+                      : (gate.UsesPersistentPlantIdentity()
+                             ? PlantSimulationId(reg, e)
+                             : static_cast<std::uint64_t>(entt::to_integral(e))),
             tick);
         const float ang = rng.next_unit() * 6.2831853f;
         const float rad = 1.0f + rng.next_unit() * 2.0f; // 1..3 m from the parent
@@ -138,46 +187,51 @@ RunCropLifecycleOnTick(entt::registry& reg,
             continue;
         }
         Comp::PlantRegionComponent identity;
-        if (reg.all_of<Comp::PlantRegionComponent>(e)) {
+        const bool owned = reg.all_of<Comp::PlantRegionComponent>(e);
+        if (owned) {
+            // A disabled regional gate admits every position. Resolve ownership before
+            // either allocator can consume an ID or the birth factory can create a child.
+            if (!::Luminumbra::world::ActiveRegionLedger::valid_anchor(childPos)) {
+                continue;
+            }
+            const auto owner = ::Luminumbra::world::ActiveRegionLedger::region_at(childPos);
+            identity.owner_x = owner.x;
+            identity.owner_z = owner.z;
+            identity.region_stamp = tick;
+        }
+        if (owned && !allocator) {
             if (!allocate_identity(identity.persistent_id)) {
                 continue;
             }
-            if (identity.persistent_id != 0) {
-                const auto owner = ::Luminumbra::world::ActiveRegionLedger::region_at(childPos);
-                identity.owner_x = owner.x;
-                identity.owner_z = owner.z;
-                identity.region_stamp = tick;
-            }
         }
-        births.push_back({childPos,
+        births.push_back({e,
+                          ripe_ticks,
+                          childPos,
                           childGenome,
                           lc.perennial,
                           lc.lifespan_ticks,
                           lc.species_id,
                           reg.all_of<Comp::GrazeableComponent>(e),
+                          owned,
                           identity});
-        ++stats.ripening;
-        lc.ripe_ticks = ripe_ticks;
-        ++lc.generations;
-        ++stats.reseeded;
-
-        if (lc.perennial) {
-            // Regrow from a vegetative stage (faster than from seed); shed half the accrued stress.
-            g.stage = static_cast<std::uint8_t>(Comp::PlantStage::Juvenile);
-            g.growth_points = StageThreshold(static_cast<std::uint8_t>(Comp::PlantStage::Sprout));
-            g.stress_points /= 2u;
-            lc.ripe_ticks = 0;
-            ++stats.reset;
-        } else {
-            deaths.push_back(e);
-            ++stats.died;
-        }
+        if (!allocator)
+            complete_senescence(e, ripe_ticks);
     }
 
     // Apply AFTER the read pass (no view invalidation mid-iteration).
     for (const Birth& b : births) {
-        const auto child = PlantSeed(reg, b.pos, b.genome, b.species, tick);
-        if (b.identity.persistent_id != 0) {
+        // Candidate births allocate through the shared factory, in parent identity order;
+        // each parent has one child (ordinal zero).
+        // A refused birth leaves that parent's lifecycle, growth and grazing untouched.
+        const auto child = allocator ? PlantSeed(reg, b.pos, b.genome, b.species, tick, *allocator)
+                                     : PlantSeed(reg, b.pos, b.genome, b.species, tick);
+        if (child == entt::null)
+            continue;
+        if (allocator && b.owned) {
+            auto identity = b.identity;
+            identity.persistent_id = RequirePlantSimulationId(reg, child);
+            reg.emplace<Comp::PlantRegionComponent>(child, identity);
+        } else if (b.identity.persistent_id != 0) {
             reg.emplace<Comp::PlantRegionComponent>(child, b.identity);
         }
         auto& clc = reg.emplace<Comp::CropLifecycleComponent>(child);
@@ -195,10 +249,37 @@ RunCropLifecycleOnTick(entt::registry& reg,
         reg.emplace<Comp::PollinationComponent>(child);
         reg.emplace<Comp::SoilFeederComponent>(
             child); // children feed on soil too (FarmingSystem opt-in parity)
+        if (allocator)
+            complete_senescence(b.parent, b.ripe_ticks);
     }
     for (auto e : deaths)
         reg.destroy(e);
     return stats;
+}
+
+} // namespace crop_detail
+
+// Shipping callers retain legacy ordering and allocation until identity activation.
+template<typename IdentityAllocator = LegacyPlantIdentityAllocator>
+inline CropLifecycleStats
+RunCropLifecycleOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                       const IdentityAllocator& allocate_identity = {}) {
+    return crop_detail::RunCropLifecycle(reg, tick, world_seed, gate, allocate_identity, nullptr);
+}
+
+// Dormant candidate lane, in both regional modes. Detached callers use the stage's
+// identity_allocator(); publication admits its cursor before exposing any births.
+inline CropLifecycleStats
+RunCropLifecycleOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed,
+                       const ::Luminumbra::world::RegionConsumerGate& gate,
+                       ::Luminumbra::world::ActiveRegionLedger& allocator) {
+    return crop_detail::RunCropLifecycle(
+        reg, tick, world_seed, gate, LegacyPlantIdentityAllocator{}, &allocator);
 }
 
 } // namespace luminumbra::foliage
