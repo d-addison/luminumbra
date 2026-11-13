@@ -623,6 +623,20 @@ void UpdatePhotoModeAndHud(ClientAppContext& app,
     }
 }
 
+void ReleasePhotoModeAndHud(ClientAppContext& app,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline) {
+    app.hud.photoMode = {};
+    app.hud.photoModeUiShown = false;
+    // Run the inactive path to retire capture-local scrub state as well. Inactive
+    // capture does not access the player, world, UI or capture destinations.
+    UpdatePhotoCapture(
+        app, nullptr, {}, nullptr, nullptr, nullptr, nullptr, nullptr, renderPipeline);
+    // Transition cleanup must also work without a subsequent gameplay frame.
+    renderPipeline.set_time_of_day_hold(false);
+    renderPipeline.set_exposure_override(-1.0f);
+    renderPipeline.set_weather(Luminumbra::Rendering::WeatherType::None, 0.0f);
+}
+
 void DrawCreatureNameplates(ClientAppContext& app,
                             GLFWwindow* window,
                             Luminumbra::Rendering::Camera* camera,

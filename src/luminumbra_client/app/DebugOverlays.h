@@ -45,6 +45,10 @@ void UpdatePhotoModeAndHud(ClientAppContext& app,
                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
                            const ScenarioHarness::RuntimeScenarioConfig& scenario_config);
 
+// Release presentation owned by the departing player before reusing the renderer.
+void ReleasePhotoModeAndHud(ClientAppContext& app,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline);
+
 // Floating creature ID nameplates for the ecology demo capture (drawn into
 // the ImGui foreground list, so they show during the timelapse too).
 void DrawCreatureNameplates(ClientAppContext& app,

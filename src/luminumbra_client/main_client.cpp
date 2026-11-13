@@ -2631,11 +2631,22 @@ int main(int argc, char* argv[]) {
         jobSystem.wait(s_worldDressingHandle);
     };
 
+    // Player ownership marks a live gameplay presentation. Retiring it is the
+    // common boundary for menu exits, world replacements and failed-entry drains.
+    auto release_player_controller = [&]() {
+        if (g_playerController) {
+            ReleasePhotoModeAndHud(g_app, renderPipeline);
+            g_playerController.reset();
+        }
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
-        if (gameSession->WorldRevision() != entry_world_revision)
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            release_player_controller();
             prepare_world_entry();
+        }
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2647,7 +2658,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         if (gameSession->WorldRevision() != entry_world_revision) {
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineOption(argc, argv, "--load-world") ||
@@ -2683,7 +2694,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto finish_world_entry = [&](bool staged_entry = false) {
-        g_playerController.reset();
+        release_player_controller();
         g_procgen = {};
         g_app.worldDressing = {};
         g_app.foragers = {};
@@ -3420,7 +3431,7 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 prepare_world_entry();
-                g_playerController.reset();
+                release_player_controller();
                 SetGamePaused(window, false);
                 SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                 if (g_uiManager)
@@ -4149,7 +4160,7 @@ int main(int argc, char* argv[]) {
             if (auto* world = gameSession->GetWorldSystem())
                 world->clear_world(gameSession->GetPhysicsSystem());
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         const auto rollback_error = entry_artifacts.rollback();
         if (!rollback_error.empty()) {
@@ -4184,6 +4195,7 @@ int main(int argc, char* argv[]) {
         return WorldEntryResult::Complete;
     };
     auto return_entry_to_menu = [&]() {
+        release_player_controller();
         SetGameState(window, gameStateManager, GameState::MAIN_MENU);
         if (g_uiManager)
             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -4646,7 +4658,7 @@ int main(int argc, char* argv[]) {
                         }
                         if (saved && main_menu) {
                             prepare_world_entry();
-                            g_playerController.reset();
+                            release_player_controller();
                             SetGamePaused(window, false);
                             SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -7674,7 +7686,7 @@ int main(int argc, char* argv[]) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");
     }
-    g_playerController.reset();
+    release_player_controller();
     mark_shutdown("player_controller_reset");
     g_camera.reset();
     mark_shutdown("camera_reset");
