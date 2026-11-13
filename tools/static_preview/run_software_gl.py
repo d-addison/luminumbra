@@ -37,6 +37,13 @@ EXPECTED_CASES = frozenset({
 
 SHADER_CASES = frozenset({("ShaderScene", "MaterialLinearReferenceAndOcclusionBlend")})
 
+# Every wait is bounded so display startup, the test child and server cleanup
+# finish inside the smallest CTest TIMEOUT that registers this runner. A CTest
+# kill would skip the finally block and leave the detached Xvfb running.
+DISPLAY_READY_SECONDS = 10
+CHILD_TIMEOUT_SECONDS = 150
+SERVER_STOP_SECONDS = 5
+
 
 def validate_report(root, expected=EXPECTED_CASES):
     """Require the exact successful GoogleTest inventory before claiming a render pass."""
@@ -89,7 +96,7 @@ def main():
             write_fd = -1
             selector = selectors.DefaultSelector()
             selector.register(read_fd, selectors.EVENT_READ)
-            if not selector.select(10):
+            if not selector.select(DISPLAY_READY_SECONDS):
                 raise RuntimeError('Owned software display did not become ready')
             display = os.read(read_fd, 32).decode('ascii').strip()
             selector.close()
@@ -100,7 +107,7 @@ def main():
                 env['LUMINUMBRA_SHADER_SCENE_OUTPUT'] = str(output.resolve())
             result = subprocess.run([args.binary, '--gtest_output=xml:' + str(output / 'tests.xml')],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    timeout=180, check=False)
+                                    timeout=CHILD_TIMEOUT_SECONDS, check=False)
             (output / 'tests.log').write_bytes(result.stdout)
             print(result.stdout.decode('utf-8', errors='replace'), end='')
             if result.returncode:
@@ -116,10 +123,10 @@ def main():
         if server is not None and server.poll() is None:
             os.killpg(server.pid, signal.SIGTERM)
             try:
-                server.wait(timeout=5)
+                server.wait(timeout=SERVER_STOP_SECONDS)
             except subprocess.TimeoutExpired:
                 os.killpg(server.pid, signal.SIGKILL)
-                server.wait(timeout=5)
+                server.wait(timeout=SERVER_STOP_SECONDS)
 
 
 if __name__ == '__main__':
