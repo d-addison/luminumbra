@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/test_frozen_terrain_presets.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
     "tools/ci/test_local_rmlui_recipe.py",
