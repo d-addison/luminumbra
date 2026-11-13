@@ -531,6 +531,51 @@ TEST_F(SavedPlayDispatch, SourceRefusalDispatchesOnlyLegacyAndReportsBothModes) 
               FarWorldRefusal::ImmutableAuthorityUnavailable);
 }
 
+TEST_F(SavedPlayDispatch, CompletedSourceStagesWhileNewerCapturesQueueAndBecomeActive) {
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    const auto serial = producer.capture()->serial;
+    ASSERT_TRUE(producer.request_capture(windows));
+    ASSERT_TRUE(producer.capture_status().queued);
+    ASSERT_FALSE(producer.capture_status().latest_ready);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().active);
+    ASSERT_TRUE(producer.request_capture(windows));
+    ASSERT_TRUE(producer.capture_status().queued);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
+    producer.pump_capture();
+    ASSERT_GT(producer.capture()->serial, serial);
+    ASSERT_TRUE(producer.capture_status().queued);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, producer.capture()->serial);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+}
+
+TEST_F(SavedPlayDispatch, QueuedWindowChangeRefusesAnUncoveredCompletedSourceTransactionally) {
+    const auto serial = renderer.SessionDiagnostic()->state.target_serial;
+    const std::array<Save::AuthorityWindow, 1> windows{{{506, 1030, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    tile.wanted.identity.key.tx = 1;
+    tile.wanted.intent.key.x = 1;
+    tile.capture.key.x = 1;
+    ASSERT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
+}
+
+TEST_F(SavedPlayDispatch, PausedCompletedSourceRefusesUntilReadsResume) {
+    const auto serial = renderer.SessionDiagnostic()->state.target_serial;
+    producer.fence_source_reads(true);
+    ASSERT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
+    producer.fence_source_reads(false);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+}
+
 TEST_F(SavedPlayDispatch, SessionBindingKeepsLegacyPreviewAndOffReplayIsolated) {
     const auto on = renderer.Selection(FarWorldPurpose::World);
     for (const auto purpose : {FarWorldPurpose::Preview, FarWorldPurpose::OffscreenPreview}) {

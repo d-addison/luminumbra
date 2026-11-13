@@ -98,7 +98,13 @@ struct SessionFarWorldPreparation {
     static constexpr std::size_t kSlots = Producer::kSlots;
     static constexpr std::uint64_t kSourceBytes = 128ULL * 1024 * 1024;
     world::GameSession* session = nullptr;
-    std::uint64_t revision = 0, attempted_serial = 0;
+    std::uint64_t revision = 0, attempted_serial = 0, staged_serial = 0;
+    static constexpr std::uint32_t kRetryFrames = 30;
+    static constexpr std::size_t kDiscoveryTilesPerPump = 8;
+    std::uint32_t retry_frames = 0;
+    bool request_failed = false, discovering = false;
+    std::size_t discovery_index = 0;
+    std::array<double, 3> discovery_camera{};
     FarWorldRefusal refusal = FarWorldRefusal::ImmutableAuthorityUnavailable;
     FarWorldRefusal request_refusal = FarWorldRefusal::None;
     bool source_enabled = false;
@@ -115,6 +121,8 @@ struct SessionFarWorldPreparation {
     std::array<World::FarVolumeSpanLedger, kSlots> history{}, candidate_history{};
     std::array<World::FarTileKey, kSlots> history_keys{}, candidate_keys{};
     std::size_t count = 0, history_count = 0, candidate_count = 0;
+    // Fixed 512-tile value cache, included in the source/control admission charge.
+    FarWorldDiagnosticSnapshot diagnostic;
 
     static std::uint64_t Clock(const void*) noexcept {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -184,8 +192,39 @@ struct SessionFarWorldPreparation {
         const auto quotient = value / edge;
         return static_cast<int>(quotient - (value % edge < 0 ? 1 : 0));
     }
+    static bool Recoverable(Producer::Error error) {
+        return error == Producer::Error::AllocationFailure ||
+               error == Producer::Error::DeadlineExceeded ||
+               error == Producer::Error::CommittedReadRefused ||
+               error == Producer::Error::SourceReadExpired;
+    }
+    bool RetryNeeded(const Producer::CaptureStatus& status,
+                     const Producer::SourceCapture* source) const {
+        return !status.active && !status.queued && !status.paused &&
+               (Recoverable(status.error) ||
+                (status.error == Producer::Error::None &&
+                 (!source || (!discovering && refusal == FarWorldRefusal::AdmissionFailed))));
+    }
+    bool SourceMatches(const Producer::SourceCapture& source) const {
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& window = windows[index];
+            if (window.min_chunk_x < source.window.min_chunk_x ||
+                window.max_chunk_x > source.window.max_chunk_x ||
+                window.min_chunk_z < source.window.min_chunk_z ||
+                window.max_chunk_z > source.window.max_chunk_z) {
+                return false;
+            }
+        }
+        return count != 0;
+    }
+    std::size_t DiscoveryEnd() const {
+        return discovery_index + std::min(count - discovery_index, kDiscoveryTilesPerPump);
+    }
     bool Request(Producer& producer, const std::array<double, 3>& camera) {
         request_refusal = FarWorldRefusal::None;
+        if (retry_frames != 0) {
+            --retry_frames;
+        }
         if (!std::isfinite(camera[1]) || std::abs(camera[1]) > World::kFarWantedCameraLimitMeters ||
             World::ComputeFarWantedSet(camera[0], camera[2], wanted) !=
                 World::FarWantedError::None ||
@@ -193,10 +232,19 @@ struct SessionFarWorldPreparation {
             request_refusal = FarWorldRefusal::InvalidRequests;
             return false;
         }
-        if (count == wanted.size() && std::equal(wanted.begin(), wanted.end(), requested.begin()) &&
-            std::abs(camera[1] - requested_y) < 16.0) {
+        const bool unchanged = count == wanted.size() &&
+                               std::equal(wanted.begin(), wanted.end(), requested.begin()) &&
+                               std::abs(camera[1] - requested_y) < 16.0;
+        const auto status = producer.capture_status();
+        if (unchanged && !RetryNeeded(status, producer.capture())) {
             return true;
         }
+        if (status.paused || ((unchanged || request_failed) && retry_frames != 0)) {
+            request_refusal = FarWorldRefusal::AdmissionFailed;
+            return false;
+        }
+        // Fixed candidate storage preserves the accepted windows on refusal.
+        std::array<Window, kSlots> candidate_windows{};
         for (std::size_t i = 0; i < wanted.size(); ++i) {
             World::FarVolumeTileKey checked;
             if (!World::ToFarVolumeTileKey(wanted[i], checked)) {
@@ -206,12 +254,14 @@ struct SessionFarWorldPreparation {
             const auto& tier = World::kFarTierTable[wanted[i].tier - 1];
             const auto edge = static_cast<std::int64_t>(tier.tile_edge_meters);
             const auto step = static_cast<std::int64_t>(tier.sample_spacing_meters);
-            windows[i] = {ChunkFloor(checked.x * edge - step - 1, CHUNK_SIZE_X),
-                          ChunkFloor((checked.x + 1) * edge + step, CHUNK_SIZE_X),
-                          ChunkFloor(checked.z * edge - step - 1, CHUNK_SIZE_Z),
-                          ChunkFloor((checked.z + 1) * edge + step, CHUNK_SIZE_Z)};
+            candidate_windows[i] = {ChunkFloor(checked.x * edge - step - 1, CHUNK_SIZE_X),
+                                    ChunkFloor((checked.x + 1) * edge + step, CHUNK_SIZE_X),
+                                    ChunkFloor(checked.z * edge - step - 1, CHUNK_SIZE_Z),
+                                    ChunkFloor((checked.z + 1) * edge + step, CHUNK_SIZE_Z)};
         }
-        if (!producer.request_capture({windows.data(), wanted.size()})) {
+        retry_frames = kRetryFrames;
+        if (!producer.request_capture({candidate_windows.data(), wanted.size()})) {
+            request_failed = true;
             const auto source_refusal = FarWorldProducerRefusal(
                 {producer.capture_status().error, World::FarFrozenCaptureError::None});
             request_refusal = source_refusal == FarWorldRefusal::None
@@ -219,6 +269,13 @@ struct SessionFarWorldPreparation {
                                   : source_refusal;
             return false;
         }
+        request_failed = false;
+        discovering = false;
+        if (!unchanged) {
+            staged_serial = 0;
+            refusal = FarWorldRefusal::AdmissionFailed;
+        }
+        windows = candidate_windows;
         requested_y = static_cast<float>(camera[1]);
         count = wanted.size();
         std::copy(wanted.begin(), wanted.end(), requested.begin());
@@ -413,6 +470,54 @@ void RenderPipeline::bind_far_world_session(world::GameSession& session, JobSyst
     }
 }
 
+void RenderPipeline::resume_far_world_session(world::GameSession& session, JobSystem& jobs) {
+    if (m_far_world_session ||
+        m_far_world->Selection(FarWorldPurpose::World).requested != FarWorldMode::Ladder) {
+        return;
+    }
+    const auto* world_system = session.GetWorldSystem();
+    if (!world_system || !session.IsSimulationTickBoundary() ||
+        world_system->pending_publication_chunks() != 0 ||
+        !world_system->get_streaming_telemetry_stats().quiescent()) {
+        return;
+    }
+    // Regeneration retires the binding before asynchronous publication settles.
+    // Rebuild policy and source ownership at the next settled saved-world frame.
+    bind_far_world_session(session, jobs);
+}
+
+bool RenderPipeline::far_world_source_current() const {
+    if (!m_far_world_session) {
+        return true;
+    }
+    const auto& preparation = *m_far_world_session;
+    const auto* producer = preparation.session->GetFarWorldAuthorityProducer();
+    if (!producer || preparation.session->WorldRevision() != preparation.revision ||
+        !preparation.source_enabled || preparation.discovering ||
+        preparation.request_refusal != FarWorldRefusal::None ||
+        preparation.refusal != FarWorldRefusal::None) {
+        return false;
+    }
+    const auto status = producer->capture_status();
+    return status.latest_ready && !status.paused && !producer->needs_capture_boundary() &&
+           preparation.staged_serial != 0 && preparation.staged_serial == status.serving_serial;
+}
+
+const FarWorldDiagnosticSnapshot& RenderPipeline::far_world_diagnostic() const {
+    const auto& snapshot = m_far_world->Diagnostic();
+    if (!m_far_world_session || snapshot.authority_kind != FarWorldAuthorityKind::Session ||
+        far_world_source_current()) {
+        return snapshot;
+    }
+    auto& filtered = m_far_world_session->diagnostic;
+    if (filtered.frame != snapshot.frame || filtered.world_epoch != snapshot.world_epoch) {
+        filtered = snapshot;
+    }
+    // Retain draw/serving evidence without qualifying an older source cohort.
+    filtered.latest_target_ready = false;
+    return filtered;
+}
+
 void RenderPipeline::pump_far_world_session(const Camera& camera, FarWorldPurpose purpose) {
     if (!m_far_world_session || purpose != FarWorldPurpose::World || !m_far_world_submission ||
         m_far_world->Selection(purpose).requested != FarWorldMode::Ladder) {
@@ -432,38 +537,67 @@ void RenderPipeline::pump_far_world_session(const Camera& camera, FarWorldPurpos
     try {
         const bool requested = preparation.Request(*producer, position);
         // Refresh can restore a source that just refused the wanted request.
-        session.PumpFarWorldAuthorityCapture();
+        // capture() is borrowed until the next pump replaces it. Keep that owned
+        // source stable across discovery frames; dirty publications remain queued.
+        if (!preparation.discovering) {
+            session.PumpFarWorldAuthorityCapture();
+        }
         if (!requested) {
+            preparation.discovering = false;
             return;
         }
         const auto status = producer->capture_status();
         if (status.error != World::FarWorldAuthorityProducer::Error::None) {
+            preparation.discovering = false;
             preparation.refusal =
                 FarWorldProducerRefusal({status.error, World::FarFrozenCaptureError::None});
             return;
         }
-        if (!status.latest_ready) {
-            preparation.refusal = FarWorldRefusal::AdmissionFailed;
-            return;
-        }
         const auto* source = producer->capture();
-        if (!source || source->serial == preparation.attempted_serial) {
-            return;
-        }
-        preparation.attempted_serial = source->serial;
-        if (source->published.size() > 2 * SessionFarWorldPreparation::kSlots ||
-            source->committed.chunks.size() > SessionFarWorldPreparation::kSlots) {
+        if (status.paused || !source || !preparation.SourceMatches(*source)) {
+            preparation.discovering = false;
             preparation.refusal = FarWorldRefusal::AdmissionFailed;
             return;
         }
-        preparation.candidate_history = preparation.history;
-        preparation.candidate_keys = preparation.history_keys;
-        preparation.candidate_count = preparation.history_count;
-        for (std::size_t index = 0; index < preparation.count; ++index) {
-            if (!preparation.Discover(*session.GetWorldSystem(), *source, position, index)) {
+        if (preparation.discovering && source->serial != preparation.attempted_serial) {
+            preparation.discovering = false;
+        }
+        if (!preparation.discovering && source->serial == preparation.attempted_serial) {
+            return;
+        }
+        if (!preparation.discovering) {
+            preparation.attempted_serial = source->serial;
+            if (source->published.size() > 2 * SessionFarWorldPreparation::kSlots ||
+                source->committed.chunks.size() > SessionFarWorldPreparation::kSlots) {
+                preparation.refusal = FarWorldRefusal::AdmissionFailed;
+                return;
+            }
+            preparation.candidate_history = preparation.history;
+            preparation.candidate_keys = preparation.history_keys;
+            preparation.candidate_count = preparation.history_count;
+            preparation.discovery_index = 0;
+            preparation.discovery_camera = position;
+            preparation.discovering = true;
+            if (preparation.refusal != FarWorldRefusal::None) {
+                preparation.refusal = FarWorldRefusal::AdmissionFailed;
+            }
+        }
+        // At most eight tiles (8 * 131^2 columns and 8 * 1536 records) per pump.
+        // The cursor and camera preserve the unbounded pass's order and inputs.
+        const auto end = preparation.DiscoveryEnd();
+        for (; preparation.discovery_index < end; ++preparation.discovery_index) {
+            if (!preparation.Discover(*session.GetWorldSystem(),
+                                      *source,
+                                      preparation.discovery_camera,
+                                      preparation.discovery_index)) {
+                preparation.discovering = false;
                 return;
             }
         }
+        if (preparation.discovery_index != preparation.count) {
+            return;
+        }
+        preparation.discovering = false;
         const World::FarFrozenCaptureLimits capture_limits{
             1, 200'000, 20'000'000, 200'000, 64ULL * 1024 * 1024};
         const World::FarFrozenCaptureWork::Counts samples{16'000'000, 128'000'000, 16'000'000};
@@ -476,11 +610,13 @@ void RenderPipeline::pump_far_world_session(const Camera& camera, FarWorldPurpos
                                             samples);
         preparation.refusal = m_far_world->Selection(purpose).refusal;
         if (staged) {
+            preparation.staged_serial = source->serial;
             preparation.history = preparation.candidate_history;
             preparation.history_keys = preparation.candidate_keys;
             preparation.history_count = preparation.candidate_count;
         }
     } catch (const std::bad_alloc&) {
+        preparation.discovering = false;
         preparation.refusal = FarWorldRefusal::AdmissionFailed;
     }
 }

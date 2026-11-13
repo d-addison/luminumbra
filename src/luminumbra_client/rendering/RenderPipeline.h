@@ -882,6 +882,8 @@ public:
     // Saved-play attachment, before streaming starts. Draining the pipeline
     // detaches it; failed world admission retains the old immutable binding.
     void bind_far_world_session(world::GameSession& session, JobSystem& jobs);
+    // Retry attachment after an in-place drain once regenerated publication settles.
+    void resume_far_world_session(world::GameSession& session, JobSystem& jobs);
     // Internal, non-persisted request. Preparation failures retain typed refusal.
     void set_far_world_mode(FarWorldMode requested);
     // Startup/world-entry policy; runtime changes first reset history via
@@ -890,17 +892,16 @@ public:
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }
-    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
-        return m_far_world->Diagnostic();
-    }
+    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const;
     FarWorldReportingState far_world_reporting_state() const {
         const auto& diagnostic = m_far_world->Diagnostic();
         const bool terrain_submission =
             m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Terrain);
         if (diagnostic.captured) {
             auto state = FarWorldReportState(diagnostic, terrain_submission);
-            state.coverage_settled =
-                state.coverage_settled && diagnostic.frame == m_far_world_frame;
+            state.coverage_settled = state.coverage_settled &&
+                                     diagnostic.frame == m_far_world_frame &&
+                                     far_world_source_current();
             return state;
         }
         return {.selection = prepared_far_world_selection(FarWorldPurpose::World),
@@ -1533,6 +1534,7 @@ private:
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
     void pump_far_world_session(const Camera& camera, FarWorldPurpose purpose);
+    bool far_world_source_current() const;
     FarWorldSelection prepared_far_world_selection(FarWorldPurpose purpose) const;
     void select_frame_far_world(FarWorldSelection selection, const Camera& camera);
     void prepare_camera_projection(const Camera& camera);

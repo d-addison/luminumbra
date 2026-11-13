@@ -6020,7 +6020,7 @@
     {
       "id": "render.session-producer-activation",
       "source": "docs/engine-guide.md#saved-world-session-authority",
-      "statement": "Normal saved-world entry binds session authority without fixture binding, pumps bounded preparation before effective selection, forwards same-frame live ownership and uses one selected scheduler and submission. Pending or refused preparation retains the Ladder request and typed Legacy fallback. Legacy opt-out, preview and paired OFF replay remain isolated. Failed opens resume the old binding; committed replacement, exit and shutdown drain workers and backend resources before releasing it. Named finite play limits await native calibration, and the PowerShell pre-launch guard and native qualification remain outstanding.",
+      "statement": "Normal saved-world entry binds session authority without fixture binding, pumps bounded preparation before effective selection, forwards same-frame live ownership and uses one selected scheduler and submission. Pending or refused preparation retains the Ladder request and typed Legacy fallback. Legacy opt-out, preview and paired OFF replay remain isolated. Failed opens resume the old binding; committed replacement, exit and shutdown drain workers and backend resources before releasing it. Completed matching captures stage while newer sources queue; source qualification remains separate. Recoverable idle captures retry with a 30-frame backoff, discovery advances eight tiles per pump, and regenerated saved worlds reattach after publication settles. Named finite play limits await native calibration, and the PowerShell pre-launch guard and native qualification remain outstanding.",
       "status": "partial",
       "evidence": [
         {

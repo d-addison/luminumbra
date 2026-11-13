@@ -3829,6 +3829,7 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                renderPipeline.resume_far_world_session(*gameSession, jobSystem);
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *gameSession->GetWorldSystem(),
                                             *g_camera,
@@ -5474,6 +5475,7 @@ int main(int argc, char* argv[]) {
                                      g_playerController && g_playerController->photo_mode_active(),
                                      scatter_ms,
                                      foliage_ms);
+                renderPipeline.resume_far_world_session(*gameSession, jobSystem);
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *world,
                                             *g_camera,
@@ -6078,6 +6080,7 @@ int main(int argc, char* argv[]) {
                         (g_app.capture.survey_active && g_app.capture.survey_settle >= 45) ||
                         (g_app.capture.frame_scan_active &&
                          g_app.capture.frame_scan_settle >= g_app.capture.frame_scan_settle_target);
+                    renderPipeline.resume_far_world_session(*gameSession, jobSystem);
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),

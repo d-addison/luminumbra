@@ -1,6 +1,8 @@
 """Check that presentation integration uses the tested clock-free policy."""
 from pathlib import Path
 import re
+from itertools import product
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,8 +17,23 @@ def compact(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def predicate(text, state):
+    """Evaluate the shipping scalar predicate, without compiling or copying its policy."""
+    for before, after in (("World::FarWorldAuthorityProducer::Error::", "Errors."),
+                          ("Producer::Error::", "Errors."),
+                          ("FarWorldRefusal::", "Refusals."), ("->", "."),
+                          ("&&", " and "), ("||", " or ")):
+        text = text.replace(before, after)
+    text = re.sub(r"!(?!=)", " not ", text)
+    return eval(compact(text), {"__builtins__": {}}, state)
+
+
+def returned(text):
+    return re.search(r"\breturn\s+(.*?);", text, re.S).group(1)
+
+
 def body(text, signature):
-    start = text.index("{", text.index(signature))
+    start = text.index("{", text.index(signature) + len(signature))
     depth = 1
     end = start + 1
     while depth:
@@ -166,8 +183,8 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("preparation.refusal = FarWorldRefusal::AdmissionFailed;",
                       body(attach, "if (!session.EnableFarWorldAuthorityProducer("))
         pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
-        self.assertEqual(compact(body(pump, "if (!status.latest_ready)")),
-                         "preparation.refusal = FarWorldRefusal::AdmissionFailed; return;")
+        self.assertEqual(compact(body(pump, "if (status.paused || !source || !preparation.SourceMatches(*source))")),
+                         "preparation.discovering = false; preparation.refusal = FarWorldRefusal::AdmissionFailed; return;")
         runner = read(ROOT / "tools/perf/test_render_runner.py")
         evidence = runner.split("    def test_traversal_twice(self):", 1)[1].split(
             "    def short_save_load_script", 1)[0]
@@ -219,7 +236,8 @@ class UploadBudgetWiring(unittest.TestCase):
         pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
         for guard in ("session.WorldRevision() != preparation.revision", "!producer",
                       "status.error != World::FarWorldAuthorityProducer::Error::None",
-                      "!status.latest_ready", "source->serial == preparation.attempted_serial"):
+                      "status.paused", "!preparation.SourceMatches(*source)",
+                      "source->serial == preparation.attempted_serial"):
             self.assertIn(guard, pump)
         self.assertIn("FarWorldProducerRefusal({status.error", compact(pump))
         self.assertIn("preparation.refusal = m_far_world->Selection(purpose).refusal", pump)
@@ -228,12 +246,15 @@ class UploadBudgetWiring(unittest.TestCase):
         request = body(self.pipeline, "bool Request(Producer& producer,")
         self.assertLess(request.index("request_refusal = FarWorldRefusal::None"),
                         request.index("!std::isfinite(camera[1])"))
-        self.assertNotRegex(request, r"(?<!_)\brefusal\s*=")
+        self.assertNotRegex(request[:request.index("request_failed = false;")],
+                            r"(?<!_)\brefusal\s*=")
+        self.assertIn("refusal = FarWorldRefusal::AdmissionFailed;",
+                      body(request, "if (!unchanged)"))
         self.assertIn("m_far_world_session->request_refusal != FarWorldRefusal::None", selection)
         self.assertIn("SelectFarWorld(selected.requested, purpose, m_far_world_session->request_refusal)", selection)
         self.assertIn("!std::isfinite(camera[1])", request)
         self.assertIn("World::ComputeFarWantedSet(", request)
-        self.assertIn("!producer.request_capture(", request)
+        self.assertIn("!producer.request_capture({candidate_windows.data(), wanted.size()})", request)
         self.assertIn("producer.capture_status().error", request)
         self.assertIn("source_refusal == FarWorldRefusal::None", request)
         self.assertIn("std::abs(camera[1] - requested_y) < 16.0", request)
@@ -262,6 +283,223 @@ class UploadBudgetWiring(unittest.TestCase):
         cancel = body(self.main, "auto drain_entry =")
         retained = body(cancel, "if (gameSession->WorldRevision() == entry_world_revision)")
         self.assertIn("FenceFarWorldAuthorityReads(false)", retained)
+
+    def test_completed_capture_stages_while_newer_authority_is_active_or_queued(self):
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertNotIn("!status.latest_ready", pump)
+        self.assertIn("!preparation.SourceMatches(*source)", pump)
+        facade = body(read(RENDERING / "FarWorldHandoffRenderer.cpp"),
+                      "bool FarWorldHandoffRenderer::StageSessionTarget(")
+        guard = re.search(r"if \((status.error.*?)\) \{", facade, re.S).group(1)
+        errors = SimpleNamespace(None_=0)
+        guard = guard.replace("::None", "::None_")
+        for active, queued, paused in product((False, True), repeat=3):
+            status = SimpleNamespace(error=0, active=active, queued=queued, paused=paused)
+            self.assertEqual(predicate(guard, dict(status=status, Errors=errors)), paused)
+        current = body(self.pipeline, "bool RenderPipeline::far_world_source_current() const")
+        unavailable = re.search(r"if \((!producer.*?)\) \{", current, re.S).group(1)
+        unavailable = unavailable.replace("::None", "::None_")
+        for present, revision, enabled, discovering, request_failed, failed in product(
+                (False, True), repeat=6):
+            preparation = SimpleNamespace(
+                session=SimpleNamespace(WorldRevision=lambda: 7 if revision else 8), revision=7,
+                source_enabled=enabled, discovering=discovering,
+                request_refusal=int(request_failed), refusal=int(failed))
+            state = dict(producer=present, preparation=preparation,
+                         Refusals=SimpleNamespace(None_=0))
+            self.assertEqual(predicate(unavailable, state),
+                             not present or not revision or not enabled or discovering or
+                             request_failed or failed)
+        latest = returned(current[current.index("const auto status"):])
+        for ready, paused, dirty, staged, serving in product((False, True), (False, True),
+                                                            (False, True), (0, 7, 8), (7, 8)):
+            state = dict(status=SimpleNamespace(latest_ready=ready, paused=paused,
+                                               serving_serial=serving),
+                         producer=SimpleNamespace(needs_capture_boundary=lambda: dirty),
+                         preparation=SimpleNamespace(staged_serial=staged))
+            self.assertEqual(predicate(latest, state),
+                             ready and not paused and not dirty and staged != 0 and staged == serving)
+        reporting = body(self.header, "FarWorldReportingState far_world_reporting_state() const")
+        self.assertIn("&& far_world_source_current()", compact(reporting))
+        diagnostic = body(self.pipeline, "const FarWorldDiagnosticSnapshot& RenderPipeline::far_world_diagnostic() const")
+        self.assertIn("far_world_source_current()", diagnostic)
+        self.assertIn("filtered.latest_target_ready = false;", diagnostic)
+        self.assertIn("return filtered;", diagnostic)
+        unfiltered = re.search(r"if \((!m_far_world_session.*?)\) \{", diagnostic, re.S).group(1)
+        unfiltered = unfiltered.replace(
+            "snapshot.authority_kind != FarWorldAuthorityKind::Session", "!session_kind")
+        for attached, session_kind, latest_source in product((False, True), repeat=3):
+            state = dict(m_far_world_session=attached, session_kind=session_kind,
+                         far_world_source_current=lambda: latest_source)
+            self.assertEqual(predicate(unfiltered, state),
+                             not attached or not session_kind or latest_source)
+        refresh = re.search(r"if \((filtered.frame.*?)\) \{", diagnostic, re.S).group(1)
+        for cached_frame, frame, cached_epoch, epoch in product((0, 1, 2**64 - 1), repeat=4):
+            state = dict(filtered=SimpleNamespace(frame=cached_frame, world_epoch=cached_epoch),
+                         snapshot=SimpleNamespace(frame=frame, world_epoch=epoch))
+            self.assertEqual(predicate(refresh, state), cached_frame != frame or cached_epoch != epoch)
+        self.assertEqual(compact(body(diagnostic,
+                         "if (filtered.frame != snapshot.frame || filtered.world_epoch != snapshot.world_epoch)")),
+                         "filtered = snapshot;")
+        matches = body(self.pipeline, "bool SourceMatches(")
+        outside = re.search(r"if \((.*?)\) \{", matches, re.S).group(1)
+        source = SimpleNamespace(window=SimpleNamespace(
+            min_chunk_x=-10, max_chunk_x=10, min_chunk_z=-20, max_chunk_z=20))
+        for low_x, high_x, low_z, high_z in product((-11, -10, 0), (0, 10, 11),
+                                                  (-21, -20, 0), (0, 20, 21)):
+            window = SimpleNamespace(min_chunk_x=low_x, max_chunk_x=high_x,
+                                     min_chunk_z=low_z, max_chunk_z=high_z)
+            self.assertEqual(predicate(outside, dict(source=source, window=window)),
+                             low_x < -10 or high_x > 10 or low_z < -20 or high_z > 20)
+        self.assertIn("return count != 0;", matches)
+        guard = re.search(r"if \((status.paused.*?)\) \{", pump, re.S).group(1)
+        guard = guard.replace("preparation.SourceMatches(*source)", "matches")
+        for paused, present, matches in product((False, True), repeat=3):
+            self.assertEqual(predicate(guard, dict(status=SimpleNamespace(paused=paused),
+                                                  source=present, matches=matches)),
+                             paused or not present or not matches)
+
+    def test_unchanged_failed_or_expired_capture_retries_with_frame_backoff(self):
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        self.assertIn("if (unchanged && !RetryNeeded(status, producer.capture()))", request)
+        producer = read(ROOT / "src/luminumbra_common/world/FarWorldAuthorityProducer.h")
+        names = re.search(r"enum class Error \{(.*?)\};", producer, re.S).group(1)
+        errors = SimpleNamespace(**{name.strip(): index for index, name in
+                                    enumerate(names.replace("None", "None_").split(","))})
+        refusals = SimpleNamespace(AdmissionFailed=1, None_=0, WaterUnavailable=2,
+                                  ImmutableAuthorityUnavailable=3)
+        recovery = returned(body(self.pipeline, "static bool Recoverable("))
+        retry = returned(body(self.pipeline, "bool RetryNeeded(")).replace("::None", "::None_")
+
+        def recoverable(error):
+            return predicate(recovery, dict(error=error, Errors=errors))
+
+        recoverable_names = {"AllocationFailure", "DeadlineExceeded", "CommittedReadRefused",
+                             "SourceReadExpired"}
+        for name, error in [*vars(errors).items(), ("Unknown", -1)]:
+            self.assertEqual(recoverable(error), name in recoverable_names)
+            for active, queued, paused, present, expired, discovering, staged in product(
+                    (False, True), repeat=7):
+                source = SimpleNamespace(serial=7, deadline=SimpleNamespace(expired=lambda: expired))
+                for refusal in vars(refusals).values():
+                    state = dict(status=SimpleNamespace(error=error, active=active, queued=queued,
+                                                        paused=paused),
+                                 source=source if present else None, staged_serial=7 if staged else 0,
+                                 discovering=discovering, refusal=refusal, Recoverable=recoverable,
+                                 Errors=errors, Refusals=refusals)
+                    expected = not (active or queued or paused) and (
+                        name in recoverable_names or (name == "None_" and (
+                            not present or (not discovering and refusal == refusals.AdmissionFailed))))
+                    self.assertEqual(predicate(retry, state), expected, state)
+        self.assertNotIn("expired()", retry)
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        self.assertIn("if (unchanged && !RetryNeeded(status, producer.capture()))", request)
+        decrement = compact(body(request, "if (retry_frames != 0)"))
+        self.assertEqual(decrement, "--retry_frames;")
+        backoff = int(re.search(r"kRetryFrames = (\d+);", self.pipeline).group(1))
+        self.assertEqual(backoff, 30)
+        cooldown = re.search(r"if \((status.paused.*?)\) \{", request, re.S).group(1)
+        for frames in range(backoff + 1):
+            for unchanged, failed, paused in product((False, True), repeat=3):
+                state = dict(status=SimpleNamespace(paused=paused), unchanged=unchanged,
+                             request_failed=failed, retry_frames=frames)
+                self.assertEqual(predicate(cooldown, state),
+                                 paused or ((unchanged or failed) and frames != 0))
+        self.assertLess(request.index("retry_frames = kRetryFrames;"),
+                        request.index("!producer.request_capture("))
+        refused = body(request,
+                       "if (!producer.request_capture({candidate_windows.data(), wanted.size()}))")
+        self.assertIn("request_failed = true;", refused)
+        self.assertNotIn("windows =", refused)
+        self.assertNotIn("count =", refused)
+        self.assertIn("windows = candidate_windows;", request)
+        self.assertIn("request_failed = false;", request)
+        self.assertIn("discovering = false;", request)
+        self.assertNotIn("Clock(", request)
+
+    def test_regenerated_saved_world_reattaches_only_after_publication_settles(self):
+        self.assertIn("void RenderPipeline::resume_far_world_session(", self.pipeline)
+        resume = body(self.pipeline, "void RenderPipeline::resume_far_world_session(")
+        self.assertIn("m_far_world_session ||", resume)
+        self.assertIn("requested != FarWorldMode::Ladder", resume)
+        self.assertIn("!world_system || !session.IsSimulationTickBoundary() ||", resume)
+        self.assertIn("world_system->pending_publication_chunks() != 0 ||", resume)
+        self.assertIn("!world_system->get_streaming_telemetry_stats().quiescent()", resume)
+        self.assertIn("bind_far_world_session(session, jobs);", resume)
+        unsettled = re.search(r"if \((!world_system.*?)\) \{", resume, re.S).group(1)
+        for present, boundary, pending, quiet in product((False, True), repeat=4):
+            world = SimpleNamespace(pending_publication_chunks=lambda: int(pending),
+                                    get_streaming_telemetry_stats=lambda: SimpleNamespace(
+                                        quiescent=lambda: quiet))
+            state = dict(world_system=world if present else None,
+                         session=SimpleNamespace(IsSimulationTickBoundary=lambda: boundary))
+            self.assertEqual(predicate(unsettled, state),
+                             not present or not boundary or pending or not quiet)
+        bind = body(self.pipeline, "void RenderPipeline::bind_far_world_session(")
+        self.assertLess(bind.index("session.EnableFarWorldAuthorityProducer("),
+                        bind.index("World::WorldFarVolumeIdentity("))
+        # Each saved-world render caller resumes; menu/preview and OFF replay do not.
+        calls = list(re.finditer(r"renderPipeline\.render_frame\(", self.main))
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            self.assertRegex(self.main[:call.start()],
+                             r"resume_far_world_session\(\*gameSession, jobSystem\);\s*$")
+        self.assertNotIn("resume_far_world_session(", body(self.main, "if (want_backdrop)"))
+        self.assertNotIn("resume_far_world_session(", body(
+            self.pipeline, "bool RenderPipeline::render_far_world_off_pair("))
+
+    def test_discovery_budget_resumes_without_replacing_source_or_partial_history(self):
+        self.assertRegex(self.pipeline, r"kDiscoveryTilesPerPump = \d+;")
+        budget = int(re.search(r"kDiscoveryTilesPerPump = (\d+);", self.pipeline).group(1))
+        self.assertEqual(budget, 8)
+        end = returned(body(self.pipeline, "std::size_t DiscoveryEnd() const"))
+        self.assertEqual(compact(end),
+                         "discovery_index + std::min(count - discovery_index, kDiscoveryTilesPerPump)")
+        end = end.replace("std::min", "minimum")
+        # Empty, boundary, maximal and partial-last-pump sets: identical order,
+        # exactly one visit per tile, no pump visits more than the shipping budget.
+        for count in range(513):
+            visited = []
+            index = 0
+            while index < count:
+                stop = predicate(end, dict(discovery_index=index, count=count,
+                                           kDiscoveryTilesPerPump=budget, minimum=min))
+                self.assertGreater(stop, index)
+                self.assertLessEqual(stop - index, budget)
+                visited.extend(range(index, stop))
+                index = stop
+            self.assertEqual(visited, list(range(count)))
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertIn("session.PumpFarWorldAuthorityCapture();", body(
+            pump, "if (!preparation.discovering)"))
+        self.assertEqual(compact(body(pump, "if (!requested)")),
+                         "preparation.discovering = false; return;")
+        replacement = body(pump, "if (preparation.discovering && source->serial != preparation.attempted_serial)")
+        self.assertEqual(compact(replacement), "preparation.discovering = false;")
+        start = body(pump[pump.index("source->serial == preparation.attempted_serial"):],
+                     "if (!preparation.discovering)")
+        self.assertIn("preparation.discovery_index = 0;", start)
+        self.assertIn("preparation.discovery_camera = position;", start)
+        self.assertIn("preparation.candidate_history = preparation.history;", start)
+        self.assertIn("const auto end = preparation.DiscoveryEnd();", pump)
+        loop = body(pump, "for (; preparation.discovery_index < end;")
+        self.assertIn("preparation.discovery_camera", loop)
+        self.assertIn("preparation.discovery_index", loop)
+        self.assertIn("preparation.discovering = false;", loop)
+        self.assertNotIn("preparation.history =", loop)
+        self.assertEqual(compact(body(pump,
+                         "if (preparation.discovery_index != preparation.count)")), "return;")
+        self.assertLess(pump.index("if (preparation.discovery_index != preparation.count)"),
+                        pump.index("m_far_world->StageSessionTarget("))
+        committed = body(pump, "if (staged)")
+        self.assertIn("preparation.history = preparation.candidate_history;", committed)
+        discovery = body(self.pipeline, "bool Discover(")
+        self.assertEqual(compact(body(discovery, "if (source.deadline.expired())")),
+                         "refusal = FarWorldRefusal::AdmissionFailed; return false;")
+        for failure in ("source.deadline.expired()", "!std::isfinite(height)",
+                        "!std::isfinite(water)", "bed.size() != depth.size()",
+                        "bed.size() > 32u * 32u", "if (!chunk)"):
+            self.assertIn(failure, discovery)
 
     def test_save_fence_preserves_current_world_until_quit_save_succeeds(self):
         quit_action = body(self.main, '} else if (act == "quit")')

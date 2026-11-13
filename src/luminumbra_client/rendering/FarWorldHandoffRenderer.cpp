@@ -165,8 +165,7 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
         return false;
     }
     const auto status = producer.capture_status();
-    if (status.error == World::FarWorldAuthorityProducer::Error::None &&
-        (status.active || status.queued || status.paused)) {
+    if (status.error == World::FarWorldAuthorityProducer::Error::None && status.paused) {
         admission_refusal_ = FarWorldRefusal::AdmissionFailed;
         return false;
     }

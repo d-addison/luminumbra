@@ -730,6 +730,12 @@ selected. Pending or refused preparation selects Legacy with a typed refusal.
 Session diagnostics distinguish per-tile fingerprints, committed generation,
 serving/target serials, latest-target readiness and actual combined submission.
 A retained old cohort cannot establish current session qualification.
+Completed captures covering the requested windows may stage while newer source
+captures are queued or active. Coverage qualification separately requires the
+latest source serial to be staged, with no pending authority changes or paused
+reads. Idle allocation, read and deadline failures retry at most once per 30
+prepared frames, including unchanged requests; invalid limits and unavailable
+authority remain typed refusals.
 
 The separately named play limits are uncalibrated finite admission ceilings.
 The total memory partition is 256 MiB per tier, with 128 MiB of V5 reserved for
@@ -740,8 +746,10 @@ source-query columns per transaction. Reads allow 32,768 region members (includi
 absence evidence), 512 records, 65,536 headers, 131,072 probes, 8/32 MiB compressed
 member/aggregate bytes, 16/64 MiB decoded member/aggregate bytes and 4 MiB of
 reader controls. Refresh has a 120-prepared-frame and two-second source/capture
-deadline. Discovery visits at most 131 squared columns and 1536 source records
-per wanted tile; each record has at most 1024 water cells. Frozen capture allows
+deadline. Discovery advances at most eight wanted tiles per pump, retaining its
+source, camera and ordered cursor until completion. Each tile visits at most
+131 squared columns and 1536 source records; each record has at most 1024 water
+cells. Frozen capture allows
 one region, 200,000 height,
 20 million density and 200,000 water operations and 64 MiB per tile; the complete
 manifest has separate 16 million height/water and 128 million density operation
@@ -756,6 +764,9 @@ Refusal or cancellation before adoption resumes those reads. Committed
 replacement, world exit and shutdown drain the selected backend and its workers
 before releasing session preparation or immutable images. Save fences retain
 render state; canonical save refresh remains owned by GameSession.
+In-place regeneration also retires the binding. Saved-world rendering reattaches
+after regenerated publication settles, rebuilding world identity and enabling
+source reads before preparation resumes.
 
 The PowerShell Ladder gate retains its pre-launch authority guard. Removing
 and qualifying that guard, native execution and measured production limits
