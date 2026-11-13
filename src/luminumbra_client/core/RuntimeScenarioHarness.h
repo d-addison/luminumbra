@@ -890,6 +890,7 @@ struct PlayerViewStationCapture {
     PlayerViewPixelStats sky;
     LodHolePixelStats holes;
     Luminumbra::Systems::SHIELD_WorldSystem::FrustumSurfaceCoverageStats coverage;
+    nlohmann::json terrain_peak;
 };
 
 // True when any column within the player-view coverage range holds open
