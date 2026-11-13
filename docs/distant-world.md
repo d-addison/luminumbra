@@ -425,7 +425,7 @@ Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
 runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
-and placement, the plant record payload, canonical in-memory serialization, the
+and placement, the currently shipped plant record payload, canonical in-memory serialization, the
 replay checkpoint bytes and lockstep hash message. There is no obsolete-world migration.
 
 New records, each declared before its slice lands with exact version identity,
@@ -442,7 +442,7 @@ in the engine guide:
 | `far/v<tier>.<tx>.<tz>.lmr` (FSV1 payload, edit-baked bricks with tombstones and generation) | `<save>/far/` | regenerate or rebuild from edited chunk records | refuse | refuse as future format |
 | `snapshot.json` commit index (members, content identities, generation, tick, anchors) | `<save>/chunks/region/` | legacy save without simulation records: load with defaults | refuse as inconsistent snapshot | refuse as future format |
 | `aether_state.efs` (existing) | `<save>/` unchanged | none | refuse | refuse as future format |
-| `plant-entities.json` (existing; persistent identities are recorded in a versioned sibling identity map, the plant payload bytes are unchanged) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
+| `plant-entities.json` (PLANNED replacement: `luminumbra.plants.v2`; the shipped payload and identity sidecar remain until activation) | `<save>/chunks/region/` unchanged | PLANNED: refuse an existing save without the v2 envelope; absent world bootstraps normally | refuse | refuse as future format |
 | scent grid section of `field-pages.fpg` (the near scent field is historical state; it is persisted so near creatures that consume it resume continuously) | `<save>/chunks/region/` | re-seeded empty | refuse | refuse as future format |
 
 Persisted creature records inventory every evolution-relevant component and
@@ -522,6 +522,71 @@ admission work. The existing periodic hash exchange is state-divergence
 detection, not admission: qualified sessions must run with checkpoint
 exchange enabled, and a mismatch ends the session at the first exchange after
 it arises.
+
+## Planned stable simulation identity
+
+PLANNED for v0.3.3 (in preparation), issue #629: the following identity and plant-format contracts supersede the earlier plant sidecar and region-only identity/hash plan at activation; none is shipped by this declaration.
+Preparatory work leaves shipping sessions, saved bytes, hashes, fixtures, `kAuthorityRulesRevision` and effective configuration identity unchanged until activation.
+
+PLANNED: every authoritative ECS participant has one immutable `SimulationIdentityComponent::id` before participation, shared across all its simulation roles; ground objects retain `GroundObject::id` from the same allocator without an ECS wrapper.
+The sole cursor belongs to `ActiveRegionLedger` in both region modes: IDs are in `[1, 2^63)`, next cursor in `[1, 2^63]`, zero is invalid and `2^63` means exhausted; issued IDs are never recycled, including after extinction.
+PLANNED: missing or duplicate identities refuse participant admission without runtime-handle fallback; render-only dressing consumes no IDs, births use ascending parent identity then child ordinal, and boot or asynchronous sources publish in deterministic source order at an authoritative tick boundary.
+Species IDs, network client IDs, chunk coordinates, rendering handles and replication's `uint32_t` session aliases remain separate identifiers; simulation IDs are never narrowed into replication aliases.
+
+PLANNED: one mandatory `luminumbra.plants.v2` envelope replaces the v1 plant payload, identity sidecar and legacy selection lane entirely, including an empty roster with the consumed shared cursor.
+Existing saves with v1, a sidecar, an unknown version or no v2 envelope refuse before publication with an unsupported-format diagnostic; no converter exists, while a genuinely absent world remains a clean bootstrap.
+PLANNED: the envelope declares schema/order identifiers, authority revision, next-ID cursor, counts and ascending-ID records with fixed versioned component tags and explicit absence; any saved ledger allocator TLV must equal the envelope cursor.
+PLANNED admission retains the 256 MiB file, 1 MiB component and 128 MiB aggregate component limits and JSON depth admission, with at most `2^20` plant records and 17 component kinds per record; exact fields, unsigned representations, duplicates, finite/domain values, ownership, stamps and aggregate sizes are checked before proportional allocation or conversion.
+PLANNED: mixed owned/unowned plants are valid, full opening validates detached saved state without comparing runtime handles to unrelated residents, and in-session adoption replaces even an empty roster while preserving unrelated residents, checking collisions and retaining the greater live/saved cursor.
+PLANNED: both region modes use the indexed transaction, validating all payloads and consistency before writes, publishing metadata/index last and retiring the sidecar transactionally; refusal preserves live state, prior committed bytes and dirty acknowledgements.
+
+PLANNED creature scope is session-only until issue #137: creatures keep their ID through movement, reproduction, mortality and carcass decay, but this work adds no creature save records or distant creature simulation.
+Saving preserves the cursor consumed by creatures and other sources even with no surviving plants; wildlife recreated after reopening is a new incarnation with new IDs, without inferred old identities.
+Issue #137 must persist existing creature IDs, complete evolution-relevant state, references and promotion/coarse state, restoring IDs before components and resolving references after record admission; plant continuation comparisons hold external wildlife inputs equivalent until then.
+
+### Planned independent plant field inventory
+
+PLANNED: this inventory is the independent completeness oracle for the later v2 codec and `plant:v2` projection, with a separate mutation regression for every field and component presence; the envelope's cursor/count and every ascending stable ID also enter the projection, including after extinction.
+Plant participation is implicit in a plant record (`PlantTag`), identity is a record field, and the following 17 component kinds define the admitted plant state; optional absence stays absent, including exact grazing biomass and `uint32_t last_grazed_tick`, with issue #760 offspring defaults preserved.
+
+| Component | Fields required by codec and projection |
+|---|---|
+| `TransformComponent` | `position.x`, `position.y`, `position.z` |
+| `PlantGenomeComponent` | `genes[0..7]` in `PlantGene` order |
+| `PlantGrowthComponent` | `species_id`, `stage`, `quality`, `growth_points`, `stress_points`, `tended`, `planted_tick`, `last_tick` |
+| `SoilFeederComponent` | `uptake`, `absorbed` |
+| `PlantHealthComponent` | `infection`, `resistance`, `state`, `infected_ticks` |
+| `PollinationComponent` | `pollinated`, `last_pollen_tick`, `crosses`, `next_genome.genes[0..7]` |
+| `CropLifecycleComponent` | `perennial`, `ripe_ticks`, `lifespan_ticks`, `generations`, `species_id` |
+| `PlantRegionComponent` | `owner_x`, `owner_z`, `region_stamp`; identity moves to the common record field |
+| `PollinationTag` | presence only |
+| `CombustibleComponent` | `fuel_milli`, `moisture_milli`, `burn_state`, `burn_ticks_remaining`, `ignition_radius` |
+| `MortalComponent` | `age_ticks`, `lifespan_ticks`, `dead` |
+| `GrazeableComponent` | `biomass`, `last_grazed_tick` |
+| `WaterSourceComponent` | `output` |
+| `IgnitionSourceComponent` | `radius`, `intensity` |
+| `FlowingWaterSourceComponent` | `flow_rate` |
+| `DecayComponent` | `decay_ticks`, `decay_duration`, `nutrient_released_milli`, `fully_decomposed` |
+| `FieldEmitterComponent` | `channel`, `rate_raw_per_tick`, `radius_cells` |
+
+### Planned ecology projection inventory
+
+PLANNED `ecology:v3` covers ascending stable IDs, presence/version tags and the complete creature and other non-plant participant state below; this hash inventory does not implement creature persistence.
+
+| State family | Required coverage |
+|---|---|
+| Creature and genome | position; predator/species, hunger, stamina, energy, move speed, last action, wish velocity, eaten; every genome trait, sensory gene, age, cooldown, generation, sex and courtship counter |
+| Mortality, decay and needs | all mortal/decay fields above; each need's name, pressure and growth rate; thirst, wish velocity, drinking and water proximity; nocturnal flag and circadian activity |
+| Social and movement state | alarm level/flag; pack coordinates/flag; territory home/radius/established and bias; migration drive/wish; scavenging wish/feeding; locomotion profile, intent, path waypoints and cursor |
+| Perception and planning | sensable scent/noise/faction; perception FOV/range/facing, complete hearing profile/faction; awareness and parameters; senses references/distance; ordered actions, targets, duration/flee, current index/time; instinct actor/archetype, replan counters and complete current plan; stimulus subscriptions |
+| Sources and participation | opportunities including names, actions, targets, needs, scores, costs and radius; forager cell/home/carry/deliveries and food-source cell/amount; water-hole radius; scent steering parameters; all applicable plant-inventory source/emitter fields; opt-in flags and resolved behavior inputs |
+| References and exclusions | valid entity references encode stable target IDs with distinct null/invalid markers; raw handles, struct padding, render data and physics/avatar pool indices are excluded |
+
+PLANNED canonical encodings use explicit widths, little-endian integers, finite binary32 float bits, counted UTF-8 strings and ordered collections, with signed-zero treatment specified consistently with simulation equality; no locale text or `std::hash` enters identity.
+Ground-object durable IDs/fields retain their regional projection with cross-kind uniqueness checked on admission; `plant:v2` carries the shared cursor in the existing plants hash slot rather than the earlier allocator-in-ecology plan.
+PLANNED: identity lookup and reservation are O(1), ordering uses fixed-pass 64-bit radix work where needed, and checkpoint projections read participants once with reused scratch, without identity repair or chunk/page scans.
+PLANNED activation selects stable seeds, ordering, complete projections and v2 session paths together under the then-current authority revision plus one; existing Hello/checkpoint/LREC layouts remain unchanged and old configuration identities refuse before advancement across TCP on Windows/POSIX, loopback, Steam, GNS and replay.
+Fresh-boot replay uses deterministic spawn requests; replay from a resumed snapshot remains unsupported without a boot contract supplying that snapshot's IDs and cursor.
 
 ## Performance measurement contract
 
