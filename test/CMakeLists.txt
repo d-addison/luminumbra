@@ -437,7 +437,7 @@ target_include_directories(rendering_defaults_test PRIVATE ../src)
 target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(rendering_defaults_test)
 
-# GL-free capture provenance builder and filesystem publication lifecycle.
+# GL-free capture codecs, bounded draw registry and filesystem publication lifecycle.
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
@@ -595,6 +595,7 @@ add_executable(render_smoke_test
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
+    rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 
@@ -2542,6 +2543,24 @@ if(_tl_python)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
+endif()
+
+# Capture diagnostics need both image packages in the same interpreter.
+set(_vl_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -I -B -c "import PIL, numpy"
+        RESULT_VARIABLE _vl_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_vl_rc EQUAL 0)
+        set(_vl_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_vl_python)
+    add_test(NAME VisualLintCaptures
+        COMMAND "${_vl_python}" -I -B ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_lint.py)
+    set_tests_properties(VisualLintCaptures PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+else()
+    message(FATAL_ERROR "VisualLintCaptures requires a Python interpreter with Pillow and NumPy.")
 endif()
 
 # SDF-contract doc-lint. Assert docs/shield/sdf-contract.md
