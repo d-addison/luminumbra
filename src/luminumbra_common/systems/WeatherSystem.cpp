@@ -1,5 +1,7 @@
 #include "WeatherSystem.h"
 
+#include "../world/GameSession.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -633,16 +635,21 @@ void WeatherSystem::BindRegionalBackend(std::function<WeatherSample(const Vec3&)
     if (static_cast<bool>(sample) != static_cast<bool>(hash)) {
         throw std::invalid_argument("regional backend needs both a sampler and a hash");
     }
-    if (!sample && m_regionalWeatherKeyed) {
+    SelectRegionalBackend(static_cast<bool>(sample));
+    m_sessionBinding.session = nullptr;
+    m_regional_sample = std::move(sample);
+    m_regional_hash = std::move(hash);
+}
+
+void WeatherSystem::SelectRegionalBackend(bool enabled) {
+    if (!enabled && m_regionalWeatherKeyed) {
         m_storm_cells = StormCells();
         m_strikes = StrikeSchedule();
         m_regionalWeatherKeyed = false;
     }
-    if (sample && !m_regionalWeatherKeyed) {
+    if (enabled && !m_regionalWeatherKeyed) {
         RebuildRegionalStormIndex();
     }
-    m_regional_sample = std::move(sample);
-    m_regional_hash = std::move(hash);
 }
 
 void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
@@ -707,8 +714,8 @@ const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
 
 void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
     m_last_tick = tick;
-    if (m_regional_sample) {
-        const auto sample = m_regional_sample(anchor);
+    if (HasRegionalBackend()) {
+        const auto sample = SampleRegional(anchor);
         m_anchor_category = sample.category;
         m_anchor_wind = sample.wind;
     }
@@ -753,7 +760,7 @@ const WeatherSystem::StormEntries* WeatherSystem::RegionalStormEntries(const Vec
 }
 
 std::size_t WeatherSystem::storm_candidates_at(const Vec3& world_pos) const {
-    if (!m_regional_sample) {
+    if (!HasRegionalBackend()) {
         return m_storm_cells.size();
     }
     const auto* entries = RegionalStormEntries(world_pos);
@@ -773,7 +780,7 @@ float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
         const float falloff = t * t;
         precip += cell.intensity * falloff;
     };
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         if (const auto* entries = RegionalStormEntries(world_pos)) {
             for (const auto& [identity, cell] : *entries) {
                 (void)identity;
@@ -802,7 +809,7 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
             }
         }
     };
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         if (const auto* entries = RegionalStormEntries(world_pos)) {
             for (const auto& [identity, cell] : *entries) {
                 (void)identity;
@@ -820,7 +827,7 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
 void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         m_last_tick = tick;
         wind.Update(tick, region_anchor);
         return;
@@ -838,7 +845,7 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
 void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         // Storms are adopted projections; wind still has to reach the restored tick.
         UpdateFromClock(tick, region_anchor, wind);
         return;
@@ -862,7 +869,7 @@ void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {
     m_last_tick = tick;
-    if (m_regional_sample)
+    if (HasRegionalBackend())
         return;
     // 1) Category map + base precipitation field for this tick.
     RebuildFields(tick, region_anchor);
@@ -882,8 +889,8 @@ void WeatherSystem::Update(std::uint64_t tick,
 }
 
 WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
-    if (m_regional_sample)
-        return m_regional_sample(world_pos).category;
+    if (HasRegionalBackend())
+        return SampleRegional(world_pos).category;
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -895,9 +902,9 @@ WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
 }
 
 float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
-    if (m_regional_sample)
+    if (HasRegionalBackend())
         return (std::min)(1.0f,
-                          m_regional_sample(world_pos).precip_intensity + StormPrecipAt(world_pos));
+                          SampleRegional(world_pos).precip_intensity + StormPrecipAt(world_pos));
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -911,8 +918,8 @@ float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
 }
 
 WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
-    if (m_regional_sample) {
-        auto sample = m_regional_sample(world_pos);
+    if (HasRegionalBackend()) {
+        auto sample = SampleRegional(world_pos);
         sample.precip_intensity =
             (std::min)(1.0f, sample.precip_intensity + StormPrecipAt(world_pos));
         sample.storm_intensity = StormIntensityAt(world_pos);
@@ -927,6 +934,9 @@ WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
 }
 
 std::string WeatherSystem::ComputeWeatherSubHash() const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->RegionalAmbientHash(12, true);
+    }
     if (m_regional_hash)
         return m_regional_hash();
     // fnv1a-64 over: seed, tick, grid geometry, origin, the per-cell category +
@@ -984,6 +994,20 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+void WeatherSystem::BindRegionalSession(const world::GameSession& session) {
+    SelectRegionalBackend(true);
+    m_regional_sample = {};
+    m_regional_hash = {};
+    m_sessionBinding.session = &session;
+}
+
+WeatherSample WeatherSystem::SampleRegional(const Vec3& position) const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->SampleRegionalWeather(position);
+    }
+    return m_regional_sample(position);
 }
 
 } // namespace Luminumbra::Systems
