@@ -16,9 +16,10 @@
 //
 // DETERMINISM (this feeds world_hash once wired): the nutrient store is INTEGER
 // fixed-point milli-units — no float accumulates in sim truth. Plants are visited
-// in ascending entity-id order, but consumption is ACCUMULATED per cell first and
-// applied as one integer subtraction, so the result is independent of traversal
-// order (two plants on one cell deplete it the same regardless of id order).
+// in ascending handle order on the legacy path and common identity order on the
+// candidate path. Absorption credits follow that order when plants compete for a
+// depleted cell. The grid's total consumption is applied as one integer subtraction
+// and is independent of traversal order.
 // Regeneration is an integer step toward a baseline. NO rng (offset +18 reserved
 // but unused — the flow is pure), NO wall-clock, NO libm transcendentals.
 //
@@ -38,6 +39,7 @@
 #include "../components/CoreComponents.h"  // TransformComponent
 #include "../components/PlantComponents.h" // PlantTag, PlantGrowthComponent, PlantStage
 #include "../components/SoilComponents.h"  // SoilFeederComponent
+#include "../simulation/SimulationParticipantOrder.h"
 #include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
@@ -194,6 +196,8 @@ inline std::int32_t SampleSoilCell(const SoilGrid& g, int cx, int cz) {
 
 // Telemetry / sub-hash for the soil tick.
 struct SoilNutrientStats {
+    // Observational candidate-order work only; never saved or hashed.
+    std::size_t ordering_visits = 0;
     int participants = 0;         // PlantTag + SoilFeeder plants considered this tick
     std::int64_t consumed = 0;    // total nutrient consumed this tick (milli-units)
     std::int64_t regenerated = 0; // total nutrient regenerated this tick (milli-units)
@@ -234,10 +238,12 @@ ApplyConsumptionAndRegen(SoilGrid& g,
 }
 
 // Advance the soil nutrient field by ONE fixed tick. Pure function of registry
-// state + the grid. id-ordered traversal; consumption is ACCUMULATED per cell
-// (order-independent) then applied with the regen step. Plants that opt in
+// state + the grid. Ordered traversal assigns depletion credits; consumption is
+// accumulated per cell (order-independent) then applied with the regen step. Plants that opt in
 // (PlantTag + SoilFeederComponent) draw from their cell proportional to growth
 // stage * feeder uptake; their `absorbed` integer accrues what they actually got.
+// StableIdentity is selected by session wiring only at authority activation.
+template<bool StableIdentity = false>
 inline SoilNutrientStats
 RunSoilNutrientOnTick(entt::registry& reg,
                       SoilGrid& soil,
@@ -267,9 +273,13 @@ RunSoilNutrientOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    if constexpr (StableIdentity) {
+        stats.ordering_visits += ::Luminumbra::simulation::OrderSimulationParticipants(reg, ents);
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
 
     const int W = soil.width();
     const int H = soil.height();
@@ -302,7 +312,7 @@ RunSoilNutrientOnTick(entt::registry& reg,
 
         // Track the plant's intent; the cell may not have this much (clamped on apply),
         // but `absorbed` records demand-met after the cell is known. To keep absorbed
-        // exact + order-independent we credit min(draw, available-before-regen) using
+        // exact in the selected order we credit min(draw, available-before-regen) using
         // the cell's CURRENT level minus what's already demanded this tick.
         const std::size_t ci = static_cast<std::size_t>(cz) * static_cast<std::size_t>(W) +
                                static_cast<std::size_t>(cx);
