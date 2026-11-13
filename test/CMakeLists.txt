@@ -213,6 +213,7 @@ add_executable(common_tests
     common/ReplicationDeltaLoop_test.cpp
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
+    common/SimulationIdentityContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
     common/FarWorldAuthorityProducer_test.cpp
@@ -258,6 +259,7 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    common/GameSessionPlantPersistence_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
@@ -1605,6 +1607,7 @@ add_executable(frontier_gates_test
     ai/creature_brain_test.cpp
     ai/creature_brain_system_test.cpp
     ai/creature_reproduction_test.cpp
+    ai/creature_identity_test.cpp
     ai/flocking_test.cpp
     ai/foraging_test.cpp
     ai/creature_divergence_test.cpp
@@ -1625,6 +1628,7 @@ add_executable(frontier_gates_test
     scripting/aether_script_binding_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     fields/energy_field_state_test.cpp
+    fields/source_identity_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp

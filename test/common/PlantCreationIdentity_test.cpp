@@ -31,6 +31,34 @@ F::SpeciesTemplate Species() {
     return species;
 }
 
+enum class CreationPath {
+    Seed,
+    Species,
+    Farming,
+    Promotion
+};
+
+entt::entity
+CreatePlant(entt::registry& registry, ActiveRegionLedger& allocator, CreationPath path) {
+    auto rng = DeterministicRng::seeded(4);
+    switch (path) {
+        case CreationPath::Seed:
+            return F::PlantSeed(registry, {}, {}, 7, 12, allocator);
+        case CreationPath::Species:
+            return F::MakePlantFromSpecies(registry, {}, Species(), rng, 12, &allocator);
+        case CreationPath::Farming: {
+            F::FarmingController controller;
+            return controller.Seed(registry, {}, Species(), rng, 12, allocator);
+        }
+        case CreationPath::Promotion: {
+            const auto resident = RenderResident(registry);
+            return F::PromotePlantToSimulation(registry, resident, 7, 12, allocator) ? resident
+                                                                                     : kNullEntity;
+        }
+    }
+    throw std::invalid_argument("Unknown plant creation path");
+}
+
 TEST(PlantCreationIdentity, SeedSpeciesAndFarmingShareTheAllocator) {
     ActiveRegionLedger ledger;
     entt::registry registry;
@@ -248,6 +276,160 @@ TEST(PlantCreationIdentity, IdentityAdmissionRefusesMissingInvalidDuplicateAndCh
         EXPECT_EQ(ledger.next_persistent_id(), 2u);
         stage.Abort();
     }
+}
+
+TEST(PlantCreationIdentity, DestroyedParentIdentityCannotBeReusedByAnyCreationPath) {
+    for (const auto path : {CreationPath::Seed,
+                            CreationPath::Species,
+                            CreationPath::Farming,
+                            CreationPath::Promotion}) {
+        SCOPED_TRACE(static_cast<int>(path));
+        ActiveRegionLedger ledger;
+        entt::registry live;
+        const auto parent = F::PlantSeed(live, {}, {}, 7, 11, ledger);
+        F::FoliageRegistryStage stage;
+        stage.Begin(live, ledger);
+        auto& candidate = stage.registry();
+        candidate.destroy(parent);
+        entt::entity child = entt::null;
+        if (path == CreationPath::Promotion) {
+            child = RenderResident(candidate);
+            candidate.emplace<C::SimulationIdentityComponent>(
+                child, C::SimulationIdentityComponent{.id = 1});
+            ASSERT_TRUE(
+                F::PromotePlantToSimulation(candidate, child, 7, 12, stage.identity_allocator()));
+        } else {
+            child = CreatePlant(candidate, stage.identity_allocator(), path);
+        }
+        ASSERT_NE(child, kNullEntity);
+        ASSERT_NE(child, parent);
+        candidate.get<C::SimulationIdentityComponent>(child).id = 1;
+        ASSERT_EQ(candidate.view<C::PlantTag>().size(), 1u);
+        EXPECT_THROW(stage.PreparePublication(live), std::runtime_error);
+        stage.Commit(live);
+        EXPECT_EQ(stage.publications(), 0u);
+        ASSERT_TRUE(live.valid(parent));
+        EXPECT_EQ(live.view<C::PlantTag>().size(), 1u);
+        EXPECT_EQ(F::RequirePlantSimulationId(live, parent), 1u);
+        EXPECT_EQ(live.get<C::PlantGrowthComponent>(parent).last_tick, 11u);
+        EXPECT_EQ(ledger.next_persistent_id(), 2u);
+        stage.Abort();
+    }
+}
+
+TEST(PlantCreationIdentity, FreshBirthsFromEveryCreationPathPublishWithRetainedIdentities) {
+    for (const auto path : {CreationPath::Seed,
+                            CreationPath::Species,
+                            CreationPath::Farming,
+                            CreationPath::Promotion}) {
+        SCOPED_TRACE(static_cast<int>(path));
+        ActiveRegionLedger ledger;
+        entt::registry live;
+        const auto parent = F::PlantSeed(live, {}, {}, 7, 11, ledger);
+        F::FoliageRegistryStage stage;
+        stage.Begin(live, ledger);
+        const auto child = CreatePlant(stage.registry(), stage.identity_allocator(), path);
+        ASSERT_NE(child, kNullEntity);
+        EXPECT_NO_THROW(stage.PreparePublication(live));
+        ASSERT_TRUE(ledger.reserve_persistent_ids(stage.next_id()));
+        stage.Commit(live);
+        EXPECT_EQ(stage.publications(), 1u);
+        EXPECT_EQ(live.view<C::PlantTag>().size(), 2u);
+        EXPECT_EQ(F::RequirePlantSimulationId(live, parent), 1u);
+        EXPECT_EQ(F::RequirePlantSimulationId(live, child), 2u);
+        EXPECT_EQ(ledger.next_persistent_id(), 3u);
+    }
+}
+
+TEST(PlantCreationIdentity, BirthAdmissionChecksBothAllocatorBoundsAndKeepsRetainedIdentity) {
+    for (const auto id : {std::uint64_t{0},
+                          std::uint64_t{4},
+                          std::uint64_t{5},
+                          std::uint64_t{6},
+                          std::uint64_t{7},
+                          std::uint64_t{8},
+                          ActiveRegionLedger::kPersistentIdLimit}) {
+        SCOPED_TRACE(id);
+        ActiveRegionLedger ledger;
+        entt::registry live;
+        const auto parent = F::PlantSeed(live, {}, {}, 7, 11, ledger);
+        ASSERT_TRUE(ledger.reserve_persistent_ids(5));
+        F::FoliageRegistryStage stage;
+        stage.Begin(live, ledger);
+        auto& candidate = stage.registry();
+        const auto child = F::PlantSeed(candidate, {}, {}, 7, 12, stage.identity_allocator());
+        std::uint64_t unused = 0;
+        ASSERT_TRUE(stage.AllocatePersistentId(unused));
+        ASSERT_EQ(unused, 6u);
+        ASSERT_EQ(stage.initial_id(), 5u);
+        ASSERT_EQ(stage.next_id(), 7u);
+        candidate.get<C::SimulationIdentityComponent>(child).id = id;
+        candidate.get<C::PlantGrowthComponent>(parent).last_tick = 12;
+        if (id == 5 || id == 6) {
+            EXPECT_NO_THROW(stage.PreparePublication(live));
+            ASSERT_TRUE(ledger.reserve_persistent_ids(stage.next_id()));
+            stage.Commit(live);
+            EXPECT_EQ(stage.publications(), 1u);
+            EXPECT_EQ(live.view<C::PlantTag>().size(), 2u);
+            EXPECT_EQ(F::RequirePlantSimulationId(live, parent), 1u);
+            EXPECT_EQ(F::RequirePlantSimulationId(live, child), id);
+            EXPECT_EQ(live.get<C::PlantGrowthComponent>(parent).last_tick, 12u);
+            EXPECT_EQ(ledger.next_persistent_id(), 7u);
+        } else {
+            EXPECT_THROW(stage.PreparePublication(live), std::runtime_error);
+            stage.Commit(live);
+            EXPECT_EQ(stage.publications(), 0u);
+            EXPECT_EQ(live.view<C::PlantTag>().size(), 1u);
+            EXPECT_EQ(F::RequirePlantSimulationId(live, parent), 1u);
+            EXPECT_EQ(live.get<C::PlantGrowthComponent>(parent).last_tick, 11u);
+            EXPECT_EQ(ledger.next_persistent_id(), 5u);
+            stage.Abort();
+        }
+    }
+}
+
+TEST(PlantCreationIdentity, EmptyCandidateAllocationRangeCannotAdmitBirths) {
+    for (const auto id : {std::uint64_t{4}, std::uint64_t{5}, std::uint64_t{6}}) {
+        SCOPED_TRACE(id);
+        ActiveRegionLedger ledger;
+        ASSERT_TRUE(ledger.reserve_persistent_ids(5));
+        entt::registry live;
+        F::FoliageRegistryStage stage;
+        stage.Begin(live, ledger);
+        const auto child = F::PlantSeed(stage.registry(), {}, {}, 7, 12);
+        stage.registry().emplace<C::SimulationIdentityComponent>(
+            child, C::SimulationIdentityComponent{.id = id});
+        ASSERT_EQ(stage.initial_id(), stage.next_id());
+        EXPECT_THROW(stage.PreparePublication(live), std::runtime_error);
+        stage.Commit(live);
+        EXPECT_EQ(stage.publications(), 0u);
+        EXPECT_TRUE(live.view<C::PlantTag>().empty());
+        EXPECT_TRUE(live.view<C::SimulationIdentityComponent>().empty());
+        EXPECT_EQ(ledger.next_persistent_id(), 5u);
+        stage.Abort();
+    }
+}
+
+TEST(PlantCreationIdentity, RetainedIdentityMustPrecedeCandidateAllocationRange) {
+    ActiveRegionLedger ledger;
+    entt::registry live;
+    const auto parent = F::PlantSeed(live, {}, {}, 7, 11, ledger);
+    // A committed identity cannot be justified by an allocation in a later candidate.
+    live.get<C::SimulationIdentityComponent>(parent).id = ledger.next_persistent_id();
+    F::FoliageRegistryStage stage;
+    stage.Begin(live, ledger);
+    std::uint64_t unused = 0;
+    ASSERT_TRUE(stage.AllocatePersistentId(unused));
+    ASSERT_EQ(unused, 2u);
+    stage.registry().get<C::PlantGrowthComponent>(parent).last_tick = 12;
+    EXPECT_THROW(stage.PreparePublication(live), std::runtime_error);
+    stage.Commit(live);
+    EXPECT_EQ(stage.publications(), 0u);
+    EXPECT_EQ(live.view<C::PlantTag>().size(), 1u);
+    EXPECT_EQ(F::RequirePlantSimulationId(live, parent), 2u);
+    EXPECT_EQ(live.get<C::PlantGrowthComponent>(parent).last_tick, 11u);
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
+    stage.Abort();
 }
 
 TEST(PlantCreationIdentity, RadixOrderChecksAllBytesAndRejectsIdentityTies) {
