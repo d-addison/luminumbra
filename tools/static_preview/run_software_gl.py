@@ -35,7 +35,8 @@ EXPECTED_CASES = frozenset({
 })
 
 
-SHADER_CASES = frozenset({("ShaderScene", "MaterialLinearReferenceAndOcclusionBlend")})
+SHADER_CASES = frozenset({("ShaderScene", name) for name in (
+    "MaterialLinearReferenceAndOcclusionBlend", "TreeImpostorAtlasCutout")})
 
 
 def validate_report(root, expected=EXPECTED_CASES):

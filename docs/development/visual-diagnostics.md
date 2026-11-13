@@ -13,7 +13,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | GPU ID attachment, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
-| Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
+| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material/alpha-cutout fixtures registered; analytical references checked; software-GL execution pending; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
 The codecs alone do not create scenario bundles or enable a runtime flag. They are
@@ -168,16 +168,61 @@ Include material blend, alpha cutout, normal decode, reversed-Z, sky horizon and
 post-edge fixtures, plus a compute SSBO readback fixture. No native client smoke
 test is needed to compile shaders in Linux CI.
 
-Planned references live in `test/rendering/shader_scenes/references/` with a manifest
+References live in `test/rendering/shader_scenes/references/` with a manifest
 recording source/define/input hashes, Mesa renderer/version and color encoding.
 Compare linear RGB: mean absolute error <= 0.005 and 99th-percentile absolute
 channel error <= 0.02 on each fixture's explicit mask; NaN/Inf always fails.
 Hard categorical/depth invariants use exact IDs or documented float epsilon,
-never a loose image score. Regeneration command after the harness lands:
-`python3 -I -B tools/gates/shader-scenes.py regenerate --manifest test/rendering/shader_scenes/scenes.json`.
-Regeneration requires review of diffs and asset-inventory refresh; it is never an
+never a loose image score. Regeneration uses the capture and fresh candidate
+paths shown in the scene catalogue below. It requires review of diffs and
+asset-inventory refresh; it is never an
 automatic response to CI failure. Cap fixture count at 64, includes at 64 levels
 and 8 MiB expanded source per translation unit; refuse budgets before compilation.
+
+### Scene catalogue
+
+The schema-2 scene manifest is the reference inventory: it pins both 128x128 PPM
+hashes, all four consumed shader sources and the capture translation unit, including
+its fixed uniforms and generated textures. References are analytical, quantized
+linear RGB with bottom-first rows; renderer metadata must not imply a GL capture.
+The existing binary PPM attribute covers every reference in this directory.
+
+| Scene | Real shader pair | Metric and tolerance |
+| --- | --- | --- |
+| `material` | `static_asset.vert/.frag` | Full-image linear RGB MAE <= 0.005 and channel-error p99 <= 0.02; existing exact material assertions retained |
+| `tree-cutout` | `tree_impostor.vert/.frag` | Same reference thresholds; maximum RGB error against independent atlas categories <= 0.000001; the GL test checks unchanged background on all six attachments for discarded texels |
+
+The tree fixture selects one tile from a generated 2x2 atlas. Its 4x4 tile repeats
+alpha 0, 0.499, 0.5 and 1, giving exactly 50% discarded pixels. Other tiles are
+opaque red to expose incorrect tile selection. Surviving albedo is checked after
+coverage division. This isolates the shader's alpha cutoff; it does not qualify
+the production atlas bake, binding or distant-tree submission.
+
+Sky horizon and radial-star expectations are deferred: at the pinned source
+revision, `renderStars` adds thresholded noise without a horizon mask or a radial
+profile. The harness has
+no known-failure mode, so those defects must not become accepted baselines. Dusk
+azimuth continuity and the reported sky seam still require software-GL evidence.
+Terrain material-transition coverage is deferred; the flat material ID does not
+provide an interpolated transition between provoking vertices.
+
+To compare or regenerate, first configure the existing opt-in scene target with
+`LUMINUMBRA_SHADER_SCENES=ON` and build `shader_scene_render_test`. Capture to a
+fresh directory using the existing runner (replace the example binary path with
+your build's target location):
+
+```sh
+python3 -I -B tools/static_preview/run_software_gl.py --binary build/fast-gcc/bin/shader_scene_render_test --profile shader-scenes --output build/scene-capture
+python3 -I -B tools/gates/shader-scenes.py compare --capture build/scene-capture
+python3 -I -B tools/gates/shader-scenes.py regenerate --capture build/scene-capture --output build/scene-candidates
+```
+
+Regeneration checks both captures, source identities, renderer evidence and the
+categorical cutout invariant before creating the candidate directory. It writes
+both reference payloads before `scenes.json`; an I/O failure cannot publish a
+complete candidate manifest. Review and copy the candidate manifest and references
+together. Their hashes are refreshed in that manifest; rerun the scene contracts
+and acceptance/public-tree validators. Never regenerate to bless a shader defect.
 
 ## D: capture checks
 

@@ -34,21 +34,32 @@ MANIFEST = ROOT / 'test/rendering/shader_scenes/scenes.json'
 
 class ShaderScenesTests(unittest.TestCase):
     def capture(self, directory, value=.25):
-        for name in ('static_asset.vert', 'static_asset.frag'):
+        for name in ('static_asset.vert', 'static_asset.frag', 'tree_impostor.vert', 'tree_impostor.frag'):
             (directory / name).write_bytes((ROOT / 'res/shaders' / name).read_bytes())
         fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_bytes().replace(b'\r\n', b'\n')
         (directory / 'fixture-sha256.txt').write_text(scene.digest(fixture), encoding='ascii')
         (directory / 'material.pfm').write_bytes(b'PF\n128 128\n-1.0\n' +
                                                struct.pack('<f', value) * scene.CHANNELS)
+        (directory / 'tree-cutout.pfm').write_bytes(
+            b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *self.cutout()))
         (directory / 'renderer.txt').write_text('llvmpipe (test fixture)\n', encoding='utf-8')
         (directory / 'version.txt').write_text('4.5 Mesa fixture\n', encoding='utf-8')
 
+    @staticmethod
+    def cutout():
+        return [value for y in range(128) for x in range(128)
+                for value in ((.0625, .125, .1875) if (x // 32 + y // 32) % 4 < 2
+                              else (.25, .5, .75))]
+
     def test_inventory_and_analytical_reference(self):
         manifest, data = scene.load_manifest(MANIFEST)
-        values = scene.rgb(data, False)
+        values = scene.rgb(data['material'], False)
         self.assertEqual(len(values), scene.CHANNELS)
         self.assertEqual(scene.metrics(values, values, manifest['fixtures'][0]['mask']), (0, 0))
         self.assertIn(manifest['reference_capture']['origin'], ('analytical', 'llvmpipe'))
+        tree = scene.rgb(data['tree-cutout'], False)
+        self.assertLessEqual(max(abs(a - b) for a, b in zip(tree, self.cutout())), .5 / 255)
+        self.assertEqual(set(data), {'material', 'tree-cutout'})
 
     def test_exact_thresholds_and_mask(self):
         zeros = (0.,) * scene.CHANNELS
@@ -114,16 +125,18 @@ class ShaderScenesTests(unittest.TestCase):
 
     def test_manifest_refuses_partial_unknown_and_changed_inputs(self):
         original = json.loads(MANIFEST.read_text(encoding='utf-8'))
-        mutations = [dict(schema=2), dict(schema=True), dict(size=[128., 128]), dict(size=[129, 128]), dict(defines=['UNKNOWN 1']),
+        mutations = [dict(schema=1), dict(schema=3), dict(schema=True), dict(size=[128., 128]), dict(size=[129, 128]), dict(defines=['UNKNOWN 1']),
                      dict(encoding='srgb'), dict(fixtures=[]), dict(inputs={}),
-                     dict(reference_sha256='0' * 64), dict(reference_capture={}), dict(inputs=None),
+                     dict(reference_sha256='0' * 64), dict(reference_sha256={}),
+                     dict(reference_sha256={'material': '0' * 64, 'tree-cutout': '0' * 64}), dict(reference_capture={}), dict(inputs=None),
                      dict(reference_capture=None),
                      dict(reference_capture={'origin': 'llvmpipe', 'renderer': 'hardware', 'version': '4.5'})]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'references').mkdir()
-            (root / 'references/material.ppm').write_bytes(
-                (MANIFEST.parent / 'references/material.ppm').read_bytes())
+            for fixture in scene.FIXTURES:
+                (root / fixture['reference']).write_bytes(
+                    (MANIFEST.parent / fixture['reference']).read_bytes())
             for changed in mutations:
                 data = dict(original, **changed)
                 path = root / 'scenes.json'
@@ -196,6 +209,104 @@ class ShaderScenesTests(unittest.TestCase):
             args.output = None
             with self.assertRaisesRegex(ValueError, 'fresh --output'):
                 scene.run(args)
+
+    def test_second_reference_inventory_refusals_and_late_write_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'references').mkdir()
+            original = json.loads(MANIFEST.read_text(encoding='utf-8'))
+            for fixture in scene.FIXTURES:
+                (root / fixture['reference']).write_bytes((MANIFEST.parent / fixture['reference']).read_bytes())
+            for mutation in ('duplicate', 'unknown', 'float-mask', 'missing-hash', 'corrupt-reference'):
+                manifest = copy.deepcopy(original)
+                if mutation == 'duplicate':
+                    manifest['fixtures'].append(manifest['fixtures'][0])
+                elif mutation == 'unknown':
+                    manifest['fixtures'][1]['name'] = 'unknown'
+                elif mutation == 'float-mask':
+                    manifest['fixtures'][1]['mask'][0] = 0.0
+                elif mutation == 'missing-hash':
+                    del manifest['reference_sha256']['tree-cutout']
+                else:
+                    manifest['reference_sha256']['tree-cutout'] = '0' * 64
+                (root / 'scenes.json').write_text(json.dumps(manifest), encoding='utf-8')
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    scene.load_manifest(root / 'scenes.json')
+            tree_reference = root / 'references/tree-cutout.ppm'
+            good_reference = tree_reference.read_bytes()
+            for payload in (None, b'', good_reference[:-1], good_reference + b'0'):
+                manifest = copy.deepcopy(original)
+                if payload is None:
+                    tree_reference.unlink()
+                else:
+                    tree_reference.write_bytes(payload)
+                    manifest['reference_sha256']['tree-cutout'] = scene.digest(payload)
+                (root / 'scenes.json').write_text(json.dumps(manifest), encoding='utf-8')
+                with self.subTest(payload_size=None if payload is None else len(payload)), \
+                        self.assertRaises((OSError, ValueError)):
+                    scene.load_manifest(root / 'scenes.json')
+                tree_reference.write_bytes(good_reference)
+            capture = root / 'capture'
+            capture.mkdir()
+            self.capture(capture)
+            output = root / 'candidate'
+            write = Path.write_bytes
+
+            def fail_second(path, payload):
+                if path.name == 'tree-cutout.ppm':
+                    raise OSError('second reference failed')
+                return write(path, payload)
+
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST, capture=capture, output=output)
+            with patch.object(Path, 'write_bytes', fail_second), self.assertRaises(OSError):
+                scene.run(args)
+            self.assertTrue((output / 'references/material.ppm').is_file())
+            self.assertFalse((output / 'scenes.json').exists())
+
+    def test_cutout_categories_and_failure_samples(self):
+        actual = self.cutout()
+        self.assertEqual(scene.tree_cutout_error(actual), 0)
+        for index in (0, 32 * 3, 64 * 3, 96 * 3, scene.CHANNELS - 3):
+            # Transparent, below cutoff, exact cutoff and opaque texels, with
+            # an error at even one pixel: a whole-image MAE can miss this.
+            for delta, passes in ((.0000009, True), (.0000011, False), (.1, False)):
+                changed = actual.copy()
+                changed[index] += delta
+                self.assertEqual(scene.tree_cutout_error(changed) <= .000001, passes)
+        for invalid in ([], actual[:-1], actual + [0],
+                        [math.nan] + actual[1:], [math.inf] + actual[1:],
+                        [-math.inf] + actual[1:]):
+            with self.assertRaises(ValueError):
+                scene.tree_cutout_error(invalid)
+
+    def test_second_scene_evidence_is_mandatory_before_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture = root / 'capture'
+            capture.mkdir()
+            output = root / 'candidate'
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST,
+                                      capture=capture, output=output)
+            for filename in ('tree_impostor.vert', 'tree_impostor.frag', 'tree-cutout.pfm'):
+                for bad in (None, b'', b'partial'):
+                    self.capture(capture)
+                    if bad is None:
+                        (capture / filename).unlink()
+                    else:
+                        (capture / filename).write_bytes(bad)
+                    with self.subTest(filename=filename, bad=bad), self.assertRaises((OSError, ValueError)):
+                        scene.run(args)
+                    self.assertFalse(output.exists())
+            self.capture(capture)
+            # An opaque rectangle must fail both comparison and regeneration,
+            # independently of the reference score or baseline regeneration.
+            (capture / 'tree-cutout.pfm').write_bytes(
+                b'PF\n128 128\n-1.0\n' + struct.pack('<f', .25) * scene.CHANNELS)
+            for command in ('compare', 'regenerate'):
+                args.command = command
+                with self.assertRaisesRegex(ValueError, 'cutout/background invariant'):
+                    scene.run(args)
+                self.assertFalse(output.exists())
 
     def test_every_rendering_and_harness_path_routes_and_docs_do_not(self):
         sensitive = ('res/shaders/new.frag', 'src/luminumbra_client/rendering/new.cpp',
