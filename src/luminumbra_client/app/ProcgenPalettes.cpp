@@ -10,6 +10,7 @@
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
+#include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/PlantProcgen.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -207,6 +208,8 @@ entt::entity PromoteNearestScatter(ProcgenPlantState& state,
                                    const glm::vec3& aim,
                                    float reach,
                                    std::uint64_t tick) {
+    if (!luminumbra::foliage::FarmingActionsAllowed(reg))
+        return entt::null;
     namespace C = Luminumbra::Components;
     int best = -1;
     float bestD = reach * reach;

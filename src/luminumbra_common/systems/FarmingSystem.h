@@ -22,6 +22,16 @@
 namespace luminumbra::foliage {
 // `Comp` (=::Luminumbra::Components) is already aliased in PlantGrowthSystem.h.
 
+// Runtime-only session gate: historical candidates seal their sources until
+// publication. Standalone registries remain editable without this context.
+struct FarmingReplayGate {
+    bool blocked = false;
+};
+inline bool FarmingActionsAllowed(const entt::registry& registry) {
+    const auto* gate = registry.ctx().find<FarmingReplayGate>();
+    return !gate || !gate->blocked;
+}
+
 namespace farming_detail {
 inline entt::entity CreateSeed(entt::registry& reg,
                                const ::Luminumbra::Vec3& pos,
@@ -44,12 +54,16 @@ inline entt::entity CreateSeed(entt::registry& reg,
 }
 } // namespace farming_detail
 
+// Creation helpers refuse with entt::null on a blocked live registry before
+// consuming RNG, allocating identity or changing entities. Replay candidates have no live gate.
 // Legacy factory remains selected by shipping callers until identity activation.
 inline entt::entity PlantSeed(entt::registry& reg,
                               const ::Luminumbra::Vec3& pos,
                               const Comp::PlantGenomeComponent& genome,
                               std::uint16_t species_id,
                               std::uint64_t tick) {
+    if (!FarmingActionsAllowed(reg))
+        return entt::null;
     return farming_detail::CreateSeed(reg, pos, genome, species_id, tick, nullptr);
 }
 
@@ -61,6 +75,8 @@ inline entt::entity PlantSeed(entt::registry& reg,
                               std::uint16_t species_id,
                               std::uint64_t tick,
                               ::Luminumbra::world::ActiveRegionLedger& allocator) {
+    if (!FarmingActionsAllowed(reg))
+        return entt::null;
     const auto identity = ::Luminumbra::simulation::AllocateSimulationIdentity(allocator);
     if (!identity.has_value())
         return entt::null;
@@ -81,6 +97,8 @@ MakePlantFromSpecies(entt::registry& reg,
                      luminumbra::core::DeterministicRng& rng,
                      std::uint64_t tick,
                      ::Luminumbra::world::ActiveRegionLedger* allocator = nullptr) {
+    if (!FarmingActionsAllowed(reg))
+        return entt::null;
     // Reserve before sampling: allocator refusal preserves the caller's RNG as well.
     Comp::SimulationIdentityComponent identity;
     if (allocator) {
@@ -204,7 +222,7 @@ struct FarmingController {
                       const SpeciesTemplate& tmpl,
                       luminumbra::core::DeterministicRng& rng,
                       std::uint64_t tick) {
-        if (seeds <= 0)
+        if (!FarmingActionsAllowed(reg) || seeds <= 0)
             return entt::null;
         --seeds;
         return MakePlantFromSpecies(reg, pos, tmpl, rng, tick);
@@ -226,13 +244,15 @@ struct FarmingController {
     }
 
     bool Water(entt::registry& reg, entt::entity e) {
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Water(reg.get<Comp::PlantGrowthComponent>(e));
         return true;
     }
     bool Fertilize(entt::registry& reg, entt::entity e) {
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Fertilize(reg.get<Comp::PlantGrowthComponent>(e));
         return true;
@@ -242,7 +262,8 @@ struct FarmingController {
     // the HarvestResult (harvestable=false if the target is not ready / invalid).
     HarvestResult Harvest(entt::registry& reg, entt::entity e) {
         HarvestResult r;
-        if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
+        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+            !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
             return r;
         r = luminumbra::foliage::Harvest(reg.get<Comp::PlantGrowthComponent>(e),
                                          reg.get<Comp::PlantGenomeComponent>(e));
