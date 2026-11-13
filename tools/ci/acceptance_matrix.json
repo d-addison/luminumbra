@@ -8083,7 +8083,7 @@
     {
       "id": "render.far-volume-page-planner",
       "source": "issue #239",
-      "statement": "The dormant constant-size page planner admits brick-aligned signed-grid windows with a 4096 metre maximum stride and an explicit cap of at most 1024 pages. Indexed windows clip outer bounds and retain stable interiors during extension. Exact ordered acknowledgements reject skipped, duplicate, reordered, overlapping, shortened or identity-mismatched requests. Single-page admission bounds canonical candidate and sample work, contiguous buffers and mesher cache entry counts including normal halos before callbacks or allocation. Map-node bytes remain subject to the charged APIs. Only tests call the planner; explicit-span compilation, equivalence and seam qualification, production ownership and native execution remain pending.",
+      "statement": "The dormant constant-size page planner admits brick-aligned signed-grid windows with a 4096 metre maximum stride and an explicit cap of at most 1024 pages. Indexed windows clip outer bounds and retain stable interiors during extension. Exact ordered acknowledgements reject skipped, duplicate, reordered, overlapping, shortened or identity-mismatched requests. Single-page admission bounds canonical candidate and sample work, contiguous buffers and mesher cache entry counts including normal halos before callbacks or allocation. Map-node bytes remain subject to the charged APIs. Only tests call the planner; explicit-span facade regressions are indexed separately. Production ownership and native execution remain pending.",
       "status": "partial",
       "evidence": [
         {
@@ -8105,6 +8105,34 @@
           "kind": "ctest",
           "ref": "FarVolumeRuntime.RefusedPageAdmissionPrecedesCanonicalCallbacksAndAllocation",
           "planned": "Run registered transactional pre-callback admission regression; owner: rendering"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-volume-memory.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.far-volume-span-facade",
+      "source": "issue #239",
+      "statement": "Dormant explicit-span generic and pristine compilation shares the existing authority session, canonical charged generation and meshing, and one pristine world sampling scope. Charged, uncharged and null-pool wrappers preserve exact request bounds and transactional outputs and reservations. Registered regressions cover full-span/page geometry and retained-brick equivalence, Y-face/XZ-edge/corner halo normals, a torus crossing zero, boundary material disagreement, invalid requests, pre-callback refusal, cancellation and exhaustive sparse mixed-page allocation admission refusal for both numeric profiles. Only tests call these paths. Native execution, production page ownership and streaming remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeFacade.ExplicitSpan*",
+          "planned": "Run registered explicit-span facade regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeFacadeMemory.ExplicitSpan*",
+          "planned": "Run registered explicit-span facade regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeWorld.ExplicitSpan*",
+          "planned": "Run registered explicit-span facade regressions; owner: rendering"
         },
         {
           "kind": "doc",
