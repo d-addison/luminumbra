@@ -131,7 +131,6 @@ CaptureManifestInput ObserveCaptureManifest(const world::GameSession& session,
     input.render_settings.emplace("lightning_bolt_width_ndc", double(lightning.bolt_width_ndc));
     input.render_settings.emplace("lightning_bolt_glow_ndc", double(lightning.bolt_glow_ndc));
     input.render_settings.emplace("lightning_ground_flash", double(lightning.ground_flash));
-    input.render_settings.emplace("lightning_cloud_darkness", double(lightning.cloud_darkness));
     input.render_settings.emplace("isolation_layer_mask",
                                   std::uint64_t(pipeline.isolation_config().layer_mask));
     input.render_settings.emplace("isolation_backdrop",
