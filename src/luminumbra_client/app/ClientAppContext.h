@@ -75,6 +75,7 @@ inline constexpr int kFrameScanWatchdogFrames = 4000;
 struct HudState {
     luminumbra::game::PhotoModeState photoMode;
     PhotoEnvironmentOverride photoEnvironment;
+    PhotoWeatherOverride photoWeather;
     bool photoModeUiShown = false; //  photo_mode.rml vs hud.rml is the active in-game overlay
     luminumbra::game::PhotoCodex photoCodex;
     // Data-driven creature species metadata (display names + rarity) the

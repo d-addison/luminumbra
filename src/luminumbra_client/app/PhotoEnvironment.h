@@ -22,6 +22,42 @@ struct PhotoEnvironmentOverride {
     int weather_index = 0; // Six UI choices: live, clear, fog, rain, snow, storm.
 };
 
+// Restore before the next frame's live writers, even when no weather writer runs.
+// Retain the full driven state: type/intensity alone lose wetness and wind.
+// One fixed-size snapshot; no allocation or per-frame scan.
+class PhotoWeatherOverride {
+public:
+    template<typename Pipeline>
+    void Apply(Pipeline& pipeline, Luminumbra::Rendering::WeatherType weather, float intensity) {
+        if (!applied_) {
+            weather_ = pipeline.get_weather_type();
+            intensity_ = pipeline.get_weather_intensity();
+            state_ = pipeline.get_weather_state();
+            applied_ = true;
+        }
+        pipeline.set_weather(weather, intensity);
+    }
+
+    template<typename Pipeline>
+    void Restore(Pipeline& pipeline) {
+        if (!applied_) {
+            return;
+        }
+        if (state_.driven) {
+            pipeline.set_weather_state(state_);
+        } else {
+            pipeline.set_weather(weather_, intensity_);
+        }
+        applied_ = false;
+    }
+
+private:
+    bool applied_ = false;
+    Luminumbra::Rendering::WeatherType weather_ = Luminumbra::Rendering::WeatherType::None;
+    float intensity_ = 0.0f;
+    Luminumbra::Rendering::WeatherRenderState state_;
+};
+
 constexpr PhotoEnvironmentOverride CyclePhotoWeather(const PhotoEnvironmentOverride& photo,
                                                      int cycle) {
     auto next = photo;

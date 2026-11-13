@@ -4492,6 +4492,8 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        // Release weather before any frame writer, including menu previews.
+        g_app.hud.photoWeather.Restore(renderPipeline);
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;

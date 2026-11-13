@@ -578,7 +578,7 @@ void UpdatePhotoEnvironment(ClientAppContext& app,
         renderPipeline.set_time_of_day(selected.time_of_day);
     }
     if (selected.weather_active) {
-        renderPipeline.set_weather(selected.weather, selected.intensity);
+        app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);
     }
 }
 

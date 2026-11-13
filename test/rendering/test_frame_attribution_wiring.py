@@ -2117,11 +2117,21 @@ class PhotoEnvironmentWiring(unittest.TestCase):
     def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
         main = read(CLIENT / "main_client.cpp")
         release = main.index("renderPipeline.set_time_of_day_hold(false);")
+        weather_release = main.index("g_app.hud.photoWeather.Restore(renderPipeline);")
+        loop = block(main, "while (!glfwWindowShouldClose(window))")
+        before_restore = loop.split("g_app.hud.photoWeather.Restore(renderPipeline);", 1)[0]
+        self.assertNotIn("if (", before_restore)
+        self.assertLess(weather_release, main.index("GameState currentState ="))
+        self.assertLess(weather_release, main.index("RenderMenuScreens("))
+        weather_writer_guard = "if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather))"
+        self.assertLess(weather_release, main.index(weather_writer_guard))
+        self.assertNotIn("photoWeather.Restore", block(main, weather_writer_guard))
         photo = main.index("UpdatePhotoEnvironment(")
         for live in ("renderPipeline.set_world_clock(gameSession->GetWorldClock());",
                      "renderPipeline.set_time_of_day_tick(sim_tick);",
                      "renderPipeline.set_weather_state(weather_state);"):
             self.assertLess(release, main.index(live))
+            self.assertLess(weather_release, main.index(live))
             self.assertLess(main.index(live), photo)
         for pin in ("scenario_runner->onPreRenderCapturePins();",
                     "renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);",
@@ -2140,8 +2150,15 @@ class PhotoEnvironmentWiring(unittest.TestCase):
         self.assertIn("SelectPhotoEnvironment(live, photo, photo_active, capture_pinned)", update)
         self.assertIn("renderPipeline.set_time_of_day(selected.time_of_day);",
                       block(update, "if (selected.time_active)"))
-        self.assertIn("renderPipeline.set_weather(selected.weather, selected.intensity);",
+        self.assertIn("app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);",
                       block(update, "if (selected.weather_active)"))
+
+    def test_weather_snapshot_survives_photo_selection_reset(self):
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoWeatherOverride photoWeather;", context)
+        update = block(read(CLIENT / "app/DebugOverlays.cpp"), "void UpdatePhotoEnvironment(")
+        self.assertIn("photo = {};", update)
+        self.assertNotIn("photoWeather =", update)
 
     def test_all_capture_modes_disable_photo_overrides(self):
         main = compact(read(CLIENT / "main_client.cpp"))
