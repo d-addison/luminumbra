@@ -1670,6 +1670,12 @@ target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminum
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 
+# Keep the allocation-refusal oracle isolated from the other test executables.
+add_executable(session_adoption_test persistence/session_adoption_test.cpp)
+target_include_directories(session_adoption_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(session_adoption_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(session_adoption_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+
 # Surface admission exercises both shipping launch parsers without a device.
 add_executable(runtime_surface_options_test
     client/runtime_surface_options_test.cpp
@@ -2079,6 +2085,7 @@ add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    session_adoption_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test

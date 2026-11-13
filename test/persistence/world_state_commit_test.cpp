@@ -474,5 +474,24 @@ TEST_P(WorldStateCommit, RefusedLoadsClearResidentChunksWithoutPublishingStagedM
     }
 }
 
+TEST_P(WorldStateCommit, ShippingPreparedStateRefusesCandidateAdoptionWithoutConsumingIt) {
+    GameSession session;
+    Configure(session);
+    ASSERT_TRUE(session.CreateWorld("Prepared shipping state", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorld());
+    const auto revision = session.WorldRevision();
+    const auto ledger = session.GetActiveRegionLedger().encode();
+    const auto fields = session.GetFieldPages().canonical_bytes();
+    const auto prepared = GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(),
+                                                         session.GetWorldSaveDir());
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    EXPECT_FALSE(session.AdoptPreparedSimulationState(prepared));
+    EXPECT_EQ(session.WorldRevision(), revision);
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+    EXPECT_EQ(session.GetFieldPages().canonical_bytes(), fields);
+    ASSERT_TRUE(session.AdoptPreparedWorld(prepared));
+    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+}
+
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, WorldStateCommit, testing::Bool());
 } // namespace
