@@ -139,7 +139,24 @@ private:
             }
         }
         glActiveTexture(static_cast<GLenum>(active));
-        return bound;
+        return bound || image_bound();
+    }
+    // Deleting a texture also clears image-unit bindings, so those count as bound.
+    bool image_bound() const {
+        GLint images = 0;
+        glGetIntegerv(GL_MAX_IMAGE_UNITS, &images);
+        // Resize-only scan, bounded to 256 image units; refuse larger contexts.
+        if (images < 0 || images > 256) {
+            return true;
+        }
+        for (GLint unit = 0; unit < images; ++unit) {
+            GLint name = 0;
+            glGetIntegeri_v(GL_IMAGE_BINDING_NAME, static_cast<GLuint>(unit), &name);
+            if (static_cast<GLuint>(name) == texture_) {
+                return true;
+            }
+        }
+        return false;
     }
     struct BindingGuard {
         GLint texture = 0;
