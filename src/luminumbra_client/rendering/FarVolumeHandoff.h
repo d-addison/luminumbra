@@ -66,7 +66,7 @@ using FarHandoffObservationVisitor = void (*)(void*,
 // Owner-thread companion; the fixture residency controller is independent.
 // One queue/result allowance and memory domain per tier serves both generations.
 // entry_slots bounds the serving/target union, every manifest and key history.
-// Idle history survives range removal until space is needed for another key;
+// Idle history survives range removal until explicit retirement or slot reuse;
 // descriptor reuse starts a new residency for that safely retired key. Global
 // epoch/publication/generation checks survive every descriptor reuse.
 // Capture inputs in this domain: use shared pool aliases whose owner outlives
@@ -115,6 +115,13 @@ public:
                                       const FarVolumeFrameLimits&,
                                       const FarVolumeUploadBackend&);
     bool TryPromote();
+    // Retire every key absent from both serving and target, including its retained
+    // identity/span constraints. Owner-thread only; no allocation, waits or GPU
+    // changes. One pass over at most sum(entry_slots) indexed descriptors.
+    // After this call a complete observation visit contains every retained key:
+    // the consumer may erase its history for absent keys before staging again.
+    // Returning keys start fresh; global epoch/publication/generation checks stay.
+    std::size_t RetireIdleHistory();
     std::optional<FarHandoffTileObservation> Observe(const World::FarTileKey&) const;
     bool CoarseMayYield(const World::FarTileKey&, FarHandoffCoverageView) const;
     std::size_t VisitServingDraws(FarVolumeDrawVisitor, void*);

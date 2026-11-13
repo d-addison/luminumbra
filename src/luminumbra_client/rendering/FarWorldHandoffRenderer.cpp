@@ -147,6 +147,10 @@ bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
     CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
     return true;
 }
+std::size_t FarWorldHandoffRenderer::RetireIdleHistory() {
+    Guard const guard(*this);
+    return handoff_ ? handoff_->RetireIdleHistory() : 0;
+}
 bool FarWorldHandoffRenderer::StageSessionTarget(
     const World::FarWorldAuthorityProducer& producer,
     const Systems::SHIELD_WorldSystem& world,
@@ -165,8 +169,11 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
         return false;
     }
     const auto status = producer.capture_status();
+    // A completed serial may make progress under continuous publication, but
+    // restaging an older target must never qualify a pending source request.
     if (status.error == World::FarWorldAuthorityProducer::Error::None &&
-        (status.active || status.queued || status.paused)) {
+        (status.paused ||
+         (!status.latest_ready && status.serving_serial <= handoff_->State().target_serial))) {
         admission_refusal_ = FarWorldRefusal::AdmissionFailed;
         return false;
     }
