@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 #include <entt/entt.hpp>
 
@@ -258,6 +259,37 @@ TEST(SoilNutrient, AbsorbedAccrues) {
         prev = a;
     }
     EXPECT_GT(prev, 0u);
+}
+
+TEST(SoilNutrient, CandidateRefusesBrokenIdentityBeforeConsumptionOrRegeneration) {
+    // Missing, zero, exhausted, out-of-range and duplicate identities all refuse.
+    for (const auto id :
+         {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{1} << 63, ~std::uint64_t{0}}) {
+        entt::registry registry;
+        SoilGrid soil(1, 1, 100);
+        const auto first = spawnPlant(registry, 0.0f, 0.0f);
+        const auto second = spawnPlant(registry, 0.0f, 0.0f);
+        registry.emplace<Comp::SimulationIdentityComponent>(first, std::uint64_t{1});
+        EXPECT_THROW(RunSoilNutrientOnTick<true>(registry, soil, 0.0f, 0.0f, 1.0f),
+                     std::logic_error);
+        registry.emplace<Comp::SimulationIdentityComponent>(second, id);
+        EXPECT_THROW(RunSoilNutrientOnTick<true>(registry, soil, 0.0f, 0.0f, 1.0f),
+                     std::logic_error);
+        EXPECT_EQ(soil.AtCell(0, 0), 100);
+        EXPECT_EQ(registry.get<Comp::SoilFeederComponent>(first).absorbed, 0u);
+        EXPECT_EQ(registry.get<Comp::SoilFeederComponent>(second).absorbed, 0u);
+    }
+}
+
+TEST(SoilNutrient, CandidateEmptyAndDegenerateGridsKeepLegacySemantics) {
+    entt::registry registry;
+    SoilGrid soil(1, 1, 100);
+    EXPECT_EQ(RunSoilNutrientOnTick<true>(registry, soil, 0.0f, 0.0f, 0.0f).regenerated, 0);
+    EXPECT_EQ(soil.AtCell(0, 0), 100);
+    const auto stats = RunSoilNutrientOnTick<true>(registry, soil, 0.0f, 0.0f, 1.0f);
+    EXPECT_EQ(stats.participants, 0);
+    EXPECT_EQ(stats.ordering_visits, 0u);
+    EXPECT_EQ(soil.AtCell(0, 0), 100 + kSoilRegenPerTick);
 }
 
 } // namespace
