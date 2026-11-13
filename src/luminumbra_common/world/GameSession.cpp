@@ -588,6 +588,7 @@ struct GameSession::FoliageStep {
                 step.pending.insert(key);
             }
         }
+        std::set<RegionKey> history_owners;
         // Persisted initialized cells are the participation record, including
         // sparse pages whose admitting plant or source has since disappeared.
         for (const bool soil : {true, false}) {
@@ -601,19 +602,43 @@ struct GameSession::FoliageStep {
                 }
                 const auto& record = found->second;
                 step.field_owners.insert(owner);
-                const auto prior = luminumbra::foliage::FoliagePriorTick(record);
-                if (record.state != RegionState::Frozen && prior <= session.m_worldClock.tick() &&
-                    session.m_worldClock.tick() - prior >
-                        luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
-                    step.blocked = true;
-                    step.deferred.insert(owner);
-                }
+                history_owners.insert(owner);
                 if (record.frozen_at != 0 && record.state != RegionState::Frozen) {
                     step.pending.insert(owner);
                 }
                 if (!soil && record.state != RegionState::Frozen) {
                     step.border_owners[record.cadence_shift].insert(owner);
                 }
+            }
+        }
+        // Bootstrap only: participants without field pages still own history.
+        // Match selection's explicit-owner precedence and incomplete opt-ins.
+        bool unowned = false;
+        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
+            for (const auto entity : session.m_registry.view<const T>()) {
+                const auto* owner =
+                    session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
+                const auto* transform =
+                    session.m_registry.try_get<const Components::TransformComponent>(entity);
+                if (owner) {
+                    history_owners.insert({owner->owner_x, owner->owner_z});
+                } else if (transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                    history_owners.insert(ActiveRegionLedger::region_at(transform->position));
+                } else if (!transform) {
+                    unowned = true;
+                }
+            }
+        });
+        // Both passes are bounded by the participant roster and kMaxRegions;
+        // they run once on initialization/adoption, never on each tick.
+        for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
+            const auto prior = luminumbra::foliage::FoliagePriorTick(record);
+            if ((unowned || history_owners.contains(key)) && record.state != RegionState::Frozen &&
+                prior <= session.m_worldClock.tick() &&
+                session.m_worldClock.tick() - prior >=
+                    luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
+                step.blocked = true;
+                step.deferred.insert(key);
             }
         }
         auto& farming = session.m_registry.ctx().emplace<luminumbra::foliage::FarmingReplayGate>();
@@ -706,30 +731,7 @@ struct GameSession::FoliageStep {
             step.last_ticks.try_emplace(key, luminumbra::foliage::FoliagePriorTick(found->second));
             step.committed_ticks.try_emplace(key, found->second.last_ticked);
         }
-        // At most kMaxRegions admitted owners; dormant index entries are not traversed.
-        std::vector<RegionKey> owners;
-        for (const auto& [key, elapsed] : step.windows.elapsed) {
-            const auto indexed = step.border_owners.find(ledger.records().at(key).cadence_shift);
-            if (elapsed != 0 && indexed != step.border_owners.end() &&
-                indexed->second.contains(key)) {
-                owners.push_back(key);
-            }
-        }
-        step.borders = luminumbra::foliage::SelectFoliageBorderEdges(
-            luminumbra::foliage::FoliageBorderEdges(
-                session.m_fieldPages, ledger.records(), owners, true),
-            ledger.records(),
-            clock.tick());
-        std::erase_if(step.borders, [&](const auto& edge) {
-            for (const auto endpoint : {edge.first, edge.second}) {
-                const auto window =
-                    step.windows.elapsed.find(FieldPageState::region_of_scent_cell(endpoint));
-                if (window == step.windows.elapsed.end() || window->second == 0) {
-                    return true;
-                }
-            }
-            return false;
-        });
+        DiscoverBorders(session.m_fieldPages, ledger.records());
         step.pages = {};
         std::set<RegionKey> staged;
         for (const auto& [key, elapsed] : step.windows.elapsed) {
@@ -954,7 +956,8 @@ struct GameSession::FoliageStep {
         }
         step.RestoreUnpublishedTicks(session);
         step.AdvanceReplay();
-        const auto live_owners = step.AdmitLiveSources(session);
+        auto live_owners = step.AdmitLiveSources(session);
+        step.AdmitHistoricalBorders(session, live_owners);
         step.border_fluxes =
             luminumbra::foliage::FoliageBorderFluxes(step.pages.irrigation(), step.borders);
         for (const auto& [key, work] :
@@ -986,6 +989,70 @@ struct GameSession::FoliageStep {
         step.active = true;
         return &step;
     }
+    void DiscoverBorders(const FieldPageState& source,
+                         const std::map<RegionKey, ActiveRegionRecord>& records) {
+        // At most kMaxRegions admitted owners; dormant index entries are not traversed.
+        std::vector<RegionKey> owners;
+        for (const auto& [key, elapsed] : windows.elapsed) {
+            const auto indexed = border_owners.find(records.at(key).cadence_shift);
+            if (elapsed != 0 && indexed != border_owners.end() && indexed->second.contains(key)) {
+                owners.push_back(key);
+            }
+        }
+        borders = luminumbra::foliage::SelectFoliageBorderEdges(
+            luminumbra::foliage::FoliageBorderEdges(source, records, owners, true),
+            records,
+            target_tick);
+        std::erase_if(borders, [&](const auto& edge) {
+            for (const auto endpoint : {edge.first, edge.second}) {
+                const auto window =
+                    windows.elapsed.find(FieldPageState::region_of_scent_cell(endpoint));
+                if (window == windows.elapsed.end() || window->second == 0) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+    bool AdmitLivePage(ScentCellKey cell, bool soil) {
+        const auto floor16 = [](int value) {
+            return value >= 0 ? value / 16 : (value - 15) / 16;
+        };
+        const auto& channel = soil ? pages.soil() : pages.irrigation();
+        const auto page = channel.pages().find({floor16(cell.x), floor16(cell.z)});
+        const bool complete =
+            page != channel.pages().end() &&
+            std::all_of(page->second.mask.begin(), page->second.mask.end(), [](auto mask) {
+                return mask == std::numeric_limits<std::uint64_t>::max();
+            });
+        if (!complete && !luminumbra::foliage::ActivateFoliagePage(pages, cell, soil)) {
+            throw std::runtime_error("Live foliage page admission refused");
+        }
+        return !complete;
+    }
+    void AdmitHistoricalBorders(const GameSession& session, std::vector<RegionKey>& live_owners) {
+        // History can wet an initially dry boundary. Discover from the completed
+        // candidate, then admit privately before flux or live topology preparation.
+        DiscoverBorders(pages, session.m_activeRegionLedger.records());
+        // At most two endpoints per discovered edge (2048 per due owner).
+        // Complete pages are probed once per endpoint and never re-expanded.
+        for (const auto& [cell, next] : borders) {
+            for (const auto endpoint : {cell, next}) {
+                const auto owner = FieldPageState::region_of_scent_cell(endpoint);
+                if (AdmitLivePage(endpoint, false)) {
+                    live_owners.push_back(owner);
+                }
+                field_owners.insert(owner);
+                border_owners[session.m_activeRegionLedger.records().at(owner).cadence_shift]
+                    .insert(owner);
+            }
+        }
+        if (!session.m_fieldPages.can_adopt_foliage(pages)) {
+            throw std::runtime_error("Foliage page capacity reached");
+        }
+        std::sort(live_owners.begin(), live_owners.end());
+        live_owners.erase(std::unique(live_owners.begin(), live_owners.end()), live_owners.end());
+    }
     std::vector<RegionKey> AdmitLiveSources(const GameSession& session) {
         std::set<RegionKey> owners;
         if (!has_registry_work) {
@@ -1007,20 +1074,7 @@ struct GameSession::FoliageStep {
             if (identity && RegionKey{identity->owner_x, identity->owner_z} != owner) {
                 return;
             }
-            const auto floor16 = [](int value) {
-                return value >= 0 ? value / 16 : (value - 15) / 16;
-            };
-            const auto& channel = soil ? pages.soil() : pages.irrigation();
-            const auto page = channel.pages().find({floor16(cell.x), floor16(cell.z)});
-            const bool complete =
-                page != channel.pages().end() &&
-                std::all_of(page->second.mask.begin(), page->second.mask.end(), [](auto mask) {
-                    return mask == std::numeric_limits<std::uint64_t>::max();
-                });
-            if (!complete) {
-                if (!luminumbra::foliage::ActivateFoliagePage(pages, cell, soil)) {
-                    throw std::runtime_error("Live foliage page admission refused");
-                }
+            if (AdmitLivePage(cell, soil)) {
                 owners.insert(owner);
             }
             field_owners.insert(owner);

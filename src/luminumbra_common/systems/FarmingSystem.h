@@ -30,6 +30,8 @@ inline bool FarmingActionsAllowed(const entt::registry& registry) {
     return !gate || !gate->blocked;
 }
 
+// Creation helpers refuse with entt::null on a blocked live registry before
+// consuming RNG or changing entities. Replay candidates have no live gate.
 // Plant a seed: spawn a PlantTag plant at the Seed stage with the given genome.
 // The growth system (once ticking) advances it from here.
 inline entt::entity PlantSeed(entt::registry& reg,
@@ -37,6 +39,8 @@ inline entt::entity PlantSeed(entt::registry& reg,
                               const Comp::PlantGenomeComponent& genome,
                               std::uint16_t species_id,
                               std::uint64_t tick) {
+    if (!FarmingActionsAllowed(reg))
+        return entt::null;
     const auto e = reg.create();
     auto& tf = reg.emplace<Comp::TransformComponent>(e);
     tf.position = pos;
@@ -61,6 +65,8 @@ inline entt::entity MakePlantFromSpecies(entt::registry& reg,
                                          const SpeciesTemplate& tmpl,
                                          luminumbra::core::DeterministicRng& rng,
                                          std::uint64_t tick) {
+    if (!FarmingActionsAllowed(reg))
+        return entt::null;
     const std::uint16_t sid = SpeciesId16(tmpl.id);
     const Comp::PlantGenomeComponent genome = SpeciesRegistry::SampleGenome(tmpl, rng);
     const entt::entity e = PlantSeed(reg, pos, genome, sid, tick);
