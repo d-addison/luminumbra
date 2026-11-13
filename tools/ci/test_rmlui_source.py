@@ -4326,7 +4326,8 @@ class SourceFixtureRunner(unittest.TextTestRunner):
 
 def run_tests():
     try:
-        unittest.main(testRunner=SourceFixtureRunner)
+        # The running script (sys.modules["__main__"]) owns the suite, also when imported by a sibling recipe test.
+        unittest.main(module="__main__", testRunner=SourceFixtureRunner)
     except FixtureUnavailable as error:
         print(f"UNAVAILABLE: RmlUiFixture: {error}", file=sys.stderr)
         raise SystemExit(2) from error
