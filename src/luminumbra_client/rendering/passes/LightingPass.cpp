@@ -515,14 +515,19 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     m_lightning_overlay_shader->setInt("u_active", 1);
     m_lightning_overlay_shader->setFloat("u_pulse", lit.pulse_intensity);
     m_lightning_overlay_shader->setVec3("u_color", lit.pulse_color);
-    m_lightning_overlay_shader->setVec2("u_strikeNdc", lit.strike_ndc);
+    const std::size_t flash_count = std::min(lit.flashes.count, kMaxLiveStrikeFlashes);
+    m_lightning_overlay_shader->setInt("u_flashCount", static_cast<int>(flash_count));
+    for (std::size_t i = 0; i < flash_count; ++i) {
+        const auto& flash = lit.flashes.entries[i];
+        const std::string suffix = "[" + std::to_string(i) + "]";
+        m_lightning_overlay_shader->setVec2("u_flashNdc" + suffix, flash.strike_ndc);
+        m_lightning_overlay_shader->setFloat("u_flashPulse" + suffix, flash.pulse);
+        m_lightning_overlay_shader->setInt("u_flashOnscreen" + suffix, flash.onscreen ? 1 : 0);
+    }
     m_lightning_overlay_shader->setFloat("u_boltWidth", lit.bolt_width_ndc);
     m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
     m_lightning_overlay_shader->setVec2("u_groundNdc", lit.ground_ndc);
     m_lightning_overlay_shader->setFloat("u_groundFlash", lit.ground_flash);
-    //  dark storm-cloud mass the bolt emerges from.
-    m_lightning_overlay_shader->setVec2("u_cloudNdc", lit.cloud_anchor_ndc);
-    m_lightning_overlay_shader->setFloat("u_cloudDark", lit.cloud_darkness);
     m_lightning_overlay_shader->setFloat(
         "u_aspect", static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
     const int point_count =
