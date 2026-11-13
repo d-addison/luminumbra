@@ -1,5 +1,7 @@
 #include "ParticlePass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/AttributedGl.h"
@@ -18,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <optional>
 
 namespace Luminumbra::Rendering {
 
@@ -741,7 +744,28 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
         glDisable(GL_CULL_FACE);
     }
 
-    m_shader->use();
+    Shader* draw_shader = m_shader.get();
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        GLint color_texture = 0;
+        GLint attachment_type = 0;
+        glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                   GL_COLOR_ATTACHMENT0,
+                                                   GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                   &attachment_type);
+        if (attachment_type == GL_TEXTURE) {
+            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                       GL_COLOR_ATTACHMENT0,
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                       &color_texture);
+        }
+        diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                      static_cast<GLuint>(color_texture),
+                                      DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+        draw_shader = capture->variant(draw_shader, false);
+    }
+
+    draw_shader->use();
     const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
                                                       static_cast<float>(ctx.screen_width) /
                                                           static_cast<float>(ctx.screen_height),
@@ -756,48 +780,60 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     m_view_up = camera.Up;
     m_view_forward = camera.Front;
     m_have_view_basis = true;
-    m_shader->setMat4("u_view", view);
-    m_shader->setMat4("u_projection", projection);
-    m_shader->setVec3("u_cameraRight", camera.Right);
-    m_shader->setVec3("u_cameraUp", camera.Up);
-    m_shader->setVec3("u_cameraPos", camera.Position);
+    draw_shader->setMat4("u_view", view);
+    draw_shader->setMat4("u_projection", projection);
+    draw_shader->setVec3("u_cameraRight", camera.Right);
+    draw_shader->setVec3("u_cameraUp", camera.Up);
+    draw_shader->setVec3("u_cameraPos", camera.Position);
     // the per-frame wall-clock SNAPSHOT (Group K ctx.time_seconds), not a
     // live glfwGetTime read — dispatch must be bit-idempotent per prepared frame.
-    m_shader->setFloat("u_time", ctx.time_seconds);
-    m_shader->setVec2("u_screenSize",
-                      glm::vec2(static_cast<float>(ctx.internal_w()),
-                                static_cast<float>(ctx.internal_h()))); // internal scene extent
-    m_shader->setFloat("u_nearPlane", camera.GetNearPlane());
-    m_shader->setFloat("u_farPlane", camera.GetFarPlane());
+    draw_shader->setFloat("u_time", ctx.time_seconds);
+    draw_shader->setVec2("u_screenSize",
+                         glm::vec2(static_cast<float>(ctx.internal_w()),
+                                   static_cast<float>(ctx.internal_h()))); // internal scene extent
+    draw_shader->setFloat("u_nearPlane", camera.GetNearPlane());
+    draw_shader->setFloat("u_farPlane", camera.GetFarPlane());
 
     // Forward lighting: sun + ambient + the nearest few point lights.
-    m_shader->setVec3("u_sunDirection", ctx.sun.direction);
-    m_shader->setVec3("u_sunColor", ctx.sun.color);
-    m_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
-    m_shader->setVec3("u_ambientColor", ctx.sky_ambient_color);
+    draw_shader->setVec3("u_sunDirection", ctx.sun.direction);
+    draw_shader->setVec3("u_sunColor", ctx.sun.color);
+    draw_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
+    draw_shader->setVec3("u_ambientColor", ctx.sky_ambient_color);
 
     const int max_lights = 4;
     int light_count = std::min(static_cast<int>(ctx.point_lights->size()), max_lights);
-    m_shader->setInt("u_pointLightCount", light_count);
+    draw_shader->setInt("u_pointLightCount", light_count);
     for (int i = 0; i < light_count; ++i) {
         const PointLight& l = (*ctx.point_lights)[static_cast<std::size_t>(i)];
         const std::string base = "u_pointLights[" + std::to_string(i) + "].";
-        m_shader->setVec3(base + "position", l.position);
-        m_shader->setVec3(base + "color", l.color);
-        m_shader->setFloat(base + "radius", l.radius);
-        m_shader->setFloat(base + "intensity", l.intensity);
+        draw_shader->setVec3(base + "position", l.position);
+        draw_shader->setVec3(base + "color", l.color);
+        draw_shader->setFloat(base + "radius", l.radius);
+        draw_shader->setFloat(base + "intensity", l.intensity);
     }
 
     // Soft-particle depth read from the G-buffer depth attachment.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
-    m_shader->setInt("u_sceneDepth", 0);
+    draw_shader->setInt("u_sceneDepth", 0);
 
     // Point the VAO's binding 0 at this frame's ring slot, then instanced-draw
     // 4 verts (a quad) per particle.
     glBindVertexArray(m_vao);
     PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        // All emitter kinds share this original batch, not separate emitter draws.
+        // The generated quad has four vertices; instance data remains in the live ring.
+        capture->write_current({.mesh_path = {},
+                                .shader_variant = "magical_particles",
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::Forward,
+                                .provenance = DiagnosticProvenance::Mesh,
+                                .generated_mesh = "particles/instanced-billboards"});
+    }
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
                                                 GL_TRIANGLE_STRIP,
                                                 0,

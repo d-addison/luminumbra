@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import ast
+import hashlib
 import json
 import re
 import unittest
@@ -2264,6 +2265,105 @@ class WorldVisualSweepWiring(unittest.TestCase):
                                       (2**31-1, 2**31-1, 2**64-1, False),
                                       (2**31-1, 2**31-1, 2**63-1, True)):
                 self.assertEqual(cpp_expression(guard, **{width: w, height: h, size: n}), refused)
+
+
+class ParticleContributorTests(unittest.TestCase):
+    def test_original_particle_batch_uses_the_shared_forward_transaction(self):
+        source = read(CLIENT / "rendering/passes/ParticlePass.cpp")
+        draw = block(source, "std::size_t ParticlePass::execute(")
+        setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
+        for required in ("GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE", "if (attachment_type == GL_TEXTURE)",
+                         "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME", "diagnostic_attachment.emplace(",
+                         "DiagnosticExtent{ctx.internal_w(), ctx.internal_h()}",
+                         "draw_shader = capture->variant(draw_shader, false)"):
+            self.assertIn(required, setup)
+        for required in ('.shader_variant = "magical_particles"', '.chunk = {}', '.lod = 0',
+                         '.ownership = DiagnosticOwnership::Live', '.pass = DiagnosticPass::Forward',
+                         '.provenance = DiagnosticProvenance::Mesh',
+                         '.generated_mesh = "particles/instanced-billboards"'):
+            self.assertIn(required, draw)
+        self.assertLess(draw.index("if (!ctx.lit_scene.id)"), draw.index("diagnostic_attachment.emplace("))
+        self.assertLess(draw.index("m_frame_instance_count == 0"), draw.index("diagnostic_attachment.emplace("))
+        self.assertLess(draw.index("diagnostic_attachment.emplace("), draw.index("draw_shader->use()"))
+        self.assertLess(draw.index("capture->write_current("), draw.index("AttributedGl::Submit("))
+        self.assertEqual(draw.count("capture->write_current("), 1)
+        self.assertEqual(draw.count("AttributedGl::Submit("), 1)
+        self.assertIn("glDrawArraysInstanced,GL_TRIANGLE_STRIP,0,4,static_cast<GLsizei>(m_frame_instance_count)",
+                      re.sub(r"\s+", "", draw))
+        # Both refusal paths keep the original identity but block publication.
+        shared = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+        current = block(shared, "void GBufferDiagnosticCapture::write_current(")
+        self.assertIn("record_contributor();", block(current, "if (!state_->framebuffer)"))
+        self.assertIn('constexpr std::string_view suffix = ":contributor_only";', current)
+        self.assertIn("abort();", block(current, "const auto record_contributor ="))
+        self.assertIn("record_contributor();", current[current.index("for (const auto& entry"):])
+        self.assertIn("abort();", block(shared, "if (!state_->forward_targets)"))
+        self.assertIn('unsupported("diagnostic_shader_variant_limit"', shared)
+        self.assertIn('unsupported("diagnostic_shader_variant_unavailable"', shared)
+        # All live particle kinds populate the same packed instance ring.
+        for producer in ("set_precipitation(", "spawn_splash_burst(", "add_waterfall_spray(",
+                         "update_ambient_motes(", "spawn_from_emitter("):
+            self.assertIn(producer, source)
+        self.assertIn("m_instance_vbo[m_ring_cursor]", draw)
+
+    def test_capture_off_bytes_and_fragment_rejection_are_preserved(self):
+        shader = read(ROOT / "res/shaders/magical_particles.frag")
+        self.assertIn("layout (location = 6) out uvec4 gDiagnosticIds;", shader)
+        self.assertEqual(shader.count("gDiagnosticIds = u_diagnosticIds;"), 1)
+        self.assertEqual(shader.count("discard;"), 2)
+        self.assertLess(shader.rindex("discard;"), shader.index("gDiagnosticIds ="))
+        self.assertLess(shader.index("FragColor = finalColor;"), shader.index("gDiagnosticIds ="))
+        for predicate, cases in (("shape <= 0.0", ((-1, True), (0, True), (0.5, False))),
+                                  ("finalColor.a < 0.01", ((0, True), (0.009, True),
+                                                          (0.01, False), (1, False)))):
+            self.assertIn("discard;", block(shader, f"if ({predicate})"))
+            name = predicate.split()[0]
+            for value, expected in cases:
+                self.assertEqual(cpp_expression(predicate, **{name: value}), expected)
+        # Strip only diagnostic blocks, retaining the original color declaration.
+        directive = "#ifdef LUMIN_DIAG_IDS\n"
+        self.assertEqual(shader.count(directive), 3)
+        while directive in shader:
+            start = shader.index(directive)
+            end = shader.index("#endif\n", start) + len("#endif\n")
+            if "layout (location = 0)\n" not in shader[start:end] and shader[start-2:start] == "\n\n":
+                start -= 1
+            shader = shader[:start] + shader[end:]
+        self.assertEqual(hashlib.sha256(shader.encode()).hexdigest(),
+                         "7150718d70c8bab5dec184cc484a84c09873d76ea0457df9e5f61c5f6f8f5fc3")
+        draw = block(read(CLIENT / "rendering/passes/ParticlePass.cpp"),
+                     "std::size_t ParticlePass::execute(")
+        branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
+        setup = draw.index("Shader* draw_shader = m_shader.get();")
+        contents = block(draw, branch)
+        end = draw.index(contents) + len(contents) + 1
+        draw = draw[:setup] + draw[end:]
+        start = draw.index(branch)
+        contents = block(draw, branch)
+        end = draw.index(contents, start) + len(contents) + 1
+        draw = draw[:start] + draw[end:]
+        draw = draw.replace("draw_shader->", "m_shader->")
+        original = "{" + re.sub(r"\s+", "", draw) + "}"
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         "bbbbb1094633b1c5f147d8bd5287e4522802ad4719a306297a83f178d0219b96")
+
+    def test_weather_overlay_refuses_instead_of_guessing_a_particle_identity(self):
+        draw = block(read(CLIENT / "rendering/passes/SkyboxPass.cpp"),
+                     "const glm::mat4& projection)")
+        branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
+        refusal = block(draw, branch)
+        self.assertIn('capture->unsupported("weather_overlay_contributor_uninstrumented", '
+                      '0, DiagnosticOwnership::Live, DiagnosticPass::Forward);', compact(refusal))
+        self.assertLess(draw.index("if (!m_weather_shader"), draw.index(branch))
+        self.assertLess(draw.index("if (!ctx.lit_scene.id"), draw.index(branch))
+        self.assertLess(draw.index(branch), draw.index("AttributedGl::Submit("))
+        self.assertNotIn("capture->write", draw)
+        self.assertEqual(draw.count("AttributedGl::Submit("), 1)
+        start = draw.index(branch)
+        end = draw.index(refusal, start) + len(refusal) + 1
+        original = "{" + re.sub(r"\s+", "", draw[:start] + draw[end:]) + "}"
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         "0c395afb6d2eb7d521b10a2f6600e57b6ba2b3c0a7003a35d5b4ecc8de84033e")
 
 
 if __name__ == "__main__":

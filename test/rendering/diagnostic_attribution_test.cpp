@@ -977,3 +977,52 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
               0x1d7f36c59bf22b7bull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x031258f2195ef329ull);
 }
+
+TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalDraw) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/passes/ParticlePass.cpp"),
+                           "std::size_t ParticlePass::execute(");
+    const auto shader = Read("res/shaders/magical_particles.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(draw, "m_frame_instance_count == 0 || m_vao == 0");
+    Contains(draw, "if (!ctx.lit_scene.id)");
+    EXPECT_LT(draw.find("if (!ctx.lit_scene.id)"), draw.find("diagnostic_attachment.emplace("));
+    Contains(draw, "glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE");
+    Contains(draw, "if (attachment_type == GL_TEXTURE)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(draw, ".shader_variant = \"magical_particles\"");
+    Contains(draw, ".generated_mesh = \"particles/instanced-billboards\"");
+    Contains(draw,
+             "glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord))");
+    Contains(WithoutWhitespace(draw),
+             "AttributedGl::Submit(glDrawArraysInstanced,GL_TRIANGLE_STRIP,0,4,"
+             "static_cast<GLsizei>(m_frame_instance_count))");
+    EXPECT_EQ(Count(draw, "glDrawArraysInstanced,"), 1u);
+    Contains(shader, "if (shape <= 0.0)");
+    Contains(shader, "if (finalColor.a < 0.01)");
+    EXPECT_EQ(Count(shader, "discard;"), 2u);
+    EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
+    EXPECT_LT(shader.find("FragColor = finalColor;"), shader.find("gDiagnosticIds ="));
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
+              0xd510044fe0ddbaf3ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xbb0d97018dfba3d4ull);
+}
+
+TEST(DiagnosticAttribution, WeatherOverlayRefusesCoverageOnlyWhenItsOriginalDrawIsSubmitted) {
+    auto draw = Body(Read("src/luminumbra_client/rendering/passes/SkyboxPass.cpp"),
+                     "const glm::mat4& projection)");
+    constexpr std::string_view branch = "if (auto* capture = GBufferDiagnosticCapture::Current())";
+    const auto refusal = Body(draw, branch);
+    Contains(WithoutWhitespace(refusal),
+             "capture->unsupported(\"weather_overlay_contributor_uninstrumented\",0,"
+             "DiagnosticOwnership::Live,DiagnosticPass::Forward);");
+    EXPECT_LT(draw.find("if (!m_weather_shader"), draw.find(branch));
+    EXPECT_LT(draw.find("if (!ctx.lit_scene.id"), draw.find(branch));
+    EXPECT_LT(draw.find(branch), draw.find("AttributedGl::Submit"));
+    EXPECT_EQ(Count(draw, "glDrawArrays,"), 1u);
+    EXPECT_EQ(draw.find("capture->write"), std::string::npos);
+    ASSERT_FALSE(refusal.empty());
+    const auto start = draw.rfind('\n', draw.find(branch)) + 1;
+    draw.erase(start, draw.find(refusal) + refusal.size() - start);
+    EXPECT_EQ(SourceHash(WithoutWhitespace(draw)), 0x522af1534eb516d0ull);
+}
