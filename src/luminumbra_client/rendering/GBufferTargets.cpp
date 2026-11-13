@@ -23,8 +23,10 @@ void GBufferDiagnosticCapture::SetCurrent(GBufferDiagnosticCapture* capture) {
 }
 
 bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
-                                             const DiagnosticExtent& extent) {
-    if (state_->framebuffer != 0 || state_->captured) {
+                                             const DiagnosticExtent& extent,
+                                             bool forward) {
+    if (state_->framebuffer != 0 ||
+        (forward ? !state_->captured || state_->forward_captured : state_->captured)) {
         state_->failure = "nested_gbuffer_attachment";
         return false;
     }
@@ -74,11 +76,12 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
         state_->buffers[static_cast<std::size_t>(index)] = static_cast<GLenum>(buffer);
     }
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
-    if (!state_->targets.ensure(true, extent, 7)) {
+    auto& targets = forward ? *state_->forward_targets : state_->targets;
+    if (!targets.ensure(true, extent, 7)) {
         state_->failure = "diagnostic_integer_target_unsupported";
         return false;
     }
-    state_->attachment_lease = state_->targets.acquire_attachment_lease();
+    state_->attachment_lease = targets.acquire_attachment_lease();
     if (!state_->attachment_lease) {
         state_->failure = "diagnostic_attachment_lease_unavailable";
         return false;
@@ -99,7 +102,13 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
                                         gbuffer.authored_texture ? GLenum{GL_COLOR_ATTACHMENT5}
                                                                  : GLenum{GL_NONE},
                                         GL_COLOR_ATTACHMENT6};
-    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    if (forward) {
+        auto forward_buffers = state_->buffers;
+        forward_buffers[6] = GL_COLOR_ATTACHMENT6;
+        glDrawBuffers(state_->buffer_count, forward_buffers.data());
+    } else {
+        glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    }
     const bool complete = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     state_->framebuffer = gbuffer.fbo_id;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
@@ -108,8 +117,14 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
         state_->failure = "diagnostic_mrt_incomplete";
         return false;
     }
-    glClearTexImage(state_->targets.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
-    state_->captured = true;
+    glClearTexImage(
+        state_->attachment_lease.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+    state_->forward = forward;
+    if (forward) {
+        state_->forward_captured = true;
+    } else {
+        state_->captured = true;
+    }
     return true;
 }
 
