@@ -68,7 +68,7 @@ std::string Bytes(const std::filesystem::path& path) {
 // Region-scoped freshness must agree with the whole-world check whenever only the
 // captured region and its halo changed.
 bool CurrentInBothScopes(const Systems::SHIELD_WorldSystem& world,
-                         const FarLodSdfSnapshot& snapshot) {
+                         const Systems::FarLodSdfSnapshot& snapshot) {
     const bool whole_world = world.is_far_lod_sdf_snapshot_current(snapshot);
     EXPECT_EQ(whole_world, world.is_far_lod_sdf_snapshot_current(snapshot, true));
     return whole_world;
