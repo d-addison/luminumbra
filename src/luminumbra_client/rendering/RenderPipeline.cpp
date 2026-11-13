@@ -19,6 +19,7 @@
 #include "SunLightModel.h"  //  rendering: SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "UploadBudget.h"
+#include "WeatherOverlayModel.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -1427,8 +1428,8 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     }
     for (const GLuint texture : {m_treeImpostorAlbedo, m_treeImpostorNormal}) {
         if (texture)
-            stats.tree_impostor_texture_bytes +=
-                static_cast<size_t>(m_treeImpostorAtlasSize) * m_treeImpostorAtlasSize * 4u;
+            stats.tree_impostor_texture_bytes += static_cast<size_t>(m_treeImpostorAtlasSize) *
+                                                 static_cast<size_t>(m_treeImpostorAtlasSize) * 4u;
     }
     estimated_vram_bytes += stats.static_model_texture_bytes + stats.tree_impostor_texture_bytes;
     if (m_materialLUT)
@@ -2127,8 +2128,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
         Luminumbra::Rendering::AttributedGl::Submit(
             glMultiDrawElementsIndirect,
-            GL_TRIANGLES,
-            GL_UNSIGNED_INT,
+            GLenum{GL_TRIANGLES},
+            GLenum{GL_UNSIGNED_INT},
             reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
             static_cast<GLsizei>(count),
             static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
@@ -2522,7 +2523,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
 FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
     FarReplayCamera result;
     const auto view = camera.GetViewMatrix();
-    const auto projection = camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+    const auto projection = camera.GetProjectionMatrix(static_cast<int>(m_screen_width),
+                                                       static_cast<int>(m_screen_height));
     std::copy_n(glm::value_ptr(view), 16, result.view.begin());
     std::copy_n(glm::value_ptr(projection), 16, result.projection.begin());
     result.zoom = camera.Zoom;
@@ -2968,7 +2970,10 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
     }
     end_gpu_pass_timer(GpuTimerPass::Shadow);
     m_cpu_frame_shadow = std::chrono::steady_clock::now(); //
-    glViewport(0, 0, m_internal_width, m_internal_height); // scene renders at internal res
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(m_internal_width),
+               static_cast<GLsizei>(m_internal_height)); // scene renders at internal res
 }
 
 void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
@@ -2993,7 +2998,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             const glm::mat4 projection =
                 gbuffer_ctx.far_world_ladder
                     ? gbuffer_ctx.gbuffer_projection
-                    : camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+                    : camera.GetProjectionMatrix(static_cast<int>(m_screen_width),
+                                                 static_cast<int>(m_screen_height));
             for (size_t i = 0; i < 16; ++i) {
                 description.view[i] = glm::value_ptr(view)[i];
                 description.projection[i] = glm::value_ptr(projection)[i];
@@ -3075,7 +3081,10 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
             GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
         PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer_pass->gbuffer().fbo_id);
         glDrawBuffers(4, pp_bufs);
-        glViewport(0, 0, m_internal_width, m_internal_height); // into internal G-buffer
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(m_internal_width),
+                   static_cast<GLsizei>(m_internal_height)); // into internal G-buffer
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_GREATER);
         glDepthMask(GL_TRUE);
@@ -3102,7 +3111,10 @@ void RenderPipeline::execute_stage_ground_decals(const Camera& camera) {
         const GLenum gd_bufs[1] = {GL_COLOR_ATTACHMENT2}; // albedo only
         PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer_pass->gbuffer().fbo_id);
         glDrawBuffers(1, gd_bufs);
-        glViewport(0, 0, m_internal_width, m_internal_height); // into internal G-buffer
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(m_internal_width),
+                   static_cast<GLsizei>(m_internal_height)); // into internal G-buffer
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
@@ -3176,12 +3188,12 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).
     glBlitFramebuffer(0,
                       0,
-                      m_internal_width,
-                      m_internal_height,
+                      static_cast<GLint>(m_internal_width),
+                      static_cast<GLint>(m_internal_height),
                       0,
                       0,
-                      m_internal_width,
-                      m_internal_height,
+                      static_cast<GLint>(m_internal_width),
+                      static_cast<GLint>(m_internal_height),
                       GL_DEPTH_BUFFER_BIT,
                       GL_NEAREST);
 }
@@ -3218,7 +3230,10 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        glViewport(0, 0, m_internal_width, m_internal_height); // into internal lighting FBO
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(m_internal_width),
+                   static_cast<GLsizei>(m_internal_height)); // into internal lighting FBO
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         m_cloud_composite_shader->use();
@@ -3229,7 +3244,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         m_cloud_composite_shader->setInt("u_cloudColor", 0);
         m_cloud_composite_shader->setInt("u_sceneDepth", 1);
         glBindVertexArray(m_screen_quad_vao);
-        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
         glBindVertexArray(0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -3243,8 +3258,9 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
         glViewport(0,
                    0,
-                   m_internal_width,
-                   m_internal_height); // skybox must not inherit a stale (screen) viewport
+                   static_cast<GLsizei>(m_internal_width),
+                   static_cast<GLsizei>(
+                       m_internal_height)); // skybox must not inherit a stale (screen) viewport
         m_skybox_pass->execute(skybox_ctx, camera, false);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
@@ -4697,14 +4713,14 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id);
     if (needs_growth) {
         glBufferData(GL_ARRAY_BUFFER,
-                     payload.vertices.size() * sizeof(VoxelVertex),
+                     static_cast<GLsizeiptr>(checked_sizes.vertex_bytes),
                      payload.vertices.data(),
                      GL_STATIC_DRAW);
         data.vertex_capacity = vertex_count;
     } else {
         glBufferSubData(GL_ARRAY_BUFFER,
                         0,
-                        payload.vertices.size() * sizeof(VoxelVertex),
+                        static_cast<GLsizeiptr>(checked_sizes.vertex_bytes),
                         payload.vertices.data());
     }
 
@@ -4712,14 +4728,14 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ebo_id);
     if (needs_growth) {
         glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                     payload.indices.size() * sizeof(u32),
+                     static_cast<GLsizeiptr>(checked_sizes.index_bytes),
                      payload.indices.data(),
                      GL_STATIC_DRAW);
         data.index_capacity = index_count;
     } else {
         glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
                         0,
-                        payload.indices.size() * sizeof(u32),
+                        static_cast<GLsizeiptr>(checked_sizes.index_bytes),
                         payload.indices.data());
     }
 
@@ -5335,7 +5351,7 @@ bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& 
                             GL_RGBA,
                             GL_UNSIGNED_BYTE,
                             img.bytes.data() + offset);
-            offset += static_cast<size_t>(size) * size * 4;
+            offset += static_cast<size_t>(size) * static_cast<size_t>(size) * 4u;
             size = std::max(1, size / 2);
         }
     }
@@ -6016,23 +6032,9 @@ void RenderPipeline::set_weather_state(const WeatherRenderState& state) {
     m_weather_state.wetness = std::clamp(state.wetness, 0.0f, 1.0f);
     m_weather_state.wind_strength = std::clamp(state.wind_strength, 0.0f, 1.0f);
 
-    const float precip = std::max(m_weather_state.rain_intensity, m_weather_state.snow_intensity);
-    if (m_weather_state.storm_intensity > 0.05f && m_weather_state.rain_intensity > 0.05f) {
-        m_weather_type = WeatherType::Storm;
-        m_weather_intensity = std::max(precip, m_weather_state.storm_intensity);
-    } else if (m_weather_state.snow_intensity > 0.02f) {
-        m_weather_type = WeatherType::Snow;
-        m_weather_intensity = m_weather_state.snow_intensity;
-    } else if (m_weather_state.rain_intensity > 0.02f) {
-        m_weather_type = WeatherType::Rain;
-        m_weather_intensity = m_weather_state.rain_intensity;
-    } else if (m_weather_state.fog_density > 0.02f) {
-        m_weather_type = WeatherType::Fog;
-        m_weather_intensity = m_weather_state.fog_density;
-    } else {
-        m_weather_type = WeatherType::None;
-        m_weather_intensity = 0.0f;
-    }
+    const auto classification = ClassifyWeatherState(m_weather_state);
+    m_weather_type = classification.type;
+    m_weather_intensity = classification.intensity;
 }
 
 void RenderPipeline::set_cloud_state(const CloudRenderState& state) {

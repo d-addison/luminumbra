@@ -321,7 +321,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
 
         const auto weather =
             ResolveWeatherOverlayState(*ctx.weather_state, ctx.weather_type, ctx.weather_intensity);
-        const float storm_floor = glm::clamp(weather.storm_intensity, 0.0f, 1.0f);
+        const float storm_floor = glm::clamp(ResolveWeatherOvercast(weather), 0.0f, 1.0f);
         m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
     }
     glBindVertexArray(m_skybox_vao);
@@ -422,7 +422,7 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_rainIntensity", weather.rain_intensity);
     m_weather_shader->setFloat("u_snowIntensity", weather.snow_intensity);
     m_weather_shader->setFloat("u_fogDensity", weather.fog_density);
-    m_weather_shader->setFloat("u_stormIntensity", weather.storm_intensity);
+    m_weather_shader->setFloat("u_stormIntensity", ResolveWeatherOvercast(weather));
     m_weather_shader->setFloat("u_wetness", weather.wetness);
     m_weather_shader->setVec3("u_windDirection", weather.wind_direction);
     m_weather_shader->setFloat("u_windStrength", weather.wind_strength);

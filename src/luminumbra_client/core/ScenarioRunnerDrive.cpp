@@ -262,7 +262,7 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
                                         : 0.0f;
             wstate.fog_density =
                 (sample.category == Luminumbra::Systems::WeatherCategory::Fog) ? 0.4f : 0.1f;
-            wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
+            wstate.storm_intensity = sample.storm_intensity;
             wstate.wetness = precip;
             const float wlen =
                 std::sqrt(sample.wind.x * sample.wind.x + sample.wind.y * sample.wind.y);
@@ -619,7 +619,7 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         if (weather != nullptr) {
             const auto sample = weather->SampleAt(cam);
             wstate.rain_intensity = std::max(sample.precip_intensity, 1.0f);
-            wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
+            wstate.storm_intensity = sample.storm_intensity;
             wstate.wetness = wstate.rain_intensity;
             wstate.fog_density = 0.1f;
             sampled_wind_len =
@@ -639,8 +639,7 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         // dome to overcast) so the rain reads as bright streaks over a
         // dark sky and the lightning has contrast. This override is
         // gated on the env flag so the dedicated Precipitation gate's
-        // calm/windy captures (which assert a specific overcast luma
-        // drop) keep their tuned storm_intensity unchanged.
+        // calm/windy captures keep the sampled storm contribution.
         if (atmos_motion_capture) {
             wstate.storm_intensity = 0.92f;
             wstate.fog_density = 0.18f;
