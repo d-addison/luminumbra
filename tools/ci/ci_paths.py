@@ -14,6 +14,8 @@ import sys
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
     "tools/test_frozen_terrain_presets.py",
+
+    "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
     "tools/ci/test_local_rmlui_recipe.py",
@@ -80,6 +82,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
