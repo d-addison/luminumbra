@@ -1,5 +1,7 @@
 #include "app/ProcgenPalettes.h"
 
+#include "app/GroundCoverHull.h"
+
 #include "core/Log.h"
 #include "luminumbra_common/components/CombustionComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -18,6 +20,7 @@
 #include "rendering/RenderPipeline.h"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 
 namespace Luminumbra::Client::App {
@@ -610,6 +613,31 @@ void BuildProcgenTreePalette(ProcgenPlantState& state,
 // texture via the instanced g_buffer path (no new art). Each palette entry is a
 // deformed icosahedron (flat-shaded faces read as rocky), with per-entry
 // non-uniform scale + per-vertex radial noise for variety.
+namespace {
+
+std::unique_ptr<Luminumbra::Rendering::Mesh>
+BuildGroundCoverMesh(const glm::vec3& lo, const glm::vec3& hi, bool farthest) {
+    const GroundCoverHull hull = BuildGroundCoverHull(lo, hi, farthest);
+    std::vector<Luminumbra::Rendering::Vertex> vertices;
+    std::vector<std::uint32_t> indices;
+    // The hull has at most eight triangles, hence at most 24 flat-shaded vertices/indices.
+    vertices.reserve(hull.faceCount * 3);
+    indices.reserve(hull.faceCount * 3);
+    for (std::size_t f = 0; f < hull.faceCount; ++f) {
+        const auto& face = hull.faces[f];
+        const auto base = static_cast<std::uint32_t>(vertices.size());
+        vertices.push_back({face.positions[0], face.normal, {0, 0}});
+        vertices.push_back({face.positions[1], face.normal, {1, 0}});
+        vertices.push_back({face.positions[2], face.normal, {0, 1}});
+        indices.push_back(base);
+        indices.push_back(base + 1);
+        indices.push_back(base + 2);
+    }
+    return Luminumbra::Rendering::MeshLoader::CreateFromArrays(vertices, indices);
+}
+
+} // namespace
+
 constexpr int kRockPaletteSize = 8;
 void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::RenderPipeline& rp) {
     if (state.rockPaletteCount > 0)
@@ -645,40 +673,8 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         z = z ^ (z >> 31);
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
-    //   LOD: an octahedron hull (6 axis-extreme verts, 8 flat faces)
-    // built from the deformed icosahedron's AABB — reads as the same boulder silhouette
-    // at distance for ~8 tris (vs 20). Used for LOD1/LOD2 so distant rocks (>140m / >320m)
-    // shed geometry; LOD3 retains the same closed hull at the horizon.
-    auto buildRockHull = [](const glm::vec3& lo, const glm::vec3& hi) {
-        const glm::vec3 c = (lo + hi) * 0.5f;
-        const glm::vec3 ex[6] = {{hi.x, c.y, c.z},
-                                 {lo.x, c.y, c.z},
-                                 {c.x, hi.y, c.z},
-                                 {c.x, lo.y, c.z},
-                                 {c.x, c.y, hi.z},
-                                 {c.x, c.y, lo.z}};
-        // 8 octahedron faces (+X/-X top/bottom rings).
-        const int of[8][3] = {
-            {0, 2, 4}, {4, 2, 1}, {1, 2, 5}, {5, 2, 0}, {0, 4, 3}, {4, 1, 3}, {1, 5, 3}, {5, 0, 3}};
-        std::vector<V> v;
-        std::vector<std::uint32_t> i;
-        v.reserve(24);
-        i.reserve(24);
-        for (int f = 0; f < 8; ++f) {
-            const glm::vec3 a = ex[of[f][0]], b = ex[of[f][1]], cc = ex[of[f][2]];
-            const glm::vec3 cr = glm::cross(b - a, cc - a);
-            const float crLen = glm::length(cr);
-            const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen) : glm::vec3(0, 1, 0);
-            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
-            v.push_back({a, nrm, {0, 0}});
-            v.push_back({b, nrm, {1, 0}});
-            v.push_back({cc, nrm, {0, 1}});
-            i.push_back(k);
-            i.push_back(k + 1);
-            i.push_back(k + 2);
-        }
-        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
-    };
+    // LOD1/LOD2 use eight-face octahedra; LOD3 uses a four-face tetrahedron.
+    // All coarse hulls share the deformed boulder's footprint and height bounds.
     int built = 0;
     for (int p = 0; p < kRockPaletteSize; ++p) {
         const glm::vec3 baseScale(
@@ -716,9 +712,9 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
                                  Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
         //  distance LODs (GBufferPass SelectTreeLod path picks these by camera
         // distance; absent = fall back to LOD0). All coarse LODs retain a closed hull.
-        rp.register_procgen_mesh(base + ".lod1", buildRockHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod2", buildRockHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod3", buildRockHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod1", BuildGroundCoverMesh(lo, hi, false));
+        rp.register_procgen_mesh(base + ".lod2", BuildGroundCoverMesh(lo, hi, false));
+        rp.register_procgen_mesh(base + ".lod3", BuildGroundCoverMesh(lo, hi, true));
         ++built;
     }
     state.rockPaletteCount = built;
@@ -765,39 +761,7 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         z = z ^ (z >> 31);
         return static_cast<float>((z >> 11) * (1.0 / 9007199254740992.0));
     };
-    //   LOD helpers (mirror the rock palette): an 8-face octahedron mound
-    // sized to the cluster AABB (8 tris vs 40-60) for every coarse LOD. A closed
-    // hull preserves the silhouette from above and avoids opaque rectangular cards.
-    // Selected by GBufferPass SelectTreeLod by camera distance.
-    auto buildBushHull = [](const glm::vec3& lo, const glm::vec3& hi) {
-        const glm::vec3 c = (lo + hi) * 0.5f;
-        const glm::vec3 ex[6] = {{hi.x, c.y, c.z},
-                                 {lo.x, c.y, c.z},
-                                 {c.x, hi.y, c.z},
-                                 {c.x, lo.y, c.z},
-                                 {c.x, c.y, hi.z},
-                                 {c.x, c.y, lo.z}};
-        const int of[8][3] = {
-            {0, 2, 4}, {4, 2, 1}, {1, 2, 5}, {5, 2, 0}, {0, 4, 3}, {4, 1, 3}, {1, 5, 3}, {5, 0, 3}};
-        std::vector<V> v;
-        std::vector<std::uint32_t> i;
-        v.reserve(24);
-        i.reserve(24);
-        for (int f = 0; f < 8; ++f) {
-            const glm::vec3 a = ex[of[f][0]], b = ex[of[f][1]], cc = ex[of[f][2]];
-            const glm::vec3 cr = glm::cross(b - a, cc - a);
-            const float crLen = glm::length(cr);
-            const glm::vec3 nrm = (crLen > 1e-6f) ? (cr / crLen) : glm::vec3(0, 1, 0);
-            const std::uint32_t k = static_cast<std::uint32_t>(v.size());
-            v.push_back({a, nrm, {0, 0}});
-            v.push_back({b, nrm, {1, 0}});
-            v.push_back({cc, nrm, {0, 1}});
-            i.push_back(k);
-            i.push_back(k + 1);
-            i.push_back(k + 2);
-        }
-        return Luminumbra::Rendering::MeshLoader::CreateFromArrays(v, i);
-    };
+    // Use the same closed coarse hulls as rocks, scaled to the cluster AABB.
     int built = 0;
     for (int p = 0; p < kBushPaletteSize; ++p) {
         std::vector<V> verts;
@@ -844,9 +808,9 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
         rp.register_procgen_mesh(base,
                                  Luminumbra::Rendering::MeshLoader::CreateFromArrays(verts, idx));
         //  distance LODs (GBufferPass picks by camera distance; absent -> LOD0).
-        rp.register_procgen_mesh(base + ".lod1", buildBushHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod2", buildBushHull(lo, hi));
-        rp.register_procgen_mesh(base + ".lod3", buildBushHull(lo, hi));
+        rp.register_procgen_mesh(base + ".lod1", BuildGroundCoverMesh(lo, hi, false));
+        rp.register_procgen_mesh(base + ".lod2", BuildGroundCoverMesh(lo, hi, false));
+        rp.register_procgen_mesh(base + ".lod3", BuildGroundCoverMesh(lo, hi, true));
         ++built;
     }
     state.bushPaletteCount = built;
