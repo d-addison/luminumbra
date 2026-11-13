@@ -606,6 +606,75 @@ class ReplaySourceContract(unittest.TestCase):
                          r'ws->EnsureSurfaceReadyNear\(')
         self.assertIn('refuse_world_entry("Menu surface preparation failed.", false);', backdrop)
 
+    def assert_diagnostic_bundle_build_graph(self, cmake):
+        targets = dict(re.findall(r'add_executable\((\w+)\s+(.*?)\)', cmake, re.DOTALL))
+        runtime = "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+        capture = "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"
+        temporal = "../src/luminumbra_client/rendering/TemporalAudit.cpp"
+        consumers = {name for name, sources in targets.items() if runtime in sources.split()}
+        self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
+                                     "diagnostic_bundle_test", "runtime_surface_options_test",
+                                     "audio_disabled_test"})
+        for target, retained in (
+            ("capture_manifest_test", ("rendering/capture_manifest_test.cpp",
+                                       "rendering/diagnostic_capture_test.cpp",
+                                       "rendering/temporal_audit_test.cpp",
+                                       "../src/luminumbra_client/rendering/CaptureManifest.cpp")),
+            ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",
+                                              "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
+        ):
+            for source in retained:
+                self.assertEqual(targets[target].split().count(source), 1, (target, source))
+        for target in sorted(consumers):
+            sources = targets[target].split()
+            for extra in re.findall(rf'target_sources\({target}\s+PRIVATE\s+(.*?)\)',
+                                    cmake, re.DOTALL):
+                sources.extend(extra.split())
+            for source in (runtime, capture, temporal):
+                self.assertEqual(sources.count(source), 1, (target, source))
+            for source in sources:
+                self.assertTrue((ROOT / "test" / source).is_file(), source)
+            libraries = re.search(rf'target_link_libraries\({target}\s+PRIVATE\s+(.*?)\)',
+                                  cmake, re.DOTALL)
+            self.assertIsNotNone(libraries)
+            self.assertIn("luminumbra_common", libraries[1].split())
+        bundle = "rendering/diagnostic_bundle_test.cpp"
+        attribution = "rendering/diagnostic_attribution_test.cpp"
+        self.assertEqual([name for name, sources in targets.items() if bundle in sources.split()],
+                         ["diagnostic_bundle_test"])
+        self.assertEqual([name for name, sources in targets.items()
+                          if attribution in sources.split()], ["render_smoke_test"])
+        registered = re.search(r'^set\(LUMINUMBRA_GTEST_TARGETS\s+(.*?)^\)', cmake,
+                               re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(registered)
+        for target in consumers:
+            self.assertEqual(registered[1].split().count(target), 1, target)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_diagnostic_bundle_and_runtime_consumers_keep_current_dependencies(self):
+        self.assert_diagnostic_bundle_build_graph(read_source("test/CMakeLists.txt"))
+
+    def test_diagnostic_bundle_build_graph_rejects_missing_dependencies_and_duplicate_owner(self):
+        cmake = read_source("test/CMakeLists.txt")
+        for target, token in (
+            ("diagnostic_bundle_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
+            ("capture_feature_profile_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
+            ("capture_manifest_test", "rendering/temporal_audit_test.cpp"),
+            ("diagnostic_bundle_test", "rendering/diagnostic_bundle_test.cpp"),
+        ):
+            start = cmake.index(f"add_executable({target}")
+            changed = cmake[:start] + cmake[start:].replace(token, "", 1)
+            with self.subTest(target=target, token=token), self.assertRaises(AssertionError):
+                self.assert_diagnostic_bundle_build_graph(changed)
+        changed = cmake.replace("add_executable(capture_manifest_test",
+                                "add_executable(capture_manifest_test\n"
+                                "    rendering/diagnostic_attribution_test.cpp", 1)
+        with self.assertRaises(AssertionError):
+            self.assert_diagnostic_bundle_build_graph(changed)
+        changed = cmake.replace("    diagnostic_bundle_test\n", "", 1)
+        with self.assertRaises(AssertionError):
+            self.assert_diagnostic_bundle_build_graph(changed)
+
     def assert_runtime_surface_owner(self, cmake, native):
         target = "runtime_surface_options_test"
         sources = re.search(rf'add_executable\({target}\s+(.*?)\)', cmake, re.DOTALL)
@@ -613,6 +682,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertEqual(sources[1].split(), [
             "client/runtime_surface_options_test.cpp",
             "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+            "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
         ])
         for command, dependencies in (
             ("target_include_directories", ("../src", "../src/luminumbra_client")),
@@ -659,6 +729,7 @@ class ReplaySourceContract(unittest.TestCase):
         native = read_source("test/client/runtime_surface_options_test.cpp")
         for token in ("client/runtime_surface_options_test.cpp",
                       "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+                      "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
                       "    runtime_surface_options_test\n"):
             # Mutate the new target itself, even when another target owns the
             # same production source. The target must retain every dependency.
@@ -1483,7 +1554,8 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.discover(str(ROOT / "test/tools"),
-                                   pattern="test_region_authority_wiring.py"))
+                                   pattern="test_region_authority_wiring.py",
+                                   top_level_dir=str(ROOT / "test/tools")))
     return tests
 
 

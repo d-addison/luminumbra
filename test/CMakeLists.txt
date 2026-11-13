@@ -464,12 +464,23 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
     ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
 target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_feature_profile_test PRIVATE
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
+
+# GL-free completed-frame bundle publication and runtime admission contracts.
+add_executable(diagnostic_bundle_test
+    rendering/diagnostic_bundle_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp)
+target_include_directories(diagnostic_bundle_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(diagnostic_bundle_test PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(diagnostic_bundle_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -1712,6 +1723,7 @@ target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_comm
 add_executable(runtime_surface_options_test
     client/runtime_surface_options_test.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(runtime_surface_options_test PRIVATE
     ../src
@@ -1976,6 +1988,7 @@ target_link_libraries(audio_volume_readback_test PRIVATE
 add_executable(audio_disabled_test
     audio/audio_disabled_test.cpp
 ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(audio_disabled_test PRIVATE
 ../src
@@ -2145,6 +2158,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     rendering_defaults_test
     capture_manifest_test
+    diagnostic_bundle_test
     capture_feature_profile_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero

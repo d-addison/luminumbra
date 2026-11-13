@@ -107,7 +107,7 @@ public:
                 mesh_ids_.emplace(key, encoded[1]);
                 meshes_.push_back(std::move(mesh_json));
             }
-            draws_.push_back({encoded, std::move(draw_json)});
+            draws_.push_back({encoded, std::move(draw_json), unsupported});
         } catch (const std::exception&) {
             meshes_.resize(old_meshes);
             if (new_mesh) {
@@ -128,6 +128,16 @@ public:
     bool complete_coverage() const {
         return !unsupported_;
     }
+    // Capture-only validation, bounded by the 65,536-entry submission limit.
+    bool complete_deferred_coverage() const {
+        for (const auto& draw : draws_) {
+            if (draw.unsupported &&
+                (draw.id[3] >> 8U) == static_cast<std::uint32_t>(DiagnosticPass::GBuffer)) {
+                return false;
+            }
+        }
+        return true;
+    }
     std::string json() const {
         std::string result;
         result.reserve(json_bytes_);
@@ -142,6 +152,22 @@ public:
         }
         result += suffix;
         return result;
+    }
+    // Explicit submission records only; never infer coverage from pixel colors.
+    // The subset cannot exceed the registry's existing 16 MiB JSON bound.
+    void append_unsupported_json(std::string& result) const {
+        result += '[';
+        bool first = true;
+        for (const auto& draw : draws_) {
+            if (draw.unsupported) {
+                if (!first) {
+                    result += ',';
+                }
+                result += draw.json;
+                first = false;
+            }
+        }
+        result += ']';
     }
     void clear() {
         draws_.clear();
@@ -160,6 +186,7 @@ private:
     struct Draw {
         DiagnosticId id;
         std::string json;
+        bool unsupported = false;
     };
     static bool valid_path(std::string_view path) {
         if (path.front() == '/' || path.find_first_of("\\:") != std::string_view::npos) {
