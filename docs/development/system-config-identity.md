@@ -60,6 +60,32 @@ SystemConfig does, applies effective fallback/clamping/count conversion, encodes
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
 `h = ((h ^ byte) * 1099511628211) & ((1 << 64) - 1)`.
 
+## Planned stable simulation identity
+
+PLANNED for v0.3.3 (in preparation), issue #629: stable simulation identity uses
+one ledger-owned allocator for plants, creatures, ground objects and other
+authoritative participants in both region modes. The mandatory
+`luminumbra.plants.v2` envelope replaces v1 and the sidecar entirely, persists
+the consumed cursor even for zero plants and refuses pre-v2 saves without a
+converter. A genuinely absent world remains a clean bootstrap. Creature IDs
+are stable within a session only until issue #137 provides creature persistence;
+reopening creates new wildlife incarnations from the restored cursor.
+
+The planned plant field inventory and ecology projection inventory in
+`docs/distant-world.md` are independent requirements for the future codec and canonical `plant:v2` and
+`ecology:v3` projections. Preparatory paths stay unselected by shipping sessions.
+Saved bytes, hashes, fixtures, `kAuthorityRulesRevision` and current configuration
+identity remain unchanged in this preparation.
+
+Only activation increments the then-current authority revision by one and
+selects stable seeds, ordering, projections and v2 session paths together. No
+future numeric revision or digest is pinned here. Existing configuration and
+resolved-content identity fields reject earlier rules before advancement in
+TCP on Windows/POSIX, loopback, Steam, GNS and replay recording/playback.
+Hello, checkpoint and LREC layouts remain unchanged; replication's `uint32_t`
+entity alias is never a narrowed simulation ID. Replay from a resumed snapshot
+still requires a boot contract supplying its stable IDs and cursor.
+
 ## Setter audit and pins
 
 `GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
