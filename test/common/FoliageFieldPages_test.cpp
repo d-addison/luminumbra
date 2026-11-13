@@ -1257,3 +1257,184 @@ TEST(FoliageFieldPages, SparsePublicationPreflightsSoilCapacityAndEmptyCandidate
     EXPECT_EQ(live.serialize(), bytes);
 }
 } // namespace
+
+namespace {
+TEST(FoliageFieldPages, LiveStepRefreshesSourcesAndRefusesIncompleteHistory) {
+    namespace C = Luminumbra::Components;
+    constexpr RegionKey owner{0, 0};
+    entt::registry registry;
+    const auto spring = registry.create();
+    registry.emplace<C::TransformComponent>(spring).position = {8, 0, 8};
+    registry.emplace<C::WaterSourceComponent>(spring).output = 800;
+    FieldPageState fields;
+    ASSERT_TRUE(ActivateFoliagePage(fields, {8, 8}, false));
+    const auto before = fields.serialize();
+    FoliageWindowReplay replay(fields, {{owner, 33}}, 33, true);
+    EXPECT_THROW(replay.FinishLiveTick(registry, fields), std::invalid_argument);
+    EXPECT_EQ(fields.serialize(), before);
+    replay.Advance(registry, fields);
+    EXPECT_EQ(replay.remaining_history_steps(), 0u);
+    EXPECT_EQ(replay.remaining_steps(), 1u);
+    EXPECT_EQ(fields.serialize(), before);
+    registry.get<C::TransformComponent>(spring).position = {16777216.0f, 0, 8};
+    EXPECT_THROW(replay.FinishLiveTick(registry, fields), std::invalid_argument);
+    EXPECT_EQ(fields.serialize(), before);
+    EXPECT_EQ(replay.remaining_steps(), 1u);
+    registry.get<C::TransformComponent>(spring).position = {9, 0, 8};
+    replay.FinishLiveTick(registry, fields);
+    EXPECT_EQ(fields.irrigation().sample({9, 8}, -1), 394);
+    EXPECT_EQ(fields.irrigation().sample({8, 8}, -1), 94);
+    EXPECT_EQ(replay.remaining_steps(), 0u);
+    const auto after = fields.serialize();
+    EXPECT_TRUE(replay.FinishLiveTick(registry, fields).empty());
+    EXPECT_TRUE(replay.Advance(registry, fields).empty());
+    FoliageWindowReplay historical(fields, {{owner, 1}}, 34);
+    EXPECT_TRUE(historical.FinishLiveTick(registry, fields).empty());
+    FoliageWindowReplay empty(fields, {}, 34, true);
+    EXPECT_TRUE(empty.FinishLiveTick(registry, fields).empty());
+    EXPECT_EQ(fields.serialize(), after);
+    // A source can enter an empty due owner after the historical topology seals.
+    const RegionKey destination{1, 0};
+    const std::array<RegionKey, 1> live_owners{destination};
+    registry.get<C::TransformComponent>(spring).position = {520, 0, 8};
+    ASSERT_TRUE(ActivateFoliagePage(fields, {520, 8}, false));
+    empty.FinishLiveTick(registry, fields, live_owners);
+    EXPECT_EQ(fields.irrigation().sample({520, 8}, -1), 394);
+    const auto admitted = fields.serialize();
+    EXPECT_TRUE(empty.FinishLiveTick(registry, fields, live_owners).empty());
+    EXPECT_EQ(fields.serialize(), admitted);
+}
+
+TEST(FoliageFieldPages, ReservedLiveTickMatchesContinuousReplayAtBudgetBoundaries) {
+    for (const auto ticks : {1u, 32u, 33u, 34u, 65u}) {
+        SCOPED_TRACE(ticks);
+        entt::registry registry;
+        FieldPageState pages;
+        ASSERT_TRUE(pages.set_soil({8, 8}, 0));
+        ASSERT_TRUE(pages.set_irrigation({8, 8}, 8000));
+        ASSERT_TRUE(pages.set_irrigation({520, 8}, 500));
+        const auto dormant = pages.region_bytes({1, 0});
+        auto expected = pages;
+        const std::map<RegionKey, std::uint32_t> windows{{{0, 0}, ticks}, {{1, 0}, 0}};
+        ReplayAllFoliageInteriors(registry, expected, windows, ticks);
+        FoliageWindowReplay replay(pages, windows, ticks, true);
+        EXPECT_EQ(replay.remaining_history_steps(), ticks - 1);
+        // At most two calls for these windows; keep a broken cursor from hanging the suite.
+        for (unsigned call = 0; call < 2 && replay.remaining_history_steps() != 0; ++call) {
+            const auto remaining = replay.remaining_history_steps();
+            const auto visits = replay.work().evolved_cells;
+            replay.Advance(registry, pages);
+            const auto advanced = remaining - replay.remaining_history_steps();
+            EXPECT_EQ(advanced, std::min(remaining, FoliageWindowReplay::kStepBudget));
+            EXPECT_EQ(replay.work().evolved_cells - visits, advanced * 2u);
+        }
+        ASSERT_EQ(replay.remaining_history_steps(), 0u);
+        EXPECT_EQ(replay.remaining_steps(), 1u);
+        const auto before_live = pages.serialize();
+        EXPECT_TRUE(replay.Advance(registry, pages).empty());
+        EXPECT_EQ(pages.serialize(), before_live);
+        const auto work = replay.FinishLiveTick(registry, pages);
+        ASSERT_EQ(work.size(), 1u);
+        EXPECT_EQ(work.at({0, 0}), 2u);
+        EXPECT_EQ(replay.remaining_steps(), 0u);
+        EXPECT_EQ(replay.remaining_history_steps(), 0u);
+        EXPECT_EQ(replay.work().evolved_cells, ticks * 2u);
+        EXPECT_EQ(replay.work().preparation_pages, 2u);
+        EXPECT_EQ(replay.work().page_probes, 64u);
+        EXPECT_EQ(pages.serialize(), expected.serialize());
+        EXPECT_EQ(pages.region_bytes({1, 0}), dormant);
+        EXPECT_TRUE(replay.FinishLiveTick(registry, pages).empty());
+        EXPECT_EQ(pages.serialize(), expected.serialize());
+    }
+}
+
+TEST(FoliageFieldPages, LiveTickRefreshesOnlyAdmittedOwnersAndUsesCurrentSourcePayload) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    const auto spring = registry.create();
+    registry.emplace<C::TransformComponent>(spring).position = {8, 0, 8};
+    registry.emplace<C::WaterSourceComponent>(spring).output = 800;
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_irrigation({8, 8}, 0));
+    ASSERT_TRUE(pages.set_irrigation({520, 8}, 100));
+    const auto dormant = pages.region_bytes({1, 0});
+    FoliageWindowReplay replay(pages, {{{0, 0}, 2}}, 2, true);
+    replay.Advance(registry, pages);
+    EXPECT_EQ(pages.irrigation().sample({8, 8}, -1), 0);
+    ASSERT_TRUE(pages.set_irrigation({9, 8}, 0));
+    registry.get<C::TransformComponent>(spring).position = {9, 0, 8};
+    registry.get<C::WaterSourceComponent>(spring).output = 400;
+    auto expected = pages;
+    FoliageInteriorReplay reference;
+    reference.Step(registry, expected, {{{0, 0}, 1}});
+    const std::array<RegionKey, 1> refreshed{{{0, 0}}};
+    const auto work = replay.FinishLiveTick(registry, pages, refreshed);
+    ASSERT_EQ(work.size(), 1u);
+    EXPECT_EQ(work.at({0, 0}), 2u);
+    EXPECT_EQ(pages.serialize(), expected.serialize());
+    EXPECT_EQ(pages.region_bytes({1, 0}), dormant);
+    EXPECT_EQ(replay.work().preparation_pages, 2u);
+    EXPECT_EQ(replay.work().preparation_cells, 3u);
+    EXPECT_EQ(replay.work().source_preparations, 2u);
+    EXPECT_EQ(replay.work().source_visits, 1u);
+}
+
+TEST(FoliageFieldPages, EmptyLiveTickAdmitsOneStepAndHistoricalCursorsIgnoreLiveRequests) {
+    entt::registry registry;
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({8, 8}, 0));
+    const std::array<RegionKey, 1> owners{{{0, 0}}};
+    const auto before = pages.serialize();
+    FoliageWindowReplay historical(pages, {{{0, 0}, 1}}, 1);
+    EXPECT_TRUE(historical.FinishLiveTick(registry, pages, owners).empty());
+    EXPECT_EQ(pages.serialize(), before);
+    EXPECT_EQ(historical.remaining_steps(), 1u);
+    for (const auto& windows :
+         {std::map<RegionKey, std::uint32_t>{}, std::map<RegionKey, std::uint32_t>{{{0, 0}, 0}}}) {
+        auto candidate = pages;
+        FoliageWindowReplay replay(candidate, windows, 1, true);
+        EXPECT_EQ(replay.remaining_history_steps(), 0u);
+        EXPECT_TRUE(replay.Advance(registry, candidate).empty());
+        EXPECT_TRUE(replay.FinishLiveTick(registry, candidate).empty());
+        EXPECT_EQ(candidate.serialize(), before);
+        EXPECT_EQ(replay.remaining_steps(), 0u);
+        const auto work = replay.FinishLiveTick(registry, candidate, owners);
+        ASSERT_EQ(work.size(), 1u);
+        EXPECT_EQ(work.at({0, 0}), 1u);
+        EXPECT_GT(candidate.soil().sample({8, 8}, -1), 0);
+        EXPECT_EQ(replay.remaining_steps(), 0u);
+        const auto after = candidate.serialize();
+        EXPECT_TRUE(replay.FinishLiveTick(registry, candidate, owners).empty());
+        EXPECT_TRUE(replay.Advance(registry, candidate).empty());
+        EXPECT_EQ(candidate.serialize(), after);
+    }
+}
+
+TEST(FoliageFieldPages, InvalidEmptyLiveTickRetainsItsCursorAndCanRetry) {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    const auto spring = registry.create();
+    registry.emplace<C::TransformComponent>(spring).position = {16777216.0f, 0, 8};
+    registry.emplace<C::WaterSourceComponent>(spring).output = 800;
+    FieldPageState pages;
+    ASSERT_TRUE(ActivateFoliagePage(pages, {8, 8}, false));
+    const auto before = pages.serialize();
+    const auto owner_before = pages.region_bytes({0, 0});
+    const std::array<RegionKey, 1> owners{{{0, 0}}};
+    FoliageWindowReplay replay(pages, {}, 1, true);
+    EXPECT_THROW(replay.FinishLiveTick(registry, pages, owners), std::invalid_argument);
+    EXPECT_EQ(replay.remaining_steps(), 0u);
+    EXPECT_EQ(replay.remaining_history_steps(), 0u);
+    EXPECT_EQ(pages.serialize(), before);
+    // Retrying with another owner must not evolve the refused owner's cells.
+    registry.get<C::TransformComponent>(spring).position = {520, 0, 8};
+    ASSERT_TRUE(ActivateFoliagePage(pages, {520, 8}, false));
+    const std::array<RegionKey, 2> retry_owners{{{1, 0}, {1, 0}}};
+    const auto work = replay.FinishLiveTick(registry, pages, retry_owners);
+    ASSERT_EQ(work.size(), 1u);
+    EXPECT_EQ(work.at({1, 0}), 256u);
+    EXPECT_EQ(pages.irrigation().sample({520, 8}, -1), 394);
+    EXPECT_EQ(pages.region_bytes({0, 0}), owner_before);
+    EXPECT_EQ(replay.remaining_steps(), 0u);
+}
+} // namespace
