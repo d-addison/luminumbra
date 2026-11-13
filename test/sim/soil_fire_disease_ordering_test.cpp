@@ -314,21 +314,16 @@ void ExpectDiseaseIdentityRefusal(const std::optional<std::uint64_t>& rejected_i
             const std::array due{RegionKey{0, 0}};
             const auto gate = regional ? RegionConsumerGate(registry, due) : RegionConsumerGate{};
             auto expected_rng = registry.ctx().emplace<luminumbra::core::DeterministicRng>(123);
-            F::PlantDiseaseStats stats{11, 12, 13, 14, 15};
             for (unsigned attempt = 0; attempt < 2; ++attempt) {
-                EXPECT_THROW(stats = F::RunPlantDiseaseOnTick<true>(registry, 1, 123, gate),
-                             std::logic_error);
-                EXPECT_EQ(stats.considered, 11);
-                EXPECT_EQ(stats.infected, 12);
-                EXPECT_EQ(stats.new_infections, 13);
-                EXPECT_EQ(stats.recovered, 14);
-                EXPECT_EQ(stats.died, 15);
+                EXPECT_THROW(
+                    static_cast<void>(F::RunPlantDiseaseOnTick<true>(registry, 1, 123, gate)),
+                    std::logic_error);
                 ExpectDiseaseRosterUnchanged(registry, plants, initial, rejected, rejected_id);
                 EXPECT_EQ(registry.ctx().get<luminumbra::core::DeterministicRng>().next_u64(),
                           expected_rng.next_u64());
             }
             // Shipping mode accepts broken IDs, with or without infectious sources.
-            stats = F::RunPlantDiseaseOnTick(registry, 1, 123, gate);
+            const auto stats = F::RunPlantDiseaseOnTick(registry, 1, 123, gate);
             EXPECT_EQ(stats.considered, 5);
             EXPECT_EQ(stats.infected, has_sources ? 1 : 0);
             EXPECT_EQ(stats.new_infections, has_sources ? 1 : 0);
