@@ -653,7 +653,10 @@ void ParticlePass::update(float dt) {
         rec.color[1] = to_unorm8(emitter.data.g_curve.sample(life_t));
         rec.color[2] = to_unorm8(emitter.data.b_curve.sample(life_t));
         rec.color[3] = to_unorm8(emitter.data.a_curve.sample(life_t));
-        rec.atlas_layer = emitter.data.atlas_layer;
+        // Layer 3 identifies ambient dust only in the render instance stream;
+        // authored emitter descriptors (including magical layer 0) stay unchanged.
+        rec.atlas_layer =
+            p.emitter_index == m_ambient_emitter_index ? uint16_t{3} : emitter.data.atlas_layer;
         // Pack rotation as snorm8 (angle/pi in [-1,1]) and the per-emitter streak
         // aspect as unorm8 (aspect/kMaxStreakAspect). Round particles carry aspect
         // 1 -> a square billboard; rain carries streak_aspect > 1 -> the vertex

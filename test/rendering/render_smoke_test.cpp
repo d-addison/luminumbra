@@ -2433,6 +2433,27 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
     EXPECT_FLOAT_EQ(alpha(29), 0.0f);
     EXPECT_NEAR(alpha(0), 1.0f, 0.001f) << "cleared sky must not fade particles";
+    // The render-only ambient tag must not glow against sky or survive far away.
+    glVertexAttribI1ui(3, 3);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(32), 0.0f);
+    glVertexAttrib3f(0, 0, 0, -3);
+    glVertexAttrib1f(1, 6);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0.25f, 0.25f, 0.25f);
+    EXPECT_NEAR(alpha(5), 1.0f, 0.001f) << "nearby dust remains visible over geometry";
+    EXPECT_NEAR(probe.draw()[16].r, 0.25f, 0.001f) << "dust has no emissive core";
+    EXPECT_NEAR(alpha(3.75f), 0.5f, 0.001f);
+    EXPECT_FLOAT_EQ(alpha(2), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    // Nonzero depth, however distant, still means geometry rather than sky.
+    EXPECT_NEAR(alpha(3000), 1.0f, 0.001f);
+    glVertexAttrib3f(0, 0, 0, -14);
+    glVertexAttrib1f(1, 28);
+    EXPECT_NEAR(alpha(32), 0.5f, 0.001f) << "dust fades continuously with camera distance";
+    for (GLuint layer : {0u, 1u, 2u, 4u}) {
+        glVertexAttribI1ui(3, layer);
+        EXPECT_GT(alpha(0), 0.0f) << "only ambient dust is suppressed over sky: " << layer;
+    }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
 }

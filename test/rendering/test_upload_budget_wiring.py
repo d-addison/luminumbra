@@ -1329,5 +1329,90 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
 
 
+class SkyAppearanceWiring(unittest.TestCase):
+    def test_ambient_tag_is_confined_to_render_instances(self):
+        particles = read(RENDERING / "passes/ParticlePass.cpp")
+        update = compact(body(particles, "void ParticlePass::update("))
+        self.assertIn("rec.atlas_layer = p.emitter_index == m_ambient_emitter_index ? "
+                      "uint16_t{3} : emitter.data.atlas_layer;", update)
+        # The magical fixture and the authored ambient descriptor keep layer 0.
+        for filename in ("ambient_motes.json", "fixture_sparkle.json"):
+            self.assertRegex(read(ROOT / "data/common/particles" / filename),
+                             r'"atlas_layer"\s*:\s*0\b')
+        for stage in ("vert", "geom"):
+            self.assertIn("flat float atlasLayer;",
+                          read(ROOT / ("res/shaders/magical_particles." + stage)))
+
+    def test_ambient_dust_scattering_rejects_sky_and_fades_with_distance(self):
+        shader = read(ROOT / "res/shaders/magical_particles.frag")
+        self.assertIn("bool isAmbientMote = abs(fs_in.atlasLayer - 3.0) < 0.25;", shader)
+        dust = compact(body(shader, "if (isAmbientMote)"))
+        self.assertIn("sceneDepthRaw > 0.0 ? 1.0 : 0.0", dust)
+        self.assertIn("1.0 - smoothstep(4.0, 24.0, fs_in.distanceToCamera)", dust)
+        self.assertIn("finalColor.rgb *= clamp(lit, vec3(0.0), vec3(1.0));", dust)
+        self.assertIn("finalColor.a *= shape * softFade * skyFade * distanceFade;", dust)
+        self.assertNotIn("+=", dust)
+        self.assertIn("else if (isRain || isSnow)", shader)
+        native = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                      "TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry)")
+        for assertion in ("EXPECT_FLOAT_EQ(alpha(0), 0.0f)",
+                          "EXPECT_FLOAT_EQ(alpha(32), 0.0f)",
+                          "EXPECT_NEAR(alpha(3000), 1.0f", "EXPECT_NEAR(alpha(32), 0.5f",
+                          "EXPECT_NEAR(probe.draw()[16].r, 0.25f",
+                          "for (GLuint layer : {0u, 1u, 2u, 4u})"):
+            self.assertIn(assertion, native)
+
+    def test_stars_have_a_horizon_cutoff_in_both_sky_palette_paths(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("nightIntensity < 0.1 || viewDir.y <= 0.0", stars)
+        self.assertIn("float horizonFade = smoothstep(0.0, 0.1, viewDir.y);", stars)
+        self.assertIn("* nightIntensity * horizonFade;", stars)
+        # Stars use one path after LUT/fallback selection, rather than a capture override.
+        main = body(shader, "void main()")
+        self.assertGreater(main.index("skyColor += renderStars("),
+                           main.index("skyColor = legacyGradient("))
+
+    def test_stars_use_compact_radial_profiles_without_grid_noise_thresholds(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("starProfile(length(fract(p) - centre))", stars)
+        self.assertIn("* 0.5 + 0.25;", stars)
+        self.assertNotIn("noise(", stars)
+        profile = compact(body(shader, "float starProfile("))
+        # Evaluate the production scalar profile, including its support boundary.
+        expression = re.fullmatch(r"return (.*);", profile).group(1)
+
+        def smoothstep(low, high, value):
+            t = min(1.0, max(0.0, (value - low) / (high - low)))
+            return t * t * (3.0 - 2.0 * t)
+
+        def sample(radius):
+            return eval(expression, {"__builtins__": {}},
+                        {"radius": radius, "smoothstep": smoothstep})
+
+        self.assertEqual(sample(0.0), 1.0)
+        previous = 1.0
+        for index in range(1, 101):
+            value = sample(index * 0.003)
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLessEqual(value, previous)
+            previous = value
+        for radius in (0.18, 0.25, 0.5, 1.0):
+            self.assertEqual(sample(radius), 0.0)
+        self.assertGreater(sample(0.09), 0.0)
+
+    def test_aurora_and_stars_share_cloud_transmittance(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        main = body(shader, "void main()")
+        cloud = main.index("skyColor = renderClouds(viewDir, skyColor, dayFactor);")
+        for layer in ("renderAurora(viewDir, dayFactor)", "renderStars(viewDir, nightFactor)"):
+            self.assertEqual(main.count(layer), 1)
+            self.assertLess(main.index("skyColor += " + layer), cloud)
+        clouds = body(shader, "vec3 renderClouds(")
+        self.assertIn("return mix(baseColor, cloudColor, alpha);", clouds)
+        self.assertIn("return baseColor;", clouds)
+
+
 if __name__ == "__main__":
     unittest.main()
