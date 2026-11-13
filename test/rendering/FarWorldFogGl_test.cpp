@@ -449,8 +449,11 @@ TEST_F(FarWorldFogGl, ProductionConsumersUseDepthForFarCentersAndAllNeighbors) {
             shader.setVec3("u_pointLights[0].color", glm::vec3(1));
             shader.setFloat("u_pointLights[0].intensity", 1);
             shader.setFloat("u_pointLights[0].radius", 50);
-            shader.setFloat("u_caveSkyMaxDist", 1);
-            shader.setInt("u_caveSkySteps", 4);
+            // Keep poisoned neighbors inside both the thickness band and the
+            // distance falloff; a rejected occluder cannot validate depth reads.
+            shader.setFloat("u_caveSkyMaxDist", 2);
+            shader.setFloat("u_caveThickness", 1.5f);
+            shader.setInt("u_caveSkySteps", 8);
             shader.setFloat("u_caveAmbientFloor", .1f);
         }
         if (ssao) {

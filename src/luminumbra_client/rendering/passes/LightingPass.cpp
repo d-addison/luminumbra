@@ -520,9 +520,6 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
     m_lightning_overlay_shader->setVec2("u_groundNdc", lit.ground_ndc);
     m_lightning_overlay_shader->setFloat("u_groundFlash", lit.ground_flash);
-    //  dark storm-cloud mass the bolt emerges from.
-    m_lightning_overlay_shader->setVec2("u_cloudNdc", lit.cloud_anchor_ndc);
-    m_lightning_overlay_shader->setFloat("u_cloudDark", lit.cloud_darkness);
     m_lightning_overlay_shader->setFloat(
         "u_aspect", static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
     const int point_count =
