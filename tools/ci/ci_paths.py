@@ -14,13 +14,16 @@ import sys
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
     "tools/gates/test_shader_scenes.py",
+    "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
+
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
     "tools/ci/test_local_rmlui_recipe.py",
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
+    "tools/gates/test_visual_lint.py",
     "test/tools/test_runtime_config_contract.py",
     "test/tools/test_graphics_ui_contract.py",
     "test/tools/test_frame_pacing_contract.py",
@@ -36,6 +39,7 @@ PYTHON_TESTS = (
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
+    "tools/ci/test_terrain_shader_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_check_docs.py",
@@ -83,7 +87,9 @@ PYTHON_TESTS = (
 )
 PYTHON_MODULES = {
     "tools/gates/shader-scenes.py",
+    "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",
+
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
@@ -242,6 +248,7 @@ def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
     return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+            or path == "res/shaders/g_buffer.frag"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 

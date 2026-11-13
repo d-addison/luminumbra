@@ -280,6 +280,7 @@ class PathGateTests(unittest.TestCase):
         for path in (
             "tools/gates/test_station_discovery.py",
             "tools/gates/test_common_library_isa.py",
+            "tools/gates/test_visual_lint.py",
             "test/tools/test_runtime_config_contract.py",
             "tools/perf/test_check_gl_debug_log.py",
             "tools/perf/test_plan_qualification.py",
@@ -296,6 +297,7 @@ class PathGateTests(unittest.TestCase):
         for path in (
             "docs/development.md", "docs/assets/example.png", "README.md", "Doxyfile",
             "tools/perf/check_residency.py", "tools/persistence/save_receipt.py",
+            "tools/gates/visual_lint.py",
             "tools/rendering/acceptance/scene_matrix.py", "tools/audio/bank_validate.py",
             "tools/blender/authoring/extension/recipes.py",
         ):

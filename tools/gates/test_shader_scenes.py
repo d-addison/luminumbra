@@ -308,6 +308,19 @@ class ShaderScenesTests(unittest.TestCase):
                     scene.run(args)
                 self.assertFalse(output.exists())
 
+    def test_runner_waits_finish_inside_every_ctest_deadline(self):
+        worst = (software.DISPLAY_READY_SECONDS + software.CHILD_TIMEOUT_SECONDS
+                 + 2 * software.SERVER_STOP_SECONDS)
+        registrations = {'ShaderSceneSoftwareGl': ROOT / 'test/CMakeLists.txt',
+                         'StaticPreviewSoftwareGL': ROOT / 'tools/static_preview/CMakeLists.txt'}
+        for name, cmake in registrations.items():
+            with self.subTest(test=name):
+                text = cmake.read_text(encoding='utf-8')
+                self.assertRegex(text, r'add_test\(NAME ' + name + r'\s+COMMAND[^)]*run_software_gl\.py')
+                deadline = re.search(r'set_tests_properties\(' + name + r' PROPERTIES[^)]*?TIMEOUT (\d+)', text)
+                self.assertIsNotNone(deadline)
+                self.assertLess(worst, int(deadline.group(1)))
+
     def test_every_rendering_and_harness_path_routes_and_docs_do_not(self):
         sensitive = ('res/shaders/new.frag', 'src/luminumbra_client/rendering/new.cpp',
                      'test/rendering/shader_scenes/references/material.ppm',

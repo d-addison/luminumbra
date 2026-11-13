@@ -12,6 +12,7 @@
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "GraphicsRuntimeConfig.h"
+#include "ImpostorCoverage.h"
 #include "Mesh.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
@@ -1043,6 +1044,7 @@ private:
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
         bool water_metadata_valid = true;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -1056,6 +1058,7 @@ private:
         u32 mesh_version = 0;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_mesh() const {
             return !vertices.empty() && !indices.empty();
@@ -1669,7 +1672,11 @@ public:
     // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
     // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
     bool tree_impostor_enabled() const {
-        return m_treeImpostorsEnabled;
+        return m_treeImpostorsEnabled && m_treeImpostorCoverage.usable();
+    }
+    // Last bake's immutable alpha diagnostic, including refused atlases.
+    const ImpostorCoverage& tree_impostor_coverage() const {
+        return m_treeImpostorCoverage;
     }
     u32 tree_impostor_albedo() const {
         return m_treeImpostorAlbedo;
@@ -1689,6 +1696,7 @@ public:
 
 private:
     bool m_treeImpostorsEnabled = false;
+    ImpostorCoverage m_treeImpostorCoverage;
     u32 m_treeImpostorAlbedo = 0;
     u32 m_treeImpostorNormal = 0;
     int m_treeImpostorGrid = 0;

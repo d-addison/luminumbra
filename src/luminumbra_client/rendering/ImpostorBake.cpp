@@ -1,5 +1,7 @@
 #include "ImpostorBake.h"
+#include "ImpostorBakePath.h"
 #include "app/FrameAttribution.h"
+#include "core/Log.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -26,7 +28,119 @@ const BakePart kParts[] = {
     {"game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_branches.lmesh"},
     {"game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_leaves.lmesh"},
 };
-constexpr glm::vec3 kPreviewBackground(1.0f, 0.0f, 1.0f); // Diagnostic export only.
+constexpr std::array<unsigned char, 3> kPreviewBackground{255, 0, 255}; // Diagnostic export only.
+
+// Bake/readback is startup or explicitly requested work, never a frame operation.
+// Preserve pixel transfer state as well as the bindings changed by mesh upload.
+struct BakeGlState {
+    GLint program{}, vao{}, array_buffer{}, draw_fbo{}, read_fbo{}, renderbuffer{}, active{};
+    GLint depth_func{}, clip_origin{}, clip_depth{}, pack_buffer{}, unpack_buffer{};
+    GLboolean depth_mask{};
+    std::array<GLint, 4> viewport{};
+    std::array<GLfloat, 4> clear_color{};
+    std::array<std::array<GLboolean, 4>, 2> color_masks{};
+    std::array<GLboolean, 2> blends{};
+    GLboolean scissor{};
+    GLdouble clear_depth{};
+    std::array<GLint, 3> texture_arrays{}, samplers{};
+    static constexpr std::array<GLenum, 8> pack_names{GL_PACK_ALIGNMENT,
+                                                      GL_PACK_ROW_LENGTH,
+                                                      GL_PACK_SKIP_ROWS,
+                                                      GL_PACK_SKIP_PIXELS,
+                                                      GL_PACK_IMAGE_HEIGHT,
+                                                      GL_PACK_SKIP_IMAGES,
+                                                      GL_PACK_SWAP_BYTES,
+                                                      GL_PACK_LSB_FIRST};
+    static constexpr std::array<GLenum, 5> enable_names{
+        GL_DEPTH_TEST, GL_CULL_FACE, GL_RASTERIZER_DISCARD, GL_COLOR_LOGIC_OP, GL_FRAMEBUFFER_SRGB};
+    std::array<GLint, pack_names.size()> pack_values{};
+    std::array<GLboolean, enable_names.size()> enable_values{};
+
+    BakeGlState() {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &array_buffer);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
+        glGetIntegerv(GL_CLIP_ORIGIN, &clip_origin);
+        glGetIntegerv(GL_CLIP_DEPTH_MODE, &clip_depth);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
+        glGetIntegerv(GL_VIEWPORT, viewport.data());
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color.data());
+        for (GLuint attachment = 0; attachment < color_masks.size(); ++attachment) {
+            glGetBooleani_v(GL_COLOR_WRITEMASK, attachment, color_masks[attachment].data());
+            blends[attachment] = glIsEnabledi(GL_BLEND, attachment);
+        }
+        scissor = glIsEnabledi(GL_SCISSOR_TEST, 0);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_depth);
+        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer);
+        for (std::size_t i = 0; i < pack_names.size(); ++i) {
+            glGetIntegerv(pack_names[i], &pack_values[i]);
+            glPixelStorei(pack_names[i], i == 0 ? 1 : 0);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        for (std::size_t i = 0; i < enable_names.size(); ++i) {
+            enable_values[i] = glIsEnabled(enable_names[i]);
+        }
+        for (GLuint unit = 0; unit < texture_arrays.size(); ++unit) {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &texture_arrays[unit]);
+            glGetIntegeri_v(GL_SAMPLER_BINDING, unit, &samplers[unit]);
+            glBindSampler(unit, 0);
+        }
+    }
+    ~BakeGlState() {
+        for (GLuint unit = 0; unit < texture_arrays.size(); ++unit) {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, static_cast<GLuint>(texture_arrays[unit]));
+            glBindSampler(unit, static_cast<GLuint>(samplers[unit]));
+        }
+        glActiveTexture(static_cast<GLenum>(active));
+        AttributedGl::UseProgram(glUseProgram, static_cast<GLuint>(program));
+        glBindVertexArray(static_cast<GLuint>(vao));
+        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(array_buffer));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw_fbo));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
+        glBindRenderbuffer(GL_RENDERBUFFER, static_cast<GLuint>(renderbuffer));
+        glDepthFunc(static_cast<GLenum>(depth_func));
+        glDepthMask(depth_mask);
+        glClipControl(static_cast<GLenum>(clip_origin), static_cast<GLenum>(clip_depth));
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+        glClearDepth(clear_depth);
+        for (GLuint attachment = 0; attachment < color_masks.size(); ++attachment) {
+            const auto& mask = color_masks[attachment];
+            glColorMaski(attachment, mask[0], mask[1], mask[2], mask[3]);
+            if (blends[attachment]) {
+                glEnablei(GL_BLEND, attachment);
+            } else {
+                glDisablei(GL_BLEND, attachment);
+            }
+        }
+        if (scissor) {
+            glEnablei(GL_SCISSOR_TEST, 0);
+        } else {
+            glDisablei(GL_SCISSOR_TEST, 0);
+        }
+        for (std::size_t i = 0; i < enable_names.size(); ++i) {
+            if (enable_values[i]) {
+                glEnable(enable_names[i]);
+            } else {
+                glDisable(enable_names[i]);
+            }
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpack_buffer));
+        for (std::size_t i = 0; i < pack_names.size(); ++i) {
+            glPixelStorei(pack_names[i], pack_values[i]);
+        }
+    }
+};
 
 Luminumbra::Rendering::AttributedGl::Program CompileBakeProgram(std::string& err) {
     const Luminumbra::Client::Attribution::PhaseScope shader_phase(
@@ -136,7 +250,8 @@ bool WritePpm(const std::string& path, int w, int h, const std::vector<unsigned 
         return false;
     f << "P6\n" << w << ' ' << h << "\n255\n";
     f.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
-    return static_cast<bool>(f);
+    f.close();
+    return !f.fail();
 }
 
 // Shared render core: loads the tree parts, renders all octahedral tiles into two KEPT
@@ -149,14 +264,24 @@ struct RenderedAtlas {
     glm::vec3 center{0.0f};
     float radius = 0;
     std::string err;
+    ImpostorCoverage alpha_coverage;
+    std::vector<unsigned char> rgba;
 };
 RenderedAtlas
 RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpostorGrid& grid) {
     RenderedAtlas out;
-    const int n = std::max(1, grid.gridResolution);
-    const int tile = std::max(1, grid.tileResolution);
+    const int n = grid.gridResolution;
+    const int tile = grid.tileResolution;
+    if (n <= 0 || n > kImpostorMaxGrid || tile <= 0 || tile > kImpostorMaxAtlasSide / n) {
+        out.err = "invalid impostor atlas dimensions";
+        return out;
+    }
     const int atlas = n * tile;
+    const auto bytes = ImpostorRgbaBytes(atlas, atlas, n);
+    // At most 8192^2 RGBA8 texels (256 MiB), shared by validation and export.
+    out.rgba.resize(bytes);
     out.size = atlas;
+    const BakeGlState gl_state;
 
     struct LoadedPart {
         std::unique_ptr<Mesh> mesh;
@@ -216,15 +341,13 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     GLuint fbo = 0, depthRb = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    auto makeColor = [&](GLuint& tex, int attach) {
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexImage2D(
-            GL_TEXTURE_2D, 0, GL_RGBA8, atlas, atlas, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    auto makeColor = [&](GLuint& tex, GLenum attach) {
+        glCreateTextures(GL_TEXTURE_2D, 1, &tex);
+        glTextureStorage2D(tex, 1, GL_RGBA8, atlas, atlas);
+        glTextureParameteri(tex, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTextureParameteri(tex, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTextureParameteri(tex, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTextureParameteri(tex, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glFramebufferTexture2D(
             GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attach, GL_TEXTURE_2D, tex, 0);
     };
@@ -266,6 +389,15 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     glClearDepth(0.0);
     glDepthFunc(GL_GREATER);
     glDepthMask(GL_TRUE);
+    for (const GLenum capability :
+         std::array<GLenum, 3>{GL_RASTERIZER_DISCARD, GL_COLOR_LOGIC_OP, GL_FRAMEBUFFER_SRGB}) {
+        glDisable(capability);
+    }
+    glDisablei(GL_SCISSOR_TEST, 0);
+    for (GLuint attachment = 0; attachment < 2; ++attachment) {
+        glDisablei(GL_BLEND, attachment);
+        glColorMaski(attachment, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glViewport(0, 0, atlas, atlas);
@@ -293,19 +425,35 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
                 glBindVertexArray(lp.mesh->vao);
                 Luminumbra::Rendering::AttributedGl::Submit(
                     glDrawElements,
-                    GL_TRIANGLES,
+                    static_cast<GLenum>(GL_TRIANGLES),
                     static_cast<GLsizei>(lp.mesh->indexCount),
-                    GL_UNSIGNED_INT,
+                    static_cast<GLenum>(GL_UNSIGNED_INT),
                     nullptr);
             }
         }
     }
     glBindVertexArray(0);
+    // DSA keeps texture bindings intact. Zero-initialized storage fails closed
+    // (empty coverage) if the driver cannot supply the readback.
+    glGetTextureImage(
+        out.albedo, 0, GL_RGBA, GL_UNSIGNED_BYTE, static_cast<GLsizei>(bytes), out.rgba.data());
+    out.alpha_coverage = MeasureImpostorCoverage(out.rgba, atlas, atlas, n);
     glDeleteFramebuffers(1, &fbo);
     glDeleteRenderbuffers(1, &depthRb);
     Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, prog);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    out.ok = true;
+    out.ok = out.alpha_coverage.usable();
+    if (!out.ok) {
+        out.err = std::string("atlas alpha coverage refused: ") + out.alpha_coverage.status();
+        LUMINUMBRA_CORE_ERROR(
+            "Tree impostor atlas {} refused: alpha coverage {:.6f} ({}); using mesh LODs",
+            kTreeImpostorAtlasName,
+            out.alpha_coverage.coverage,
+            out.alpha_coverage.status());
+        glDeleteTextures(1, &out.albedo);
+        glDeleteTextures(1, &out.normal);
+        out.albedo = out.normal = 0;
+    }
     return out;
 }
 
@@ -326,51 +474,24 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
     const int atlas = ra.size;
     const int n = std::max(1, grid.gridResolution);
     const int tile = std::max(1, grid.tileResolution);
-    std::vector<unsigned char> rgb(static_cast<std::size_t>(atlas) * atlas * 3u);
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(atlas) * atlas * 4u);
-    std::vector<unsigned char> nrm(static_cast<std::size_t>(atlas) * atlas * 3u);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glBindTexture(GL_TEXTURE_2D, ra.albedo);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-    glBindTexture(GL_TEXTURE_2D, ra.normal);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, nrm.data());
-
-    for (std::size_t pixel = 0; pixel < rgba.size() / 4; ++pixel) {
+    const BakeGlState gl_state;
+    const auto& rgba = ra.rgba;
+    const auto pixels = rgba.size() / 4u;
+    // Export buffers share the validated atlas bound: at most 8192^2 RGB texels each.
+    std::vector<unsigned char> rgb(pixels * 3u);
+    std::vector<unsigned char> nrm(pixels * 3u);
+    glGetTextureImage(
+        ra.normal, 0, GL_RGB, GL_UNSIGNED_BYTE, static_cast<GLsizei>(nrm.size()), nrm.data());
+    for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
         for (std::size_t channel = 0; channel < 3; ++channel) {
-            rgb[pixel * 3 + channel] =
-                rgba[pixel * 4 + 3] > 0
-                    ? rgba[pixel * 4 + channel]
-                    : static_cast<unsigned char>(kPreviewBackground[channel] * 255.0f);
+            rgb[pixel * 3 + channel] = rgba[pixel * 4 + 3] >= 128 ? rgba[pixel * 4 + channel]
+                                                                  : kPreviewBackground[channel];
         }
     }
-    std::vector<float> tileCov(static_cast<std::size_t>(n) * n, 0.0f);
-    double covSum = 0.0;
-    out.min_coverage = 1.0f;
-    for (int tj = 0; tj < n; ++tj)
-        for (int ti = 0; ti < n; ++ti) {
-            long covered = 0;
-            for (int py = 0; py < tile; ++py)
-                for (int px = 0; px < tile; ++px) {
-                    const std::size_t idx =
-                        (static_cast<std::size_t>(tj * tile + py) * atlas + (ti * tile + px)) * 4u;
-                    if (rgba[idx + 3] >= 128)
-                        ++covered;
-                }
-            const float cov = static_cast<float>(covered) / static_cast<float>(tile * tile);
-            tileCov[static_cast<std::size_t>(tj) * n + ti] = cov;
-            covSum += cov;
-            out.min_coverage = glm::min(out.min_coverage, cov);
-        }
-    out.mean_coverage = static_cast<float>(covSum / (static_cast<double>(n) * n));
+    out.min_coverage = static_cast<float>(ra.alpha_coverage.min_cell);
+    out.mean_coverage = static_cast<float>(ra.alpha_coverage.coverage);
 
-    std::string normalPath = outPpmPath;
-    {
-        const auto dot = normalPath.find_last_of('.');
-        if (dot != std::string::npos)
-            normalPath.insert(dot, "_normal");
-        else
-            normalPath += "_normal";
-    }
+    const std::string normalPath = ImpostorNormalAtlasPath(outPpmPath).string();
     const bool normal_written = WritePpm(normalPath, atlas, atlas, nrm);
     out.ok = WritePpm(outPpmPath, atlas, atlas, rgb) && normal_written;
     if (!out.ok)
@@ -381,15 +502,19 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
             jf << "{\n  \"atlas_size\": " << atlas << ",\n  \"grid\": " << n
                << ",\n  \"tile\": " << tile << ",\n  \"mean_coverage\": " << out.mean_coverage
                << ",\n  \"min_coverage\": " << out.min_coverage << ",\n  \"tile_coverage\": [";
-            for (std::size_t k = 0; k < tileCov.size(); ++k) {
+            for (std::size_t k = 0; k < ra.alpha_coverage.cell_count; ++k) {
                 if (k)
                     jf << ", ";
-                jf << tileCov[k];
+                jf << ra.alpha_coverage.cells[k];
             }
             jf << "]\n}\n";
+            jf.close();
+        }
+        if (!jf) {
+            out.ok = false;
+            out.error = "failed to write atlas coverage JSON: " + outPpmPath;
         }
     }
-    glBindTexture(GL_TEXTURE_2D, 0);
     glDeleteTextures(1, &ra.albedo);
     glDeleteTextures(1, &ra.normal);
     return out;
@@ -400,6 +525,7 @@ ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(const std::string& rootDir
                                                       const OctaImpostorGrid& grid) {
     ImpostorAtlasTextures out;
     RenderedAtlas ra = RenderAtlas(rootDir, rp, grid);
+    out.alpha_coverage = ra.alpha_coverage;
     if (!ra.ok) {
         out.error = ra.err;
         return out;
