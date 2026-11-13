@@ -17,6 +17,8 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE
     vec2 UV;           // mesh UV (unused for instanced terrain props; )
     flat uint MaterialID;
+    vec4 GroundWeights; // interpolated Stone, Soil, Grass, Sand coverage
+    float DeepslateWeight;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
     vec3 PrevWorldPos; //  TAAU: world pos with PREVIOUS-frame wind sway
     vec3 FarRelativeWorldPos; // interface match; unused outside ladder terrain
@@ -75,6 +77,8 @@ void main()
     vs_out.UV = aUV; // Pass UVs to the static-model texture lane.
 
     vs_out.MaterialID = uint(u_materialId);
+    vs_out.GroundWeights = vec4(0.0);
+    vs_out.DeepslateWeight = 0.0;
     vs_out.Tint = aTint;
     vs_out.FarRelativeWorldPos = vec3(0.0);
     vs_out.FarTileLocalPos = vec3(0.0);

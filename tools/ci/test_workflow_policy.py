@@ -1215,6 +1215,18 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             if value(step, "- name", 6) != "Save fast dependency sources":
                 self.assertIsNone(value(step, "continue-on-error", 8))
         self.assertIn("fetch-depth: 0", fast)
+        named = {value(step, "- name", 6): step for step in steps(fast)}
+        install = named["Install offline shader compiler"]
+        compile_shaders = named["Validate shader compiler contracts and all shader permutations"]
+        for step in (install, compile_shaders):
+            self.assertIsNone(value(step, "if", 8))
+            self.assertIsNone(value(step, "continue-on-error", 8))
+        self.assertIn("sudo apt-get install -y --no-install-recommends glslang-tools", install)
+        self.assertEqual(value(compile_shaders, "run", 8).splitlines(), [
+            "python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator",
+            "python3 -I -B tools/ci/compile_shaders.py",
+        ])
+        self.assertLess(steps(fast).index(install), steps(fast).index(compile_shaders))
 
     def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
