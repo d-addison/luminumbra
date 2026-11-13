@@ -26,6 +26,8 @@ uniform sampler2D gDepth;           // unit 3: hardware depth texture
 #ifdef LUMIN_DIAG_VIEWS
 layout(binding = 4) uniform usampler2D gIdentity;
 layout(binding = 5) uniform usamplerBuffer gDrawMetadata;
+layout(binding = 6) uniform sampler2D gContribution;
+uniform int u_contributionReady = 0;
 uniform int u_identityReady = 0;
 uniform int u_inspect = 0;
 uniform int u_pixelX = 0;
@@ -114,6 +116,25 @@ vec3 identityColor() {
 
 void main() {
 #ifdef LUMIN_DIAG_VIEWS
+    if (u_mode >= 12 && u_mode <= 29) {
+        vec3 value = unsupportedColor();
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            vec4 contribution = texelFetch(gContribution, pixel, 0);
+            if (contribution.a == 1.0) {
+                // Non-finite values stay conspicuous; raw HDR storage is never clamped.
+                if (any(isnan(contribution.rgb))) value = vec3(1.0, 0.0, 1.0);
+                else if (any(isinf(contribution.rgb))) value = vec3(0.0, 1.0, 1.0);
+                else if (u_mode == 12 || u_mode == 13 || u_mode == 14 ||
+                         u_mode == 17 || u_mode == 19 || u_mode == 26)
+                    value = max(contribution.rgb, vec3(0.0)) / (vec3(1.0) + max(contribution.rgb, vec3(0.0)));
+                else value = contribution.rgb;
+            }
+        }
+        FragColor = vec4(value, 1.0);
+        return;
+    }
     if (u_inspect != 0) {
         ivec2 pixel = ivec2(u_pixelX, u_pixelY);
         inspectorId = texelFetch(gIdentity, pixel, 0);

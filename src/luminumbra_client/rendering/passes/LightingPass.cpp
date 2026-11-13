@@ -1,6 +1,7 @@
 #include "LightingPass.h"
 #include "../FarWorldReplay.h"
 #include "../RenderingDefaults.h"
+#include "DebugViewPass.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -16,6 +17,7 @@
 #include "rendering/Shader.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,9 +30,161 @@
 namespace Luminumbra::Rendering {
 
 LightingPass::LightingPass() = default;
-LightingPass::~LightingPass() = default;
+LightingPass::~LightingPass() {
+    reset_contributions();
+}
+
+namespace {
+// Only the opt-in draw touches attachment one. Save at most 32 draw-buffer slots.
+class ContributionAttachment {
+public:
+    ContributionAttachment(GLuint framebuffer, GLuint texture)
+        : framebuffer_(framebuffer) {
+        if (texture == 0 || framebuffer_ == 0) {
+            return;
+        }
+        glGetIntegerv(GL_MAX_DRAW_BUFFERS, &count_);
+        GLint occupied = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT1,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                              &occupied);
+        if (count_ < 2 || count_ > static_cast<GLint>(buffers_.size()) || occupied != GL_NONE) {
+            return;
+        }
+        for (GLint index = 0; index < count_; ++index) {
+            GLint buffer = 0;
+            glGetIntegerv(GL_DRAW_BUFFER0 + static_cast<GLenum>(index), &buffer);
+            buffers_[static_cast<std::size_t>(index)] = static_cast<GLenum>(buffer);
+        }
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 1, mask_.data());
+        blend_ = glIsEnabledi(GL_BLEND, 1);
+        glDisablei(GL_BLEND, 1);
+        // Initialize every texel, even when the submitted draw is scissored or clipped.
+        glClearTexImage(texture, 0, GL_RGBA, GL_FLOAT, nullptr);
+        attached_ = true;
+        glFramebufferTexture2D(
+            GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, texture, 0);
+        constexpr std::array<GLenum, 2> outputs = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(static_cast<GLsizei>(outputs.size()), outputs.data());
+        glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        ready_ = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (!ready_) {
+            detach();
+        }
+    }
+    ~ContributionAttachment() {
+        detach();
+    }
+    bool ready() const {
+        return ready_;
+    }
+    void detach() {
+        if (!attached_) {
+            return;
+        }
+        GLint previous = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer_);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, 0, 0);
+        glDrawBuffers(count_, buffers_.data());
+        glColorMaski(1, mask_[0], mask_[1], mask_[2], mask_[3]);
+        if (blend_ == GL_TRUE) {
+            glEnablei(GL_BLEND, 1);
+        } else {
+            glDisablei(GL_BLEND, 1);
+        }
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous));
+        attached_ = false;
+    }
+
+private:
+    GLuint framebuffer_;
+    GLint count_ = 0;
+    std::array<GLenum, 32> buffers_{};
+    std::array<GLboolean, 4> mask_{};
+    GLboolean blend_ = GL_FALSE;
+    bool attached_ = false;
+    bool ready_ = false;
+};
+} // namespace
+
+void LightingPass::reset_contributions() {
+    auto& control = DebugViewPass::controls();
+    if (control.contribution_texture == m_contribution_texture) {
+        control.contribution_texture = 0;
+        control.contribution_view = DebugViewPass::None;
+        control.contribution_size = {};
+    }
+    if (m_contribution_texture != 0) {
+        glDeleteTextures(1, &m_contribution_texture);
+    }
+    m_contribution_texture = 0;
+    m_contribution_width = 0;
+    m_contribution_height = 0;
+}
+
+bool LightingPass::prepare_contributions(const RenderContext& ctx) {
+    if (!DebugViewPass::contribution_extent(ctx.internal_w(), ctx.internal_h())) {
+        return false;
+    }
+    if (m_contribution_source_program != m_lighting_shader->Id()) {
+        // The normal shader participates in reload-all; rebuild the opt-in sibling lazily.
+        m_contribution_shader.reset();
+        m_contribution_source_program = m_lighting_shader->Id();
+    }
+    if (!m_contribution_shader) {
+        m_contribution_shader =
+            std::make_unique<Shader>(m_lighting_shader->VertexPath().c_str(),
+                                     m_lighting_shader->FragmentPath().c_str(),
+                                     std::vector<std::string>{},
+                                     std::vector<std::string>{"LUMIN_DIAG_CONTRIBUTIONS 1"});
+    }
+    if (!m_contribution_shader->IsValid()) {
+        return false;
+    }
+    if (m_contribution_width == ctx.internal_w() && m_contribution_height == ctx.internal_h()) {
+        return m_contribution_texture != 0;
+    }
+    reset_contributions();
+    GLint maximum = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+    if (maximum <= 0 || ctx.internal_w() > static_cast<unsigned int>(maximum) ||
+        ctx.internal_h() > static_cast<unsigned int>(maximum)) {
+        return false;
+    }
+    GLint previous = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+    glGenTextures(1, &m_contribution_texture);
+    if (m_contribution_texture == 0) {
+        return false;
+    }
+    glBindTexture(GL_TEXTURE_2D, m_contribution_texture);
+    glTexStorage2D(GL_TEXTURE_2D,
+                   1,
+                   GL_RGBA16F,
+                   static_cast<GLsizei>(ctx.internal_w()),
+                   static_cast<GLsizei>(ctx.internal_h()));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GLint allocated = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &allocated);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous));
+    if (allocated != static_cast<GLint>(ctx.internal_w())) {
+        reset_contributions();
+        return false;
+    }
+    m_contribution_width = ctx.internal_w();
+    m_contribution_height = ctx.internal_h();
+    return true;
+}
 
 void LightingPass::init_shader(const std::filesystem::path& root_path) {
+    m_contribution_shader.reset();
+    m_contribution_source_program = 0;
+    reset_contributions();
     m_root_path = root_path; // retained for the lazy lightning overlay ()
     m_lighting_shader =
         std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(),
@@ -133,6 +287,7 @@ void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width
 }
 
 void LightingPass::destroy_lighting_fbo(RenderResourceRegistry& registry) {
+    reset_contributions();
     // Ownership contract: the registry deletes the owned lighting GL objects.
     registry.destroy_owned("lighting_fbo");
     registry.destroy_owned("lighting_color");
@@ -152,6 +307,9 @@ void LightingPass::destroy_lighting_fbo(RenderResourceRegistry& registry) {
 }
 
 void LightingPass::reset_shader() {
+    m_contribution_shader.reset();
+    m_contribution_source_program = 0;
+    reset_contributions();
     m_lighting_shader.reset();
 }
 
@@ -171,8 +329,8 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
                         0,
                         0,
                         0,
-                        ctx.internal_w(),
-                        ctx.internal_h()); // internal-sized lit color
+                        static_cast<GLsizei>(ctx.internal_w()),
+                        static_cast<GLsizei>(ctx.internal_h())); // internal-sized lit color
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
@@ -195,23 +353,42 @@ void LightingPass::execute(const RenderContext& ctx) {
     const float far_plane = ctx.render_view
                                 ? static_cast<float>(ctx.render_view->description().far_plane)
                                 : ctx.camera->GetFarPlane();
+    auto& diagnostics = DebugViewPass::controls();
+    diagnostics.contribution_texture = 0;
+    diagnostics.contribution_view = DebugViewPass::None;
+    const bool requested = diagnostics.enabled &&
+                           DebugViewPass::supported_contribution(diagnostics.view) &&
+                           !ctx.frozen_replay;
+    const bool prepared = requested && prepare_contributions(ctx);
+    Shader* lighting_shader = m_lighting_shader.get();
     const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
     // The fullscreen quad lies at clip depth zero. Scene visibility comes from
     // the G-buffer, and its depth is blitted here after deferred lighting.
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // deferred lighting into the internal FBO
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // deferred lighting into the internal FBO
     glDepthMask(GL_TRUE);
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    m_lighting_shader->use();
-    m_lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
-    m_lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
-    m_lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
-    m_lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
-    m_lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
-    m_lighting_shader->setInt("u_authoredSurface", 13);
-    m_lighting_shader->setInt("u_sceneDepth", 4);
+    ContributionAttachment contribution(m_lighting_fbo.fbo_id,
+                                        prepared ? m_contribution_texture : 0);
+    if (contribution.ready()) {
+        lighting_shader = m_contribution_shader.get();
+    }
+    lighting_shader->use();
+    if (contribution.ready()) {
+        lighting_shader->setInt("u_contributionMode", diagnostics.view);
+    }
+    lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
+    lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
+    lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
+    lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
+    lighting_shader->setInt("u_authoredSurface", 13);
+    lighting_shader->setInt("u_sceneDepth", 4);
     glActiveTexture(GL_TEXTURE13);
     glBindTexture(GL_TEXTURE_2D, ctx.authored_surface.id);
     glActiveTexture(GL_TEXTURE0);
@@ -237,73 +414,73 @@ void LightingPass::execute(const RenderContext& ctx) {
     // is skipped -> pixel-identical to the pre- path.
     glActiveTexture(GL_TEXTURE10);
     glBindTexture(GL_TEXTURE_2D, ctx.aether_field.id);
-    m_lighting_shader->setInt("u_aetherField", 10);
+    lighting_shader->setInt("u_aetherField", 10);
     // the tinted-transmission cascade at unit 11. The
     // array is init-cleared WHITE, so with no glass the multiply is exactly 1.0
     // (pixel-identical); u_shadowTintEnabled==0 skips the sampling entirely (the
     // same-build A/B lever: off vs on-with-white must FLIP to exactly 0.0).
     glActiveTexture(GL_TEXTURE11);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_tint_array.id);
-    m_lighting_shader->setInt("u_shadowTintCascades", 11);
-    m_lighting_shader->setInt("u_shadowTintEnabled", ctx.shadow_tint_array.id != 0 ? 1 : 0);
+    lighting_shader->setInt("u_shadowTintCascades", 11);
+    lighting_shader->setInt("u_shadowTintEnabled", ctx.shadow_tint_array.id != 0 ? 1 : 0);
     glActiveTexture(GL_TEXTURE12);
     glBindTexture(GL_TEXTURE_2D, m_environment_brdf);
-    m_lighting_shader->setInt("u_environmentBrdf", 12);
+    lighting_shader->setInt("u_environmentBrdf", 12);
     if (ctx.aether_active && ctx.aether_extent > 0) {
         const float world_span = static_cast<float>(ctx.aether_extent) * ctx.aether_cell_size;
-        m_lighting_shader->setFloat("u_aetherActive", 1.0f);
-        m_lighting_shader->setVec2("u_aetherFieldWorldOrigin", ctx.aether_world_origin);
-        m_lighting_shader->setFloat("u_aetherFieldInvWorldSpan",
-                                    world_span > 0.0f ? (1.0f / world_span) : 0.0f);
+        lighting_shader->setFloat("u_aetherActive", 1.0f);
+        lighting_shader->setVec2("u_aetherFieldWorldOrigin", ctx.aether_world_origin);
+        lighting_shader->setFloat("u_aetherFieldInvWorldSpan",
+                                  world_span > 0.0f ? (1.0f / world_span) : 0.0f);
     } else {
-        m_lighting_shader->setFloat("u_aetherActive", 0.0f);
+        lighting_shader->setFloat("u_aetherActive", 0.0f);
     }
     // the glow grade from the context — the defaults
     // equal the GLSL initializers, so untouched contexts stay pixel-identical.
-    m_lighting_shader->setVec3("u_aetherGlowColor", ctx.aether_glow_color);
-    m_lighting_shader->setFloat("u_aetherGlowIntensity", ctx.aether_glow_intensity);
+    lighting_shader->setVec3("u_aetherGlowColor", ctx.aether_glow_color);
+    lighting_shader->setFloat("u_aetherGlowIntensity", ctx.aether_glow_intensity);
     //  ( -6): emissive modulation — 0.0 default is a
     // multiply by exactly 1.0, so untouched contexts stay pixel-identical.
-    m_lighting_shader->setFloat("u_aetherMaterialModulation", ctx.aether_material_modulation);
+    lighting_shader->setFloat("u_aetherMaterialModulation", ctx.aether_material_modulation);
     //  (-8): polarity tint gate — 0.0 keeps the glow color
     // untouched (the single-channel/no-upload default).
-    m_lighting_shader->setFloat("u_aetherPolarityActive", ctx.aether_polarity_active ? 1.0f : 0.0f);
+    lighting_shader->setFloat("u_aetherPolarityActive", ctx.aether_polarity_active ? 1.0f : 0.0f);
     // the render-only snow cover (0 default = byte-identical).
-    m_lighting_shader->setFloat("u_snowCover", ctx.snow_cover);
+    lighting_shader->setFloat("u_snowCover", ctx.snow_cover);
     glActiveTexture(GL_TEXTURE0);
-    m_lighting_shader->setMat4("u_inverseView", glm::inverse(view));
-    m_lighting_shader->setInt("gPosition", 0);
-    m_lighting_shader->setInt("gNormalMaterial", 1);  // Octahedral normal + material
-    m_lighting_shader->setInt("gAlbedoRoughness", 2); // Albedo + roughness
-    m_lighting_shader->setInt("gMetallicAO", 3);      // Metallic + AO
-    m_lighting_shader->setInt("gDepth", 4);
-    m_lighting_shader->setInt("u_shadowCascades", 5);
-    m_lighting_shader->setInt("u_ssao", 6);
-    m_lighting_shader->setInt("u_terrainTextures", 7);
-    m_lighting_shader->setInt("u_materialLUT", 8);
-    m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
-    m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
-    m_lighting_shader->setVec3("u_viewPos", eye);
-    m_lighting_shader->setInt("u_orthographic", ctx.render_view && ctx.render_view->orthographic());
-    m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
-    m_lighting_shader->setVec3("u_sun.color", ctx.sun.color);
+    lighting_shader->setMat4("u_inverseView", glm::inverse(view));
+    lighting_shader->setInt("gPosition", 0);
+    lighting_shader->setInt("gNormalMaterial", 1);  // Octahedral normal + material
+    lighting_shader->setInt("gAlbedoRoughness", 2); // Albedo + roughness
+    lighting_shader->setInt("gMetallicAO", 3);      // Metallic + AO
+    lighting_shader->setInt("gDepth", 4);
+    lighting_shader->setInt("u_shadowCascades", 5);
+    lighting_shader->setInt("u_ssao", 6);
+    lighting_shader->setInt("u_terrainTextures", 7);
+    lighting_shader->setInt("u_materialLUT", 8);
+    lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
+    lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
+    lighting_shader->setVec3("u_viewPos", eye);
+    lighting_shader->setInt("u_orthographic", ctx.render_view && ctx.render_view->orthographic());
+    lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
+    lighting_shader->setVec3("u_sun.color", ctx.sun.color);
     // moon-shadows: the moon's TOWARD-LIGHT direction (anti-sun, overhead at
     // midnight; same convention the shader uses for u_sun.direction). The shader
     // lights + keys the cast-shadow lookup off this so moonlit terrain has real
     // directional form and shadows from the now-moon shadow cascade.
-    m_lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
-    m_lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // rendering: lunar phase
-    m_lighting_shader->setVec3("u_moonRadiance",
-                               ctx.moon_radiance); // rendering : dedicated moon radiance channel
+    lighting_shader->setVec3("u_moonDir", ctx.moon_light_dir);
+    lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // rendering: lunar phase
+    lighting_shader->setVec3("u_moonRadiance",
+                             ctx.moon_radiance); // rendering : dedicated moon radiance channel
     if (ctx.static_studio) {
-        m_lighting_shader->setFloat("u_moonWrapFloor", 0.25f);
-        m_lighting_shader->setFloat("u_exposure", ctx.exposure > 0 ? ctx.exposure : 1.0f);
-        m_lighting_shader->setFloat("u_saturation", 1.0f);
-        m_lighting_shader->setFloat("u_contrast", 1.0f);
-        m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(1));
-        m_lighting_shader->setVec3("u_shadowTint", glm::vec3(1));
-        m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1));
-        m_lighting_shader->setFloat("u_splitToneStrength", 0.0f);
+        lighting_shader->setFloat("u_moonWrapFloor", 0.25f);
+        lighting_shader->setFloat("u_exposure", ctx.exposure > 0 ? ctx.exposure : 1.0f);
+        lighting_shader->setFloat("u_saturation", 1.0f);
+        lighting_shader->setFloat("u_contrast", 1.0f);
+        lighting_shader->setVec3("u_lightWarmth", glm::vec3(1));
+        lighting_shader->setVec3("u_shadowTint", glm::vec3(1));
+        lighting_shader->setVec3("u_highlightTint", glm::vec3(1));
+        lighting_shader->setFloat("u_splitToneStrength", 0.0f);
     } else {
         // LUMIN_MOON_WRAP_FLOOR is a supported photo-grade override for the moon
         // wrap floor. It is parsed once; 0.25 is the shipped navigable-night default.
@@ -315,7 +492,7 @@ void LightingPass::execute(const RenderContext& ctx) {
             }
             return 0.25f;
         }();
-        m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
+        lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
 
         //  cinematic grade (-style): BOLD default — lifted exposure, rich
         // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
@@ -340,25 +517,25 @@ void LightingPass::execute(const RenderContext& ctx) {
         }();
         //  rendering: the RenderContext exposure seam slot wins when set; the
         // sentinel 0 falls back to the static LUMIN_GRADE exposure (byte-identical until ).
-        m_lighting_shader->setFloat("u_exposure",
-                                    ctx.exposure > 0.0f ? ctx.exposure : s_grade.exposure);
-        m_lighting_shader->setFloat("u_saturation", s_grade.saturation);
-        m_lighting_shader->setFloat("u_contrast", s_grade.contrast);
-        m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));
-        m_lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));    // cool
-        m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
-        m_lighting_shader->setFloat("u_splitToneStrength", 0.55f);
+        lighting_shader->setFloat("u_exposure",
+                                  ctx.exposure > 0.0f ? ctx.exposure : s_grade.exposure);
+        lighting_shader->setFloat("u_saturation", s_grade.saturation);
+        lighting_shader->setFloat("u_contrast", s_grade.contrast);
+        lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));
+        lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));    // cool
+        lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
+        lighting_shader->setFloat("u_splitToneStrength", 0.55f);
     }
     const size_t point_light_count = ctx.point_lights ? ctx.point_lights->size() : 0;
     if (point_light_count > 32)
         throw std::invalid_argument("Lighting point-light count exceeds shader capacity");
-    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(point_light_count));
+    lighting_shader->setInt("u_pointLightCount", static_cast<int>(point_light_count));
     for (size_t i = 0; i < point_light_count; ++i) {
         std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
-        m_lighting_shader->setVec3(prefix + "position", (*ctx.point_lights)[i].position);
-        m_lighting_shader->setVec3(prefix + "color", (*ctx.point_lights)[i].color);
-        m_lighting_shader->setFloat(prefix + "radius", (*ctx.point_lights)[i].radius);
-        m_lighting_shader->setFloat(prefix + "intensity", (*ctx.point_lights)[i].intensity);
+        lighting_shader->setVec3(prefix + "position", (*ctx.point_lights)[i].position);
+        lighting_shader->setVec3(prefix + "color", (*ctx.point_lights)[i].color);
+        lighting_shader->setFloat(prefix + "radius", (*ctx.point_lights)[i].radius);
+        lighting_shader->setFloat(prefix + "intensity", (*ctx.point_lights)[i].intensity);
     }
     // Cave / sky-visibility ambient occlusion (render-only). Default OFF =>
     // u_caveAmbientOcclusion 0.0 => the shader's skyVis term is exactly 1.0 =>
@@ -366,50 +543,50 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        m_lighting_shader->setMat4("u_projection",
-                                   ctx.far_world_ladder ? ctx.gbuffer_projection : projection);
-        m_lighting_shader->setVec2(
+        lighting_shader->setMat4("u_projection",
+                                 ctx.far_world_ladder ? ctx.gbuffer_projection : projection);
+        lighting_shader->setVec2(
             "u_screenSize",
             glm::vec2(ctx.internal_w(), ctx.internal_h())); // cave AO marches the internal G-buffer
 
         if (ctx.static_studio) {
-            m_lighting_shader->setFloat("u_caveAmbientOcclusion", 0.0f);
+            lighting_shader->setFloat("u_caveAmbientOcclusion", 0.0f);
         } else {
             static const auto s_caveAO =
                 ResolveCaveAmbientOcclusion(Core::ReadEnvironment("LUMIN_CAVE_AO"));
-            m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
-            m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
-            m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
-            m_lighting_shader->setFloat("u_caveAmbientFloor", s_caveAO.floor);
-            m_lighting_shader->setFloat("u_caveThickness", s_caveAO.thickness);
+            lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
+            lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
+            lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
+            lighting_shader->setFloat("u_caveAmbientFloor", s_caveAO.floor);
+            lighting_shader->setFloat("u_caveThickness", s_caveAO.thickness);
         }
         // Optional point-light punch (shader Patch 4, not applied); defaults keep
         // legacy behaviour. setFloat on an absent uniform is a harmless no-op.
-        m_lighting_shader->setFloat("u_pointLightFalloff", 0.05f);
-        m_lighting_shader->setFloat("u_pointLightInvSqMix", 0.0f);
+        lighting_shader->setFloat("u_pointLightFalloff", 0.05f);
+        lighting_shader->setFloat("u_pointLightInvSqMix", 0.0f);
     }
-    m_lighting_shader->setFloat("u_farPlane", far_plane);
+    lighting_shader->setFloat("u_farPlane", far_plane);
     // -T12: the shadow-cascade validity/refresh fixup (which MUTATES the
     // shared ShadowMap private state + calls the pipeline-private
     // get_light_space_matrices) is hoisted to make_lighting_context; the resolved
     // splits + matrices arrive via ctx.cascade_splits + ctx.light_space_matrices.
-    m_lighting_shader->setVec4("u_cascadeSplits", ctx.cascade_splits);
+    lighting_shader->setVec4("u_cascadeSplits", ctx.cascade_splits);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         if (!ctx.light_space_matrices ||
             ctx.light_space_matrices->size() <= static_cast<size_t>(i)) {
             if (!ctx.static_studio)
                 throw std::invalid_argument("Missing lighting cascade matrices");
-            m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
-                                       glm::mat4(1));
+            lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
+                                     glm::mat4(1));
             continue;
         }
-        m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
-                                   (*ctx.light_space_matrices)[static_cast<std::size_t>(i)]);
+        lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
+                                 (*ctx.light_space_matrices)[static_cast<std::size_t>(i)]);
     }
     glm::vec3 terrainOrigin(floor(eye.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
                             0.0f,
                             floor(eye.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
-    m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
+    lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
     // project the wind-advected cloud coverage onto the terrain as a
     // crawling cast shadow (directSun *= 1 - cloudShadow). The uniforms must match
     // the sky-dome's cloudCoverageAt field exactly so a dome cloud and its ground
@@ -419,19 +596,26 @@ void LightingPass::execute(const RenderContext& ctx) {
         const CloudRenderState& cloud = ctx.cloud_state;
         const bool shadow_on =
             cloud.enabled && cloud.shadow_enabled && cloud.shadow_strength > 0.0f;
-        m_lighting_shader->setInt("u_cloudShadowEnabled", shadow_on ? 1 : 0);
-        m_lighting_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
-        m_lighting_shader->setFloat("u_cloudCoverageAmount",
-                                    cloud.enabled ? cloud.coverage_amount : 0.0f);
-        m_lighting_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
-        m_lighting_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
-        m_lighting_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
-        m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
+        lighting_shader->setInt("u_cloudShadowEnabled", shadow_on ? 1 : 0);
+        lighting_shader->setVec2("u_cloudScrollOffset", cloud.scroll_offset);
+        lighting_shader->setFloat("u_cloudCoverageAmount",
+                                  cloud.enabled ? cloud.coverage_amount : 0.0f);
+        lighting_shader->setFloat("u_cloudBiomeVariation", cloud.biome_variation);
+        lighting_shader->setFloat("u_cloudPlaneHeight", cloud.plane_height);
+        lighting_shader->setFloat("u_cloudShadowStrength", cloud.shadow_strength);
+        lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
     if (ctx.lighting_draws)
         ++(*ctx.lighting_draws);
+    if (contribution.ready()) {
+        diagnostics.contribution_texture = m_contribution_texture;
+        diagnostics.contribution_size = {m_contribution_width, m_contribution_height};
+        diagnostics.contribution_view = diagnostics.view;
+    }
+    contribution.detach();
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (depth_was_enabled)
@@ -534,7 +718,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     }
 
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

@@ -1,7 +1,15 @@
 #version 450 core
 #include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 0)
+#endif
 out vec4 FragColor;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 1) out vec4 DiagnosticContribution;
+uniform int u_contributionMode;
+vec3 diagnosticLightSpecular = vec3(0.0);
+#endif
 
 in vec2 TexCoords;
 
@@ -381,6 +389,9 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
     // Optimized specular calculation
     vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticLightSpecular = specular * radiance * NdotL;
+#endif
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
@@ -429,6 +440,15 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
 }
 
 void main() {
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // Alpha zero is explicit unsupported, including every early return / sky texel.
+    DiagnosticContribution = vec4(0.0);
+    vec3 diagnosticSun = vec3(0.0);
+    vec3 diagnosticMoon = vec3(0.0);
+    vec3 diagnosticLighting = vec3(0.0);
+    vec3 diagnosticSpecular = vec3(0.0);
+    float diagnosticShadow = 1.0;
+#endif
     if (u_staticStudio != 0 && texture(u_sceneDepth, TexCoords).r == 0.0) {
         FragColor = vec4(u_studioBackground, 0.0);
         return;
@@ -527,6 +547,13 @@ void main() {
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow) * shadowTint;
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticSun = Lo;
+    diagnosticLighting = (sunRadiance / PI) * max(dot(Normal, L_sun), 0.0)
+        * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticSpecular = diagnosticLightSpecular * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticShadow = shadow;
+#endif
     //  moonlight (owner: "there should be some brightness from the moon"):
     // a dim cool directional fill so night terrain reads as FORMED (directional
     // N.L gives contrast/detail) rather than a flat near-black sheet. Derived
@@ -585,6 +612,15 @@ void main() {
         float moonLuma = dot(moonLit, vec3(0.2126, 0.7152, 0.0722));
         moonLit = mix(moonLit, moonLuma * vec3(0.70, 0.80, 1.05), 0.55);
         Lo += moonLit;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+        diagnosticMoon = moonLit;
+        diagnosticLighting += (moonRadiance / PI) * moonWrap * moonShadow;
+        vec3 moonSpecularLit = moonSpecular * moonShadow;
+        float moonSpecularLuma = dot(moonSpecularLit, vec3(0.2126, 0.7152, 0.0722));
+        diagnosticSpecular += mix(moonSpecularLit,
+            moonSpecularLuma * vec3(0.70, 0.80, 1.05), 0.55);
+        diagnosticShadow = moonShadow;
+#endif
     }
 
     // Point Lights with early rejection
@@ -598,6 +634,10 @@ void main() {
             vec3 L_point = lightVec / dist; // Avoid normalize when we already have distance
             vec3 radiance = u_pointLights[i].color * u_pointLights[i].intensity * attenuation;
             Lo += CalculateLightContribution(L_point, V, Normal, F0, Albedo, Metallic, a2, k, radiance);
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+            diagnosticSpecular += diagnosticLightSpecular;
+            diagnosticLighting += (radiance / PI) * max(dot(Normal, L_point), 0.0);
+#endif
         }
     }
 
@@ -728,6 +768,31 @@ void main() {
     vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow
         + (authored ? authoredSurface.rgb : vec3(0.0)); // + emissive markers
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // Linear terms before exposure/grade. Material views show the values lighting uses.
+    // Direct terms include BRDF/albedo and their exact shadow/cloud/transmission factors.
+    // Fog and later forward/sky/shadow producers have no output here.
+    vec3 diagnosticValue = vec3(0.0);
+    bool diagnosticSupported = true;
+    if (u_contributionMode == 12) diagnosticValue = diagnosticSun;
+    else if (u_contributionMode == 13) diagnosticValue = diagnosticMoon;
+    else if (u_contributionMode == 14) diagnosticValue = ambient;
+    else if (u_contributionMode == 15) diagnosticValue = vec3(diagnosticShadow);
+    else if (u_contributionMode == 16) diagnosticValue = vec3(ao);
+    else if (u_contributionMode == 17) diagnosticValue = crystalGlow + aetherGlow + markerGlow
+        + (authored ? authoredSurface.rgb : vec3(0.0));
+    else if (u_contributionMode == 19) diagnosticValue = diagnosticSpecular + ambientSpecular * ao * skyVis;
+    else if (u_contributionMode == 20) diagnosticValue = vec3(Roughness);
+    else if (u_contributionMode == 21) diagnosticValue = vec3(Metallic);
+    else if (u_contributionMode == 22) diagnosticValue = viewNormal * 0.5 + 0.5;
+    else if (u_contributionMode == 23) diagnosticValue = Normal * 0.5 + 0.5;
+    else if (u_contributionMode == 24) diagnosticValue = vec3(skyVis);
+    else if (u_contributionMode == 25) diagnosticValue = vec3(materialAO);
+    else if (u_contributionMode == 26) diagnosticValue = diagnosticLighting;
+    else diagnosticSupported = false;
+    if (dot(viewPos, viewPos) >= 1e-8 && diagnosticSupported)
+        DiagnosticContribution = vec4(diagnosticValue, 1.0);
+#endif
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
     // flash composites over BOTH the lit terrain and the sky. (The lighting pass
