@@ -30,6 +30,12 @@ class SystemConfig;
 
 namespace Luminumbra::Client::App {
 
+// Consume environment input after live defaults, before scenario pins and rendering.
+void UpdatePhotoEnvironment(ClientAppContext& app,
+                            Luminumbra::Client::PlayerController* playerController,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                            bool capture_pinned);
+
 // Photo-mode capture loop + codex/objectives/farming HUD. Runs AFTER
 // render_frame against a CONST registry; it never ticks the sim or mutates
 // the registry, so determinism cannot regress. Interactive play only.
