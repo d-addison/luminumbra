@@ -27,6 +27,10 @@ namespace Luminumbra::Ecs {
 struct EntityRegistrySnapshot;
 }
 
+namespace Luminumbra::Systems {
+struct WeatherSchedule;
+}
+
 namespace Luminumbra::Persistence {
 
 class CreatedWorldArtifacts;
@@ -101,11 +105,13 @@ public:
     // LMR payload wire version; metadata envelopes have their own version boundary.
     static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr std::uint16_t kIndexedMetadataVersion = 3;
+    // Schedule-bearing metadata only; LMR region payloads remain version 2.
+    static constexpr std::uint16_t kScheduledMetadataVersion = 4;
     struct SaveFormat {
         bool indexed = false;
         bool requires_index = false;
     };
-    // Present invalid control files refuse; only v2 metadata/v1 manifests permit index absence.
+    // Invalid controls refuse. V2 or nonindexed v4 metadata and v1 manifests permit index absence.
     static bool read_save_format(const std::filesystem::path& save_dir,
                                  SaveFormat& format,
                                  std::vector<std::string>* errors = nullptr,
@@ -294,6 +300,12 @@ public:
                                     std::optional<world::WorldCalendar>* render_calendar = nullptr,
                                     std::size_t* water_sim_cursor = nullptr,
                                     const std::stop_token& stop = {});
+    // Stages both outputs; any malformed/unsupported envelope leaves them unchanged.
+    static bool read_weather_schedule(const std::filesystem::path& save_dir,
+                                      std::shared_ptr<const Systems::WeatherSchedule>& schedule,
+                                      std::uint64_t& tick,
+                                      std::vector<std::string>* errors = nullptr,
+                                      const std::stop_token& stop = {});
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk

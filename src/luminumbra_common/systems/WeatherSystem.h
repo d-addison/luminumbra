@@ -41,6 +41,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -129,6 +130,32 @@ struct WeatherSample {
     Vec2 wind = Vec2(0.0f);        // local wind vector (from the storm advection field)
 };
 
+// Integer keyframes: targets hold outside the table; between starts, intensities
+// interpolate linearly with integer truncation and the left category holds.
+// Wind remains the ordinary wind field. A declared strike replaces procedural
+// lightning for this schedule and still reaches the normal simulation consumers.
+struct WeatherSchedule {
+    static constexpr std::size_t kMaxPhases = 32;
+    static constexpr std::uint64_t kMaxSpanTicks = 108000; // one hour at 30 Hz
+    static constexpr std::size_t kMaxEncodedBytes = 4 + 2 + kMaxPhases * 26 + 2 + 16;
+    static constexpr std::string_view kIdentityPrefix = "weather-schedule-v1:";
+    struct Phase {
+        std::uint64_t start_tick = 0;
+        WeatherCategory category = WeatherCategory::Clear;
+        std::uint16_t precipitation = 0; // 0..65535 maps to 0..1
+        std::uint16_t storm = 0;
+        bool operator==(const Phase&) const = default;
+    };
+    std::vector<Phase> phases; // admitted/copies bounded by kMaxPhases
+    std::optional<std::uint64_t> strike_tick;
+    [[nodiscard]] bool valid() const;
+    // WSC1 + fixed-width lowercase hex, independent of locale and struct layout.
+    [[nodiscard]] std::string canonical_bytes() const;
+    static bool Decode(std::string_view bytes, WeatherSchedule& out);
+    [[nodiscard]] WeatherSample Sample(std::uint64_t tick) const;
+    bool operator==(const WeatherSchedule&) const = default;
+};
+
 class WindFieldSystem;
 
 class WeatherSystem {
@@ -137,6 +164,8 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
+    // Setup only; invalid schedules and changes after the first update refuse.
+    bool SetSchedule(const WeatherSchedule& schedule);
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash);
     // Pure query projections adopted from FPG authority; this does not advance evolution.
@@ -224,6 +253,8 @@ public:
     // ). Bounded: <= kMaxLiveStrikes entries.
     [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const;
     [[nodiscard]] int live_strike_count() const noexcept {
+        if (m_schedule)
+            return static_cast<int>(m_scheduledStrikes.size());
         return static_cast<int>(m_regionalWeatherKeyed
                                     ? m_regionalStrikes.size() - m_hiddenRegionalStrikes
                                     : m_strikes.size());
@@ -264,6 +295,13 @@ public:
     }
 
 private:
+    std::optional<WeatherSchedule> m_schedule;
+    std::string m_scheduleBytes;
+    WeatherSample m_scheduledSample;
+    // At most one declared event; reserve once during setup, never allocate per tick.
+    std::vector<StrikeEvent> m_scheduledStrikes;
+    Vec3 m_scheduleAnchor{};
+    void UpdateSchedule(std::uint64_t tick, const Vec3& anchor);
     std::function<WeatherSample(const Vec3&)> m_regional_sample;
     std::function<std::string()> m_regional_hash;
     // Map a world position to a local cell (clamped result reported via in_region).

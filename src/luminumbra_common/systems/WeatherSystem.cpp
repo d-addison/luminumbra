@@ -119,6 +119,146 @@ float UnitFloat(std::uint64_t key) {
 
 } // namespace
 
+bool WeatherSchedule::valid() const {
+    if (phases.empty() || phases.size() > kMaxPhases)
+        return false;
+    const auto first = phases.front().start_tick;
+    std::uint64_t previous = first;
+    for (std::size_t i = 0; i < phases.size(); ++i) {
+        const auto& phase = phases[i];
+        if (phase.start_tick >= (std::uint64_t{1} << 62) ||
+            (i != 0 && phase.start_tick <= previous) || phase.start_tick - first > kMaxSpanTicks ||
+            static_cast<unsigned>(phase.category) >= kWeatherCategoryCount)
+            return false;
+        previous = phase.start_tick;
+    }
+    return !strike_tick || (*strike_tick != 0 && *strike_tick >= first && *strike_tick <= previous);
+}
+
+std::string WeatherSchedule::canonical_bytes() const {
+    if (!valid())
+        return {};
+    std::string bytes = "WSC1";
+    bytes.reserve(kMaxEncodedBytes);
+    const auto append = [&bytes](std::uint64_t value, unsigned digits) {
+        constexpr std::string_view hex = "0123456789abcdef";
+        for (unsigned i = digits; i != 0; --i)
+            bytes.push_back(hex[(value >> ((i - 1) * 4)) & 15]);
+    };
+    append(phases.size(), 2);
+    for (const auto& phase : phases) {
+        append(phase.start_tick, 16);
+        append(static_cast<std::uint8_t>(phase.category), 2);
+        append(phase.precipitation, 4);
+        append(phase.storm, 4);
+    }
+    append(strike_tick.has_value() ? 1 : 0, 2);
+    if (strike_tick)
+        append(*strike_tick, 16);
+    return bytes;
+}
+
+bool WeatherSchedule::Decode(std::string_view bytes, WeatherSchedule& out) {
+    if (bytes.size() < 8 || bytes.size() > kMaxEncodedBytes || !bytes.starts_with("WSC1"))
+        return false;
+    std::size_t cursor = 4;
+    const auto read = [&bytes, &cursor](unsigned digits, std::uint64_t& value) {
+        if (digits > bytes.size() - cursor)
+            return false;
+        value = 0;
+        for (unsigned i = 0; i < digits; ++i) {
+            const char c = bytes[cursor++];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                return false;
+            value = (value << 4) | static_cast<unsigned>(c <= '9' ? c - '0' : c - 'a' + 10);
+        }
+        return true;
+    };
+    std::uint64_t count = 0;
+    if (!read(2, count) || count == 0 || count > kMaxPhases)
+        return false;
+    const auto minimum = 8 + static_cast<std::size_t>(count) * 26;
+    if (bytes.size() != minimum && bytes.size() != minimum + 16)
+        return false;
+    WeatherSchedule decoded;
+    decoded.phases.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::uint64_t tick = 0, category = 0, precipitation = 0, storm = 0;
+        if (!read(16, tick) || !read(2, category) || !read(4, precipitation) || !read(4, storm) ||
+            category >= kWeatherCategoryCount)
+            return false;
+        decoded.phases.push_back({tick,
+                                  static_cast<WeatherCategory>(category),
+                                  static_cast<std::uint16_t>(precipitation),
+                                  static_cast<std::uint16_t>(storm)});
+    }
+    std::uint64_t present = 0;
+    if (!read(2, present) || present > 1)
+        return false;
+    if (present != 0) {
+        std::uint64_t tick = 0;
+        if (!read(16, tick))
+            return false;
+        decoded.strike_tick = tick;
+    }
+    if (cursor != bytes.size() || !decoded.valid())
+        return false;
+    out = std::move(decoded);
+    return true;
+}
+
+WeatherSample WeatherSchedule::Sample(std::uint64_t tick) const {
+    if (!valid())
+        return {};
+    const auto upper = std::upper_bound(
+        phases.begin(), phases.end(), tick, [](std::uint64_t time, const Phase& phase) {
+            return time < phase.start_tick;
+        });
+    const auto& left = upper == phases.begin() ? phases.front() : *(upper - 1);
+    const auto intensity = [&](std::uint16_t Phase::*member) {
+        std::uint64_t value = left.*member;
+        if (upper != phases.begin() && upper != phases.end()) {
+            const auto span = upper->start_tick - left.start_tick;
+            const auto elapsed = tick - left.start_tick;
+            value = (value * (span - elapsed) + ((*upper).*member) * elapsed) / span;
+        }
+        return static_cast<float>(value) / 65535.0f;
+    };
+    return {.category = left.category,
+            .precip_intensity = intensity(&Phase::precipitation),
+            .storm_intensity = intensity(&Phase::storm),
+            .wind = Vec2(0.0f)};
+}
+
+bool WeatherSystem::SetSchedule(const WeatherSchedule& schedule) {
+    if (m_last_tick != 0 || !schedule.valid())
+        return false;
+    m_schedule = schedule;
+    m_scheduleBytes = schedule.canonical_bytes();
+    m_scheduledStrikes.reserve(1);
+    UpdateSchedule(0, Vec3(0.0f));
+    return true;
+}
+
+void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
+    if (!m_schedule)
+        return;
+    m_last_tick = tick;
+    m_scheduleAnchor = anchor;
+    m_scheduledSample = m_schedule->Sample(tick);
+    m_anchor_category = m_scheduledSample.category;
+    m_scheduledStrikes.clear();
+    if (m_schedule->strike_tick && tick == *m_schedule->strike_tick) {
+        const auto seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed));
+        const auto salt = Mix64(seed ^ tick);
+        m_scheduledStrikes.push_back({tick,
+                                      anchor.x + (UnitFloat(salt) * 2.0f - 1.0f) * 32.0f,
+                                      anchor.z + (UnitFloat(salt ^ 1) * 2.0f - 1.0f) * 32.0f,
+                                      0.5f + UnitFloat(salt ^ 2) * 0.5f,
+                                      static_cast<std::uint32_t>(salt)});
+    }
+}
+
 const char* WeatherCategoryName(WeatherCategory category) noexcept {
     switch (category) {
         case WeatherCategory::Clear:
@@ -458,6 +598,8 @@ void WeatherSystem::StepStrikes(std::uint64_t tick) {
 }
 
 std::vector<StrikeEvent> WeatherSystem::StrikesThisTick() const {
+    if (m_schedule)
+        return m_scheduledStrikes;
     std::vector<StrikeEvent> out;
     if (m_regionalWeatherKeyed) {
         if (m_regionalStrikesDeliveredThrough &&
@@ -688,6 +830,8 @@ const std::vector<StormCell>& WeatherSystem::StormCells() const {
     return m_regionalStormCache;
 }
 const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
+    if (m_schedule)
+        return m_scheduledStrikes;
     if (!m_regionalWeatherKeyed) {
         return m_strikes;
     }
@@ -712,6 +856,7 @@ void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& ancho
         m_anchor_category = sample.category;
         m_anchor_wind = sample.wind;
     }
+    UpdateSchedule(tick, anchor);
 }
 
 void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick,
@@ -823,6 +968,7 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
     if (m_regional_sample) {
         m_last_tick = tick;
         wind.Update(tick, region_anchor);
+        UpdateSchedule(tick, region_anchor);
         return;
     }
     wind.ClearStormPerturbations();
@@ -838,6 +984,12 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
 void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
+    if (m_schedule && !m_regional_sample) {
+        wind.ClearStormPerturbations();
+        wind.Update(tick, region_anchor);
+        Update(tick, region_anchor, &wind);
+        return;
+    }
     if (m_regional_sample) {
         // Storms are adopted projections; wind still has to reach the restored tick.
         UpdateFromClock(tick, region_anchor, wind);
@@ -862,6 +1014,11 @@ void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {
     m_last_tick = tick;
+    if (m_schedule) {
+        UpdateSchedule(tick, region_anchor);
+        m_anchor_wind = wind ? wind->SampleWind(region_anchor) : Vec2(0.0f);
+        return;
+    }
     if (m_regional_sample)
         return;
     // 1) Category map + base precipitation field for this tick.
@@ -882,6 +1039,8 @@ void WeatherSystem::Update(std::uint64_t tick,
 }
 
 WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
+    if (m_schedule)
+        return m_scheduledSample.category;
     if (m_regional_sample)
         return m_regional_sample(world_pos).category;
     int lx = 0;
@@ -895,6 +1054,8 @@ WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
 }
 
 float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
+    if (m_schedule)
+        return m_scheduledSample.precip_intensity;
     if (m_regional_sample)
         return (std::min)(1.0f,
                           m_regional_sample(world_pos).precip_intensity + StormPrecipAt(world_pos));
@@ -911,6 +1072,11 @@ float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
 }
 
 WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
+    if (m_schedule) {
+        auto sample = m_scheduledSample;
+        sample.wind = m_regional_sample ? m_regional_sample(world_pos).wind : m_anchor_wind;
+        return sample;
+    }
     if (m_regional_sample) {
         auto sample = m_regional_sample(world_pos);
         sample.precip_intensity =
@@ -927,6 +1093,25 @@ WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
 }
 
 std::string WeatherSystem::ComputeWeatherSubHash() const {
+    if (m_schedule) {
+        std::uint64_t hash = 14695981039346656037ull;
+        for (const auto c : m_scheduleBytes)
+            MixU8(hash, static_cast<std::uint8_t>(c));
+        MixU64(hash, m_last_tick);
+        MixU64(hash, static_cast<std::uint32_t>(m_weather_seed));
+        MixU64(hash, static_cast<std::uint32_t>(m_lightning_seed));
+        MixFloat(hash, m_scheduleAnchor.x);
+        MixFloat(hash, m_scheduleAnchor.z);
+        if (m_regional_hash) {
+            for (const auto c : m_regional_hash())
+                MixU8(hash, static_cast<std::uint8_t>(c));
+        }
+        constexpr std::string_view hex = "0123456789abcdef";
+        std::string result(16, '0');
+        for (unsigned i = 0; i < 16; ++i)
+            result[i] = hex[(hash >> ((15 - i) * 4)) & 15];
+        return result;
+    }
     if (m_regional_hash)
         return m_regional_hash();
     // fnv1a-64 over: seed, tick, grid geometry, origin, the per-cell category +

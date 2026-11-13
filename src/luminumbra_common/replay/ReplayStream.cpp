@@ -293,6 +293,8 @@ ReplayWriter::ReplayWriter() = default;
 ReplayWriter::~ReplayWriter() = default;
 
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
+    if (header.system_config_identity.starts_with("weather-schedule-v1:"))
+        return false; // This replay format cannot reconstruct scheduled weather.
     if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return false;
     m_replacement_guard.reset();
@@ -419,10 +421,14 @@ bool BoundedReplayRecorder::Refused(int formatted) {
 bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHeader& header) {
     // Every refusal below names its step in the fixed-size refusal text; the
     // full paths go to the logger only.
-    if (m_byte_limit == 0)
-        return Refused(std::snprintf(m_open_refusal.data(),
-                                     kOpenRefusalBytes,
-                                     "unconfigured: Configure must succeed before Open"));
+    const bool unsupported_schedule =
+        header.system_config_identity.starts_with("weather-schedule-v1:");
+    const char* initial_refusal = unsupported_schedule
+                                      ? "unsupported: weather schedule requires a versioned replay"
+                                      : "unconfigured: Configure must succeed before Open";
+    if (m_byte_limit == 0 || unsupported_schedule)
+        return Refused(
+            std::snprintf(m_open_refusal.data(), kOpenRefusalBytes, "%s", initial_refusal));
     if (!m_directory.empty())
         return Refused(std::snprintf(m_open_refusal.data(),
                                      kOpenRefusalBytes,

@@ -67,6 +67,7 @@ class PhysicsSystem;
 class WaterSystem;
 class WindFieldSystem;
 class WeatherSystem;
+struct WeatherSchedule;
 class AetherFieldSystem;
 } // namespace Systems
 } // namespace Luminumbra
@@ -166,6 +167,7 @@ public:
         std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
+        std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
         Vec3 energy_anchor{};
         std::uint64_t simulation_tick = 0;
         std::uint64_t world_revision = 0;
@@ -335,6 +337,11 @@ public:
     }
     const Systems::WeatherSystem* GetWeatherSystem() const {
         return m_weatherSystem.get();
+    }
+    // Pre-world setup: copies validated input, so callers cannot mutate session identity.
+    bool SetWeatherSchedule(const Systems::WeatherSchedule& schedule);
+    [[nodiscard]] const Systems::WeatherSchedule* GetWeatherSchedule() const {
+        return m_weatherSchedule.get();
     }
 
     // the deterministic Aether scalar field. Sim-authoritative; its
@@ -811,6 +818,7 @@ private:
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
+    std::shared_ptr<const Systems::WeatherSchedule> m_weatherSchedule;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     // The stateful energy layer. Null unless
     // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (explicit OFF —

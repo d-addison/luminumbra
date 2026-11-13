@@ -4,6 +4,7 @@
 #include "ReplacementOutputFile.h"
 #include "WorldSaveEncoding.h"
 #include "core/Profiler.h"
+#include "systems/WeatherSystem.h"
 #include "world/FarVolumeMemory.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
@@ -3607,12 +3608,28 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
     if (!version.is_number_integer())
         return "corrupt world metadata container version";
     if (version != WorldSaveService::kContainerVersion &&
-        version != WorldSaveService::kIndexedMetadataVersion) {
+        version != WorldSaveService::kIndexedMetadataVersion &&
+        version != WorldSaveService::kScheduledMetadataVersion) {
         if (version >= 0 && version < WorldSaveService::kContainerVersion)
             return WorldSaveService::kObsoleteWorldMessage;
-        if (version > WorldSaveService::kIndexedMetadataVersion)
+        if (version > WorldSaveService::kScheduledMetadataVersion)
             return "unsupported future world metadata container version " + version.dump();
         return "corrupt world metadata container version";
+    }
+    const bool scheduled = version == WorldSaveService::kScheduledMetadataVersion;
+    if (metadata.contains("weatherSchedule") != scheduled ||
+        metadata.contains("weatherScheduleTick") != scheduled)
+        return "corrupt world metadata: weather schedule version mismatch";
+    if (scheduled) {
+        const auto& encoding = metadata.at("weatherSchedule");
+        const auto& tick = metadata.at("weatherScheduleTick");
+        Systems::WeatherSchedule schedule;
+        if (!encoding.is_string() ||
+            !Systems::WeatherSchedule::Decode(encoding.get_ref<const std::string&>(), schedule) ||
+            !tick.is_number_integer() || (!tick.is_number_unsigned() && tick < 0) ||
+            tick >= world::WorldClock::kTickLimit ||
+            (metadata.contains("simulationTick") && metadata.at("simulationTick") != tick))
+            return "corrupt world metadata: invalid weather schedule";
     }
     if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty())
         return seed_error;
@@ -3640,6 +3657,17 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
                                ? 1
                                : 0;
     return {};
+}
+
+// Legacy direct metadata writes retain their opaque-byte contract. Admit new
+// schedule fields and explicit unsupported versions before any publication.
+std::string CheckMetadataVersionInput(const nlohmann::json& metadata) {
+    if (metadata.contains("weatherSchedule") || metadata.contains("weatherScheduleTick") ||
+        (metadata.contains("container_version") &&
+         metadata.at("container_version") != WorldSaveService::kContainerVersion &&
+         metadata.at("container_version") != WorldSaveService::kIndexedMetadataVersion))
+        return CheckMetadataValue(metadata);
+    return world::ValidateWorldSeedMetadata(metadata);
 }
 
 std::string CheckMetadataFile(const std::filesystem::path& save_dir,
@@ -4254,7 +4282,7 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
             "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
         return false;
     }
-    if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty()) {
+    if (const auto seed_error = CheckMetadataVersionInput(metadata); !seed_error.empty()) {
         AddError(errors, seed_error);
         return false;
     }
@@ -4386,9 +4414,12 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
             AddError(errors, error);
             return false;
         }
-        if (metadata.at("container_version") != kIndexedMetadataVersion ||
+        const auto metadata_version = metadata.contains("weatherSchedule")
+                                          ? kScheduledMetadataVersion
+                                          : kIndexedMetadataVersion;
+        if (metadata.at("container_version") != metadata_version ||
             !metadata.contains("snapshotFormat")) {
-            metadata["container_version"] = kIndexedMetadataVersion;
+            metadata["container_version"] = metadata_version;
             metadata["snapshotFormat"] = 1;
             std::string bytes;
             if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, bytes, 4, false) ||
@@ -4480,7 +4511,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
     }
     if (scope.engaged()) {
-        metadata["container_version"] = kIndexedMetadataVersion;
+        metadata["container_version"] = metadata.contains("weatherSchedule")
+                                            ? kScheduledMetadataVersion
+                                            : kIndexedMetadataVersion;
         metadata["snapshotFormat"] = 1;
     }
     const std::string output_bytes = (scope.engaged() || has_clock || has_render_calendar)
@@ -4631,6 +4664,56 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     return true;
 }
 
+bool WorldSaveService::read_weather_schedule(
+    const std::filesystem::path& save_dir,
+    std::shared_ptr<const Systems::WeatherSchedule>& schedule,
+    std::uint64_t& tick,
+    std::vector<std::string>* errors,
+    const std::stop_token& stop) {
+    nlohmann::json metadata;
+    bool missing = false;
+    SavedJsonFailure failure = SavedJsonFailure::None;
+    if (!ReadSavedJson(save_dir / "world_info.json",
+                       SavedInputLimits::kMetadataBytes,
+                       metadata,
+                       missing,
+                       true,
+                       &failure,
+                       stop)) {
+        AddError(errors,
+                 failure == SavedJsonFailure::Cancelled   ? "Saved-world validation cancelled."
+                 : failure == SavedJsonFailure::Malformed ? "Corrupt world metadata: invalid JSON."
+                 : failure == SavedJsonFailure::Unreadable
+                     ? "Corrupt world metadata: unreadable or non-regular input."
+                     : "Saved-input admission refused: unreadable or oversized world metadata.");
+        return false;
+    }
+    if (!missing) {
+        const auto error = CheckMetadataValue(metadata);
+        if (!error.empty()) {
+            AddError(errors,
+                     metadata.contains("weatherSchedule") ||
+                             metadata.contains("weatherScheduleTick")
+                         ? "Corrupt weather schedule metadata: " + error
+                         : error);
+            return false;
+        }
+    }
+    std::shared_ptr<const Systems::WeatherSchedule> decoded;
+    std::uint64_t decoded_tick = 0;
+    if (!missing && metadata.contains("weatherSchedule")) {
+        Systems::WeatherSchedule value;
+        if (!Systems::WeatherSchedule::Decode(
+                metadata.at("weatherSchedule").get_ref<const std::string&>(), value))
+            return false;
+        decoded = std::make_shared<const Systems::WeatherSchedule>(std::move(value));
+        decoded_tick = metadata.at("weatherScheduleTick").get<std::uint64_t>();
+    }
+    schedule = std::move(decoded);
+    tick = decoded_tick;
+    return true;
+}
+
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,
@@ -4678,8 +4761,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         }
         if (missing)
             return true;
-        if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata);
-            !seed_error.empty()) {
+        if (const auto seed_error = CheckMetadataVersionInput(metadata); !seed_error.empty()) {
             AddError(errors, seed_error);
             return false;
         }
