@@ -105,6 +105,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarFrozenObservation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GroundObjectStore.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/SimulationTerrain.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WaterShare.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
