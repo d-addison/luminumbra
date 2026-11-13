@@ -5802,15 +5802,6 @@ int main(int argc, char* argv[]) {
                                         }
                                         return ndc;
                                     };
-                                    const auto project_stroke =
-                                        [&](const std::vector<glm::vec3>& stroke) {
-                                            std::vector<glm::vec2> points;
-                                            points.reserve(stroke.size());
-                                            for (const glm::vec3& wp : stroke) {
-                                                points.push_back(project(wp));
-                                            }
-                                            return points;
-                                        };
                                     const auto project_strike = [&](std::size_t index) {
                                         const auto& strike = *consumed[index].event;
                                         const float gy = consumed[index].ground_y;
@@ -5821,16 +5812,8 @@ int main(int argc, char* argv[]) {
                                             strike.magnitude,
                                             (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
                                                 strike.strike_tick);
-                                        Luminumbra::Rendering::ProjectedLiveStrike projected;
-                                        projected.main_channel = project_stroke(bolt.main_channel);
-                                        projected.branches.reserve(bolt.branches.size());
-                                        for (const auto& br : bolt.branches) {
-                                            projected.branches.push_back(project_stroke(br));
-                                        }
-                                        projected.pulse = pulses[index];
-                                        projected.strike_ndc =
-                                            project(glm::vec3(strike.world_x, gy, strike.world_z));
-                                        return projected;
+                                        return Luminumbra::Rendering::ProjectLightningBolt(
+                                            bolt, vp, pulses[index]);
                                     };
                                     // Each candidate has 33 channel points and at most three
                                     // 4-point branches. Test visibility before the 48-strike cap;
