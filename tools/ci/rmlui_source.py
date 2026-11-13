@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -139,9 +139,15 @@ def inventory(root: Path, ignore_git: bool = False, allowed_directories: set[str
                 continue
             raise
         with scan:
+            # At most STORAGE_ENTRIES retained entries. Reject an oversized
+            # directory before path validation and metadata reads can delay
+            # command retirement across thousands of already doomed entries.
+            directory_entries = []
             for entry in scan:
                 entries += 1
                 require(entries <= STORAGE_ENTRIES, "source entry bound exceeded")
+                directory_entries.append(entry)
+            for entry in directory_entries:
                 name = Path(entry.path).relative_to(root).as_posix()
                 safe_relative(name)
                 transient_git = live_git and name.startswith(".git/")
@@ -258,18 +264,26 @@ def shutdown_refusal(primary_error: BaseException | None, shutdown_errors: list[
 class CommandCancellation:
     """Main-thread signal ownership shared explicitly with command workers.
 
-    Handlers record the first cancellation; commands retire their retained tree
-    before this scope restores and forwards the original handler. Workers must
-    join this scope before spawning. Failed handler restorations retain their
-    original callbacks and pending cancellation for explicit recovery.
+    POSIX commands run on workers, including calls from the main thread. The
+    first SIGINT/SIGTERM closes admission and waits for all registered workers
+    to retire their groups before the handler returns. Repeated signals coalesce
+    until scope exit restores and forwards the first original handler once.
+    Workers must join this explicit main-thread scope before spawning. Ignored
+    signals stay ignored. Windows retains its job-object shutdown and deferred
+    signal forwarding; external TerminateProcess bypasses Python handlers.
+    Failed restorations retain callbacks and cancellation for explicit recovery.
     """
 
     def __init__(self):
         self.condition = threading.Condition()
         self.active = 0
         self.open = False
-        self.pending = None
+        self.signals = {}  # At most one retained cancellation.
         self.handlers = {}
+
+    @property
+    def pending(self):
+        return self.signals.get("first")
 
     def __enter__(self):
         require(threading.current_thread() is threading.main_thread(),
@@ -288,6 +302,8 @@ class CommandCancellation:
             failures = self.restore_handlers()
             if failures:
                 raise shutdown_refusal(error, failures) from error
+            if os.name == "posix":
+                self.forward_pending()
             raise
 
     def restore_handlers(self):
@@ -306,8 +322,24 @@ class CommandCancellation:
     def record(self, signum, frame):
         # Two handlers, one retained signal/frame. Repeated signals cannot
         # interrupt spawn custody, tree shutdown, or handler restoration.
-        if self.pending is None:
-            self.pending = (signum, frame, self.handlers[signum])
+        if self.pending is not None:
+            return
+        pending = (signum, frame, self.handlers[signum])
+        # A nested signal can arrive while constructing pending. Publish once
+        # in a single dict operation, without overwriting that nested record.
+        if self.signals.setdefault("first", pending) is pending:
+            if os.name == "posix":
+                with self.condition:
+                    # Only workers hold command registrations on POSIX. Their
+                    # existing command/cleanup deadlines also bound this wait.
+                    while self.active:
+                        self.condition.wait(0.01)
+                previous = self.pending[2]
+                if isinstance(getattr(previous, "__self__", None), CommandCancellation):
+                    # Nested scopes must cancel the enclosing owner's workers
+                    # before this handler returns too. Its application callback
+                    # remains deferred until that enclosing scope restores it.
+                    previous(signum, frame)
 
     def check(self):
         require(self.open and self.pending is None, "Git command cancelled")
@@ -316,6 +348,8 @@ class CommandCancellation:
     def command(self):
         with self.condition:
             self.check()
+            require(os.name != "posix" or threading.current_thread() is not threading.main_thread(),
+                    "Git command registration requires a POSIX worker")
             # Reuse the storage entry bound for outstanding registrations.
             require(self.active < STORAGE_ENTRIES, "Git command ownership bound exceeded")
             self.active += 1
@@ -327,6 +361,9 @@ class CommandCancellation:
                 self.condition.notify_all()
 
     def __exit__(self, exc_type, exc_value, traceback):
+        if os.name == "posix":
+            require(threading.current_thread() is threading.main_thread(),
+                    "Git cancellation requires a main-thread owner")
         with self.condition:
             self.open = False  # Atomically close admission before waiting.
             # Each registered command retains its existing 120-second deadline
@@ -336,7 +373,10 @@ class CommandCancellation:
         failures = self.restore_handlers()
         if failures:
             raise shutdown_refusal(exc_value, failures) from (exc_value or failures[0])
-        pending, self.pending = self.pending, None
+        self.forward_pending()
+
+    def forward_pending(self):
+        pending = self.signals.pop("first", None)
         if pending is not None:
             signum, frame, previous = pending
             if previous == signal.SIG_DFL:
@@ -479,12 +519,31 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
                 input_bytes: bytes | None = None, *,
                 cancellation: CommandCancellation | None = None) -> bytes:
     """Run one owned tree, with bounded output, storage and shutdown."""
-    if cancellation is None:
-        with CommandCancellation() as owner:
+    with CommandCancellation() if cancellation is None else nullcontext(cancellation) as owner:
+        def execute():
             with owner.command():
                 return owned_command(source, argv, environment, input_bytes, owner)
-    with cancellation.command():
-        return owned_command(source, argv, environment, input_bytes, cancellation)
+        if os.name == "posix" and threading.current_thread() is threading.main_thread():
+            # Keep spawn custody and shutdown off the signal-handling thread. A
+            # signal during Popen must wait for the worker to acquire and retire
+            # the returned child, before its PID reaches the calling thread.
+            result, errors = [], []  # Exactly one bounded result or exception.
+            def run():
+                try:
+                    result.append(execute())
+                except BaseException as error:
+                    errors.append(error)
+            worker = threading.Thread(target=run)
+            worker.start()
+            try:
+                worker.join()
+            finally:
+                if worker.is_alive():
+                    worker.join()
+            if errors:
+                raise errors[0]
+            return result[0]
+        return execute()
 
 
 def owned_command(source: Path, argv: list[str], environment: dict[str, str],
@@ -604,6 +663,17 @@ def owned_command(source: Path, argv: list[str], environment: dict[str, str],
             # an empty job alone cannot exclude later enrollment or spawning.
             attempt(process.kill)
         elif process is not None:
+            if cancellation.pending is not None:
+                def forward_session() -> None:
+                    try:
+                        os.killpg(process.pid, cancellation.pending[0])
+                    except ProcessLookupError:
+                        return
+                    # Give every member 100 ms, even if its leader has already
+                    # exited. Keep that PID unreaped until SIGKILL below covers
+                    # all surviving descendants, including signal ignorers.
+                    time.sleep(0.1)
+                attempt(forward_session)
             def terminate_session() -> None:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
