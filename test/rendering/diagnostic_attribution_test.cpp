@@ -23,6 +23,14 @@ void Contains(const std::string& source, std::string_view text) {
     EXPECT_NE(source.find(text), std::string::npos) << text;
 }
 
+void Before(const std::string& source, std::string_view first, std::string_view second) {
+    const auto first_position = source.find(first);
+    const auto second_position = source.find(second);
+    ASSERT_NE(first_position, std::string::npos) << first;
+    ASSERT_NE(second_position, std::string::npos) << second;
+    EXPECT_LT(first_position, second_position);
+}
+
 std::size_t Count(const std::string& source, std::string_view text) {
     std::size_t result = 0;
     for (auto position = source.find(text); position != std::string::npos;
@@ -100,21 +108,23 @@ TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
 }
 
 TEST(DiagnosticAttribution, DisabledScopeDoesNotAllocateTargetsOrCompileVariants) {
-    const auto producers = Read(kPass);
-    Contains(producers, "static thread_local GBufferDiagnosticCapture* capture = nullptr;");
-    const auto constructor = Body(producers, "GBufferDiagnosticCapture::GBufferDiagnosticCapture(");
+    const auto targets = (Read(kTargets) + Read(kPass));
+    EXPECT_EQ(Count(Read(kPass), "if (capture) {\n        shader = capture->variant("), 3u);
+    Contains(targets, "static thread_local GBufferDiagnosticCapture* capture = nullptr;");
+    const auto scope = Body(targets, "GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(");
+    Contains(scope, "if (capture_ && !capture_->attach(gbuffer, extent))");
+    const auto constructor = Body(targets, "GBufferDiagnosticCapture::GBufferDiagnosticCapture(");
     Contains(constructor, "SetCurrent(this);");
+    Contains(Body(targets, "GBufferDiagnosticCapture::~GBufferDiagnosticCapture()"),
+             "SetCurrent(nullptr);");
     EXPECT_EQ(constructor.find("gl"), std::string::npos);
     EXPECT_EQ(constructor.find("ensure("), std::string::npos);
     EXPECT_EQ(constructor.find("make_unique<Shader>"), std::string::npos);
-    const auto variant = Body(producers, "Shader* GBufferDiagnosticCapture::variant(");
-    Contains(variant, "if (!shader || !shader->IsValid())");
+    const auto variant = Body(targets, "Shader* GBufferDiagnosticCapture::variant(");
+    Contains(variant, "if (!state_->framebuffer || !shader || !shader->IsValid())");
     Contains(variant, "LUMIN_DIAG_IDS 1");
     Contains(variant, "LUMINUMBRA_FAR_WORLD_LADDER 1");
-    EXPECT_LT(variant.find("if (!shader"), variant.find("make_unique<Shader>"));
-    EXPECT_EQ(Count(producers, "if (capture) {\n        shader = capture->variant("), 3u);
-    Contains(Body(producers, "GBufferDiagnosticCapture::~GBufferDiagnosticCapture()"),
-             "SetCurrent(nullptr);");
+    EXPECT_LT(variant.find("if (!state_->framebuffer"), variant.find("make_unique<Shader>"));
 }
 
 TEST(DiagnosticAttribution, BothFragmentWritersUseTheExistingDiscardAndDepth) {
@@ -142,13 +152,14 @@ TEST(DiagnosticAttribution, DeferredVertexSiblingsSelectVariantsAndUploadInteger
     const auto pass = Read(kPass);
     EXPECT_EQ(Count(pass, "shader = capture->variant("), 3u);
     EXPECT_EQ(Count(pass, "diagnostic_uniforms.Cache(*shader)"), 3u);
+    Contains(pass, "GBufferDiagnosticAttachment diagnostic_attachment(");
     Contains(pass, "? \"instanced_static_mesh_ladder\"");
     Contains(pass, "? \"skinned_mesh_ladder\"");
     Contains(pass, "std::numeric_limits<GLsizei>::max()");
     Contains(pass, "diagnostic_static_mesh_index_count");
     ASSERT_NE(pass.find("glDrawElementsInstancedBaseInstance"), std::string::npos);
     EXPECT_LT(pass.find("diagnostic_static_mesh_index_count"),
-              pass.find("glDrawElementsInstancedBaseInstance"));
+              pass.find("Submit(glDrawElementsInstancedBaseInstance"));
     const auto write =
         Body((Read(kTargets) + Read(kPass)), "void GBufferDiagnosticCapture::write(");
     Contains(write, "state_->table.submit(submission, id)");
@@ -204,6 +215,57 @@ TEST(DiagnosticAttribution, BothLegacyFarWritersCarryTheActualTierAndOwner) {
     EXPECT_FALSE(table.complete_coverage());
 }
 
+TEST(DiagnosticAttribution, CapabilityRefusalIsAnExplicitUnsupportedRecord) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "state_->framebuffer != 0 || state_->captured");
+    Contains(attach, "!gbuffer.fbo_id || !gbuffer.position_texture");
+    Contains(attach, "max_buffers < 7");
+    Contains(attach, "max_buffers > static_cast<GLint>(state_->buffers.size())");
+    Contains(attach, "max_attachments < 7");
+    Contains(attach, "diagnostic_mrt_capability");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    Contains(attach, "diagnostic_integer_target_unsupported");
+    Contains(attach, "diagnostic_attachment_occupied");
+    Contains(attach, "diagnostic_mrt_incomplete");
+    Contains(Body(targets, "bool GBufferDiagnosticCapture::attach("), "unsupported(reason)");
+    EXPECT_LT(attach.find("attachment_type != GL_NONE"), attach.find("targets.ensure("));
+    const auto refusal = Body(targets, "void GBufferDiagnosticCapture::unsupported(");
+    Contains(refusal, "state_->failed = true");
+    Contains(refusal, ".provenance = DiagnosticProvenance::Unsupported");
+    Contains(refusal, "state_->table.submit(");
+    Contains(refusal, "throw std::runtime_error");
+    const auto complete = Body(targets, "bool GBufferDiagnosticCapture::complete()");
+    Contains(complete, "state_->captured && !state_->framebuffer && !state_->failed");
+    Contains(complete, "state_->table.complete_coverage()");
+}
+
+TEST(DiagnosticAttribution, ResizeAndIncompleteAttachmentRestoreTheEntireDrawBufferState) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "width <= 0 || height <= 0");
+    Contains(attach, "static_cast<std::uint32_t>(width) != extent.width");
+    Contains(attach, "static_cast<std::uint32_t>(height) != extent.height");
+    Contains(attach, "diagnostic_gbuffer_extent_mismatch");
+    Contains(attach, "state_->targets.ensure(true, extent, 7)");
+    Contains(attach, "GL_DRAW_BUFFER0 + static_cast<GLenum>(index)");
+    Contains(attach, "glGetBooleani_v(GL_COLOR_WRITEMASK, 6, state_->color_mask.data())");
+    Contains(attach, "glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)");
+    Contains(attach, "if (!complete) {\n        detach_target();");
+    EXPECT_LT(attach.find("GL_DRAW_BUFFER0"), attach.find("glFramebufferTexture2D("));
+    const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Contains(detach, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0");
+    Contains(detach, "glDrawBuffers(state_->buffer_count, state_->buffers.data())");
+    Contains(detach, "glColorMaski(6,");
+    Contains(detach, "static_cast<GLuint>(saved_framebuffer)");
+    const auto retire = Body(targets, "void GBufferDiagnosticCapture::before_destroy(");
+    Contains(retire, "state_->framebuffer == gbuffer.fbo_id");
+    EXPECT_LT(retire.find("detach_target();"), retire.find("gbuffer_recreated_during_capture"));
+    const auto destroy = Body(targets, "void DestroyGBufferTargets(");
+    EXPECT_LT(destroy.find("capture->before_destroy(gbuffer)"),
+              destroy.find("registry.destroy_owned"));
+}
+
 TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) {
     const auto pass = Read(kPass);
     Contains(pass, "live_terrain_mdi_unsupported");
@@ -219,19 +281,99 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(targets, "diagnostic_shader_variant_unavailable");
     Contains(Body(targets, "void GBufferDiagnosticCapture::unsupported("),
              ".provenance = DiagnosticProvenance::Unsupported");
-    Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"), "return false;");
+    Contains(targets, "std::uncaught_exceptions() > exceptions_");
+    Contains(Body(targets, "void GBufferDiagnosticCapture::abort()"), "state_->failed = true;");
 }
 
-TEST(DiagnosticAttribution, ProducerScopeNeverAttachesOrClaimsCompleteCoverage) {
-    const auto pass = Read(kPass);
+TEST(DiagnosticAttribution, AttachmentStorageIsEnsuredBeforeLeaseAndLeaseBeforeAttachment) {
     const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
-    for (const auto* source : {&pass, &header}) {
-        EXPECT_EQ(source->find("DiagnosticTargets"), std::string::npos);
-        EXPECT_EQ(source->find("glFramebufferTexture"), std::string::npos);
-        EXPECT_EQ(source->find("GBufferDiagnosticAttachment"), std::string::npos);
-        EXPECT_EQ(source->find("attach_target"), std::string::npos);
-    }
-    EXPECT_EQ(SourceHash(Read(kTargets)), 0x9915b3a54a41b2a9ull);
-    Contains(header, "explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table)");
-    Contains(Body(pass, "bool GBufferDiagnosticCapture::complete()"), "return false;");
+    Contains(header, "DiagnosticTargets::AttachmentLease attachment_lease;");
+    const auto attach = Body(Read(kTargets), "bool GBufferDiagnosticCapture::attach_target(");
+    Before(attach,
+           "state_->targets.ensure(true, extent, 7)",
+           "state_->attachment_lease = state_->targets.acquire_attachment_lease()");
+    Before(attach,
+           "state_->attachment_lease = state_->targets.acquire_attachment_lease()",
+           "if (!state_->attachment_lease)");
+    Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
+    Contains(attach, "state_->attachment_lease.texture()");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    EXPECT_EQ(attach.find("attachment_lease.reset()"), std::string::npos);
+}
+
+TEST(DiagnosticAttribution, ResizeAndRegistryTeardownDetachBeforeReleasingTheAttachmentLease) {
+    const auto targets = Read(kTargets);
+    const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Before(detach, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0", "attachment_lease.reset()");
+    Before(detach,
+           "glDrawBuffers(state_->buffer_count, state_->buffers.data())",
+           "attachment_lease.reset()");
+    Before(detach, "static_cast<GLuint>(saved_framebuffer)", "attachment_lease.reset()");
+    EXPECT_EQ(Count(targets + Read(kPass), "attachment_lease.reset()"), 1u);
+    const auto retire = Body(targets, "void GBufferDiagnosticCapture::before_destroy(");
+    Contains(retire, "state_->framebuffer && state_->framebuffer == gbuffer.fbo_id");
+    Before(retire, "detach_target();", "state_->failed = true;");
+    const auto destroy = Body(targets, "void DestroyGBufferTargets(");
+    Before(destroy, "capture->before_destroy(gbuffer)", "registry.destroy_owned(");
+    const auto pass = Read(kPass);
+    Contains(Body(pass, "void GBufferPass::destroy_gbuffer("),
+             "DestroyGBufferTargets(m_gbuffer, registry)");
+    const auto execute = Body(pass, "GBufferDrawStats GBufferPass::execute(");
+    Before(execute, "DestroyGBufferTargets(m_gbuffer, *ctx.registry)", "CreateGBufferTargets(");
+    Before(execute,
+           "glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)",
+           "GBufferDiagnosticAttachment diagnostic_attachment(");
+    Before(execute, "GBufferDiagnosticAttachment diagnostic_attachment(", "geometry_pass_chunks(");
+    Before(execute,
+           "GBufferDiagnosticAttachment diagnostic_attachment(",
+           "geometry_pass_static_meshes(");
+    Before(execute,
+           "GBufferDiagnosticAttachment diagnostic_attachment(",
+           "geometry_pass_skinned_meshes(");
+    // Authored preview is the other caller of the same shared lifecycle.
+    const auto preview = Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp");
+    Before(preview,
+           "DestroyGBufferTargets(gbuffer, resources)",
+           "CreateGBufferTargets(gbuffer, resources, w, h, true)");
+}
+
+TEST(DiagnosticAttribution, UnboundGBufferLeaseRefusesTargetResizeAndPreservesStorageAndBindings) {
+    const auto targets = Read(kTargets);
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Before(attach, "state_->targets.acquire_attachment_lease()", "glFramebufferTexture2D(");
+    // Restoring the caller binding must not drop ownership of the now-unbound G-buffer.
+    Before(attach, "state_->framebuffer = gbuffer.fbo_id;", "state_->captured = true;");
+    EXPECT_EQ(attach.find("attachment_lease.reset()"), std::string::npos);
+    const auto lifecycle = Read("src/luminumbra_client/rendering/DiagnosticTargets.h");
+    const auto ensure = Body(lifecycle, "bool ensure(");
+    Before(ensure, "if (leases_ != 0)", "BindingGuard guard;");
+    Before(ensure, "if (leases_ != 0)", "glGenTextures(");
+    Before(ensure, "if (leases_ != 0)", "destroy(texture_, framebuffer_)");
+    Contains(Body(ensure, "if (leases_ != 0)"), "return false;");
+    const auto reset = Body(lifecycle, "[[nodiscard]] bool reset()");
+    Before(reset, "if (leases_ != 0)", "destroy(texture_, framebuffer_)");
+    // The existing modeled-driver regression also checks handles, extents, all
+    // caller bindings and the attachment after refusal on an unbound framebuffer.
+    const auto tests = Read("test/rendering/diagnostic_capture_test.cpp");
+    Contains(tests, "UnboundCallerAttachmentLeaseRefusesResizeAndReleaseEnablesResize");
+}
+
+TEST(DiagnosticAttribution, IncompleteRollbackAndExceptionTeardownDetachBeforeLeaseRelease) {
+    const auto targets = Read(kTargets);
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    const auto rollback = Body(attach, "if (!complete)");
+    Before(rollback, "detach_target();", "diagnostic_mrt_incomplete");
+    const auto pass = Read(kPass);
+    const auto scope = Body(pass, "GBufferDiagnosticAttachment::~GBufferDiagnosticAttachment()");
+    Before(scope, "capture_->detach();", "std::uncaught_exceptions() > exceptions_");
+    Contains(scope, "capture_->abort();");
+    const auto destructor = Body(pass, "GBufferDiagnosticCapture::~GBufferDiagnosticCapture()");
+    Before(destructor, "detach();", "SetCurrent(nullptr)");
+    Contains(destructor, "catch (...)");
+    const auto detach = Body(pass, "void GBufferDiagnosticCapture::detach()");
+    Before(detach, "detach_target();", "unsupported(reason)");
+    const auto release = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Before(release, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0", "attachment_lease.reset()");
+    const auto complete = Body(pass, "bool GBufferDiagnosticCapture::complete()");
+    Contains(complete, "!state_->attachment_lease");
 }
