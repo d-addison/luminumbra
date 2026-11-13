@@ -132,6 +132,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/UploadBudget.h"
 #include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
+#include "rendering/passes/DebugViewPass.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
 #include "rendering/passes/WaterPass.h"
@@ -1563,6 +1564,13 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = 4;
         else if (dv == "position")
             g_app.overlay.debug_view_mode = 5;
+        else if (const int identity_mode = Luminumbra::Rendering::DebugViewPass::identity_mode(dv);
+                 identity_mode != Luminumbra::Rendering::DebugViewPass::None) {
+            auto& diagnostics = Luminumbra::Rendering::DebugViewPass::controls();
+            diagnostics.enabled = true;
+            diagnostics.view = identity_mode;
+            diagnostics.refresh = true;
+        }
     }
     g_app.capture.render_benchmark_path =
         GetCommandLineOption(argc, argv, "--render-benchmark", "");
@@ -3462,8 +3470,10 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = static_cast<int>(
                 std::find(modes.begin(), modes.end(), std::get<std::string>(args[0])) -
                 modes.begin());
+            Luminumbra::Rendering::DebugViewPass::controls().view =
+                Luminumbra::Rendering::DebugViewPass::None;
         } else if (name == "render debug-cycle")
-            g_app.overlay.debug_view_mode = (g_app.overlay.debug_view_mode + 1) % 6;
+            Luminumbra::Rendering::DebugViewPass::cycle_mode(g_app.overlay.debug_view_mode);
         else if (name == "render wireframe")
             g_app.overlay.wireframe_mode = std::get<bool>(args[0]);
         else if (name == "render wireframe-toggle")

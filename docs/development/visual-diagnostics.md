@@ -15,7 +15,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
 | Exact producer coverage | Partial | File-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
-| Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
+| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
@@ -23,7 +23,7 @@ The GL-free bundle writer can publish supplied immutable completed-frame planes.
 Runtime scenario capture does not yet supply those planes or enable diagnostics.
 The capture test target uses modeled GL entry points for target lifecycle tests;
 rendering calls these helpers only inside an explicitly constructed
-`GBufferDiagnosticCapture`. No runtime option constructs that scope yet.
+`GBufferDiagnosticCapture`. The developer-console identity snapshot constructs that scope only on explicit refresh; scenario bundle integration remains separate.
 Diagnostic options are admitted once
 in `ParseRuntimePathOptions`, before save-root creation: malformed input is refused,
 and enabled diagnostics receive an explicit unavailable-adapter error. The pure
@@ -31,8 +31,8 @@ resolver accepts valid CLI/environment options for the pending adapter. The clie
 source manifest includes the codecs.
 The helpers are header-only to keep the stacked change within ten files.
 The acceptance matrix records this partial state. No new runtime asset is added.
-Shader files are outside the roots classified by `public-asset-inventory.json`, so
-their guarded edits do not change that inventory.
+Shader files and this development document are outside the roots classified by
+`public-asset-inventory.json`; regenerating it retains the existing classified assets.
 
 The capture adapter must supply a fresh draw table and reusable `DiagnosticTargets`,
 then keep one capture scope alive around one deferred frame. Attachment setup occurs
@@ -195,6 +195,43 @@ draw table together; resizing invalidates a pending selection. Copy the schema-1
 JSON or request a bundle at that point. No GPU stalls/readbacks while closed;
 limit inspection to one pixel per user request and one retained frozen frame.
 
+### ID snapshot controls
+
+In the developer console's Debug views panel, enable **Identity diagnostics**.
+Named snapshot modes are draw-id (6), mesh-id (7), lod (8), chunk (9),
+producer-owner (10) and mesh-path (11); modes 0 through 5 retain their existing
+meaning. Refresh captures one render frame's ID plane and draw table together.
+The view remains frozen until the next explicit refresh; moving the camera does
+not change the retained IDs. Resizing hides an incompatible snapshot until refresh.
+The same six names are accepted by `--debug-view`; selecting one explicitly
+enables identity diagnostics and requests one snapshot. Existing CLI modes retain
+their meaning.
+
+Magenta hatching labels zero, unresolved and unsupported identities. Producer
+colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
+far volume blue; live ownership has full brightness, legacy far 70% and ladder far
+45%. Mesh-path provenance uses hashed mesh colours, orange SDF, blue heightfield
+and explicit magenta hatching for unknown provenance. Producer spellings outside
+the known renderer families remain unsupported. This does not expand producer coverage.
+
+Open **Single-pixel inspector**, enter top-left render-attachment coordinates and
+press **Refresh snapshot / inspect selected pixel**. The panel displays schema-1
+probe JSON and the exact joined draw/mesh records (including path, chunk, LOD,
+owner, pass and supported status). Albedo is linear, normal is signed view-space,
+depth is raw hardware depth and material is the exact normal attachment alpha ID.
+One fragment gathers nearest, unfiltered values at that coordinate into a fixed
+48-byte buffer; one buffer readback occurs per explicit valid request while the
+inspector is open. Closing the panel closes the inspector. Closed, idle, disabled,
+invalid-coordinate and frozen-replay paths perform no inspector readback.
+
+Snapshot registry preparation is capped by 65,536 draws and 16 MiB schema-1 JSON;
+its GPU lookup contains at most 131,074 RGBA32UI texels. No registry scan runs on
+idle frames. Targets and shader variants are created only on explicit diagnostic
+refresh, never on the default rendering path. A competing capture scope refuses
+the snapshot request until that scope releases ownership. Viewport/DPI picking,
+AOV image freezing/zoom, extra attachment selection and bundle requests are later
+view/inspector work; coordinate inspection and identity-image freezing are available here.
+
 ## C: Linux shader lane
 
 Add steps to the fast Linux lane on GitHub-hosted public-repository runners with
@@ -279,7 +316,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | A2: ID targets and draw registry | `rendering/DiagnosticTargets.h`; `rendering/DiagnosticTargets.cpp`; `rendering/DiagnosticDrawTable.h`; `rendering/DiagnosticDrawTable.cpp`; `test/rendering/diagnostic_targets_test.cpp`; `test/rendering/diagnostic_draw_table_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/sources.cmake`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A1. Lazy integer attachment lifecycle, bounded registry and GL-state restoration; avoids owned files. |
 | A3: exact deferred attribution | `rendering/passes/GBufferPass.cpp`; `rendering/GBufferTargets.cpp`; `rendering/GBufferTargets.h`; `res/shaders/g_buffer.frag`; `res/shaders/foliage.frag`; `rendering/FarLodSystem.cpp`; `test/rendering/diagnostic_attribution_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A2; coordinate owned files with minimal local hunks. Opt-in MRT shader variants mirror actual alpha/depth/LOD ownership; no approximate geometry replay. |
 | A4: scenario bundles and probes | `rendering/DiagnosticCapture.h`; `rendering/DiagnosticCapture.cpp`; `rendering/RenderPipeline.h`; `rendering/RenderPipeline.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/diagnostic_bundle_test.cpp`; `test/CMakeLists.txt`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A3. Shared readback/transaction adapter and once-only opt-in; coordinate owned scenario file. Extend capture_manifest_test for the GL-free adapter; use the client source manifest updated with the codecs in A2. |
-| B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A4. ID/LOD/chunk/ownership and mesh-path views, single-pixel inspector; avoids listed owned files. |
+| B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/main_client.cpp`; `docs/development/visual-diagnostics.md` (10) | After A4. Named CLI/panel ID/LOD/chunk/ownership and mesh-path snapshots, single-pixel inspector; avoids listed owned files. |
 | B2: shader contribution views | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `res/shaders/g_buffer.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After B1. Remaining view catalogue, instrumented opt-in variants and overlay state. Coordinate owned shaders. Forward/sky/shadow contributor planes remain separately labeled until their producers are instrumented. |
 | C1: every-PR shader compile | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `tools/ci/shader_variants.json`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `src/luminumbra_client/rendering/ShaderSource.h`; `src/luminumbra_client/rendering/ShaderSource.cpp`; `src/luminumbra_client/rendering/Shader.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Independent of A/B. Share include preparation and register preprocessing/variant regression. Avoids owned files. Every-PR compile is unconditional within the fast job. |
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/material.ppm`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After C1. First reference/metric/regeneration vertical path; extend the scene catalogue in later bounded changes. Avoids owned files; reference and consumer share one path gate. |
