@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/NearTerrainRefinement.h"
+#include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
 
 #include <gtest/gtest.h>
 
@@ -385,5 +386,154 @@ TEST(NearTerrainRefinement, EveryChildPreservesFlatProvokingVertexMaterial) {
         const auto source_provoking = patch.mesh.indices[source_triangle * 3 + 2];
         EXPECT_EQ(output.vertices[provoking].material_id,
                   patch.mesh.vertices[source_provoking].material_id);
+    }
+}
+
+namespace {
+struct EligibilityPatch {
+    std::array<std::shared_ptr<Chunk>, 27> chunks;
+    World::NearTerrainMeshSnapshot evidence;
+
+    EligibilityPatch() {
+        std::size_t index = 0;
+        for (int z = -1; z <= 1; ++z) {
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x, ++index) {
+                    chunks[index] = std::make_shared<Chunk>(IVec3(x, y, z));
+                    evidence.halo[index] = {chunks[index], 0};
+                }
+            }
+        }
+        evidence.mesh_version = 7;
+        evidence.sample_step = 1;
+        evidence.generated_current_params = true;
+        evidence.unedited_halo = true;
+    }
+
+    std::shared_ptr<const World::NearTerrainMeshSnapshot> Publish() {
+        auto densities = MakePatch().densities;
+        const auto snapshot = World::CompleteNearTerrainMeshSnapshot(evidence, densities);
+        chunks[13]->mesh_version.store(evidence.mesh_version);
+        chunks[13]->near_terrain_snapshot.store(snapshot);
+        return snapshot;
+    }
+};
+} // namespace
+
+TEST(NearTerrainEligibility, PublishesMatchingMeshVersionAndOwnsItsLattice) {
+    EligibilityPatch patch;
+    auto densities = MakePatch().densities;
+    const auto expected = densities;
+    const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities);
+    auto& chunk = *patch.chunks[13];
+    chunk.near_terrain_snapshot.store(snapshot);
+    EXPECT_EQ(World::CurrentNearTerrainMeshSnapshot(chunk, 7), nullptr);
+    chunk.mesh_version.store(7);
+    EXPECT_EQ(World::CurrentNearTerrainMeshSnapshot(chunk, 7), snapshot);
+    EXPECT_EQ(snapshot->densities, expected);
+    EXPECT_EQ(snapshot->sample_step, 1);
+    EXPECT_TRUE(snapshot->generated_current_params);
+    EXPECT_TRUE(snapshot->unedited_halo);
+    EXPECT_TRUE(snapshot->complete_height_like_sdf);
+    EXPECT_TRUE(snapshot->eligible(chunk, 7, 0));
+    EXPECT_TRUE(snapshot->eligible(chunk, 7, 1024));
+    EXPECT_FALSE(snapshot->eligible(chunk, 7, 1024.01f));
+    EXPECT_FALSE(snapshot->eligible(chunk, 7, -1));
+    EXPECT_FALSE(snapshot->eligible(chunk, 7, std::numeric_limits<float>::infinity()));
+    EXPECT_FALSE(snapshot->eligible(chunk, 7, std::numeric_limits<float>::quiet_NaN()));
+}
+
+TEST(NearTerrainEligibility, EveryEditInvalidatesSelfAndAllHaloNeighbours) {
+    // Relative halo membership is symmetric: changing any one of these 27
+    // chunks invalidates the source's evidence, including corner neighbours.
+    for (std::size_t index = 0; index < 27; ++index) {
+        for (int edit = 0; edit < 3; ++edit) {
+            SCOPED_TRACE(index);
+            SCOPED_TRACE(edit);
+            EligibilityPatch patch;
+            const auto snapshot = patch.Publish();
+            ASSERT_NE(World::CurrentNearTerrainMeshSnapshot(*patch.chunks[13], 7), nullptr);
+            if (edit == 0) {
+                patch.chunks[index]->mark_voxel_data_dirty();
+            } else if (edit == 1) {
+                patch.chunks[index]->mark_sdf_loaded_or_edited();
+            } else {
+                patch.chunks[index]->invalidate_near_terrain_snapshot();
+            }
+            EXPECT_EQ(World::CurrentNearTerrainMeshSnapshot(*patch.chunks[13], 7), nullptr);
+            EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+            patch.chunks[index]->clear_voxel_data_dirty();
+            patch.chunks[index]->mark_sdf_generated_current_params();
+            EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+        }
+    }
+}
+
+TEST(NearTerrainEligibility, RejectsStaleQueuedRecordsAndRetiredOwners) {
+    for (int stale = 0; stale < 8; ++stale) {
+        SCOPED_TRACE(stale);
+        EligibilityPatch patch;
+        const auto snapshot = patch.Publish();
+        auto& chunk = *patch.chunks[13];
+        if (stale == 0) {
+            chunk.mesh_version.store(8);
+        } else if (stale == 1) {
+            chunk.near_terrain_snapshot.store({});
+        } else if (stale == 2) {
+            patch.chunks[0].reset();
+        } else if (stale == 3) {
+            patch.chunks[0]->normalize_for_park();
+        } else if (stale == 4) {
+            patch.chunks[0]->reset_pending_jobs();
+        } else if (stale == 5) {
+            patch.chunks[0]->near_terrain_epoch.store(std::numeric_limits<u64>::max());
+            patch.chunks[0]->invalidate_near_terrain_snapshot();
+        } else if (stale == 6) {
+            chunk.mesh_version.store(0);
+        } else {
+            const auto replacement = patch.Publish();
+            ASSERT_NE(replacement, snapshot);
+        }
+        EXPECT_FALSE(snapshot->matches(chunk, 7));
+        EXPECT_FALSE(snapshot->eligible(chunk, 7, 0));
+    }
+    const Chunk missing(IVec3(0));
+    EXPECT_EQ(World::CurrentNearTerrainMeshSnapshot(missing, 0), nullptr);
+}
+
+TEST(NearTerrainEligibility, RefusesMissingPartialEditedCoarseAndCaveEvidence) {
+    for (int invalid = 0; invalid < 11; ++invalid) {
+        SCOPED_TRACE(invalid);
+        EligibilityPatch patch;
+        auto densities = MakePatch().densities;
+        if (invalid == 0) {
+            densities.clear();
+        } else if (invalid == 1) {
+            densities.pop_back();
+        } else if (invalid == 2) {
+            densities.push_back(0);
+        } else if (invalid == 3) {
+            densities[8 + 8 * 17 + 8 * 17 * 17] = -1;
+        } else if (invalid == 4) {
+            densities[0] = std::numeric_limits<float>::quiet_NaN();
+        } else if (invalid == 5) {
+            patch.evidence.generated_current_params = false;
+        } else if (invalid == 6) {
+            patch.evidence.unedited_halo = false;
+        } else if (invalid == 7) {
+            patch.evidence.sample_step = 2;
+        } else if (invalid == 8) {
+            patch.evidence.sample_step = 0;
+        } else if (invalid == 9) {
+            patch.evidence.halo[0] = {};
+        } else {
+            patch.evidence.halo[0].epoch = std::numeric_limits<u64>::max();
+        }
+        const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities);
+        auto& chunk = *patch.chunks[13];
+        chunk.mesh_version.store(7);
+        chunk.near_terrain_snapshot.store(snapshot);
+        EXPECT_FALSE(snapshot->eligible(chunk, 7, 0));
+        EXPECT_LE(snapshot->densities.size(), World::kNearTerrainDensityCount);
     }
 }

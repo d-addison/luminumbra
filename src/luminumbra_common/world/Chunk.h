@@ -19,7 +19,8 @@ namespace Luminumbra {
 
 namespace World {
 struct FarLodSdfSnapshot;
-}
+struct NearTerrainMeshSnapshot;
+} // namespace World
 
 enum class ChunkState : u8 {
     Unloaded,
@@ -104,6 +105,7 @@ public:
     // clear; runtime voxel edits must call mark_voxel_data_dirty, and a
     // successful save clears it again.
     void mark_voxel_data_dirty() {
+        invalidate_near_terrain_snapshot();
         notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         advance_water_seed_edit_generation();
         m_terrain_authority.store(true, std::memory_order_release);
@@ -165,6 +167,7 @@ public:
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
+        invalidate_near_terrain_snapshot();
         notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         m_terrain_authority.store(false, std::memory_order_release);
         // Terrain ownership and provenance change on every path, so cached authority stamps are
@@ -199,6 +202,7 @@ public:
         }
     }
     void mark_sdf_loaded_or_edited() {
+        invalidate_near_terrain_snapshot();
         notify_far_world_change(World::FarWorldAuthorityChange::Terrain);
         advance_water_seed_edit_generation();
         // Claiming terrain authority changes what the authority projection hashes.
@@ -343,6 +347,7 @@ public:
     // the parked store. Sim truth (sdf/heightmap/material/water state) is untouched. The caller
     // guarantees no job owns the chunk.
     void normalize_for_park() {
+        invalidate_near_terrain_snapshot();
         has_collision.store(false, std::memory_order_release);
         current_lod.store(-1, std::memory_order_release);
         pending_lod.store(-1, std::memory_order_release);
@@ -370,6 +375,7 @@ public:
     // Call only after workers have drained, when adopting persisted authority.
     // Serialized staging flags cannot represent a job in the current process.
     void reset_pending_jobs() {
+        invalidate_near_terrain_snapshot();
         pending_lod.store(-1, std::memory_order_release);
         pending_mesh_ready.store(false, std::memory_order_release);
         pending_water_mesh_generated.store(false, std::memory_order_release);
@@ -417,6 +423,19 @@ public:
     std::vector<u8> material_data;
 
     // --- Render Data ---
+    // Transient mesh evidence: never serialized or included in authority/hash projections.
+    // A halo record observes these epochs, so editing one chunk invalidates all
+    // dependent records without walking resident chunks or touching worker inputs.
+    std::atomic<std::shared_ptr<const World::NearTerrainMeshSnapshot>> near_terrain_snapshot;
+    std::atomic<u64> near_terrain_epoch{0};
+    void invalidate_near_terrain_snapshot() {
+        near_terrain_snapshot.store({}, std::memory_order_release);
+        auto epoch = near_terrain_epoch.load(std::memory_order_acquire);
+        while (epoch != std::numeric_limits<u64>::max() &&
+               !near_terrain_epoch.compare_exchange_weak(
+                   epoch, epoch + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {}
+    }
+
     std::vector<VoxelVertex> mesh_vertices;
     std::vector<u32> mesh_indices;
     std::vector<VoxelVertex> water_mesh_vertices;

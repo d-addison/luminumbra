@@ -41,6 +41,99 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_near_terrain_eligibility_publishes_with_matching_mesh_version(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("CaptureNearTerrainMeshEvidence(", world)
+        capture = body(world, "CaptureNearTerrainMeshEvidence(")
+        self.assertIn("evidence->mesh_version = mesh_version;", capture)
+        for axis in ("x", "y", "z"):
+            self.assertIn(f"for (int {axis} = -1; {axis} <= 1; ++{axis}", capture)
+        for refusal in ("!neighbour", "ChunkState::Loading", "ChunkState::Unloaded",
+                        "ChunkState::Unloading", "kPackedMinXz", "kPackedMaxXz",
+                        "kPackedMinY", "kPackedMaxY", "neighbour->has_terrain_authority()",
+                        "neighbour->voxel_revision() != 0", "kFullSdfLattice", "kHeightmapCells"):
+            self.assertIn(refusal, capture)
+        boot = body(world, "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(")
+        self.assertLess(boot.index("chunk->near_terrain_snapshot.store({}"),
+                        boot.index("chunk->mesh_version++"))
+        boot_publish = body(boot, "for (const auto& built : chunks_to_build) {\n        const auto& chunk")
+        self.assertIn("chunk->mesh_version.load(std::memory_order_acquire)", boot_publish)
+        self.assertIn("World::CompleteNearTerrainMeshSnapshot(*evidence, densities)", boot_publish)
+        self.assertGreater(boot.index(boot_publish), boot.index("AddBoundaryTransitionSkirts("))
+        dispatch = body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        self.assertLess(dispatch.index("CaptureNearTerrainMeshEvidence("),
+                        dispatch.index("lane_jobs.emplace_back("))
+        worker = body(dispatch, "lane_jobs.emplace_back(")
+        self.assertLess(worker.index("GenerateWaterMesh("),
+                        worker.index("World::CompleteNearTerrainMeshSnapshot(*evidence, scratch.sdf_data)"))
+        self.assertLess(worker.index("World::CompleteNearTerrainMeshSnapshot("),
+                        worker.index("pending_mesh_ready.store(true"))
+        publish = body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
+        terrain = body(publish, "if (job_chunk.terrain_mesh_required && terrain_current)")
+        self.assertLess(terrain.index("chunk->mesh_version++"),
+                        terrain.index("chunk->near_terrain_snapshot.store("))
+        self.assertIn("job_chunk.scratch->near_terrain_snapshot.load(", terrain)
+        snapshots = body(self.pipeline, "RenderPipeline::build_chunk_snapshots(")
+        self.assertIn("World::CurrentNearTerrainMeshSnapshot(*chunk, snapshot.mesh_version)", snapshots)
+        self.assertIn("snapshot.near_terrain_snapshot.reset();",
+                      body(snapshots, "if (version_after_metadata != snapshot.mesh_version)"))
+        self.assertEqual(self.header.count("std::shared_ptr<const World::NearTerrainMeshSnapshot>"), 2)
+
+    def test_near_terrain_edits_invalidate_self_and_every_halo_neighbour(self):
+        chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
+        for marker in ("mark_voxel_data_dirty", "mark_sdf_loaded_or_edited",
+                       "mark_sdf_generated_current_params", "normalize_for_park", "reset_pending_jobs"):
+            self.assertIn("invalidate_near_terrain_snapshot();", body(chunk, f"void {marker}()"))
+        invalidation = body(chunk, "void invalidate_near_terrain_snapshot()")
+        self.assertIn("near_terrain_snapshot.store({},", invalidation)
+        self.assertIn("near_terrain_epoch.compare_exchange_weak(", invalidation)
+        self.assertIn("epoch != std::numeric_limits<u64>::max()", invalidation)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        external = body(world, "void SHIELD_WorldSystem::notify_far_lod_authority_changed(")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", external)
+        for setter in ("set_seed", "set_params", "clear_world"):
+            self.assertIn("chunk->invalidate_near_terrain_snapshot();",
+                          body(world, f"void SHIELD_WorldSystem::{setter}("))
+        adoption = body(world, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", body(adoption, "if (adopted)"))
+        edit = body(world, "int SHIELD_WorldSystem::EditTerrainVoxel(")
+        self.assertIn("chunk->mark_voxel_data_dirty();", body(edit, "if (changed)"))
+        carve = read(ROOT / "src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp")
+        self.assertIn("chunk->mark_voxel_data_dirty();", carve)
+        self.assertIn("world_system->notify_far_lod_authority_changed(chunk->get_coords());", carve)
+
+    def test_near_terrain_stale_records_are_rejected_through_upload_queue(self):
+        contract_path = ROOT / "src/luminumbra_common/world/NearTerrainMeshSnapshot.h"
+        try:
+            contract = read(contract_path)
+        except FileNotFoundError:
+            self.fail("near-terrain snapshot contract is missing")
+        dependencies = body(contract, "bool dependencies_current() const")
+        self.assertIn("for (const auto& dependency : halo)", dependencies)
+        self.assertIn("!chunk", dependencies)
+        self.assertIn("chunk->near_terrain_epoch.load(std::memory_order_acquire) != dependency.epoch",
+                      compact(dependencies))
+        matching = body(contract, "bool matches(")
+        for guard in ("version != 0", "mesh_version == version", "dependencies_current()",
+                      "chunk.near_terrain_snapshot.load(std::memory_order_acquire).get() == this",
+                      "chunk.mesh_version.load(std::memory_order_acquire) == version"):
+            self.assertIn(guard, matching)
+        payload = body(self.pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(")
+        self.assertIn("payload.near_terrain_snapshot = chunk.near_terrain_snapshot;", payload)
+        self.assertIn("!payload.near_terrain_snapshot->matches(*chunk.source_chunk, version_before)",
+                      payload)
+        self.assertEqual(payload.count("payload.near_terrain_snapshot.reset();"), 2)
+        for upload in ("upload_chunk_mesh", "upload_water_mesh"):
+            self.assertNotIn("RefineNearTerrain(",
+                             body(self.pipeline, f"void RenderPipeline::{upload}("))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("PublishesMatchingMeshVersionAndOwnsItsLattice",
+                           "EveryEditInvalidatesSelfAndAllHaloNeighbours",
+                           "RejectsStaleQueuedRecordsAndRetiredOwners",
+                           "RefusesMissingPartialEditedCoarseAndCaveEvidence"):
+            self.assertIn("TEST(NearTerrainEligibility, " + regression + ")", native)
+        self.assertIn("rendering/NearTerrainRefinement_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
     def test_wiring_regression_runs_in_ctest_and_python_ci(self):
         registration = read(ROOT / "test/CMakeLists.txt")
         self.assertEqual(registration.count("add_test(NAME UploadBudgetWiringPython "), 1)
