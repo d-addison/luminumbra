@@ -68,7 +68,9 @@ const SimulationTerrain::Record* SimulationTerrain::find(Key key) const {
     return m_index[position].get();
 }
 
-bool SimulationTerrain::agrees(Key key, std::span<const float> samples) const {
+bool SimulationTerrain::agrees(Key key,
+                               std::span<const float> samples,
+                               std::span<const Lattice> replacements) const {
     // Only 26 neighbours can share nodes: at most 6*289 + 12*17 + 8 comparisons.
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dy = -1; dy <= 1; ++dy) {
@@ -84,10 +86,21 @@ bool SimulationTerrain::agrees(Key key, std::span<const float> samples) const {
                 if (nx < low || nx > high || ny < low || ny > high || nz < low || nz > high) {
                     continue;
                 }
-                const auto* neighbour = find({static_cast<std::int32_t>(nx),
-                                              static_cast<std::int32_t>(ny),
-                                              static_cast<std::int32_t>(nz)});
-                if (neighbour == nullptr) {
+                const Key neighbour_key{static_cast<std::int32_t>(nx),
+                                        static_cast<std::int32_t>(ny),
+                                        static_cast<std::int32_t>(nz)};
+                const auto replacement = std::find_if(replacements.begin(),
+                                                      replacements.end(),
+                                                      [neighbour_key](const Lattice& lattice) {
+                                                          return lattice.key == neighbour_key;
+                                                      });
+                const auto* neighbour = find(neighbour_key);
+                const std::span<const float> adjacent =
+                    replacement != replacements.end()
+                        ? replacement->samples
+                        : (neighbour ? std::span<const float>(neighbour->samples)
+                                     : std::span<const float>{});
+                if (adjacent.empty()) {
                     continue;
                 }
                 const int x0 = dx > 0 ? 16 : 0;
@@ -100,7 +113,7 @@ bool SimulationTerrain::agrees(Key key, std::span<const float> samples) const {
                     for (int y = y0; y <= y1; ++y) {
                         for (int x = x0; x <= x1; ++x) {
                             if (samples[Index(x, y, z)] !=
-                                neighbour->samples[Index(x - dx * 16, y - dy * 16, z - dz * 16)]) {
+                                adjacent[Index(x - dx * 16, y - dy * 16, z - dz * 16)]) {
                                 return false;
                             }
                         }
@@ -113,44 +126,74 @@ bool SimulationTerrain::agrees(Key key, std::span<const float> samples) const {
 }
 
 SimulationTerrain::Admission SimulationTerrain::admit(Key key, std::span<const float> samples) {
-    if (samples.size() != kLatticeSamples) {
+    const Lattice lattice{key, samples};
+    return admit(std::span(&lattice, 1));
+}
+
+bool SimulationTerrain::contains(Key key) const {
+    return find(key) != nullptr;
+}
+
+bool SimulationTerrain::matches(Key key, std::span<const float> samples) const {
+    const auto* record = find(key);
+    return record && samples.size() == kLatticeSamples &&
+           std::equal(samples.begin(), samples.end(), record->samples.begin());
+}
+
+SimulationTerrain::Admission SimulationTerrain::admit(std::span<const Lattice> lattices) {
+    if (lattices.empty())
         return Admission::Unavailable;
-    }
-    // Validate both hard caps and division bounds before doing input work or allocating.
-    if (m_limits.lattices == 0 || m_limits.lattices > kMaxLattices ||
+    if (lattices.size() > kMaxBatch || m_limits.lattices == 0 || m_limits.lattices > kMaxLattices ||
         m_limits.owned_bytes > kMaxOwnedBytes ||
-        m_limits.lattices > m_limits.owned_bytes / sizeof(Entry)) {
+        m_limits.lattices > m_limits.owned_bytes / sizeof(Entry))
         return Admission::WorkLimit;
-    }
-    const auto position = lower_bound(key);
-    const bool replacing = position < m_size && m_index[position]->key == key;
     const auto index_bytes = m_limits.lattices * sizeof(Entry);
-    if ((!replacing && m_size == m_limits.lattices) ||
-        m_size + 1 > (m_limits.owned_bytes - index_bytes) / sizeof(Record)) {
+    if (lattices.size() + m_size > (m_limits.owned_bytes - index_bytes) / sizeof(Record))
         return Admission::WorkLimit;
+    std::size_t additions = 0;
+    for (std::size_t i = 0; i < lattices.size(); ++i) {
+        const auto& lattice = lattices[i];
+        if (lattice.samples.size() != kLatticeSamples ||
+            !std::all_of(lattice.samples.begin(), lattice.samples.end(), [](float value) {
+                return std::isfinite(value);
+            }))
+            return Admission::Unavailable;
+        for (std::size_t j = 0; j < i; ++j)
+            if (lattices[j].key == lattice.key)
+                return Admission::Unavailable;
+        additions += contains(lattice.key) ? 0u : 1u;
     }
-    if (!std::all_of(
-            samples.begin(), samples.end(), [](float value) { return std::isfinite(value); }) ||
-        !agrees(key, samples)) {
-        return Admission::Unavailable;
-    }
+    if (additions > m_limits.lattices - m_size)
+        return Admission::WorkLimit;
+    for (const auto& lattice : lattices)
+        if (!agrees(lattice.key, lattice.samples, lattices))
+            return Admission::Unavailable;
+    // Fixed stack staging has no growth slack; only participating records are copied.
+    std::array<Entry, kMaxBatch> staged;
+    std::unique_ptr<Entry[]> index;
     try {
-        auto record = std::make_unique<Record>();
-        record->key = key;
-        std::copy(samples.begin(), samples.end(), record->samples.begin());
-        if (!m_index) {
-            auto index = std::make_unique<Entry[]>(m_limits.lattices);
-            m_index = std::move(index);
+        for (std::size_t i = 0; i < lattices.size(); ++i) {
+            staged[i] = std::make_unique<Record>();
+            staged[i]->key = lattices[i].key;
+            std::copy(
+                lattices[i].samples.begin(), lattices[i].samples.end(), staged[i]->samples.begin());
         }
-        if (!replacing) {
-            for (auto i = m_size; i > position; --i) {
-                m_index[i] = std::move(m_index[i - 1]);
-            }
-            ++m_size;
-        }
-        m_index[position] = std::move(record);
+        if (!m_index)
+            index = std::make_unique<Entry[]>(m_limits.lattices);
     } catch (const std::bad_alloc&) {
         return Admission::WorkLimit;
+    }
+    if (index)
+        m_index = std::move(index);
+    // All fallible work precedes publication. At most 128*4096 pointer moves.
+    for (std::size_t i = 0; i < lattices.size(); ++i) {
+        const auto position = lower_bound(lattices[i].key);
+        if (position == m_size || m_index[position]->key != lattices[i].key) {
+            for (auto j = m_size; j > position; --j)
+                m_index[j] = std::move(m_index[j - 1]);
+            ++m_size;
+        }
+        m_index[position] = std::move(staged[i]);
     }
     return Admission::Accepted;
 }

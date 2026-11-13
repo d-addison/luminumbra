@@ -24,6 +24,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -33,6 +34,17 @@
 #include "WorldgenFileReader.h"
 
 namespace Luminumbra::World {
+
+// Hard work/storage bounds, checked before enumeration, expansion and allocation.
+inline constexpr std::size_t kMaxStructureSites = 4096;
+inline constexpr std::size_t kMaxStructureVoxels = 262144;
+inline constexpr std::size_t kMaxStructurePieces = 64;
+inline constexpr std::size_t kMaxStructureBoxes = 128;
+inline constexpr std::size_t kMaxStructureSockets = 32;
+inline constexpr int kMaxStructureCoordinate = 1000000;
+
+// Opens and verifies one regular-file handle; at most 1 MiB per file, 4 MiB per pool.
+bool ReadStructureTemplateFile(const std::filesystem::path& path, std::string& bytes);
 
 // A single voxel box piece: an axis-aligned solid box of one material, in
 // piece-local coordinates (metres). A piece is a small set of boxes plus named
@@ -106,7 +118,7 @@ struct StructureVoxel {
 StructureTemplatePool
 LoadStructureTemplatePool(const std::filesystem::path& type_dir,
                           const std::string& type,
-                          const WorldgenFileReader& read_file = ReadWorldgenFile);
+                          const WorldgenFileReader& read_file = ReadStructureTemplateFile);
 
 // --- Deterministic placement grid ---
 //
@@ -119,6 +131,7 @@ SiteInCell(const StructureTemplatePool& pool, int world_seed, int cell_x, int ce
 // O(1) nearest-site query: scans the cells within `search_radius_cells` of the
 // cell containing (near_x, near_z) and returns the nearest hosted site, or
 // nullopt if none. Deterministic.
+// Radius must be in [0,31] (at most 3969 cells). Invalid inputs return nullopt.
 std::optional<StructureSite> LocateNearestSite(const StructureTemplatePool& pool,
                                                int world_seed,
                                                int near_x,
@@ -128,6 +141,7 @@ std::optional<StructureSite> LocateNearestSite(const StructureTemplatePool& pool
 // All sites whose grid cell centre falls inside [min, max) on X/Z (half-open),
 // in deterministic cell-scan order. Used to enumerate sites overlapping a
 // region for placement.
+// More than 4096 candidate cells refuses with an empty result before scanning.
 std::vector<StructureSite> SitesInArea(
     const StructureTemplatePool& pool, int world_seed, int min_x, int min_z, int max_x, int max_z);
 
@@ -137,6 +151,8 @@ std::vector<StructureSite> SitesInArea(
 // pieces at matching sockets (a socket on the placed set joins a socket on a
 // candidate piece). Returns voxels in world coordinates relative to site.origin.
 // Pure function of (pool, site.site_seed).
+// Invalid coordinates, metadata or expansion beyond 262144 voxels refuse with an
+// empty result, never a truncated structure. Validates every piece before expansion.
 std::vector<StructureVoxel> AssembleStructure(const StructureTemplatePool& pool,
                                               const StructureSite& site);
 

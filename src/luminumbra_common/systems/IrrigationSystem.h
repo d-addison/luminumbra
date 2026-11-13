@@ -203,6 +203,13 @@ struct IrrigationStats {
     std::int64_t drained = 0;   // total moisture drained this tick (milli-units)
 };
 
+// The integer reduction needs no source identity or ordering. Shipping callers
+// retain the legacy traversal until the authority activation.
+enum class IrrigationSourceOrder {
+    Legacy,
+    PermutationInvariant
+};
+
 // Internal: apply the accumulated per-cell deposit, then ONE conservative integer
 // diffusion pass (out-of-place), then drain every cell toward the dry baseline.
 // Three integer passes over the grid — deterministic and order-independent (the
@@ -319,7 +326,8 @@ RunIrrigationOnTick(entt::registry& reg,
                     float origin_x,
                     float origin_z,
                     float cell_size,
-                    const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                    const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                    IrrigationSourceOrder source_order = IrrigationSourceOrder::Legacy) {
     IrrigationStats stats;
     if (cell_size <= 0.0f || grid.width() <= 0 || grid.height() <= 0) {
         return stats; // degenerate grid: nothing to do
@@ -342,9 +350,11 @@ RunIrrigationOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    if (source_order == IrrigationSourceOrder::Legacy) {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
 
     for (auto e : ents) {
         ++stats.sources;
@@ -367,7 +377,13 @@ RunIrrigationOnTick(entt::registry& reg,
             continue;
         const std::size_t ci = static_cast<std::size_t>(cz) * static_cast<std::size_t>(W) +
                                static_cast<std::size_t>(cx);
-        deposit[ci] += add;
+        // Nonnegative uint16 inputs obey min(cap, a+b): associative and
+        // commutative. Capping before the grid's identical saturation prevents
+        // int32 overflow for dense rosters; telemetry retains the full int64 sum.
+        if (source_order == IrrigationSourceOrder::PermutationInvariant)
+            deposit[ci] = (std::min)(kMoistureMax, deposit[ci] + add);
+        else
+            deposit[ci] += add;
         stats.deposited += add;
     }
 
