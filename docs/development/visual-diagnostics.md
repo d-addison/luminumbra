@@ -12,16 +12,54 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target and capture-local draw registry | Implemented as standalone helpers | `DiagnosticTargets.h`; `DiagnosticDrawTable.h`; registered `DiagnosticTargetDriver.*` and `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| GPU attribution, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
+| Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
+| Exact producer coverage | Partial | File-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
+| Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
 The codecs and standalone helpers do not create scenario bundles or enable a runtime
 flag. The capture test target uses modeled GL entry points for target lifecycle tests;
-rendering does not call these helpers yet. The client source manifest includes the codecs.
+rendering calls these helpers only inside an explicitly constructed
+`GBufferDiagnosticCapture`. No runtime option constructs that scope yet. The client
+source manifest includes the codecs.
 The helpers are header-only to keep the stacked change within ten files.
 The acceptance matrix records this partial state. No new runtime asset is added.
+Shader files are outside the roots classified by `public-asset-inventory.json`, so
+their guarded edits do not change that inventory.
+
+The capture adapter must supply a fresh draw table and reusable `DiagnosticTargets`,
+then keep one capture scope alive around one deferred frame. Attachment setup occurs
+after the normal clear, checks the actual G-buffer dimensions and integer/MRT
+capability, and restores all draw buffers, the identity color mask and the previous draw framebuffer on
+detach or incomplete-FBO refusal. A resize during attachment detaches before the
+framebuffer is destroyed and records unsupported coverage. A mismatched extent,
+occupied attachment, missing target capability or failed variant is an explicit
+unsupported record. The adapter must refuse publication unless `complete()` is
+true after detachment; an incomplete plane can contain undefined IDs from a producer
+without an instrumented fragment output and cannot be interpreted as background.
+`complete()` covers only `GBufferPass`; the adapter must also account for later
+plant/decal writes and separate forward contributors before publishing a bundle.
+Capture scopes cannot nest or reuse a nonempty draw table. Exception unwinding
+invalidates the frame; an empty live-terrain submission adds no unsupported record.
+
+Only an active attached scope compiles diagnostic programs, capped at six deferred
+vertex/ladder combinations. Default and ladder variants retain the existing alpha
+discard and depth output; identities are integer uniform uploads to attachment six.
+During capture, static instances are submitted once each using their existing
+attributes and base-instance offset, so repeated instances get separate ordered
+draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
+to the base mesh. The existing 65,536-entry registry limit refuses excessive capture
+submissions. Normal rendering keeps its batched draws and original attachments.
+
+Completing exact coverage requires changes beyond the deferred attachment owners:
+the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission
+metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
+`FoliagePass` and `tree_impostor.frag`. A foliage
+identity belongs to a separate forward contributor plane because its color blends
+with the already lit scene. None of these gaps is represented as a guessed mesh or
+as successful background coverage.
 
 ## A: capture bundle and pixel identity
 
