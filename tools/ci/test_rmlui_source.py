@@ -3122,6 +3122,61 @@ class OwnedCommandLifetime(unittest.TestCase):
 
 
 class CommandCancellationContract(unittest.TestCase):
+    def setUp(self):
+        # Fault injection below requires both registrations to be reachable,
+        # regardless of dispositions inherited from the invoking shell.
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        for sig, callback in previous.items():
+            self.addCleanup(signal.signal, sig, callback)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    def test_inherited_ignored_dispositions_remain_ignored(self):
+        for ignored in ((signal.SIGINT,), (signal.SIGTERM,), (signal.SIGINT, signal.SIGTERM)):
+            with self.subTest(ignored=ignored):
+                before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+                try:
+                    for sig in ignored:
+                        signal.signal(sig, signal.SIG_IGN)
+                    with self.assertRaisesRegex(OSError, "scope failure"), M.CommandCancellation() as outer:
+                        for sig in ignored:
+                            self.assertEqual(signal.getsignal(sig), signal.SIG_IGN)
+                            self.assertNotIn(sig, outer.handlers)
+                            signal.raise_signal(sig)
+                        with M.CommandCancellation() as inner:
+                            for sig in ignored:
+                                self.assertEqual(signal.getsignal(sig), signal.SIG_IGN)
+                                self.assertNotIn(sig, inner.handlers)
+                        self.assertIsNone(outer.pending)
+                        with outer.command():
+                            outer.check()
+                        raise OSError("scope failure")
+                    for sig, callback in before.items():
+                        self.assertEqual(signal.getsignal(sig), signal.SIG_IGN if sig in ignored else callback)
+                finally:
+                    for sig, callback in before.items():
+                        signal.signal(sig, callback)
+
+    def test_fault_injection_contracts_under_inherited_ignored_signals(self):
+        cases = (
+            "test_registration_failure_restores_prior_handlers",
+            "test_each_restoration_failure_retains_custody_and_attempts_other_handler",
+            "test_registration_rollback_attempts_both_handlers_and_preserves_failure",
+            "test_pending_signal_survives_restoration_failure_and_forwards_after_recovery",
+            "test_ignored_signal_and_nested_owner_restore_on_error",
+        )
+        for ignored in ("SIGINT", "SIGTERM"):
+            with self.subTest(ignored=ignored):
+                script = ("import runpy,signal,sys; "
+                          "signal.signal(getattr(signal,sys.argv.pop(1)),signal.SIG_IGN); "
+                          "sys.argv.pop(0); runpy.run_path(sys.argv[0],run_name='__main__')")
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", script, ignored, str(Path(__file__).resolve()),
+                     *["CommandCancellationContract." + case for case in cases]],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 5 tests", result.stderr)
+
     def test_worker_without_owner_refuses_before_spawn(self):
         errors = []
         def run():
@@ -4047,6 +4102,72 @@ class Utf8SourceReads(unittest.TestCase):
 
 
 class FixtureCleanupCustody(unittest.TestCase):
+    def test_missing_or_invalid_fixture_is_named_unavailable_before_unittest_setup(self):
+        for state in ("missing", "empty", "partial"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                original = Path(directory).resolve(strict=True) / "input"
+                if state != "missing":
+                    original.mkdir()
+                    if state == "partial":
+                        (original / ".appveyor.yml").write_bytes(b"partial input\n")
+                    identity, seal = file_identity(original), BorrowedSource.snapshot(original)
+                environment = dict(os.environ, TMPDIR=directory,
+                                   LUMINUMBRA_RMLUI_TEST_SOURCE=str(original))
+                for script, case in (
+                    ("test_rmlui_source.py", "SourceFiles.test_full_pin_publication_and_readonly_repeat"),
+                    ("test_local_rmlui_recipe.py",
+                     "LocalSourceRecipe.test_documented_local_recipe_requires_both_owned_disconnected_sources")):
+                    with self.subTest(script=script):
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(MODULE_PATH.with_name(script)), case],
+                            env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                        self.assertIn("UNAVAILABLE: RmlUiFixture:", result.stderr)
+                        self.assertNotIn("ERROR: setUpClass", result.stderr)
+                        self.assertEqual(list(Path(directory).iterdir()), [] if state == "missing" else [original])
+                        if state != "missing":
+                            self.assertEqual(file_identity(original), identity)
+                            self.assertEqual(BorrowedSource.snapshot(original), seal)
+
+    def test_fixture_acquisition_refusals_preserve_failure_and_clean_owned_storage(self):
+        class Fixture(unittest.TestCase):
+            setUpClass = classmethod(SourceFiles.setUpClass.__func__)
+            def test_contract(self):
+                raise AssertionError("unavailable fixture reached a test")
+
+        for error in (M.Refusal("transport refused"), M.Refusal("unknown Git metadata"),
+                      PermissionError("unreadable"), TimeoutError("deadline expired"),
+                      AssertionError("fixture invariant"), RuntimeError("recovery failed")):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                environment = dict(os.environ)
+                environment.pop("LUMINUMBRA_RMLUI_TEST_SOURCE", None)
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(tempfile, "tempdir", directory), \
+                        mock.patch.object(M.Workspace, "download", side_effect=error):
+                    runner = SourceFixtureRunner(stream=io.StringIO())
+                    expected = FixtureUnavailable if isinstance(error, (OSError, M.Refusal)) else type(error)
+                    with self.assertRaisesRegex(expected, str(error)) as raised:
+                        runner.run(unittest.TestSuite([Fixture("test_contract")]))
+                if expected is FixtureUnavailable:
+                    self.assertIs(raised.exception.__cause__, error)
+                else:
+                    self.assertIs(raised.exception, error)
+                self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_empty_and_independent_suites_do_not_acquire_fixture(self):
+        calls = []
+        class Independent(unittest.TestCase):
+            def test_contract(self):
+                calls.append("contract")
+
+        for cases in ([], [Independent("test_contract")]):
+            with self.subTest(count=len(cases)), \
+                    mock.patch.object(M.Workspace, "download", side_effect=AssertionError("unexpected fetch")):
+                result = SourceFixtureRunner(stream=io.StringIO()).run(unittest.TestSuite(cases))
+                self.assertTrue(result.wasSuccessful(), result.errors)
+                self.assertEqual(result.testsRun, len(cases))
+                self.assertEqual(calls, ["contract"] * len(cases))
+
     def test_vanished_cleanup_entries_are_absent_and_custody_stays_strict(self):
         for boundary in ("inventory", "file", "directory", "root", "replacement", "custody", "outside",
                          "permission", "unreadable"):
@@ -4166,5 +4287,50 @@ class FixtureCleanupCustody(unittest.TestCase):
             self.test_readonly_object_retry_requires_exact_custody_attributes_and_unlink()
 
 
+class FixtureUnavailable(Exception):
+    """The complete verified input could not be acquired; coverage is unavailable."""
+
+
+class SourceFixtureRunner(unittest.TextTestRunner):
+    @classmethod
+    def needs_fixture(cls, suite):
+        for test in suite:
+            if isinstance(test, unittest.TestSuite):
+                if cls.needs_fixture(test):
+                    return True
+            elif getattr(type(test).setUpClass, "__func__", None) is SourceFiles.setUpClass.__func__:
+                return True
+        return False
+
+    def run(self, suite):
+        if not self.needs_fixture(suite):
+            return super().run(suite)
+
+        class Fixture:
+            pass
+
+        # Acquire once before unittest enters any class. Each consumer still
+        # enrolls, verifies and restores the full input under exclusive custody.
+        # Acquisition failure is a nonzero unavailable result, never a test skip.
+        try:
+            SourceFiles.setUpClass.__func__(Fixture)
+        except (OSError, M.Refusal) as error:
+            raise FixtureUnavailable(str(error)) from error
+        try:
+            with mock.patch.dict(os.environ, TMPDIR=str(Fixture.workspace.stage.parent),
+                                 LUMINUMBRA_RMLUI_TEST_SOURCE=str(Fixture.workspace.stage)):
+                return super().run(suite)
+        finally:
+            SourceFiles.tearDownClass.__func__(Fixture)
+
+
+def run_tests():
+    try:
+        unittest.main(testRunner=SourceFixtureRunner)
+    except FixtureUnavailable as error:
+        print(f"UNAVAILABLE: RmlUiFixture: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+
+
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()
