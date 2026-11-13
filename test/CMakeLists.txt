@@ -2711,6 +2711,8 @@ add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
+add_test(NAME ShaderCompilePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_compile_shaders.py)
 set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)
 add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
