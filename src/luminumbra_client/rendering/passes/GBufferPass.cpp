@@ -1,4 +1,5 @@
 #include "GBufferPass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
 #include "StaticDrawPass.h"
@@ -28,12 +29,118 @@
 #include <chrono> // CPU submit cost of the static-prop pass
 #include <cstddef>
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
+#include <limits>
 #include <string>
 #include <utility> // std::pair for the LOD-resolve helper return
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
 
 namespace Luminumbra::Rendering {
+
+namespace {
+GBufferDiagnosticCapture*& ActiveCapture() {
+    static thread_local GBufferDiagnosticCapture* capture = nullptr;
+    return capture;
+}
+} // namespace
+
+GBufferDiagnosticCapture* GBufferDiagnosticCapture::Current() {
+    return ActiveCapture();
+}
+
+void GBufferDiagnosticCapture::SetCurrent(GBufferDiagnosticCapture* capture) {
+    ActiveCapture() = capture;
+}
+
+GBufferDiagnosticCapture::State::State(DiagnosticDrawTable& draw_table)
+    : table(draw_table) {}
+
+GBufferDiagnosticCapture::State::~State() = default;
+
+GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticDrawTable& table) {
+    if (Current()) {
+        throw std::logic_error("Diagnostic capture scopes cannot nest");
+    }
+    if (table.resolve(1)) {
+        throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
+    }
+    state_ = std::make_unique<State>(table);
+    SetCurrent(this);
+}
+
+GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
+    SetCurrent(nullptr);
+}
+
+void GBufferDiagnosticCapture::unsupported(std::string_view producer,
+                                           std::uint32_t lod,
+                                           DiagnosticOwnership ownership) {
+    DiagnosticId unused{};
+    if (!state_->table.submit({.mesh_path = {},
+                               .shader_variant = producer,
+                               .chunk = {},
+                               .lod = lod,
+                               .ownership = ownership,
+                               .pass = DiagnosticPass::GBuffer,
+                               .provenance = DiagnosticProvenance::Unsupported},
+                              unused)) {
+        throw std::runtime_error("Diagnostic unsupported record exceeds registry bounds");
+    }
+}
+
+bool GBufferDiagnosticCapture::complete() const {
+    // Producer identities alone cannot qualify pixels without a leased ID attachment.
+    return false;
+}
+
+Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
+    if (!shader || !shader->IsValid()) {
+        return shader;
+    }
+    for (const auto& entry : state_->variants) {
+        if (entry.vertex == shader->VertexPath() && entry.fragment == shader->FragmentPath() &&
+            entry.ladder == ladder) {
+            return entry.shader.get();
+        }
+    }
+    if (state_->variants.size() == 6) {
+        unsupported("diagnostic_shader_variant_limit");
+        return shader;
+    }
+    std::vector<std::string> defines{"LUMIN_DIAG_IDS 1"};
+    if (ladder) {
+        defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
+    }
+    auto diagnostic = std::make_unique<Shader>(shader->VertexPath().c_str(),
+                                               shader->FragmentPath().c_str(),
+                                               std::vector<std::string>{},
+                                               defines);
+    const GLint identity =
+        diagnostic->IsValid() ? glGetUniformLocation(diagnostic->Id(), "u_diagnosticIds") : -1;
+    if (identity < 0) {
+        unsupported("diagnostic_shader_variant_unavailable");
+        return shader;
+    }
+    state_->variants.push_back(
+        {shader->VertexPath(), shader->FragmentPath(), ladder, std::move(diagnostic), identity});
+    return state_->variants.back().shader.get();
+}
+
+void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
+    for (const auto& entry : state_->variants) {
+        if (entry.shader.get() != &shader) {
+            continue;
+        }
+        DiagnosticId id{};
+        if (!state_->table.submit(submission, id)) {
+            unsupported("diagnostic_identity_refused", submission.lod, submission.ownership);
+            throw std::runtime_error("Diagnostic identity submission refused");
+        }
+        glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
+        return;
+    }
+    unsupported("diagnostic_writer_without_variant", submission.lod, submission.ownership);
+}
 
 // capacity of the shared per-(mesh,material) instance-matrix VBO. The draw
 // path clamps uploads + draw counts to this so a group larger than capacity can
@@ -174,7 +281,7 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glGenVertexArrays(1, &m_impostorVAO);
     glBindVertexArray(m_impostorVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
-    for (int column = 0; column < 5; ++column) {
+    for (GLuint column = 0; column < 5; ++column) {
         glEnableVertexAttribArray(column);
         glVertexAttribPointer(
             column,
@@ -353,6 +460,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
+            if (auto* capture = GBufferDiagnosticCapture::Current()) {
+                capture->unsupported("authored_static_surface");
+            }
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -375,12 +485,21 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        const Camera& camera,
                                        const glm::vec4 (&frustum_planes)[6],
                                        GBufferDrawStats& stats) {
-    const auto& shader = geometry_shader(input.far_selection.effective);
-    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+    Shader* shader = geometry_shader(input.far_selection.effective).get();
+    auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldPassUniforms diagnostic_uniforms;
+    if (capture) {
+        shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+        if (shader) {
+            diagnostic_uniforms.Cache(*shader);
+        }
+    }
+    auto& uniforms = capture ? diagnostic_uniforms
+                     : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_geometry_ladder_uniforms
                          : m_geometry_far_uniforms;
 
-    if (!UseDrawProgram(shader.get(), stats))
+    if (!UseDrawProgram(shader, stats))
         return;
     glm::mat4 projection = ctx.gbuffer_projection;
     glm::mat4 view = camera.GetViewMatrix();
@@ -457,6 +576,9 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
+    if (capture && ts.draws != 0) {
+        capture->unsupported("live_terrain_mdi_unsupported");
+    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -478,7 +600,13 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return result;
         },
         input.submit_ladder,
-        [&uniforms](const FarWorldDrawCommand& command) { return uniforms.Prepare(command); });
+        [&uniforms, capture](const FarWorldDrawCommand& command) {
+            if (capture) {
+                capture->unsupported(
+                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+            }
+            return uniforms.Prepare(command);
+        });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
     stats.far_water_indices += far_stats.water_indices;
@@ -571,15 +699,24 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                                               const Camera& camera,
                                               const glm::vec4 (&frustum_planes)[6],
                                               GBufferDrawStats& stats) {
-    const auto& shader = instanced_static_mesh_shader(input.far_selection.effective);
-    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+    Shader* shader = instanced_static_mesh_shader(input.far_selection.effective).get();
+    auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldPassUniforms diagnostic_uniforms;
+    if (capture) {
+        shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+        if (shader) {
+            diagnostic_uniforms.Cache(*shader);
+        }
+    }
+    auto& uniforms = capture ? diagnostic_uniforms
+                     : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_static_ladder_uniforms
                          : m_static_far_uniforms;
 
     const auto _sp_t0 = std::chrono::steady_clock::now(); // CPU submit cost
     if (!ctx.frozen_replay)
         m_last_static_prop_cpu_ms = 0.0;
-    if (!UseDrawProgram(shader.get(), stats))
+    if (!UseDrawProgram(shader, stats))
         return;
     uniforms.Reset();
     const glm::mat4 static_view = camera.GetViewMatrix();
@@ -747,8 +884,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const std::uint64_t rkey =
-            cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) * 0x9E3779B97F4A7C15ull);
+        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
+                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
         auto rit = m_resolveMemo.find(rkey);
         if (rit == m_resolveMemo.end()) {
             const std::string& basePath = m_propMeshPaths[cp.pathIndex];
@@ -858,9 +995,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
-                            static_cast<GLsizeiptr>(instance_count) * sizeof(glm::mat4),
+                            static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
+                                                    sizeof(glm::mat4)),
                             matrices.data() + offset);
-            for (int i = 0; i < 4; i++) {
+            for (GLuint i = 0; i < 4; i++) {
                 glEnableVertexAttribArray(3 + i);
                 glVertexAttribPointer(3 + i,
                                       4,
@@ -874,17 +1012,61 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceTintVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
-                            static_cast<GLsizeiptr>(instance_count) * sizeof(glm::vec3),
+                            static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
+                                                    sizeof(glm::vec3)),
                             batch.tints.data() + offset);
             glEnableVertexAttribArray(7);
             glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
             glVertexAttribDivisor(7, 1);
-            Luminumbra::Rendering::AttributedGl::Submit(glDrawElementsInstanced,
-                                                        GL_TRIANGLES,
-                                                        mesh->indexCount,
-                                                        GL_UNSIGNED_INT,
-                                                        nullptr,
-                                                        instance_count);
+            if (capture) {
+                if (mesh->indexCount >
+                    static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
+                    capture->unsupported("diagnostic_static_mesh_index_count");
+                    throw std::runtime_error("Diagnostic static mesh index count exceeds GLsizei");
+                }
+                // Bound temporary LOD-path copies to the registry's UTF-8 path limit.
+                if (batch.basePath.size() > 1024 || batch.drawPath.size() > 1024) {
+                    capture->unsupported("static_mesh_identity_path_limit");
+                    throw std::runtime_error("Diagnostic static mesh path exceeds registry bounds");
+                }
+                std::uint32_t resolved_lod = 0;
+                for (int level = 1; level < kTreeLodCount; ++level) {
+                    if (batch.drawPath == LodMeshPath(batch.basePath, level)) {
+                        resolved_lod = static_cast<std::uint32_t>(level);
+                        break;
+                    }
+                }
+                const bool generated = batch.drawPath.starts_with("procgen://");
+                for (GLsizei instance = 0; instance < instance_count; ++instance) {
+                    capture->write(
+                        *shader,
+                        {.mesh_path = generated ? std::string_view{} : batch.drawPath,
+                         .shader_variant = input.far_selection.effective == FarWorldMode::Ladder
+                                               ? "instanced_static_mesh_ladder"
+                                               : "instanced_static_mesh",
+                         .chunk = {},
+                         .lod = resolved_lod,
+                         .ownership = DiagnosticOwnership::Live,
+                         .pass = DiagnosticPass::GBuffer,
+                         .provenance = generated ? DiagnosticProvenance::Unsupported
+                                                 : DiagnosticProvenance::Mesh});
+                    Luminumbra::Rendering::AttributedGl::Submit(
+                        glDrawElementsInstancedBaseInstance,
+                        GLenum{GL_TRIANGLES},
+                        static_cast<GLsizei>(mesh->indexCount),
+                        GLenum{GL_UNSIGNED_INT},
+                        nullptr,
+                        1,
+                        static_cast<GLuint>(instance));
+                }
+            } else {
+                Luminumbra::Rendering::AttributedGl::Submit(glDrawElementsInstanced,
+                                                            GLenum{GL_TRIANGLES},
+                                                            static_cast<GLsizei>(mesh->indexCount),
+                                                            GLenum{GL_UNSIGNED_INT},
+                                                            nullptr,
+                                                            instance_count);
+            }
             glBindVertexArray(0);
         }
     }
@@ -919,14 +1101,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             const GLsizei count = static_cast<GLsizei>(
                 std::min<size_t>(impostorInstances.size() - offset, kStaticInstanceCapacity));
             glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
-            glBufferSubData(GL_ARRAY_BUFFER,
-                            0,
-                            static_cast<GLsizeiptr>(count) * sizeof(ImpostorInstance),
-                            impostorInstances.data() + offset);
+            glBufferSubData(
+                GL_ARRAY_BUFFER,
+                0,
+                static_cast<GLsizeiptr>(static_cast<std::size_t>(count) * sizeof(ImpostorInstance)),
+                impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
+            if (capture) {
+                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+            }
             Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArraysInstanced, GL_TRIANGLE_STRIP, 0, 4, count);
+                glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);
         }
         if (cull_was_enabled)
@@ -945,8 +1131,17 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
                                                const Camera& camera,
                                                const glm::vec4 (&frustum_planes)[6],
                                                GBufferDrawStats& stats) {
-    const auto& shader = skinned_mesh_shader(input.far_selection.effective);
-    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+    Shader* shader = skinned_mesh_shader(input.far_selection.effective).get();
+    auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldPassUniforms diagnostic_uniforms;
+    if (capture) {
+        shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+        if (shader) {
+            diagnostic_uniforms.Cache(*shader);
+        }
+    }
+    auto& uniforms = capture ? diagnostic_uniforms
+                     : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_skinned_ladder_uniforms
                          : m_skinned_far_uniforms;
 
@@ -957,7 +1152,7 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     if (view.begin() == view.end()) {
         return;
     }
-    if (!UseDrawProgram(shader.get(), stats)) {
+    if (!UseDrawProgram(shader, stats)) {
         return;
     }
     uniforms.Reset();
@@ -1076,8 +1271,23 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_jointPaletteSSBO);
 
         glBindVertexArray(mesh->vao);
-        Luminumbra::Rendering::AttributedGl::Submit(
-            glDrawElements, GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+        if (capture) {
+            capture->write(*shader,
+                           {.mesh_path = mesh_info.meshPath,
+                            .shader_variant = input.far_selection.effective == FarWorldMode::Ladder
+                                                  ? "skinned_mesh_ladder"
+                                                  : "skinned_mesh",
+                            .chunk = {},
+                            .lod = 0,
+                            .ownership = DiagnosticOwnership::Live,
+                            .pass = DiagnosticPass::GBuffer,
+                            .provenance = DiagnosticProvenance::Mesh});
+        }
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GLenum{GL_TRIANGLES},
+                                                    static_cast<GLsizei>(mesh->indexCount),
+                                                    GLenum{GL_UNSIGNED_INT},
+                                                    nullptr);
         glBindVertexArray(0);
         stats.skinned_draws++;
         stats.skinned_indices += mesh->indexCount;

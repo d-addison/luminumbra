@@ -13,15 +13,20 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| GPU attribution, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
+| Deferred attribution producers | Implemented without an ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
+| G-buffer ID attachment | Pending | Attachment integration must hold an `AttachmentLease` for the entire caller attachment lifetime, including rollback, resize and teardown; producer scopes currently always report incomplete coverage |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
+| Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 | Temporal audits and all-features profile (E1–E3) | Planned; gap inventory below describes current code | Exact-tick site sequences, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
-The codecs, standalone draw registry and standalone target do not create scenario bundles or enable a runtime
-flag. The capture test target models GL entry points for target lifecycle regressions;
-rendering does not call these helpers yet. The client source manifest includes the codecs.
+The codecs and standalone helpers do not create scenario bundles or enable a runtime
+flag. The capture test target uses modeled GL entry points for target lifecycle tests;
+rendering submits attribution only inside an explicitly constructed
+`GBufferDiagnosticCapture`. No runtime option constructs that scope yet. The client
+source manifest includes the codecs.
 
 `DiagnosticTargets` owns a lazy RGBA32UI texture and standalone framebuffer, capped
 at 16,777,216 pixels (256 MiB; transactional resize peaks at 512 MiB). Capabilities,
@@ -40,6 +45,36 @@ and owned-framebuffer refusal checks still apply to resize. Destroying the owner
 with live leases asserts in debug builds and terminates in every build before GL
 deletion. Callers must detach before releasing or move-assigning over a live lease.
 The acceptance matrix records this partial state. No new runtime asset is added.
+Shader files are outside the roots classified by `public-asset-inventory.json`, so
+their guarded edits do not change that inventory.
+
+An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
+collects deferred submission identities. It neither accepts nor retains a diagnostic
+target texture, and never changes framebuffer attachments. `GBufferTargets.cpp`
+remains unchanged. `complete()` always returns false: producer records alone cannot
+qualify pixels or authorize bundle publication. G-buffer ID attachment, its lease
+lifetime, capability refusal, state restoration, resize and teardown regressions
+remain pending. Capture scopes cannot nest or reuse a nonempty draw table; an empty
+live-terrain submission adds no unsupported record.
+
+Only an explicit producer scope compiles diagnostic programs, capped at six deferred
+vertex/ladder combinations. Default and ladder variants retain the existing alpha
+discard and depth output. The guarded integer output uses location six; without an
+ID attachment that output is discarded. With diagnostics disabled, removing the
+conditional blocks reproduces the base fragment shader text byte for byte.
+During collection, static instances are submitted once each using their existing
+attributes and base-instance offset, so repeated instances get separate ordered
+draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
+to the base mesh. The existing 65,536-entry registry limit refuses excessive capture
+submissions. Normal rendering keeps its batched draws and original attachments.
+
+Completing exact coverage requires changes beyond the deferred attachment owners:
+the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission
+metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
+`FoliagePass` and `tree_impostor.frag`. A foliage
+identity belongs to a separate forward contributor plane because its color blends
+with the already lit scene. None of these gaps is represented as a guessed mesh or
+as successful background coverage.
 
 ## A: capture bundle and pixel identity
 
