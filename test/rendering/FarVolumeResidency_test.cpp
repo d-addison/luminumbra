@@ -2499,6 +2499,42 @@ TEST(FarVolumeHandoff, ReclaimedDescriptorCannotIntegrateCancelledWorkerFromPrev
     EXPECT_TRUE(IsFarTileCovering(HandoffObserve(owner, {5, 1, 0}).serving_coverage));
 }
 
+TEST(FarVolumeHandoff, ExplicitRetirementDoesNotWaitForOrResurrectCancelledAuthority) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    HandoffWorkerGate gate;
+    FarVolumeHandoff owner(jobs, *memory, Limits(), &gate);
+    HandoffGateRelease const release{gate};
+    auto original = std::array{HandoffInput(memory, {5, -1, 0}, 1, true, -512, 512)};
+    std::weak_ptr<const FarFrozenObservation> const held = original[0].observation;
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    gate.Arm();
+    owner.AdvanceFrame(0, 0, {1, 0, 0}, {});
+    ASSERT_TRUE(HandoffWait([&] { return gate.Entered(); }));
+    const std::array replacement{HandoffInput(memory, {5, 1, 0}, 2, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, replacement)));
+    original = {};
+    EXPECT_FALSE(held.expired());
+    EXPECT_EQ(owner.RetireIdleHistory(), 1u); // Returns while the cancelled worker is held.
+    EXPECT_FALSE(held.expired());
+    const std::array returned{HandoffInput(memory, {5, -1, 0}, 3, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(3, returned)));
+    gate.Release();
+    std::size_t calls = 0;
+    ASSERT_TRUE(HandoffSettle(owner, returned, Backend(calls)));
+    ASSERT_TRUE(owner.TryPromote());
+    EXPECT_TRUE(held.expired());
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(owner.Memory()[4].bytes_gpu, 0u);
+    EXPECT_TRUE(HandoffDraws(owner).empty());
+    const auto observed = HandoffObserve(owner, {5, -1, 0});
+    ASSERT_TRUE(observed.serving);
+    if (observed.serving) {
+        EXPECT_EQ(observed.serving->identity, returned[0].wanted.identity);
+    }
+}
+
 TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     JobSystem jobs;
     jobs.startup(1);
@@ -2512,6 +2548,7 @@ TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     ASSERT_TRUE(owner.TryPromote());
     ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, b)));
     EXPECT_TRUE(IsFarTileCovering(HandoffObserve(owner, {5, 0, 0}).serving_coverage));
+    EXPECT_EQ(owner.RetireIdleHistory(), 0u); // Serving-only and target-only keys both survive.
     ASSERT_TRUE(HandoffSettle(owner, b, Backend(calls)));
     ASSERT_TRUE(owner.TryPromote());
     EXPECT_FALSE(owner.Observe({5, 0, 0}));
@@ -2522,6 +2559,30 @@ TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     EXPECT_EQ(owner.State().serving_serial, 2u);
     EXPECT_EQ(owner.State().target_serial, 2u);
     EXPECT_EQ(memory->Pool(5)->used(), used);
+    EXPECT_EQ(owner.RetireIdleHistory(), 1u);
+    EXPECT_EQ(owner.RetireIdleHistory(), 0u);
+    EXPECT_EQ(memory->Pool(5)->used(), used);
+    auto invalid = HandoffManifest(1, c);
+    EXPECT_FALSE(owner.StageTarget(invalid));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
+    invalid = HandoffManifest(3, c);
+    invalid.world_epoch = 2;
+    EXPECT_FALSE(owner.StageTarget(invalid));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
+    invalid = HandoffManifest(3, c);
+    invalid.committed_generation = 1;
+    EXPECT_FALSE(owner.StageTarget(invalid));
+    EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::ImmutableAuthorityUnavailable);
+    EXPECT_EQ(owner.State().serving_serial, 2u);
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(3, c)));
+    ASSERT_TRUE(HandoffSettle(owner, c, Backend(calls)));
+    EXPECT_TRUE(owner.TryPromote());
+    const auto returned = HandoffObserve(owner, {5, 0, 0});
+    ASSERT_TRUE(returned.serving);
+    if (returned.serving) {
+        EXPECT_EQ(returned.serving->identity, c[0].wanted.identity);
+    }
 }
 
 TEST(FarVolumeHandoff, ExpiredFrozenObserverRetainsControlChargeUntilItsOwnRelease) {
@@ -3023,6 +3084,60 @@ TEST(FarVolumeResidency, AdmissionIndexSizeRefusalsUnwindBeforeAnyTierStorageEsc
         for (std::size_t tier = 1; tier <= kFarTierCount; ++tier)
             EXPECT_EQ(memory.Pool(tier)->used(), 0u);
     }
+}
+
+TEST(FarVolumeHandoff, ExplicitRetirementBoundsAllTierHistoryWithoutAllocatingOrRemovingTargets) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    const auto limits = Limits();
+    AdmissionAllocationObserver allocator;
+    FarVolumeHandoff owner(jobs, *memory, limits, &allocator);
+    const auto allocations = allocator.Allocations();
+    EXPECT_EQ(owner.RetireIdleHistory(), 0u);
+    // Traverse four times the per-tier capacity. No builds are dispatched: this
+    // also covers retirement of omitted, never-published target descriptors.
+    for (std::uint64_t serial = 1; serial <= 4 * limits.entry_slots[0]; ++serial) {
+        SCOPED_TRACE(serial);
+        std::array<FarHandoffTileInput, kFarTierCount> inputs{};
+        for (std::uint8_t tier = 1; tier <= kFarTierCount; ++tier) {
+            inputs[tier - 1] = HandoffInput(
+                memory, {tier, -static_cast<std::int64_t>(serial), 0}, 1, false, -256, 128);
+        }
+        auto manifest = HandoffManifest(serial, inputs);
+        manifest.committed_generation = 1;
+        ASSERT_TRUE(owner.StageTarget(manifest));
+        const auto before = owner.Memory();
+        EXPECT_EQ(owner.RetireIdleHistory(), serial == 1 ? 0u : kFarTierCount);
+        EXPECT_EQ(owner.RetireIdleHistory(), 0u);
+        EXPECT_EQ(owner.State().target_serial, serial);
+        EXPECT_EQ(owner.State().serving_serial, 0u);
+        EXPECT_EQ(owner.AdmissionRefusal(), FarWorldRefusal::None);
+        ASSERT_TRUE(owner.StageTarget(manifest)); // Sorted index still finds every target.
+        for (std::uint8_t tier = 1; tier <= kFarTierCount; ++tier) {
+            const auto observed = HandoffObserve(owner, inputs[tier - 1].wanted.identity.key);
+            ASSERT_TRUE(observed.target);
+            if (observed.target) {
+                EXPECT_EQ(observed.target->identity, inputs[tier - 1].wanted.identity);
+                EXPECT_EQ(observed.target->intent, inputs[tier - 1].wanted.intent);
+            }
+            EXPECT_EQ(owner.Memory()[tier - 1].bytes_total, before[tier - 1].bytes_total);
+            EXPECT_LE(owner.Memory()[tier - 1].bytes_total, before[tier - 1].limit);
+        }
+        EXPECT_EQ(allocator.Allocations(), allocations);
+    }
+    // The first tile's wider span has been retired in every tier, so neither
+    // its old intent nor resolved span can reject a fresh, narrower residency.
+    std::array<FarHandoffTileInput, kFarTierCount> returned{};
+    for (std::uint8_t tier = 1; tier <= kFarTierCount; ++tier) {
+        returned[tier - 1] = HandoffInput(memory, {tier, -1, 0}, 1, false);
+    }
+    auto manifest = HandoffManifest(4 * limits.entry_slots[0] + 1, returned);
+    manifest.committed_generation = 1;
+    EXPECT_TRUE(owner.StageTarget(manifest));
+    EXPECT_EQ(owner.RetireIdleHistory(), kFarTierCount);
+    EXPECT_EQ(allocator.Allocations(), allocations);
+    owner.CancelAndDrain();
+    EXPECT_EQ(owner.RetireIdleHistory(), 0u);
 }
 
 TEST(FarVolumeHandoff, AdmissionCollisionSupersessionKeepsSlotsAndIdempotenceWithoutScratchGrowth) {

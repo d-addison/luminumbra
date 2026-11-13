@@ -1938,6 +1938,38 @@ TEST(FarWorldHandoffRenderer, EveryTierAndProfileCapturesInTheBoundMemoryDomain)
     }
 }
 
+TEST(FarWorldHandoffRenderer, IdleRetirementMakesCompleteDiagnosticsSafeForHistoryReclamation) {
+    JobSystem jobs;
+    DriverState state;
+    state.fixture_released = true;
+    FarWorldHandoffRenderer renderer;
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    const std::array first{RendererHandoffInput(renderer, {5, -1, 0}, 1, false)};
+    const std::array next{RendererHandoffInput(renderer, {5, 1, 0}, 2, false)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, first)));
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(2, next)));
+    auto returned = std::array{RendererHandoffInput(renderer, {5, -1, 0}, 3, false)};
+    returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-128, 64};
+    EXPECT_FALSE(renderer.StageTarget(RendererHandoffManifest(3, returned)));
+    EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
+    ASSERT_TRUE(renderer.Diagnostic().complete);
+    ASSERT_EQ(renderer.Diagnostic().tile_count, 1u);
+    EXPECT_EQ(renderer.Diagnostic().tiles[0].key, next[0].wanted.identity.key);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 1u);
+    EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_TRUE(renderer.StageTarget(RendererHandoffManifest(3, returned)));
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+}
+
 TEST(FarWorldHandoffRenderer, SaveFencePreservesBindingOwnershipAndDraws) {
     JobSystem jobs;
     jobs.startup(1);
@@ -2400,6 +2432,46 @@ TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOld
               FarFrozenCaptureError::DeadlineExceeded);
     ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
+}
+
+TEST_F(SessionRendererTest, FreshCompletedSerialStagesUnderQueuedAndActiveCapturesButNeverFences) {
+    ASSERT_TRUE(Stage());
+    for (const bool active : {false, true}) {
+        SCOPED_TRACE(active);
+        ASSERT_TRUE(producer.request_capture(windows));
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_TRUE(producer.capture_status().latest_ready);
+        const auto completed = producer.capture_status().serving_serial;
+        const auto previous = renderer.SessionDiagnostic()->state.target_serial;
+        ASSERT_GT(completed, previous);
+        ASSERT_TRUE(producer.request_capture(windows));
+        if (active) {
+            producer.pump_capture();
+            ASSERT_TRUE(producer.capture_status().active);
+        } else {
+            ASSERT_TRUE(producer.capture_status().queued);
+        }
+        producer.fence_source_reads(true);
+        EXPECT_FALSE(Stage()); // Even a fresh completed serial cannot cross a source fence.
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+                  FarWorldRefusal::AdmissionFailed);
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, previous);
+        producer.fence_source_reads(false);
+        ASSERT_TRUE(Stage());
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, completed);
+        EXPECT_FALSE(Stage()); // The same completed serial cannot qualify pending work again.
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+                  FarWorldRefusal::AdmissionFailed);
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, completed);
+        producer.pump_capture();
+        producer.pump_capture();
+        ASSERT_TRUE(producer.capture_status().latest_ready);
+        ASSERT_TRUE(Stage());
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial,
+                  producer.capture_status().serving_serial);
+        EXPECT_TRUE(Stage()); // Latest-ready duplicate staging remains idempotent.
+    }
 }
 
 TEST_F(SessionRendererTest,
