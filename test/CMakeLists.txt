@@ -213,6 +213,7 @@ add_executable(common_tests
     common/ReplicationDeltaLoop_test.cpp
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
+    common/SimulationIdentityContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
     common/FarWorldAuthorityProducer_test.cpp
@@ -1604,6 +1605,7 @@ add_executable(frontier_gates_test
     ai/creature_brain_test.cpp
     ai/creature_brain_system_test.cpp
     ai/creature_reproduction_test.cpp
+    ai/creature_identity_test.cpp
     ai/flocking_test.cpp
     ai/foraging_test.cpp
     ai/creature_divergence_test.cpp
