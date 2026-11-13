@@ -171,6 +171,7 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          e.pass_name = "lightning_overlay";
                          e.samplers = {
                              {"u_scene", GL_SAMPLER_2D, -1},
+                             {"u_sceneDepth", GL_SAMPLER_2D, -1},
                          };
                          return e;
                      }()});

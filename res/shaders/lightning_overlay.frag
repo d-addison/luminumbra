@@ -4,6 +4,8 @@
 out vec4 FragColor;
 in vec2 TexCoords;
 
+uniform sampler2D u_sceneDepth; // D32F reversed-Z: near 1, sky 0
+uniform mat4 u_gbufferInverseProjection; // selected Legacy or Ladder projection
 uniform sampler2D u_scene;   // the composited (lit + sky) tonemapped color
 
 #define MAX_BOLT_POINTS 96
@@ -22,6 +24,7 @@ uniform float u_boltWidth = 0.012;       // bolt core half-width (NDC)
 uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
 uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline with kLiveBoltPenUp breaks
+uniform float u_boltInverseDepth[MAX_BOLT_POINTS]; // reciprocal positive view depth
 uniform float u_aspect = 1.777;          // framebuffer width/height
 // GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
 // a bright radial bloom at the touchdown point sells the strike connecting to the
@@ -41,28 +44,76 @@ float offscreenFlashFloor(float strikeExtent, float sceneLuma) {
     return 0.35 * smoothstep(1.0, 1.3, strikeExtent) * clamp(sceneLuma * 4.0, 0.0, 1.0);
 }
 
-// Shortest distance (aspect-corrected NDC) from a screen point to the bolt
-// polyline. The explicit kLiveBoltPenUp marker breaks disjoint strokes.
-float boltDistance(vec2 ndc) {
+// Reconstruct positive reciprocal view depth in the scene's selected projection.
+// Clear sky and invalid samples never occlude. This also handles Ladder's far
+// plane and temporal jitter without assuming the bolt used the same projection.
+float sceneInverseDepth(vec2 uv) {
+    float depth = texture(u_sceneDepth, uv).r;
+    if (isnan(depth) || isinf(depth) || depth <= 0.0 || depth > 1.0) return 0.0;
+    vec4 view = u_gbufferInverseProjection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    if (any(isnan(view)) || any(isinf(view)) || view.z >= 0.0 || view.w <= 0.0) return 0.0;
+    float inverseDepth = view.w / -view.z;
+    return isnan(inverseDepth) || isinf(inverseDepth) ? 0.0 : inverseDepth;
+}
+
+float boltVisibility(float boltDepth, float sceneDepth) {
+    if (sceneDepth <= 0.0) return 1.0;
+    // No attenuation in front or at equal depth. Fade over one percent of the
+    // occluder's distance to avoid a hard depth seam at a nearly touching ridge.
+    return 1.0 - smoothstep(0.0, 0.01, (sceneDepth - boltDepth) / sceneDepth);
+}
+
+vec2 channelResponse(float distance, float coreHalf, float glowRadius) {
+    float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, distance);
+    float glowLin = glowRadius > coreHalf ? 1.0 - smoothstep(coreHalf, glowRadius, distance) : 0.0;
+    return vec2(core, glowLin * glowLin);
+}
+
+// Compare each segment independently before taking the strongest contribution:
+// a hidden branch must not mask another visible channel at the same pixel.
+vec2 boltResponse(vec2 ndc) {
+    float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
+    float glowRadius = min(u_boltGlow, 0.030);
+    float sceneDepth = sceneInverseDepth(TexCoords);
     float best = 1e9;
+    vec2 faded = vec2(0.0);
     vec2 prev = vec2(0.0);
+    float prevDepth = 0.0;
     bool have_prev = false;
     for (int i = 0; i < MAX_BOLT_POINTS; ++i) {
         if (i >= u_boltCount) break;
         vec2 p = u_bolt[i];
-        if (all(equal(p, kLiveBoltPenUp))) { have_prev = false; continue; }
+        float depth = u_boltInverseDepth[i];
+        if (all(equal(p, kLiveBoltPenUp)) || isnan(depth) || isinf(depth) || depth <= 0.0) {
+            have_prev = false;
+            continue;
+        }
         if (have_prev) {
             vec2 a = vec2(prev.x * u_aspect, prev.y);
             vec2 b = vec2(p.x * u_aspect, p.y);
             vec2 q = vec2(ndc.x * u_aspect, ndc.y);
             vec2 ab = b - a;
-            float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
-            best = min(best, length(q - (a + t * ab)));
+            float lengthSquared = dot(ab, ab);
+            float t = clamp(dot(q - a, ab) / max(lengthSquared, 1e-8), 0.0, 1.0);
+            float bd = length(q - (a + t * ab));
+            // Outside the core/glow support there is no channel contribution.
+            if (bd <= max(coreHalf, glowRadius)) {
+                // A subpixel stroke can collapse along the view ray. Its nearer
+                // endpoint must remain visible regardless of polyline order.
+                float boltDepth = lengthSquared > 1e-8 ? mix(prevDepth, depth, t) : max(prevDepth, depth);
+                float visibility = boltVisibility(boltDepth, sceneDepth);
+                if (visibility == 1.0) {
+                    best = min(best, bd);
+                } else if (visibility > 0.0) {
+                    faded = max(faded, channelResponse(bd, coreHalf, glowRadius) * visibility);
+                }
+            }
         }
         prev = p;
+        prevDepth = depth;
         have_prev = true;
     }
-    return best;
+    return max(channelResponse(best, coreHalf, glowRadius), faded);
 }
 
 void main() {
@@ -100,17 +151,9 @@ void main() {
         // near-binary edge a hair wide in NDC) regardless of the glow tuning, and
         // the glow halo is kept tight + faint so it frames the bolt rather than
         // bloating it. The result reads as a hot jagged crack of light, not a tube.
-        float bd = boltDistance(ndc);
-        // Core half-width in NDC clamped to a ~1-2px equivalent ribbon so the bolt
-        // is sharp at any resolution. (0.0016 NDC ~= 1.5px on a 1080-tall frame.)
-        float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
-        // Hot core: hard near-binary inner ribbon (thin bright filament). A tiny
-        // smoothstep band gives 1px antialiasing without widening the core.
-        float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, bd);
-        // Glow: tight quadratic falloff, kept faint so it does not read as girth.
-        float glowRadius = min(u_boltGlow, 0.030);
-        float glowLin = 1.0 - smoothstep(coreHalf, glowRadius, bd);
-        float glow = glowLin * glowLin;
+        vec2 bolt = boltResponse(ndc);
+        float core = bolt.x;
+        float glow = bolt.y;
         vec3 hotCore = mix(u_color, vec3(1.0), 0.97);   // near-white hot filament
         vec3 glowCol = u_color;                          // bluish additive halo
         // Core is the dominant bright channel; glow is a thin translucent halo.

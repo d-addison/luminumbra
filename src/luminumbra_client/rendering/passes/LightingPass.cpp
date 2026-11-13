@@ -171,8 +171,8 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
                         0,
                         0,
                         0,
-                        ctx.internal_w(),
-                        ctx.internal_h()); // internal-sized lit color
+                        static_cast<GLsizei>(ctx.internal_w()),
+                        static_cast<GLsizei>(ctx.internal_h())); // internal-sized lit color
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
@@ -200,7 +200,10 @@ void LightingPass::execute(const RenderContext& ctx) {
     // the G-buffer, and its depth is blitted here after deferred lighting.
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // deferred lighting into the internal FBO
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // deferred lighting into the internal FBO
     glDepthMask(GL_TRUE);
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -429,7 +432,8 @@ void LightingPass::execute(const RenderContext& ctx) {
         m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
     if (ctx.lighting_draws)
         ++(*ctx.lighting_draws);
     glBindVertexArray(0);
@@ -460,7 +464,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
         PassGl::label_gl_object(GL_PROGRAM,
                                 m_lightning_overlay_shader ? m_lightning_overlay_shader->Id() : 0u,
                                 "shader.lightning_overlay");
-        // validate the overlay's one sampler (u_scene) against the registry.
+        // Validate the overlay color and reversed-Z depth samplers.
         if (m_lightning_overlay_shader && m_lightning_overlay_shader->IsValid()) {
             if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay")) {
                 m_lightning_overlay_shader->ValidateLayout(*layout);
@@ -512,6 +516,12 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
     m_lightning_overlay_shader->setInt("u_scene", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+    glActiveTexture(GL_TEXTURE0);
+    m_lightning_overlay_shader->setInt("u_sceneDepth", 1);
+    m_lightning_overlay_shader->setMat4("u_gbufferInverseProjection",
+                                        ctx.gbuffer_inverse_projection);
     m_lightning_overlay_shader->setInt("u_active", 1);
     m_lightning_overlay_shader->setFloat("u_pulse", lit.pulse_intensity);
     m_lightning_overlay_shader->setVec3("u_color", lit.pulse_color);
@@ -530,16 +540,20 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     m_lightning_overlay_shader->setFloat("u_groundFlash", lit.ground_flash);
     m_lightning_overlay_shader->setFloat(
         "u_aspect", static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
-    const int point_count =
-        std::min<int>(static_cast<int>(lit.bolt_points_ndc.size()), kMaxBoltSegmentPoints);
+    const int point_count = static_cast<int>(
+        std::min(lit.bolt_points_ndc.size(), static_cast<std::size_t>(kMaxBoltSegmentPoints)));
     m_lightning_overlay_shader->setInt("u_boltCount", point_count);
     for (int i = 0; i < point_count; ++i) {
         m_lightning_overlay_shader->setVec2("u_bolt[" + std::to_string(i) + "]",
                                             lit.bolt_points_ndc[static_cast<std::size_t>(i)]);
+        m_lightning_overlay_shader->setFloat(
+            "u_boltInverseDepth[" + std::to_string(i) + "]",
+            lit.bolt_points_ndc[static_cast<std::size_t>(i)].inverse_depth);
     }
 
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

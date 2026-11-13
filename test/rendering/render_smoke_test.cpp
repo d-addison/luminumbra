@@ -2923,6 +2923,147 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
         glDeleteProgram(program);
 }
 
+TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const auto vertex = (SourceRoot() / "res/shaders/lightning_overlay.vert").string();
+    const auto fragment = (SourceRoot() / "res/shaders/lightning_overlay.frag").string();
+    Luminumbra::Rendering::Shader shader(vertex.c_str(), fragment.c_str());
+    ASSERT_TRUE(shader.IsValid());
+    FullscreenFloatProbe probe;
+    shader.use();
+    shader.setInt("u_scene", 0);
+    shader.setInt("u_sceneDepth", 1);
+    shader.setInt("u_active", 1);
+    shader.setFloat("u_pulse", 1);
+    shader.setFloat("u_aspect", 1);
+    shader.setFloat("u_boltWidth", 0.010f);
+    shader.setFloat("u_boltGlow", 0.034f);
+    // Keep a localized world flash present: occlusion must affect only geometry.
+    shader.setInt("u_flashCount", 1);
+    shader.setVec2("u_flashNdc[0]", {0, 0});
+    shader.setFloat("u_flashPulse[0]", 0.2f);
+    shader.setInt("u_flashOnscreen[0]", 1);
+    probe.texture(0, {glm::vec4(0.1f, 0.1f, 0.1f, 1)});
+    const auto bolt = [&](float y, float inverse_depth) {
+        shader.setInt("u_boltCount", 2);
+        shader.setVec2("u_bolt[0]", {-0.9f, y});
+        shader.setVec2("u_bolt[1]", {0.9f, y});
+        shader.setFloat("u_boltInverseDepth[0]", inverse_depth);
+        shader.setFloat("u_boltInverseDepth[1]", inverse_depth);
+    };
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        auto projection =
+            Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
+        // The scene may be jittered while the overlay bolt stays unjittered.
+        projection[2][0] += 0.001f;
+        projection[2][1] -= 0.001f;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+        const auto depth_at = [&](float distance) {
+            const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
+            return clip.z / clip.w;
+        };
+        bolt(0, 0.01f);                   // channel 100 m away
+        probe.texture(1, {glm::vec4(0)}); // cleared sky never occludes
+        const auto sky_pixels = probe.draw();
+        const auto sky = sky_pixels[16];
+        EXPECT_GT(sky.r, 3.2f);
+        for (float distance : {100.0f, 200.0f, 14000.0f}) {
+            if (distance < far_plane) {
+                probe.texture(1, {glm::vec4(depth_at(distance))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        shader.setInt("u_boltCount", 0);
+        const auto flash_pixels = probe.draw();
+        const auto flash_only = flash_pixels[16];
+        EXPECT_GT(flash_only.r, 0.1f);
+        EXPECT_NEAR(sky.r, flash_only.r + 3.46112f, 0.0001f);
+        EXPECT_FLOAT_EQ(sky_pixels.front().r, flash_pixels.front().r);
+        EXPECT_FLOAT_EQ(sky_pixels.back().r, flash_pixels.back().r);
+        bolt(0, 0.01f);
+        probe.texture(1, {glm::vec4(depth_at(25))}); // opaque cave wall / hill
+        EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        probe.texture(1, {glm::vec4(depth_at(99.5f))}); // near-contact ridge: soft edge
+        const auto ridge = probe.draw()[16];
+        EXPECT_GT(ridge.r, flash_only.r + 0.5f);
+        EXPECT_LT(ridge.r, sky.r - 0.5f);
+        // The tight glow, as well as the core, is suppressed below the ridge;
+        // the sky on its other side retains exactly the unobstructed response.
+        bolt(0.015f, 0.01f);
+        probe.texture(1, {glm::vec4(0)});
+        const auto sky_glow = probe.draw();
+        EXPECT_GT(sky_glow[16].r, flash_only.r + 0.01f);
+        std::vector<glm::vec4> ridge_depth(FullscreenFloatProbe::width, glm::vec4(0));
+        std::fill_n(ridge_depth.begin(), FullscreenFloatProbe::width / 2, glm::vec4(depth_at(25)));
+        probe.texture(1, ridge_depth);
+        const auto ridge_glow = probe.draw();
+        EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
+        EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        // A hidden closest segment must not erase an overlapping visible one.
+        bolt(0, 0.01f);
+        shader.setInt("u_boltCount", 5);
+        shader.setVec2("u_bolt[2]", {-3, -3});
+        shader.setFloat("u_boltInverseDepth[2]", 0);
+        shader.setVec2("u_bolt[3]", {-0.9f, 0});
+        shader.setVec2("u_bolt[4]", {0.9f, 0});
+        shader.setFloat("u_boltInverseDepth[3]", 0.1f);
+        shader.setFloat("u_boltInverseDepth[4]", 0.1f);
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        for (float invalid : {0.0f,
+                              -1.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, invalid);
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        }
+        for (float invalid : {-1.0f,
+                              2.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(invalid)});
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+        // Collapsed or subpixel strokes use the nearer endpoint in either order.
+        for (float span : {0.0f, 0.00001f}) {
+            for (float first_depth : {0.01f, 0.1f}) {
+                bolt(0, first_depth);
+                shader.setVec2("u_bolt[0]", {0.03125f - span, 0});
+                shader.setVec2("u_bolt[1]", {0.03125f + span, 0});
+                shader.setFloat("u_boltInverseDepth[1]", first_depth == 0.01f ? 0.1f : 0.01f);
+                probe.texture(1, {glm::vec4(depth_at(25))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        // A zero or sub-core glow radius still has a core, with no inverted halo.
+        for (float radius : {-0.01f, 0.0f, 0.0005f, 0.001f}) {
+            shader.setFloat("u_boltGlow", radius);
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(depth_at(25))});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+            probe.texture(1, {glm::vec4(0)});
+            const auto core_only = probe.draw();
+            EXPECT_NEAR(core_only[16].r, flash_only.r + 3.17312f, 0.0001f);
+            EXPECT_FLOAT_EQ(core_only.front().r, flash_pixels.front().r);
+        }
+        shader.setFloat("u_boltGlow", 0.034f);
+        // Unavailable or malformed reconstruction must not manufacture an occluder.
+        std::array<glm::mat4, 5> invalid_inverse{
+            glm::mat4(0), glm::mat4(1), glm::mat4(-1), glm::mat4(1), glm::mat4(1)};
+        invalid_inverse[3][0][0] = std::numeric_limits<float>::quiet_NaN();
+        invalid_inverse[4][2][2] = -std::numeric_limits<float>::min();
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        for (const auto& inverse : invalid_inverse) {
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
     HiddenGlContext context;
     if (!context.ready())
