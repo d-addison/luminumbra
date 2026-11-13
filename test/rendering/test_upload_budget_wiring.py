@@ -1,5 +1,6 @@
 """Check that presentation integration uses the tested clock-free policy."""
 from pathlib import Path
+import math
 import re
 import unittest
 
@@ -40,6 +41,158 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.pipeline = read(RENDERING / "RenderPipeline.cpp")
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
+
+    def test_near_terrain_eligibility_publishes_with_matching_mesh_version(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("CaptureNearTerrainMeshEvidence(", world)
+        capture = body(world, "CaptureNearTerrainMeshEvidence(")
+        self.assertIn("evidence->mesh_version = mesh_version;", capture)
+        for axis in ("x", "y", "z"):
+            self.assertIn(f"for (int {axis} = -1; {axis} <= 1; ++{axis}", capture)
+        for refusal in ("!neighbour", "ChunkState::Loading", "ChunkState::Unloaded",
+                        "ChunkState::Unloading", "kPackedMinXz", "kPackedMaxXz",
+                        "kPackedMinY", "kPackedMaxY", "neighbour->has_terrain_authority()",
+                        "neighbour->voxel_revision() != 0", "kFullSdfLattice", "kHeightmapCells"):
+            self.assertIn(refusal, capture)
+        boot = body(world, "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(")
+        self.assertLess(boot.index("chunk->near_terrain_snapshot.store({}"),
+                        boot.index("chunk->mesh_version++"))
+        boot_publish = body(boot, "for (const auto& built : chunks_to_build) {\n        const auto& chunk")
+        self.assertIn("chunk->mesh_version.load(std::memory_order_acquire)", boot_publish)
+        self.assertIn("World::CompleteNearTerrainMeshSnapshot(*evidence, densities)", boot_publish)
+        self.assertIn("auto& densities = built.step == 1 ? chunk->sdf_data : empty_densities;",
+                      boot_publish)
+        self.assertNotIn("densities = chunk->sdf_data", boot_publish)
+        self.assertGreater(boot.index(boot_publish), boot.index("AddBoundaryTransitionSkirts("))
+        dispatch = body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        self.assertLess(dispatch.index("CaptureNearTerrainMeshEvidence("),
+                        dispatch.index("lane_jobs.emplace_back("))
+        worker = body(dispatch, "lane_jobs.emplace_back(")
+        self.assertLess(worker.index("GenerateWaterMesh("),
+                        worker.index("World::CompleteNearTerrainMeshSnapshot(*evidence, scratch.sdf_data)"))
+        self.assertLess(worker.index("World::CompleteNearTerrainMeshSnapshot("),
+                        worker.index("pending_mesh_ready.store(true"))
+        publish = body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
+        terrain = body(publish, "if (job_chunk.terrain_mesh_required && terrain_current)")
+        self.assertLess(terrain.index("chunk->mesh_version++"),
+                        terrain.index("chunk->near_terrain_snapshot.store("))
+        self.assertIn("job_chunk.scratch->near_terrain_snapshot.load(", terrain)
+        snapshots = body(self.pipeline, "RenderPipeline::build_chunk_snapshots(")
+        self.assertIn("chunk->near_terrain_snapshot.load(std::memory_order_acquire)", snapshots)
+        self.assertIn("snapshot.near_terrain_snapshot.reset();",
+                      body(snapshots, "if (version_after_metadata != snapshot.mesh_version)"))
+        self.assertEqual(self.header.count("std::shared_ptr<const World::NearTerrainMeshSnapshot>"), 2)
+
+    def test_near_terrain_frame_capture_defers_dependency_validation(self):
+        snapshots = body(self.pipeline, "RenderPipeline::build_chunk_snapshots(")
+        self.assertIn("chunk->near_terrain_snapshot.load(std::memory_order_acquire)", snapshots)
+        for validation in ("CurrentNearTerrainMeshSnapshot(", "dependencies_current(",
+                           "->matches(", "->eligible(", ".halo", "->halo"):
+            self.assertNotIn(validation, snapshots)
+
+    def test_near_terrain_edits_invalidate_self_and_every_halo_neighbour(self):
+        chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
+        for marker in ("mark_voxel_data_dirty", "mark_sdf_loaded_or_edited",
+                       "mark_sdf_generated_current_params", "normalize_for_park", "reset_pending_jobs"):
+            self.assertIn("invalidate_near_terrain_snapshot();", body(chunk, f"void {marker}()"))
+        invalidation = body(chunk, "void invalidate_near_terrain_snapshot()")
+        self.assertIn("near_terrain_snapshot.store({},", invalidation)
+        self.assertIn("near_terrain_epoch.compare_exchange_weak(", invalidation)
+        self.assertIn("epoch != std::numeric_limits<u64>::max()", invalidation)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        external = body(world, "void SHIELD_WorldSystem::notify_far_lod_authority_changed(")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", external)
+        for setter in ("set_seed", "set_params", "clear_world"):
+            self.assertIn("chunk->invalidate_near_terrain_snapshot();",
+                          body(world, f"void SHIELD_WorldSystem::{setter}("))
+        adoption = body(world, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", body(adoption, "if (adopted)"))
+        edit = body(world, "int SHIELD_WorldSystem::EditTerrainVoxel(")
+        self.assertIn("chunk->mark_voxel_data_dirty();", body(edit, "if (changed)"))
+        carve = read(ROOT / "src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp")
+        self.assertIn("chunk->mark_voxel_data_dirty();", carve)
+        self.assertIn("world_system->notify_far_lod_authority_changed(chunk->get_coords());", carve)
+
+    def test_near_terrain_water_promotion_invalidates_before_changing_provenance(self):
+        chunk = read(ROOT / "src/luminumbra_common/world/Chunk.h")
+        promotion = body(chunk, "void set_water_authority()")
+        self.assertIn("sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited", promotion)
+        self.assertIn("voxel_revision() == 0", promotion)
+        self.assertLess(promotion.index("invalidate_near_terrain_snapshot();"),
+                        promotion.index("m_sdf_provenance.store("))
+        self.assertIn("set_water_authority();", body(chunk, "void publish_water_state()"))
+
+    def test_near_terrain_retirement_precedes_every_resident_removal(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        activation = body(world, "bool SHIELD_WorldSystem::update_chunk_activation(")
+        removals = activation.split("m_streaming_state.chunks.erase(it)")
+        self.assertEqual(len(removals), 4)
+        for prefix in removals[:-1]:
+            self.assertTrue("invalidate_near_terrain_snapshot();" in prefix or
+                            "normalize_for_park();" in prefix)
+        restore = body(world, "bool SHIELD_WorldSystem::restore_authoritative_chunk(")
+        discard = body(restore, "const auto discard_placeholder =")
+        self.assertLess(discard.index("resident->second->invalidate_near_terrain_snapshot();"),
+                        discard.index("m_streaming_state.chunks.erase(resident)"))
+        for marker in ("void SHIELD_WorldSystem::clear_world(",
+                       "SHIELD_WorldSystem::~SHIELD_WorldSystem()"):
+            self.assertIn("chunk->invalidate_near_terrain_snapshot();", body(world, marker))
+        streaming = read(ROOT / "src/luminumbra_common/world/WorldStreamingState.cpp")
+        erase = body(streaming, "bool WorldStreamingState::erase_chunk(ChunkID id)")
+        self.assertIn("it->second->invalidate_near_terrain_snapshot();", erase)
+        self.assertLess(erase.index("it->second->invalidate_near_terrain_snapshot();"),
+                        erase.index("m_chunks.erase(it)"))
+        clear = body(streaming, "void WorldStreamingState::clear()")
+        self.assertIn("chunk->invalidate_near_terrain_snapshot();", clear)
+        self.assertLess(clear.index("chunk->invalidate_near_terrain_snapshot();"),
+                        clear.index("m_chunks.clear()"))
+        self.assertNotIn("WorldStreamingState::~WorldStreamingState()", streaming)
+
+    def test_near_terrain_lattice_retention_requires_explicit_refinement_request(self):
+        contract = read(ROOT / "src/luminumbra_common/world/NearTerrainMeshSnapshot.h")
+        self.assertIn("bool retain_densities = false", contract)
+        complete = body(contract, "CompleteNearTerrainMeshSnapshot(")
+        retention = body(complete, "if (retain_densities &&")
+        self.assertIn("snapshot->densities = std::move(densities);", retention)
+        self.assertEqual(complete.count("snapshot->densities ="), 1)
+        self.assertNotIn("densities.size()", body(contract, "bool\n    eligible("))
+
+    def test_near_terrain_stale_records_are_rejected_through_upload_queue(self):
+        contract_path = ROOT / "src/luminumbra_common/world/NearTerrainMeshSnapshot.h"
+        try:
+            contract = read(contract_path)
+        except FileNotFoundError:
+            self.fail("near-terrain snapshot contract is missing")
+        dependencies = body(contract, "bool dependencies_current() const")
+        self.assertIn("for (const auto& dependency : halo)", dependencies)
+        self.assertIn("!chunk", dependencies)
+        self.assertIn("chunk->near_terrain_epoch.load(std::memory_order_acquire) != dependency.epoch",
+                      compact(dependencies))
+        matching = body(contract, "bool matches(")
+        for guard in ("version != 0", "mesh_version == version", "dependencies_current()",
+                      "chunk.near_terrain_snapshot.load(std::memory_order_acquire).get() == this",
+                      "chunk.mesh_version.load(std::memory_order_acquire) == version"):
+            self.assertIn(guard, matching)
+        payload = body(self.pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(")
+        self.assertIn("payload.near_terrain_snapshot = chunk.near_terrain_snapshot;", payload)
+        self.assertIn("!payload.near_terrain_snapshot->matches(*chunk.source_chunk, version_before)",
+                      payload)
+        self.assertEqual(payload.count("payload.near_terrain_snapshot.reset();"), 2)
+        for upload in ("upload_chunk_mesh", "upload_water_mesh"):
+            self.assertNotIn("RefineNearTerrain(",
+                             body(self.pipeline, f"void RenderPipeline::{upload}("))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("PublishesMatchingMeshVersionAndOwnsItsLattice",
+                           "EveryEditInvalidatesSelfAndAllHaloNeighbours",
+                           "WaterPromotionInvalidatesSourceAndEveryHaloNeighbour",
+                           "ResidentRemovalRefusesRetainedOwnersAfterReplacement",
+                           "LiveWorldEvictionRefusesRetainedOwnersAfterReplacement",
+                           "EvidenceWithoutRefinementRetainsNoLattice",
+                           "TemporaryViewsPreserveResidentEvidence",
+                           "RejectsStaleQueuedRecordsAndRetiredOwners",
+                           "RefusesMissingPartialEditedCoarseAndCaveEvidence"):
+            self.assertIn("TEST(NearTerrainEligibility, " + regression + ")", native)
+        self.assertIn("rendering/NearTerrainRefinement_test.cpp", read(ROOT / "test/CMakeLists.txt"))
 
     def test_peak_station_records_rendered_centre_and_target_mesh_diagnostics(self):
         capture = read(ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
@@ -1415,6 +1568,217 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::filesystem::rename(temporary, path, error)", builder)
         self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
+
+
+class SkyLutContinuity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = read(RENDERING / "SkyAtmosphereLut.ipp")
+
+    def test_cpu_fallback_repairs_empty_partial_and_oversized_base_luts_before_sampling(self):
+        sky = body(self.source, "void SkyAtmosphereLut::build_sky_view_cpu(")
+        prefix = sky.split("const glm::vec3 beta_r =", 1)[0]
+        header = read(RENDERING / "SkyAtmosphereLut.h")
+        constants = {name: int(value) for name, value in re.findall(
+            r"static constexpr int (k\w+) = (\d+);", header)}
+        sizes = {"m_transmittance_cpu": 256 * 64, "m_multiscatter_cpu": 32 * 32}
+        guards = re.findall(r"if\s*\((.*?)\)\s*\{\s*(build_\w+_cpu)\(\);\s*\}",
+                            prefix, re.S)
+        self.assertEqual([builder for _, builder in guards],
+                         ["build_transmittance_cpu", "build_multiscatter_cpu"])
+        # Execute the production size predicates for all 25 shape pairs. Empty
+        # covers GPU-only startup; short/long covers incomplete or stale buffers;
+        # exact sizes must reuse the existing CPU output without another build.
+        for trans in (0, 1, 256 * 64 - 1, 256 * 64, 256 * 64 + 1):
+            for multi in (0, 1, 32 * 32 - 1, 32 * 32, 32 * 32 + 1):
+                state = dict(m_transmittance_cpu=trans, m_multiscatter_cpu=multi)
+                rebuilt = []
+                for predicate, builder in guards:
+                    expression = compact(predicate).replace("static_cast<std::size_t>", "int")
+                    expression = expression.replace(".size()", "")
+                    if eval(expression, {"__builtins__": {}}, dict(constants, int=int, **state)):
+                        if builder == "build_multiscatter_cpu":
+                            self.assertEqual(state["m_transmittance_cpu"], sizes["m_transmittance_cpu"])
+                        buffer = "m_" + builder.removeprefix("build_")
+                        state[buffer] = sizes[buffer]
+                        rebuilt.append(buffer)
+                with self.subTest(trans=trans, multi=multi):
+                    self.assertEqual(state, sizes)
+                    self.assertEqual(rebuilt, [name for name, count in
+                                              (("m_transmittance_cpu", trans),
+                                               ("m_multiscatter_cpu", multi))
+                                              if count != sizes[name]])
+
+    def test_every_cpu_entry_and_gpu_failure_converges_on_guarded_builder(self):
+        # There are only two CPU entry sites, shared by all platforms/backends.
+        self.assertEqual(self.source.count("build_sky_view_cpu("), 3)
+        for method, branch in (("initialize", "if (!gpu_init_done)"),
+                               ("refresh_sky_view", "if (!gpu_done)")):
+            entry = body(self.source, "bool SkyAtmosphereLut::" + method + "(")
+            self.assertIn("build_sky_view_cpu(", body(entry, branch))
+        gpu = body(self.source, "bool SkyAtmosphereLut::build_sky_view_gpu(")
+        failure = body(gpu, "if (!readback_ok)")
+        self.assertIn("return false;", failure)
+        self.assertIn("mapped_bytes >= skyview_bytes", gpu)
+        self.assertIn("std::chrono::steady_clock::now() >= readback_deadline", gpu)
+        # Resize/quality never changes the fixed LUT geometry or clears its CPU
+        # storage; a subsequent refresh still enters the same guarded builder.
+        pipeline = read(RENDERING / "RenderPipeline.cpp")
+        for method in ("void RenderPipeline::on_resize(",
+                       "bool RenderPipeline::resize_graphics_targets(",
+                       "bool RenderPipeline::apply_graphics(",
+                       "void RenderPipeline::set_cloud_quality("):
+            self.assertNotIn("m_sky_lut", body(pipeline, method))
+
+    def test_gpu_success_then_fallback_regressions_are_registered_without_skips(self):
+        registration = read(ROOT / "test/CMakeLists.txt")
+        target = registration.split("add_executable(render_smoke_test", 1)[1].split(")", 1)[0]
+        self.assertIn("rendering/SkyAtmosphereLutGl_test.cpp", target)
+        native = read(ROOT / "test/rendering/SkyAtmosphereLutGl_test.cpp")
+        for name in ("GpuInitializationThenReadbackDeadlineMatchesCpu",
+                     "GpuInitializationThenCpuModeMatchesCpu",
+                     "InitializationShaderFailureMatchesCpu",
+                     "InitializationReadbackDeadlineMatchesCpu"):
+            self.assertIn("TEST_F(SkyAtmosphereLutGl, " + name + ")", native)
+        self.assertNotIn("GTEST_SKIP", native)
+        self.assertIn("EXPECT_EQ(Pixels(actual), Pixels(reference));", native)
+        self.assertIn("EXPECT_EQ(lut.sun_transmittance(0.0f), glm::vec3(1.0f));", native)
+
+    def cpu_sampler(self, width, height, values):
+        if "sample_lut_linear(" not in self.source:
+            # Model the old production lookup too, so the numeric regressions
+            # fail on its radiance step rather than on a missing helper name.
+            trans = compact(body(self.source, "glm::vec3 SkyAtmosphereLut::sample_transmittance("))
+            self.assertIn("static_cast<int>(u * kTransmittanceWidth)", trans)
+            self.assertIn("static_cast<int>(v * kTransmittanceHeight)", trans)
+
+            def nearest(u, v):
+                x = min(width - 1, int(min(1.0, max(0.0, u)) * width))
+                y = min(height - 1, int(min(1.0, max(0.0, v)) * height))
+                return values[y * width + x]
+
+            return nearest
+        helper = compact(body(self.source, "sample_lut_linear("))
+        self.assertIn("const int x0 = static_cast<int>(x);", helper)
+        self.assertIn("const int y0 = static_cast<int>(y);", helper)
+        self.assertIn("const int x1 = std::min(x0 + 1, width - 1);", helper)
+        self.assertIn("const int y1 = std::min(y0 + 1, height - 1);", helper)
+        self.assertIn("lut[static_cast<std::size_t>(row) * static_cast<std::size_t>(width) + "
+                      "static_cast<std::size_t>(column)]", helper)
+
+        def expression(text):
+            text = text.replace("glm::clamp", "clamp").replace("glm::mix", "mix")
+            text = text.replace("static_cast<float>", "float")
+            return re.sub(r"(?<=\d)f\b", "", text)
+
+        axes = [expression(re.search(r"const float " + axis + r" = (.*?);", helper).group(1))
+                for axis in ("x", "y")]
+        blend = expression(re.search(r"return (glm::mix\(.*);$", helper).group(1))
+        functions = {"float": float, "clamp": lambda x, lo, hi: min(hi, max(lo, x)),
+                     "mix": lambda a, b, t: a * (1.0 - t) + b * t}
+
+        def sample(u, v):
+            scope = dict(functions, width=width, height=height, u=u, v=v)
+            x, y = [eval(axis, {"__builtins__": {}}, scope) for axis in axes]
+            x0, y0 = int(x), int(y)
+            scope.update(x=x, y=y, x0=x0, y0=y0,
+                         x1=min(x0 + 1, width - 1), y1=min(y0 + 1, height - 1),
+                         at=lambda column, row: values[row * width + column])
+            return eval(blend, {"__builtins__": {}}, scope)
+
+        return sample
+
+    def test_cpu_and_both_compute_builders_use_continuous_nonperiodic_sampling(self):
+        trans = compact(body(self.source, "glm::vec3 SkyAtmosphereLut::sample_transmittance("))
+        self.assertIn("return sample_lut_linear(m_transmittance_cpu, kTransmittanceWidth, "
+                      "kTransmittanceHeight, u, v);", trans)
+        sky = compact(body(self.source, "void SkyAtmosphereLut::build_sky_view_cpu("))
+        self.assertIn("sample_lut_linear(m_multiscatter_cpu, kMultiScatterWidth, "
+                      "kMultiScatterHeight, ms_u, ms_v)", sky)
+        self.assertNotIn("static_cast<int>", sky)
+        for builder in ("build_multiscatter_cpu", "build_sky_view_cpu"):
+            self.assertIn("sample_transmittance(", body(self.source, "void SkyAtmosphereLut::" + builder))
+        for name in ("kSkyViewComputeSrc", "kMultiscatterComputeSrc"):
+            shader = self.source.split('const char* ' + name + ' = R"GLSL(', 1)[1].split(')GLSL"', 1)[0]
+            with self.subTest(builder=name):
+                helper = compact(body(shader, "vec3 sampleLutLinear("))
+                self.assertEqual(helper, "vec2 halfTexel = 0.5 / vec2(textureSize(lut, 0)); "
+                                 "return textureLod(lut, clamp(uv, halfTexel, "
+                                 "vec2(1.0) - halfTexel), 0.0).rgb;")
+                self.assertIn("return sampleLutLinear(u_transmittance, vec2(u, v));",
+                              body(shader, "vec3 sampleTransmittance("))
+                self.assertNotIn("texelFetch(", shader)
+                if name == "kSkyViewComputeSrc":
+                    self.assertIn("sampleLutLinear(u_multiscatter, vec2(msU, msV))", shader)
+        # Linear filtering is required in both CPU-upload and GPU-allocation paths.
+        for signature in ("void SkyAtmosphereLut::upload_texture(", "void allocate_empty_lut_texture("):
+            self.assertIn("GL_TEXTURE_MIN_FILTER, GL_LINEAR", body(self.source, signature))
+            self.assertIn("GL_TEXTURE_MAG_FILTER, GL_LINEAR", body(self.source, signature))
+
+    def test_production_bilinear_mapping_centres_edges_and_every_old_cell_boundary(self):
+        # These are the two bounded LUT dimensions, not a per-frame allocation.
+        for width, height in ((256, 64), (32, 32)):
+            values = [float((x * 17 + y * 7) % 31) for y in range(height) for x in range(width)]
+            sample = self.cpu_sampler(width, height, values)
+            for x, y in ((0, 0), (width // 2, height // 2), (width - 1, height - 1)):
+                self.assertEqual(sample((x + 0.5) / width, (y + 0.5) / height), values[y * width + x])
+            for u, v, index in ((-1.0, -1.0, 0), (0.0, 0.0, 0),
+                                (1.0, 1.0, -1), (2.0, 2.0, -1)):
+                self.assertEqual(sample(u, v), values[index])
+            # GPU normalized coordinates clamp before filtering, while the CPU
+            # clamps in texel space. Check agreement when just one axis clamps.
+            for u in (-1.0, 0.0, 0.5 / width, 0.37, 1.0 - 0.5 / width, 1.0, 2.0):
+                for v in (-1.0, 0.0, 0.5 / height, 0.63, 1.0 - 0.5 / height, 1.0, 2.0):
+                    gu = min(1.0 - 0.5 / width, max(0.5 / width, u)) * width - 0.5
+                    gv = min(1.0 - 0.5 / height, max(0.5 / height, v)) * height - 0.5
+                    expected = sum(values[y * width + x] * wx * wy
+                                   for x, wx in ((int(gu), 1.0 - gu % 1.0),
+                                                 (min(int(gu) + 1, width - 1), gu % 1.0))
+                                   for y, wy in ((int(gv), 1.0 - gv % 1.0),
+                                                 (min(int(gv) + 1, height - 1), gv % 1.0)))
+                    self.assertAlmostEqual(sample(u, v), expected)
+            u, v = (3.5 + 0.25) / width, (4.5 + 0.75) / height
+            expected = sum(values[y * width + x] * wx * wy
+                           for x, wx in ((3, 0.75), (4, 0.25))
+                           for y, wy in ((4, 0.25), (5, 0.75)))
+            self.assertAlmostEqual(sample(u, v), expected)
+            epsilon = 1e-10
+            for axis, count in ((0, width), (1, height)):
+                for cell in range(1, count):
+                    before, after = [0.5, 0.5], [0.5, 0.5]
+                    before[axis], after[axis] = cell / count - epsilon, cell / count + epsilon
+                    self.assertLess(abs(sample(*before) - sample(*after)), 1e-5)
+
+    def test_dusk_zero_cosine_meridian_is_continuous_and_matches_sweep_seam(self):
+        # Summer, dusk and camera values are pinned to the shipping sweep inputs.
+        sweep = read(ROOT / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp")
+        self.assertIn('{"dusk", 0.25f}', sweep)
+        self.assertIn('{"yaw120", 120.0f, 0.0f, false', sweep)
+        self.assertIn('camera->Zoom = 75.0f;', sweep)
+        tilt = float(re.search(r"kSeasonalTiltAmplitude = ([0-9.]+)f",
+                              read(RENDERING / "TimeOfDayModel.h")).group(1))
+        sun_z = 0.2 - math.sin(tilt)
+        bearing = math.degrees(math.atan2(sun_z, -1.0)) % 360.0
+        meridian = bearing - 90.0
+        focal = 800.0 / math.tan(math.radians(75.0 / 2.0))
+        x = 1920.0 + focal * math.tan(math.radians(meridian - 120.0))
+        self.assertAlmostEqual(x, 1566.0, delta=2.0)
+        for width, height in ((256, 64), (32, 32)):
+            # A nonconstant fixture isolates the bin-crossing discontinuity from
+            # the integration. All march samples cross this boundary together.
+            values = [float(x >= width // 2) for _ in range(height) for x in range(width)]
+            sample = self.cpu_sampler(width, height, values)
+            for zenith in (0.1, 0.5, 1.0, math.radians(89.0)):
+                def mu(azimuth):
+                    return 0.01 * math.sin(zenith) * math.cos(math.radians(azimuth - bearing))
+
+                left = (mu(meridian - 1e-5) + 1.0) * 0.5
+                right = (mu(meridian + 1e-5) + 1.0) * 0.5
+                self.assertLess(abs(sample(left, 0.2) - sample(right, 0.2)), 1e-6)
+                # Negative control: devel's nearest lookup has a full step here.
+                old_left = values[int(left * width)]
+                old_right = values[int(right * width)]
+                self.assertEqual(abs(old_left - old_right), 1.0)
 
 
 class SkyAppearanceWiring(unittest.TestCase):
