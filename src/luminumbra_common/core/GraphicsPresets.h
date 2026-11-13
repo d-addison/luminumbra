@@ -71,6 +71,7 @@ struct GraphicsValues {
     bool gpu_sky_lut = true;
     bool exposure_meter = false;
     bool live_menu_preview = true;
+    bool terrain_near_refinement = false;
 };
 
 [[nodiscard]] bool operator==(const GraphicsValues& left, const GraphicsValues& right);

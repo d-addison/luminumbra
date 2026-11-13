@@ -3814,6 +3814,10 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     m_farlod->set_horizon(config.far_radius_m, config.far_outer_clip_m);
     set_volumetric_quality(config.volumetric_quality);
     m_ui_blur = config.ui_blur;
+    if (m_near_terrain_refinement.set_enabled(resolved.values.terrain_near_refinement)) {
+        m_taau_pass->invalidate_history();
+        m_frustumCache.valid = false;
+    }
     // Scale changes already reset history during target publication. Other presentation
     // changes also invalidate the accumulated image, even with unchanged target extents.
     if (config != previous && config.render_scale == previous.render_scale) {
@@ -3867,6 +3871,7 @@ void RenderPipeline::clear_all_chunk_data() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& data : m_free_chunk_render_slots) {
         delete_chunk_slot(data);
     }
@@ -4219,6 +4224,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& d : m_free_chunk_render_slots) {
         delete_chunk_slot(d);
     }
@@ -4428,8 +4434,14 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     for (auto& [id, data] : records) {
         if (active.contains(id))
             data.frames_since_inactive = 0;
-        else if (++data.frames_since_inactive > inactive_ttl)
-            expired.push_back(id);
+        else {
+            if constexpr (!Water) {
+                m_near_terrain_refinement.forget(id);
+            }
+            if (++data.frames_since_inactive > inactive_ttl) {
+                expired.push_back(id);
+            }
+        }
     }
     for (const auto id : expired) {
         if constexpr (Water)
@@ -4450,11 +4462,34 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 continue;
             }
         }
+        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
+                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
+                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
+        const auto delta = center - camera.Position;
+        const float distance = glm::dot(delta, delta);
+        bool refinement_requested = false;
+        bool refinement_changed = false;
+        if constexpr (!Water) {
+            if (chunk.source_chunk) {
+                const auto evidence = m_near_terrain_refinement.observe(
+                    *chunk.source_chunk, chunk.mesh_version, chunk.near_terrain_snapshot, distance);
+                refinement_requested = static_cast<bool>(evidence);
+                const auto resident = records.find(chunk.id);
+                refinement_changed =
+                    resident != records.end() && !resident->second.refinement.matches(evidence);
+            }
+        }
         const auto found = records.find(chunk.id);
+        bool retire_refined = false;
+        if constexpr (!Water) {
+            retire_refined = found != records.end() && found->second.refinement.requested;
+        }
         // A published empty water mesh is a real replacement, adopted through
-        // the same bounded queue. Absent chunks still use the inactivity grace.
+        // the same bounded queue. An emptied refined terrain mesh also retires
+        // its displaced surface. Absent chunks still use the inactivity grace.
         if (!(Water ? chunk.has_water_mesh() : chunk.has_terrain_mesh()) &&
-            (!Water || found == records.end() || found->second.element_count == 0))
+            ((!Water && !retire_refined) || found == records.end() ||
+             found->second.element_count == 0))
             continue;
         const bool is_new = found == records.end() || found->second.element_count == 0;
         bool is_stale = !is_new && found->second.mesh_version !=
@@ -4464,6 +4499,7 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 is_stale || (!is_new && m_frame_far_selection.effective == FarWorldMode::Ladder &&
                              !found->second.LadderUploadValid());
         }
+        is_stale = is_stale || refinement_changed;
         if (!is_new && !is_stale)
             continue;
         ++(is_new
@@ -4483,11 +4519,10 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                             : stats.terrain_stale_uploads_deferred));
             continue;
         }
-        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
-                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
-                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
-        const auto delta = center - camera.Position;
-        const float distance = glm::dot(delta, delta);
+        if constexpr (!Water) {
+            bytes = NearTerrainRefinementCache::upload_cost(
+                refinement_requested, chunk.terrain_vertex_count, chunk.terrain_index_count, bytes);
+        }
         candidates.push_back(
             {chunk,
              is_new,
@@ -4543,8 +4578,29 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                     upload_water_mesh(candidate.chunk, payload);
                 else
                     unload_water_resources(candidate.chunk.id);
-            } else
-                upload_chunk_mesh(candidate.chunk, payload);
+            } else {
+                const auto evidence =
+                    m_near_terrain_refinement.observe(*candidate.chunk.source_chunk,
+                                                      payload.mesh_version,
+                                                      payload.near_terrain_snapshot,
+                                                      candidate.distance_sq);
+                if (m_near_terrain_refinement.prepare(*candidate.chunk.source_chunk,
+                                                      payload.mesh_version,
+                                                      evidence,
+                                                      candidate.distance_sq,
+                                                      payload.vertices,
+                                                      payload.indices,
+                                                      elapsed()) ==
+                    NearTerrainUploadResult::Deferred) {
+                    return false;
+                }
+                payload.refinement.set(evidence);
+                if (payload.has_mesh()) {
+                    upload_chunk_mesh(candidate.chunk, payload);
+                } else {
+                    unload_chunk_resources(candidate.chunk.id);
+                }
+            }
             return failures ==
                    (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
         },
@@ -4575,7 +4631,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
                                                ChunkMeshPayload& payload) const {
-    if (!chunk.source_chunk || !chunk.has_terrain_mesh()) {
+    if (!chunk.source_chunk ||
+        ((chunk.terrain_vertex_count == 0) != (chunk.terrain_index_count == 0))) {
         return false;
     }
 
@@ -4601,7 +4658,7 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
     }
 
     const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
-    if (version_after != version_before || !payload.has_mesh()) {
+    if (version_after != version_before || (payload.vertices.empty() != payload.indices.empty())) {
         payload.near_terrain_snapshot.reset();
         payload.vertices.clear();
         payload.indices.clear();
@@ -4846,6 +4903,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
     render_data.mesh_version = payload.mesh_version;
+    render_data.refinement = payload.refinement;
     render_data.frames_since_inactive = 0;
 
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
@@ -4881,6 +4939,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    m_near_terrain_refinement.forget(chunk_id);
     m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {
