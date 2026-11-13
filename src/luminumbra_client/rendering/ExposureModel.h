@@ -11,8 +11,8 @@
 // functions, so the gate that unit-tests them exercises the SAME code the shipping
 // frame uses -- there is no second copy to drift.
 //
-// DETERMINISM. Render-only. The exposure multiplier feeds ONLY u_exposure in the
-// lighting pass; it NEVER feeds world_hash. Because it is not
+// DETERMINISM. Render-only. The exposure multiplier feeds u_exposure in the
+// lighting and foliage passes; it NEVER feeds world_hash. Because it is not
 // hashed it is free to use std::exp2 (libm) -- unlike PhotoCamera.h, which is
 // sim-adjacent and libm-free by contract. ExposureValue itself (from PhotoCamera.h)
 // stays on its in-house libm-free Log2Approx, so the EV the HUD meter shows and the
@@ -23,6 +23,7 @@
 #include <glm/glm.hpp> // glm::smoothstep / glm::mix for the auto TOD exposure curve
 
 #include "luminumbra_common/game/PhotoCamera.h" // luminumbra::game::LensSettings + ExposureValue
+#include <glm/gtc/constants.hpp>
 
 namespace Luminumbra::Rendering {
 
@@ -67,8 +68,9 @@ inline float ManualExposureMultiplier(const luminumbra::game::LensSettings& lens
 // deterministic). The atmosphere model spans orders of magnitude day to night; a
 // fixed exposure leaves night a flat crush and golden hour over-bright. DAY == kManualExposureM0
 // (1.12) so the noon image is preserved and toggling photo mode at the default lens is continuous;
-// night is lifted for a navigable moonlit scene; a gentle dip through the low-sun golden band adds
-// mood/contrast. GPU metering and manual photo EV both override this fallback.
+// a gentle dip through the low-sun golden band adds mood/contrast. This raw
+// adaptation target is bounded by MoonScaledAutoExposure at each lit pass.
+// GPU metering replaces the target; manual photo EV overrides the bounded result.
 // Render-only; never included in world_hash.
 inline float AutoExposureForElevation(float sunUpFactor) {
     constexpr float kNightExposure = 1.75f; // lift so a moonlit night stays dim-but-navigable
@@ -80,6 +82,28 @@ inline float AutoExposureForElevation(float sunUpFactor) {
     float exposure = glm::mix(kNightExposure, kManualExposureM0, day);
     exposure = glm::mix(exposure, kGoldenExposure, golden);
     return exposure;
+}
+
+// Render-only lunar irradiance: no moonlight from a body below the horizon.
+inline float MoonLightFactor(float illumination, float moonUpFactor) {
+    return glm::clamp(illumination, 0.0f, 1.0f) * glm::smoothstep(0.0f, 0.35f, moonUpFactor);
+}
+
+inline glm::vec3 NightAmbientColor(float illumination, float moonUpFactor) {
+    // A 2% starlight floor leaves new-moon terrain dark enough to need local lights.
+    const float fill = glm::mix(0.02f, 1.0f, MoonLightFactor(illumination, moonUpFactor));
+    return glm::vec3(0.008f, 0.010f, 0.015f) * glm::pi<float>() * fill;
+}
+
+// Bound both analytic and GPU-metered adaptation so neither restores daylight
+// brightness at night. Preserve the daytime curve and apply manual EV afterwards.
+inline float MoonScaledAutoExposure(float automaticExposure,
+                                    float sunUpFactor,
+                                    float illumination,
+                                    float moonUpFactor) {
+    const float nightCeiling = glm::mix(0.45f, 0.85f, MoonLightFactor(illumination, moonUpFactor));
+    const float day = glm::smoothstep(-0.1f, 0.15f, sunUpFactor);
+    return glm::mix(glm::min(automaticExposure, nightCeiling), automaticExposure, day);
 }
 
 // Precedence for the RenderContext.exposure seam: a photo-mode manual override (> 0)
