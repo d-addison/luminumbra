@@ -59,6 +59,7 @@ private:
     bool driveWaterVisual();
     bool driveMaterialVisual();
     bool driveSkyboxVisual();
+    bool driveAtmosphereCamera();
     bool driveWeatherVisual();
     bool driveCloudShadow();
     bool driveParticleDeterminism();

@@ -57,6 +57,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/NearTerrainRefinement.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeBuildQueue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeUpload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
