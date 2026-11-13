@@ -192,7 +192,7 @@ TEST(LiveStrikeComposer, StrongestStrikeIsPlacedFirstWhenChannelsExceedTheBudget
     // Branches follow the same order, so the strongest strike keeps its fork.
     EXPECT_EQ(composed.points[62], strikes[2].branches[0].front());
     EXPECT_FLOAT_EQ(composed.pulse, 0.4f);
-    EXPECT_EQ(composed.strike_ndc, strikes[2].strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strikes[2].strike_ndc);
 }
 
 TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
@@ -209,7 +209,106 @@ TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
     EXPECT_EQ(Strokes(composed.points), 3u);
     // The strongest flash comes from the offscreen strike and still lights the scene.
     EXPECT_FLOAT_EQ(composed.pulse, 0.2f);
-    EXPECT_EQ(composed.strike_ndc, offscreen.strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, offscreen.strike_ndc);
+}
+
+TEST(LiveStrikeComposer, FlashCentresAreOrderedByPulseThenInputIndex) {
+    const std::array strikes{Strike({-0.5f, 0.5f}, 0, 0.2f),
+                             Strike({0.0f, 0.5f}, 0, 0.8f),
+                             Strike({0.5f, 0.5f}, 0, 0.8f)};
+    const auto composed = ComposeLiveStrikes(strikes, 0);
+    ASSERT_EQ(composed.flashes.count, strikes.size());
+    const std::array<std::size_t, 3> expected{1, 2, 0};
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(composed.flashes.entries[i].strike_ndc, strikes[expected[i]].strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[i].pulse, strikes[expected[i]].pulse);
+        EXPECT_TRUE(composed.flashes.entries[i].onscreen);
+    }
+    EXPECT_TRUE(composed.points.empty());
+}
+
+TEST(LiveStrikeComposer, FlashCapKeepsTheStrongestAndEarlierTies) {
+    constexpr auto cap = Luminumbra::Rendering::kMaxLiveStrikeFlashes;
+    std::array<ProjectedLiveStrike, cap + 2> strikes{};
+    for (std::size_t i = 0; i < strikes.size(); ++i) {
+        strikes[i].strike_ndc = {static_cast<float>(i) * 0.1f, 0.0f};
+        strikes[i].pulse = 0.2f;
+    }
+    // A late stronger strike displaces the last retained tie, not the earliest one.
+    strikes.back().pulse = 0.9f;
+    const auto composed = ComposeLiveStrikes(strikes, 0);
+    ASSERT_EQ(composed.flashes.count, cap);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strikes.back().strike_ndc);
+    for (std::size_t i = 1; i < cap; ++i) {
+        EXPECT_EQ(composed.flashes.entries[i].strike_ndc, strikes[i - 1].strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[i].pulse, 0.2f);
+    }
+}
+
+TEST(LiveStrikeComposer, FlashCandidateSelectionIsBoundedAndKeepsStableTies) {
+    using Luminumbra::Rendering::SelectLiveStrikeFlashCandidates;
+    constexpr auto cap = Luminumbra::Rendering::kMaxLiveStrikeFlashes;
+    EXPECT_TRUE(SelectLiveStrikeFlashCandidates({}).empty());
+    const std::array<float, 1> single{0.42f};
+    EXPECT_EQ(SelectLiveStrikeFlashCandidates(single), (std::vector<std::size_t>{0}));
+    std::array<float, cap + 2> pulses{};
+    pulses.fill(0.2f);
+    pulses.back() = 0.9f;
+    const auto selected = SelectLiveStrikeFlashCandidates(pulses);
+    ASSERT_EQ(selected.size(), cap);
+    for (std::size_t i = 0; i + 1 < cap; ++i) {
+        EXPECT_EQ(selected[i], i);
+    }
+    EXPECT_EQ(selected.back(), pulses.size() - 1);
+    pulses.front() = 1.0f;
+    EXPECT_EQ(SelectLiveStrikeFlashCandidates(pulses), selected);
+}
+
+TEST(LiveStrikeComposer, BehindCameraStrongestKeepsSentinelAndWeakerVisibleCentre) {
+    ProjectedLiveStrike behind;
+    behind.pulse = 0.9f;
+    const auto visible = Strike({0.6f, 0.2f}, 0, 0.4f);
+    const std::array strikes{behind, visible};
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_EQ(composed.flashes.count, 2u);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, kLiveBoltPenUp);
+    EXPECT_FALSE(composed.flashes.entries[0].onscreen);
+    EXPECT_FLOAT_EQ(composed.flashes.entries[0].pulse, behind.pulse);
+    EXPECT_EQ(composed.flashes.entries[1].strike_ndc, visible.strike_ndc);
+    EXPECT_TRUE(composed.flashes.entries[1].onscreen);
+    EXPECT_FLOAT_EQ(composed.flashes.entries[1].pulse, visible.pulse);
+    EXPECT_EQ(composed.points, visible.main_channel);
+}
+
+TEST(LiveStrikeComposer, SingleOnscreenFlashPreservesCentrePulseAndGeometry) {
+    for (const glm::vec2 centre :
+         {glm::vec2(0.0f, 0.5f), glm::vec2(-1.0f, 1.0f), glm::vec2(1.0f, 1.0f)}) {
+        const auto strike = Strike(centre, 0, 0.42f);
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(composed.flashes.count, 1u);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strike.strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[0].pulse, strike.pulse);
+        EXPECT_TRUE(composed.flashes.entries[0].onscreen);
+        EXPECT_FLOAT_EQ(composed.pulse, strike.pulse);
+        EXPECT_EQ(composed.points, strike.main_channel);
+    }
+}
+
+TEST(LiveStrikeComposer, OffscreenCentresAreNotClampedIntoTheView) {
+    const std::array<glm::vec2, 5> centres{glm::vec2(-1.01f, 0.0f),
+                                           glm::vec2(1.01f, 0.0f),
+                                           glm::vec2(0.0f, -1.01f),
+                                           glm::vec2(0.0f, 1.01f),
+                                           kLiveBoltPenUp};
+    for (const auto centre : centres) {
+        ProjectedLiveStrike strike;
+        strike.strike_ndc = centre;
+        strike.pulse = 0.4f;
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 0);
+        ASSERT_EQ(composed.flashes.count, 1u);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, centre);
+        EXPECT_FALSE(composed.flashes.entries[0].onscreen);
+    }
 }
 
 TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
@@ -225,7 +324,7 @@ TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
     EXPECT_EQ(composed.points[1], glm::vec2(1.0f, 0.0f));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[0]));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[1]));
-    EXPECT_EQ(composed.strike_ndc, crossing.strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, crossing.strike_ndc);
 }
 
 TEST(LiveStrikeComposer, CrossingSegmentsUploadOnlyClippedRealPoints) {
@@ -481,6 +580,7 @@ TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
     const auto empty = ComposeLiveStrikes({}, 96);
     EXPECT_TRUE(empty.points.empty());
     EXPECT_FLOAT_EQ(empty.pulse, 0.0f);
+    EXPECT_EQ(empty.flashes.count, 0u);
     const std::vector<ProjectedLiveStrike> strikes{Strike({0.0f, 0.5f}, 1, 0.3f)};
     // The 20-point branch would fit, but its 30-point channel does not.
     const auto tiny = ComposeLiveStrikes(strikes, 25);
