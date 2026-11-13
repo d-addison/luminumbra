@@ -60,13 +60,8 @@ uniform int u_useSkyLut = 1;          // 0 falls back to the legacy gradient
 // and pushes it here. 0 == no aurora; the dusk dome stays clean.
 uniform float u_auroraStrength = 0.0;
 
-//  (defect 3): NIGHT-STORM visibility floor. A night
-// storm was rendering as a near-black dome (dayFactor ~0 -> the dome scattering
-// and the cloud layer both collapse to black). This is a small additive sky-grey
-// floor under the storm clouds so a NIGHT storm is dark-but-legible (rain +
-// lightning read against it) WITHOUT lifting the clear-night dome. The CPU passes
-// the storm intensity; it is 0 for clear sky so clear night stays genuinely dark.
-uniform float u_stormSkyFloor = 0.0;   // [0,1] storm intensity for the night floor
+// Storm intensity also suppresses stars through heavy overcast.
+uniform float u_stormSkyFloor = 0.0;
 
 //  isolation/layer mode: when > 0 the skybox renders a flat neutral BACKDROP
 // (the no-geometry background) instead of the sky dome, so an isolated subsystem
@@ -225,7 +220,7 @@ float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
 
 //  #2: bounded volumetric raymarch through the cloud slab. Replaces the
 // tier-1 single-plane projection. dayFactor lights the clouds; at night they
-// fall to a faint dark silhouette (storm night held legible by u_stormSkyFloor).
+// fall to a faint dark silhouette.
 vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     if (viewDir.y < 0.02) return baseColor; // No clouds at/below the horizon.
 
@@ -324,11 +319,7 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     float nightT = 1.0 - smoothstep(0.0, 0.32, dayFactor);
     cloudColor = mix(cloudColor, cloudColor * 0.12 + vec3(0.02, 0.02, 0.03), nightT);
 
-    // NIGHT-STORM floor: keep a night overcast legible without lifting the
-    // clear-night dome (u_stormSkyFloor is 0 for clear sky).
-    float nightStormFloor = u_stormSkyFloor * (1.0 - dayFactor) * 0.16;
-    // Keep clouds bright through twilight (was dayFactor*1.04 -> halved at dusk).
-    float cloudBright = max(0.5 + 0.55 * dayFactor, nightStormFloor);
+    float cloudBright = 0.5 + 0.55 * dayFactor;
     cloudColor *= cloudBright;
 
     return mix(baseColor, cloudColor, alpha);
@@ -621,19 +612,6 @@ void main()
 
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
-
-    //  (defect 3): NIGHT-STORM dome floor. Independent
-    // of the cloud layer, lift the whole night-storm dome to a faint cool storm-grey
-    // so the sky behind the rain/lightning is dark-but-legible rather than pure
-    // black. Gated by storm intensity AND nightFactor, and faded toward the horizon
-    // so it reads as overcast murk above the scene. Zero for clear sky / daytime, so
-    // the clear-night dome and all daytime cells are untouched.
-    {
-        float stormNight = u_stormSkyFloor * nightFactor;
-        float aboveHorizon = smoothstep(-0.05, 0.35, viewDir.y);
-        vec3 stormMurk = vec3(0.020, 0.024, 0.034);
-        skyColor += stormMurk * stormNight * aboveHorizon;
-    }
 
     // --- 6. MAGICAL AURORA (NIGHT-ONLY; gated by the deep-night envelope) ---
     skyColor += renderAurora(viewDir, dayFactor);
