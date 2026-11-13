@@ -223,8 +223,9 @@ const float kDetailGain    = 1.4;   // high-freq amplification (>1 sharpens). Gr
 
 // Vertex normals smooth across ridges; using them for projection gives cliffs
 // weight in the collapsed top-down projection and stretches its texels.
-vec3 terrain_surface_normal(vec3 worldPos, vec3 smoothNormal) {
-    vec3 face = cross(dFdx(worldPos), dFdy(worldPos));
+vec3 terrain_surface_normal(vec3 viewPos, vec3 smoothNormal) {
+    // Differentiate camera-relative coordinates, then undo the rigid view rotation.
+    vec3 face = transpose(u_normalViewMatrix) * cross(dFdx(viewPos), dFdy(viewPos));
     float extent = dot(face, face);
     vec3 n = extent > 1e-20 ? face * inversesqrt(extent) : smoothNormal;
     return dot(n, smoothNormal) < 0.0 ? -n : n;
@@ -327,8 +328,11 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
 }
 
 void main() {
-    // Evaluate derivatives before any discard or material-dependent control flow.
-    vec3 surfaceN = terrain_surface_normal(fs_in.WorldPos, normalize(fs_in.WorldNormal));
+    // The draw-uniform terrain gate keeps derivatives before any discard.
+    vec3 surfaceN = vec3(0.0);
+    if (u_macroRockOverlay == 1) {
+        surfaceN = terrain_surface_normal(fs_in.FragPos, normalize(fs_in.WorldNormal));
+    }
 #ifdef LUMINUMBRA_FAR_WORLD_LADDER
     // A program writing gl_FragDepth must assign it on every surviving path.
     // Live, legacy, static and skinned depth/material outputs stay inert.
@@ -526,7 +530,7 @@ void main() {
         float normLayer = floor(texInfo.g * 255.0 + 0.5);
         float tiling = max(texInfo.b * 64.0, 0.0625);
         float scale = 1.0 / tiling; // repeats per world unit
-        vec3 weights = triplanar_weights(surfaceN);
+        vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);
         float geomSlope = surfaceN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
         vec3 baseAlbedo =
             triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale) * albedoScale * albedoTint;

@@ -22,15 +22,15 @@ class TerrainShaderContract(unittest.TestCase):
         self.terrain = self.main.split("else if (texInfo.a > 0.5 && u_forceFlat == 0)", 1)[1]
 
     def test_projection_and_slope_use_the_face_before_normal_mapping_or_discard(self):
-        self.assertIn("cross(dFdx(worldPos), dFdy(worldPos))", self.shader)
-        # Collapsed world-space derivatives retain a finite interpolated normal;
+        # Collapsed relative derivatives retain a finite interpolated normal;
         # back-facing winding is aligned to the authored surface orientation.
         self.assertIn("extent > 1e-20 ? face * inversesqrt(extent) : smoothNormal", self.shader)
         self.assertIn("dot(n, smoothNormal) < 0.0 ? -n : n", self.shader)
-        call = "terrain_surface_normal(fs_in.WorldPos, normalize(fs_in.WorldNormal))"
+        call = "terrain_surface_normal(fs_in.FragPos, normalize(fs_in.WorldNormal))"
         self.assertIn(call, self.main)
         self.assertLess(self.main.index(call), self.main.index("discard;"))
-        self.assertIn("vec3 weights = triplanar_weights(surfaceN);", self.terrain)
+        self.assertIn("vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);",
+                      self.terrain)
         self.assertIn("float geomSlope = surfaceN.y;", self.terrain)
         self.assertLess(self.terrain.index("float geomSlope"),
                         self.terrain.index("triplanar_normal("))
@@ -38,6 +38,58 @@ class TerrainShaderContract(unittest.TestCase):
             self.assertIn(f"triplanar_{channel}(fs_in.WorldPos, "
                           + ("worldN, " if channel == "normal" else "") + "weights,",
                           self.terrain)
+
+    def test_face_derivatives_use_view_relative_positions_and_return_world_normals(self):
+        helper = re.search(r"vec3 terrain_surface_normal\(vec3 viewPos, vec3 smoothNormal\) "
+                           r"\{([^{}]+)\}", self.shader)
+        self.assertIsNotNone(helper)
+        self.assertIn("vec3 face = transpose(u_normalViewMatrix) * "
+                      "cross(dFdx(viewPos), dFdy(viewPos));", helper[1])
+        self.assertNotIn("WorldPos", helper[1])
+        self.assertIn("terrain_surface_normal(fs_in.FragPos, normalize(fs_in.WorldNormal))",
+                      self.main)
+        # Every producer carries view space, including the unbiased ladder input.
+        for vertex, transform in (
+                ("g_buffer.vert", "view * worldPos"),
+                ("instanced_mesh.vert", "view * worldPos"),
+                ("skinned_mesh.vert", "viewModel * skinnedPos")):
+            with self.subTest(vertex=vertex):
+                text = source("res/shaders/" + vertex)
+                self.assertIn(transform, text)
+                self.assertIn("vs_out.FragPos = vec3(viewPos);", text)
+                self.assertIn("gl_Position = projection * viewPos;", text)
+        terrain_vertex = source("res/shaders/g_buffer.vert")
+        self.assertIn("vec4 viewPos = u_farWorldLadder == 1 ? "
+                      "vec4(mat3(view) * (aPos + u_farRelativeOrigin), 1.0) : view * worldPos;",
+                      terrain_vertex)
+        renderer = source("src/luminumbra_client/rendering/FarWorldRenderer.cpp")
+        self.assertIn("const std::array<double, 3>& camera", renderer)
+        self.assertIn("candidate.relative_origin[i] = static_cast<float>(origin[i] - camera[i]);",
+                      renderer)
+        uniforms = source("src/luminumbra_client/rendering/passes/FarWorldPassUniforms.cpp")
+        self.assertIn('relative_ = glGetUniformLocation(program_, "u_farRelativeOrigin");', uniforms)
+        self.assertIn("glProgramUniform3fv(program_, relative_, 1, command.relative_origin.data());",
+                      uniforms)
+        self.assertIn("mat4 viewModel = view * model;", source("res/shaders/skinned_mesh.vert"))
+        pass_source = source("src/luminumbra_client/rendering/passes/GBufferPass.cpp")
+        for view in ("view", "static_view", "skinned_view"):
+            self.assertIn(f'shader->setMat3("u_normalViewMatrix", glm::mat3({view}));', pass_source)
+        self.assertIn("return glm::lookAt(Position, Position + Front, Up);",
+                      source("src/luminumbra_client/rendering/Camera.h"))
+
+    def test_face_normal_work_is_only_in_a_uniform_terrain_gate_before_discard(self):
+        # Anchor the entire prologue: no varying branch or earlier discard may
+        # surround the derivatives, including in the ladder program variant.
+        self.assertRegex(self.main, r"^ \{ vec3 surfaceN = vec3\(0.0\); "
+                         r"if \(u_macroRockOverlay == 1\) \{ "
+                         r"surfaceN = terrain_surface_normal\([^;]+; \}")
+        self.assertEqual(self.main.count("terrain_surface_normal("), 1)
+        self.assertIn("uniform int u_macroRockOverlay = 0;", self.shader)
+        # Props that reuse triplanar materials keep smooth projection weights;
+        # foliage, authored UV models and untextured draws never consume the face.
+        self.assertIn("triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN)",
+                      self.terrain)
+        self.assertLess(self.main.index("terrain_surface_normal("), self.main.index("discard;"))
 
     def test_steep_sand_has_defined_rock_coverage_and_flat_ground_is_preserved(self):
         guard = re.search(r"if \(u_macroRockOverlay == 1 && geomSlope < ([\d.]+) && "
