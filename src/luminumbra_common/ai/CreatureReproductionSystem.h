@@ -31,7 +31,7 @@
 
 #include <entt/entity/registry.hpp>
 
-#include "CreatureBrain.h" // CreatureAction (skip mate-seeking while fleeing)
+#include "CreatureBrainSystem.h" // shared participant ordering and CreatureAction
 #include "CreatureGenome.h"
 #include "CreatureSpeciesRegistry.h"
 #include "UtilityAI.h" // utility_clamp01
@@ -63,6 +63,8 @@ inline constexpr float kReproSpawnRadius = 1.2f;     // newborn appears beside t
 struct CreatureReproductionStats {
     int born = 0;     // offspring created this tick
     int courting = 0; // ready females currently adjacent to a ready male
+    // Const result diagnostic: identity lookups in the admitted ordering pass.
+    std::size_t identity_visits = 0;
 };
 
 // Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
@@ -90,9 +92,11 @@ struct ReproductionTuning {
 // opposite-sex mate by OVERRIDING the brain's wish velocity — unless they are fleeing a
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
+// `stable_identity` selects the dormant candidate contract, independently of region admission.
 inline void RunMateSeekingOnTick(entt::registry& reg,
                                  const ReproductionTuning& tuning = {},
-                                 const CreatureTickAdmission* admission = nullptr) {
+                                 const CreatureTickAdmission* admission = nullptr,
+                                 bool stable_identity = false) {
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
@@ -109,9 +113,7 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
             ents.push_back(entity);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    OrderCreatureParticipants(reg, ents, stable_identity);
     std::vector<M> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
@@ -165,13 +167,17 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
 // PHASE B (run AFTER the physics bridge): advance age/cooldown, accumulate courtship for ready
 // adjacent opposite-sex pairs, and birth one offspring per completed courtship (female-driven
 // so each completion makes exactly one baby; the chosen male is consumed for the tick).
+// A non-null identity_ledger selects the dormant candidate contract and must be the
+// shared allocator that issued the parents' immutable session identities. Exhaustion
+// refuses the whole batch before parent bookkeeping changes. No creature records are saved.
 inline CreatureReproductionStats
 RunMatingResolveOnTick(entt::registry& reg,
                        std::uint64_t tick,
                        std::uint64_t world_seed = 0,
                        const ReproductionTuning& tuning = {},
                        const CreatureSpeciesRegistry* species = nullptr,
-                       const CreatureTickAdmission* admission = nullptr) {
+                       const CreatureTickAdmission* admission = nullptr,
+                       ::Luminumbra::world::ActiveRegionLedger* identity_ledger = nullptr) {
     CreatureReproductionStats stats;
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
@@ -182,13 +188,28 @@ RunMatingResolveOnTick(entt::registry& reg,
             ents.push_back(entity);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    const bool stable_identity = identity_ledger != nullptr;
+    stats.identity_visits = OrderCreatureParticipants(reg, ents, stable_identity);
+    // Stage only participating parents. Refused birth batches leave even age/cooldown
+    // untouched. The legacy lane continues writing directly to its existing components.
+    std::vector<Comp::CreatureGenomeComponent> staged_genomes;
+    if (identity_ledger) {
+        staged_genomes.reserve(ents.size());
+        for (const auto entity : ents) {
+            if (CreatureSeedIdentity(reg, entity, true) >= identity_ledger->next_persistent_id())
+                throw std::logic_error(
+                    "Creature identity must precede the shared allocator cursor");
+            staged_genomes.push_back(view.get<Comp::CreatureGenomeComponent>(entity));
+        }
+    }
+    auto genome_at = [&](std::size_t index) -> Comp::CreatureGenomeComponent& {
+        return stable_identity ? staged_genomes[index]
+                               : view.get<Comp::CreatureGenomeComponent>(ents[index]);
+    };
 
     // Bookkeeping: age everyone, tick down cooldowns (id-ordered, deterministic).
-    for (auto e : ents) {
-        auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+    for (std::size_t index = 0; index < ents.size(); ++index) {
+        auto& gn = genome_at(index);
         if (gn.age_ticks < 0xFFFFFFFFu)
             ++gn.age_ticks;
         if (gn.reproduce_cooldown > 0)
@@ -197,17 +218,18 @@ RunMatingResolveOnTick(entt::registry& reg,
 
     // Snapshot ready males (by position) for the courtship search.
     struct Male {
-        entt::entity e;
+        std::size_t parent_index;
         float x, z;
         std::uint16_t species_id;
     };
     std::vector<Male> males;
-    for (auto e : ents) {
+    for (std::size_t index = 0; index < ents.size(); ++index) {
+        const auto e = ents[index];
         const auto& cr = view.get<Comp::CreatureComponent>(e);
-        const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        const auto& gn = genome_at(index);
         if (!gn.female && IsReadyToMate(cr, gn, tuning)) {
             const auto& tf = view.get<Comp::TransformComponent>(e);
-            males.push_back({e, tf.position.x, tf.position.z, cr.species_id});
+            males.push_back({index, tf.position.x, tf.position.z, cr.species_id});
         }
     }
 
@@ -217,14 +239,16 @@ RunMatingResolveOnTick(entt::registry& reg,
         std::uint32_t generation;
         bool female;
         std::uint16_t species_id;
+        std::uint64_t identity = 0;
     };
     std::vector<Birth> births;
     std::vector<bool> male_used(males.size(), false);
 
     // Female-driven courtship: each ready female courts her nearest unused ready male in range.
-    for (auto e : ents) {
+    for (std::size_t index = 0; index < ents.size(); ++index) {
+        const auto e = ents[index];
         auto& cr = view.get<Comp::CreatureComponent>(e);
-        auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
+        auto& gn = genome_at(index);
         if (!gn.female || !IsReadyToMate(cr, gn, tuning)) {
             continue;
         }
@@ -251,9 +275,10 @@ RunMatingResolveOnTick(entt::registry& reg,
             continue; // still courting
 
         // Courtship complete -> a baby. Consume this male for the tick.
-        const entt::entity maleE = males[static_cast<std::size_t>(best)].e;
+        const auto male_index = males[static_cast<std::size_t>(best)].parent_index;
+        const entt::entity maleE = ents[male_index];
         male_used[static_cast<std::size_t>(best)] = true;
-        auto& mgn = view.get<Comp::CreatureGenomeComponent>(maleE);
+        auto& mgn = genome_at(male_index);
 
         CreatureGenome fG;
         fG.move_speed = gn.move_speed;
@@ -274,8 +299,8 @@ RunMatingResolveOnTick(entt::registry& reg,
 
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
             kReproSeedOffset ^ world_seed,
-            (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
-                static_cast<std::uint64_t>(entt::to_integral(maleE)),
+            (CreatureSeedIdentity(reg, e, stable_identity) * 0x9E3779B97F4A7C15ull) ^
+                CreatureSeedIdentity(reg, maleE, stable_identity),
             tick);
         const CreatureSpecies* species_definition =
             species ? species->Find(cr.species_id) : nullptr;
@@ -304,9 +329,29 @@ RunMatingResolveOnTick(entt::registry& reg,
         mgn.reproduce_cooldown = tuning.cooldown_ticks;
     }
 
+    if (identity_ledger && !births.empty()) {
+        const auto first_id = identity_ledger->next_persistent_id();
+        // Subtract before adding: even a batch at the exhausted cursor cannot wrap.
+        if (births.size() > ::Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit - first_id)
+            throw std::length_error("Creature offspring simulation identity allocation refused");
+        // Capacity can refuse only the first allocation: the allocator extension has
+        // constant size thereafter, and the complete batch fits the admitted ID range.
+        for (auto& birth : births) {
+            if (!identity_ledger->allocate_persistent_id(birth.identity))
+                throw std::logic_error("Preflighted creature identity allocation failed");
+        }
+    }
+    if (stable_identity) {
+        for (std::size_t index = 0; index < ents.size(); ++index)
+            view.get<Comp::CreatureGenomeComponent>(ents[index]) = staged_genomes[index];
+    }
+
     // Create offspring AFTER the read pass (no view invalidation mid-iteration).
+    // One child per completed female courtship: ascending mother ID, child ordinal zero.
     for (const Birth& b : births) {
         const auto child = reg.create();
+        if (stable_identity)
+            reg.emplace<Comp::SimulationIdentityComponent>(child, b.identity);
         auto& tf = reg.emplace<Comp::TransformComponent>(child);
         tf.position.x = b.x;
         tf.position.y = b.y;

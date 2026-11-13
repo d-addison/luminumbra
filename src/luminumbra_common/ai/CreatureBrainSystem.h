@@ -25,9 +25,13 @@
 #include "../components/CreatureComponents.h"
 #include "../components/ThirstComponents.h" // thirst joins the arbiter
 #include "../core/DeterministicMath.h"
+#include "../simulation/SimulationIdentity.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -40,7 +44,68 @@ namespace dm = ::Luminumbra::DeterministicMath;
 
 struct CreatureBrainStats {
     int updated = 0;
+    // Const result diagnostic: identity lookups in the admitted ordering pass.
+    std::size_t identity_visits = 0;
 };
+
+// Shared brain/reproduction candidate ordering. Shipping callers retain handle ordering
+// until authority activation. Missing, invalid or duplicate IDs refuse before any writes.
+// Scratch is bounded by the admitted participant count; eight byte passes cost O(N).
+inline std::size_t OrderCreatureParticipants(const entt::registry& reg,
+                                             std::vector<entt::entity>& entities,
+                                             bool stable_identity) {
+    if (entities.empty())
+        return 0;
+    if (!stable_identity) {
+        std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        return 0;
+    }
+    struct Keyed {
+        entt::entity entity = entt::null;
+        std::uint64_t id = 0;
+    };
+    std::vector<Keyed> ordered;
+    ordered.reserve(entities.size());
+    std::size_t visits = 0;
+    for (const auto entity : entities) {
+        const auto* identity = reg.try_get<Comp::SimulationIdentityComponent>(entity);
+        ++visits;
+        if (!identity || !::Luminumbra::simulation::IsValidSimulationId(identity->id))
+            throw std::logic_error("Creature participant requires a valid simulation identity");
+        ordered.push_back({.entity = entity, .id = identity->id});
+    }
+    std::vector<Keyed> scratch(ordered.size());
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        // One bucket per byte value (256); their counts sum to the participant count.
+        std::array<std::size_t, 256> offsets{};
+        for (const auto& entry : ordered)
+            ++offsets[(entry.id >> shift) & 255u];
+        std::size_t offset = 0;
+        for (auto& bucket : offsets) {
+            const auto count = bucket;
+            bucket = offset;
+            offset += count;
+        }
+        for (const auto& entry : ordered)
+            scratch[offsets[(entry.id >> shift) & 255u]++] = entry;
+        ordered.swap(scratch);
+    }
+    for (std::size_t index = 0; index < ordered.size(); ++index) {
+        if (index != 0 && ordered[index - 1].id == ordered[index].id)
+            throw std::logic_error("Duplicate creature simulation identity");
+        entities[index] = ordered[index].entity;
+    }
+    return visits;
+}
+
+// Select only after participant admission has validated stable identities.
+inline std::uint64_t
+CreatureSeedIdentity(const entt::registry& reg, entt::entity entity, bool stable_identity) {
+    return stable_identity ? reg.get<Comp::SimulationIdentityComponent>(entity).id
+                           : static_cast<std::uint64_t>(entt::to_integral(entity));
+}
 
 // How strongly herd flocking biases the action heading (unit-scale; the action dir is also
 // unit, so this is a fractional blend that keeps flee/hunt dominant).
@@ -125,6 +190,8 @@ inline int WorldToScentCell(float world, float origin, float cell_size) {
 // target (and thus every downstream decision/movement) is UNCHANGED. The flag exists
 // so the shared substrate can be exercised without touching the default sim
 // trajectory (proven equivalent by test/ai/creature_brain_substrate_test.cpp).
+// `stable_identity` selects the candidate identity contract; shipping callers leave it
+// false until authority activation. Every admitted participant must already have an ID.
 inline CreatureBrainStats
 RunCreatureBrainSystemOnTick(entt::registry& reg,
                              float dt,
@@ -135,7 +202,8 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
                              float scent_cell_size = 0.0f,
                              bool use_perception_substrate = true,
                              const CreatureSpeciesRegistry* species = nullptr,
-                             const CreatureTickAdmission* admission = nullptr) {
+                             const CreatureTickAdmission* admission = nullptr,
+                             bool stable_identity = false) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
@@ -145,9 +213,7 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    stats.identity_visits = OrderCreatureParticipants(reg, ents, stable_identity);
 
     // Pre-tick snapshot so all creatures sense the SAME state regardless of update order.
     struct Snap {
@@ -425,8 +491,9 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
                 break;
             case CreatureAction::Wander: {
                 const float ang =
-                    2.39996323f * static_cast<float>(entt::to_integral(e) % 16u +
-                                                     1u); // deterministic per-id heading
+                    2.39996323f *
+                    static_cast<float>(CreatureSeedIdentity(reg, e, stable_identity) % 16u +
+                                       1u); // deterministic per-id heading
                 dirx = dm::Cos(ang);
                 dirz = dm::Sin(ang);
                 break;

@@ -153,8 +153,8 @@ public:
     // Copies retain authoritative registers and start with fresh publication scratch.
     ActiveRegionLedger(const ActiveRegionLedger& other);
     ActiveRegionLedger& operator=(const ActiveRegionLedger& other);
-    ActiveRegionLedger(ActiveRegionLedger&&) noexcept = default;
-    ActiveRegionLedger& operator=(ActiveRegionLedger&&) noexcept = default;
+    ActiveRegionLedger(ActiveRegionLedger&& other) noexcept;
+    ActiveRegionLedger& operator=(ActiveRegionLedger&& other) noexcept;
     [[nodiscard]] const std::map<RegionKey, ActiveRegionRecord>& records() const {
         return m_records;
     }
@@ -182,6 +182,16 @@ public:
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
     // Throws std::length_error without mutation when the allocator TLV exceeds the file cap.
     bool allocate_persistent_id(std::uint64_t& id);
+    // Detached preparation only: reserve [next_persistent_id(), next_id) or restore a
+    // saved cursor in O(1). Accepts [current, kPersistentIdLimit], including exhaustion.
+    // Invalid/backward cursors or insufficient envelope capacity refuse without mutation.
+    // Discard a candidate reservation only while no identity has escaped its storage.
+    [[nodiscard]] bool reserve_persistent_ids(std::uint64_t next_id) noexcept;
+    // Const diagnostic: cumulative record inspections maintaining frozen-history capacity
+    // accounting. Allocation/reservation and capacity queries must add zero visits.
+    [[nodiscard]] std::uint64_t capacity_record_visits() const noexcept {
+        return m_capacityRecordVisits;
+    }
     using WaterDebts = std::map<RegionKey, std::uint64_t>;
     static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
     [[nodiscard]] const WaterDebts& water_debts() const noexcept {
@@ -348,6 +358,7 @@ public:
     static bool decode(std::string_view bytes, ActiveRegionLedger& out, std::string& error);
 
 private:
+    void swap(ActiveRegionLedger& other) noexcept;
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
     // energy age, water debt or completed work, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
@@ -356,6 +367,7 @@ private:
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
+    bool inspect_frozen_history(const ActiveRegionRecord& record) noexcept;
     // Whether the combined envelope fits kMaxFileBytes with the proposed owner counts.
     // Omitted completed owners and the allocator flag retain their current registers.
     bool encodable_with_counts(std::size_t energy_owners,
@@ -376,6 +388,9 @@ private:
     // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.
     // This bookkeeping is excluded from the canonical projection.
     std::set<RegionKey> m_legacyFrozenDigests;
+    // Derived accounting only; never encoded or hashed. At most kMaxRegions histories.
+    std::size_t m_frozenHistoryCount = 0;
+    std::uint64_t m_capacityRecordVisits = 0;
     std::optional<Vec3> m_localAnchor;
     std::uint64_t m_tick = 0;
     std::uint64_t m_headerTick = 0;

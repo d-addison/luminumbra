@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::world {
@@ -68,6 +69,7 @@ ActiveRegionLedger::ActiveRegionLedger(const ActiveRegionLedger& other)
     , m_config(other.m_config)
     , m_records(other.m_records)
     , m_legacyFrozenDigests(other.m_legacyFrozenDigests)
+    , m_frozenHistoryCount(other.m_frozenHistoryCount)
     , m_localAnchor(other.m_localAnchor)
     , m_tick(other.m_tick)
     , m_headerTick(other.m_headerTick)
@@ -79,6 +81,34 @@ ActiveRegionLedger& ActiveRegionLedger::operator=(const ActiveRegionLedger& othe
         *this = std::move(next);
     }
     return *this;
+}
+ActiveRegionLedger::ActiveRegionLedger(ActiveRegionLedger&& other) noexcept
+    : ActiveRegionLedger() {
+    swap(other);
+}
+ActiveRegionLedger& ActiveRegionLedger::operator=(ActiveRegionLedger&& other) noexcept {
+    if (this != &other) {
+        ActiveRegionLedger next(std::move(other));
+        swap(next);
+    }
+    return *this;
+}
+void ActiveRegionLedger::swap(ActiveRegionLedger& other) noexcept {
+    using std::swap;
+    swap(m_scheduleScratch, other.m_scheduleScratch);
+    swap(m_energyPublication, other.m_energyPublication);
+    swap(m_completedWork, other.m_completedWork);
+    swap(m_energyAges, other.m_energyAges);
+    swap(m_waterDebts, other.m_waterDebts);
+    swap(m_config, other.m_config);
+    swap(m_records, other.m_records);
+    swap(m_legacyFrozenDigests, other.m_legacyFrozenDigests);
+    swap(m_frozenHistoryCount, other.m_frozenHistoryCount);
+    swap(m_capacityRecordVisits, other.m_capacityRecordVisits);
+    swap(m_localAnchor, other.m_localAnchor);
+    swap(m_tick, other.m_tick);
+    swap(m_headerTick, other.m_headerTick);
+    swap(m_nextPersistentId, other.m_nextPersistentId);
 }
 bool ActiveRegionLedger::valid_anchor(const Vec3& p) noexcept {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && p.x >= -16777216.0f &&
@@ -186,6 +216,8 @@ bool ActiveRegionLedger::acknowledge_resume(const RegionKey& key, std::uint64_t 
         it->second.frozen_at != frozen_at)
         return false;
     it->second.frozen_at = 0;
+    if (!inspect_frozen_history(it->second))
+        --m_frozenHistoryCount;
     it->second.last_ticked = m_tick;
     return true;
 }
@@ -314,6 +346,15 @@ bool ActiveRegionLedger::allocate_persistent_id(std::uint64_t& id) {
     id = m_nextPersistentId++;
     return true;
 }
+bool ActiveRegionLedger::reserve_persistent_ids(std::uint64_t next_id) noexcept {
+    if (next_id < m_nextPersistentId || next_id > kPersistentIdLimit)
+        return false;
+    if (!encodable_with_counts(
+            m_energyAges.size(), m_waterDebts.size(), std::nullopt, next_id != 1))
+        return false;
+    m_nextPersistentId = next_id;
+    return true;
+}
 bool ActiveRegionLedger::energy_age(const RegionKey& key, std::uint64_t& age) const noexcept {
     const auto found = m_energyAges.find(key);
     if (found == m_energyAges.end())
@@ -406,6 +447,8 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
             !energy_ages().contains(it->first) && !m_waterDebts.contains(it->first) &&
             !completed_work().contains(it->first) && !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
+            if (inspect_frozen_history(r))
+                --m_frozenHistoryCount;
             it = m_records.erase(it);
         } else
             ++it;
@@ -613,10 +656,12 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         if ((r.visited && r.last_proximity == clock.tick()) || r.wake_pending) {
             r.state = RegionState::Active;
         } else if (selected == key) {
-            if (over)
+            if (over) {
+                if (r.state == RegionState::Reduced && !inspect_frozen_history(r))
+                    ++m_frozenHistoryCount;
                 r.state =
                     r.state == RegionState::Active ? RegionState::Reduced : RegionState::Frozen;
-            else
+            } else
                 r.state =
                     r.state == RegionState::Frozen ? RegionState::Reduced : RegionState::Active;
         }
@@ -676,7 +721,10 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     // Retention runs after the digest so the trace describes the pre-eviction state.
     for (const auto& key : scratch.evictions) {
         m_legacyFrozenDigests.erase(key);
-        m_records.erase(key);
+        const auto record = m_records.find(key);
+        if (inspect_frozen_history(record->second))
+            --m_frozenHistoryCount;
+        m_records.erase(record);
     }
     std::erase_if(result.due, [this](const RegionKey& key) { return !m_records.contains(key); });
     result.evicted.swap(scratch.evictions);
@@ -776,20 +824,20 @@ std::string ActiveRegionLedger::canonical_bytes() const {
     return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
-    for (const auto& [key, r] : m_records) {
-        (void)key;
-        if (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0)
-            return true;
-    }
-    return false;
+    return m_frozenHistoryCount != 0;
+}
+bool ActiveRegionLedger::inspect_frozen_history(const ActiveRegionRecord& record) noexcept {
+    ++m_capacityRecordVisits;
+    return record.state == RegionState::Frozen || record.frozen_at != 0 ||
+           record.frozen_digest != 0;
 }
 bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
                                                std::size_t debts,
                                                std::optional<std::size_t> completed_owners,
                                                bool allocator_advanced,
                                                std::optional<std::size_t> record_count) const {
-    // Owners are a subset of the records, so this arithmetic cannot overflow. The first sum
-    // already counts a projection declaration; only a ledger near the cap needs the exact scan.
+    // Owner/record counts are bounded by 2^20, so the full sum fits 32-bit size_t.
+    // Cached history keeps even the exact near-capacity fallback O(1).
     const std::size_t completed_count = completed_owners.value_or(completed_work().size());
     const std::size_t completed = completed_count == 0 ? 0u : 10u + 16u * completed_count;
     const std::size_t allocator = (allocator_advanced || m_nextPersistentId != 1) ? 14u : 0u;
@@ -807,7 +855,17 @@ bool ActiveRegionLedger::encodable_with_counts(std::size_t owners,
 }
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
-    const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
+    // Encoded bytes come from the records themselves, never from the derived capacity cache.
+    // The payload below is already linear in the record count.
+    bool frozen_history = false;
+    for (const auto& [key, r] : m_records) {
+        (void)key;
+        if (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0) {
+            frozen_history = true;
+            break;
+        }
+    }
+    const bool declare_projection = frozen_history && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
     const bool extended_contract = allocator_advanced || !m_energyAges.empty() ||
                                    !m_waterDebts.empty() || !m_completedWork.empty();
@@ -966,6 +1024,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 (r.state == RegionState::Frozen && r.last_ticked >= r.frozen_at))
                 return false;
             result.m_records.emplace(key, r);
+            if (result.inspect_frozen_history(r))
+                ++result.m_frozenHistoryCount;
         }
         bool declared_projection = false;
         if (version >= 2) {
