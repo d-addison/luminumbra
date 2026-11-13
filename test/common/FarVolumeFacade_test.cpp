@@ -10,11 +10,14 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <tuple>
 #include <type_traits>
+#include <vector>
 
 namespace {
 using namespace Luminumbra::World;
@@ -540,5 +543,96 @@ TEST(FarVolumeFacade, OriginalFiniteBoxFilterRetainsTapOrderAndRefusals) {
         std::invalid_argument);
     EXPECT_THROW(BoxFilterFarVolumeCarve({}, 16, [](const glm::vec3&) { return -1.0f; }),
                  std::invalid_argument);
+}
+} // namespace
+
+namespace {
+TEST(FarVolumeFacade, ExplicitSpanRejectsCrossPageBoundaryMaterialDisagreement) {
+    auto authority = Plane(FarVolumeNumericProfile::RawFloat);
+    // A thin sloping surface intersects the common Y=0 face.
+    authority.density = [](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+        return FarVolumeSample{static_cast<float>(p.y) + static_cast<float>(p.x) / 128 - 1.25f, 7};
+    };
+    FarVolumeCompilation output;
+    ASSERT_TRUE(
+        CompileFarVolumeSpan({{1, 0, 0}, {-16, 0}, 42}, authority, FixtureLimits(), output));
+    const auto held = output;
+    std::uint64_t calls = 0;
+    authority.density = [&](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+        ++calls;
+        // Change only material at the page boundary after generation. Reusing
+        // field identity never excuses disagreement with resident samples.
+        return FarVolumeSample{static_cast<float>(p.y) + static_cast<float>(p.x) / 128 - 1.25f,
+                               static_cast<std::uint8_t>(p.y == 0 && calls > 1024 * 125 ? 9 : 7)};
+    };
+    FarVolumeFacadeFailure failure;
+    EXPECT_FALSE(CompileFarVolumeSpan(
+        {{1, 0, 0}, {0, 16}, 42}, authority, FixtureLimits(), output, &failure));
+    EXPECT_EQ(failure.code, FarVolumeFacadeError::MeshRefused);
+    EXPECT_EQ(failure.mesh, FarVolumeMeshError::SampleMismatch);
+    EXPECT_EQ(output, held);
+}
+
+TEST(FarVolumeFacade, ExplicitSpanInvalidRequestsAndBudgetsRefuseBeforeCallbacks) {
+    auto authority = Plane();
+    std::uint64_t calls = 0;
+    authority.height = [&](std::int64_t, std::int64_t) {
+        ++calls;
+        return 0.0f;
+    };
+    authority.density = [&](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
+        ++calls;
+        return FarVolumeSample{};
+    };
+    FarVolumeCompilation output;
+    output.tile.request = {{2, 1, 2}, {-32, 32}, 17};
+    const auto held = output;
+    const FarVolumeRequest valid{{1, 0, 0}, {-16, 16}, 42};
+    for (const auto& request : std::vector<FarVolumeRequest>{
+             {{0, 0, 0}, {-16, 16}, 42},
+             {{6, 0, 0}, {-16, 16}, 42},
+             {{1, 0, 0}, {0, 0}, 42},
+             {{1, 0, 0}, {16, -16}, 42},
+             {{1, 0, 0}, {-15, 16}, 42},
+             {{1, 0, 0}, {-16, 15}, 42},
+             {{1, 0, 0}, {std::numeric_limits<std::int64_t>::min(), 16}, 42},
+             {{1, 0, 0}, {-16, std::numeric_limits<std::int64_t>::max()}, 42},
+             {{1, 0, 0}, {-kFarVolumeExactCoordinateLimitMeters, 16}, 42},
+             {{1, 0, 0}, {-16, kFarVolumeExactCoordinateLimitMeters}, 42},
+             {{1, std::numeric_limits<std::int64_t>::max(), 0}, {-16, 16}, 42},
+             {{1, 0, std::numeric_limits<std::int64_t>::min()}, {-16, 16}, 42},
+             {{1, 0, 0}, {-4096, 4194304}, 42},
+             {{1, 0, 0}, {-16, 16}, 43}}) {
+        FarVolumeMemoryPool pool(1024);
+        FarVolumeMemoryLease lease(pool);
+        EXPECT_FALSE(CompileFarVolumeSpanCharged(
+            request, authority, FixtureLimits(), {&pool, &lease, nullptr}, output));
+        EXPECT_EQ(pool.attempts(), 0u);
+        EXPECT_EQ(output, held);
+    }
+    for (unsigned refusal = 0; refusal < 3; ++refusal) {
+        auto limits = FixtureLimits();
+        if (refusal == 0) {
+            limits.generation.max_candidate_bricks = 2047;
+        }
+        if (refusal == 1) {
+            limits.authority.max_density_samples = 2048 * 125 - 1;
+        }
+        if (refusal == 2) {
+            limits.authority.max_height_samples = 0;
+        }
+        EXPECT_FALSE(CompileFarVolumeSpan(valid, authority, limits, output));
+        EXPECT_EQ(output, held);
+    }
+    authority.caves = static_cast<FarCaveMode>(255);
+    EXPECT_FALSE(CompileFarVolumeSpan(valid, authority, FixtureLimits(), output));
+    authority.caves = FarCaveMode::BandLimited;
+    authority.numeric = static_cast<FarVolumeNumericProfile>(255);
+    EXPECT_FALSE(CompileFarVolumeSpan(valid, authority, FixtureLimits(), output));
+    authority.numeric = FarVolumeNumericProfile::RawFloat;
+    authority.density = {};
+    EXPECT_FALSE(CompileFarVolumeSpan(valid, authority, FixtureLimits(), output));
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(output, held);
 }
 } // namespace
