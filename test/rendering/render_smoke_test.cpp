@@ -2365,7 +2365,309 @@ private:
     GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
     std::array<GLuint, 6> inputs{};
 };
+void ExpectCanopyRoomCrossings(GLuint program,
+                               FullscreenFloatProbe& probe,
+                               const glm::mat4& projection) {
+    constexpr int planeRows = 4096;
+    const auto roomPositions = [&](float ceilingHeight, bool floorVisible = true) {
+        // The fixed row count bounds storage; include the fragment's floor so
+        // samples below the horizon contain actual open-side geometry.
+        std::vector<glm::vec4> room(planeRows, glm::vec4(0));
+        for (int row = 0; row < planeRows; ++row) {
+            const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+            if (!floorVisible && ndcY < 0) {
+                continue;
+            }
+            const float surfaceY = ndcY > 0 ? ceilingHeight : -1.7f;
+            room[static_cast<std::size_t>(row)] =
+                glm::vec4(0, surfaceY, -surfaceY * projection[1][1] / ndcY, 1);
+        }
+        return room;
+    };
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // All these room samples are near-lane positions; float depth still
+    // validates each Ladder read independently of the stored positions.
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (bool floorVisible : {false, true}) {
+        probe.texture(0, roomPositions(1, floorVisible), planeRows);
+        const auto firstCeiling = probe.draw()[16];
+        EXPECT_LT(firstCeiling.r, 0.3f) << "a ceiling crossed in the first 3 m interval occludes";
+        EXPECT_GT(firstCeiling.g, 2);
+        EXPECT_LE(firstCeiling.g, 40);
+    }
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -0.85f, -12);
+    probe.texture(0, roomPositions(0.1f, false), planeRows);
+    EXPECT_LT(probe.draw()[16].r, 0.3f)
+        << "the first refined back-side hit can precede an empty open-side probe";
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+
+    // Account for the sampled texel centre when placing the ceiling around
+    // the second coarse tap's thickness cutoff.
+    const float coarseY = -1.65f + 6;
+    const float coarseUv = 0.5f + 0.5f * projection[1][1] * coarseY / 12;
+    const float sampledNdc = 2 * (std::floor(coarseUv * planeRows) + 0.5f) / planeRows - 1;
+    const float surfaceScale = glm::length(glm::vec2(1, projection[1][1] / sampledNdc));
+    float cutoffVisibility[2]{};
+    int cutoffIndex = 0;
+    for (float gap : {1.499f, 1.501f}) {
+        const float height = (glm::length(glm::vec2(coarseY, 12)) - gap) / surfaceScale;
+        probe.texture(0, roomPositions(height), planeRows);
+        const auto result = probe.draw()[16];
+        EXPECT_LT(result.r, 0.4f);
+        EXPECT_LE(result.g, 40);
+        cutoffVisibility[cutoffIndex++] = result.r;
+    }
+    EXPECT_NEAR(cutoffVisibility[0], cutoffVisibility[1], 0.005f)
+        << "crossings on both sides of the thickness cutoff use the same intersection";
+}
 } // namespace
+
+TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    std::string source, positions, diagnostic;
+    ASSERT_TRUE(
+        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(ReadShaderSource(
+        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
+        << diagnostic;
+    const auto begin = source.find("float computeSkyVisibility(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    // Compile the shipping march and position decoder with controlled geometry.
+    std::string fragmentSource = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2D gPosition, u_sceneDepth;
+uniform mat4 u_inverseView, u_projection;
+uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
+uniform int u_caveSkySteps;
+uniform vec3 probePosition;
+#define farWorldPosition decodePosition
+)" + positions + R"(
+#undef farWorldPosition
+int positionTaps = 0;
+bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
+                      inout vec3 position) {
+    ++positionTaps;
+    return decodePosition(storedPosition, floatDepth, uv, position);
+}
+)" + source.substr(begin, end - begin) +
+                                 R"(
+void main() {
+    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
+    FragColor = vec4(visibility, float(positionTaps), 0, 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragmentText = fragmentSource.c_str();
+    glShaderSource(fragment, 1, &fragmentText, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    probe.texture(1, {glm::vec4(0.5f)});
+    SetMat4Identity(program, "u_inverseView");
+    glm::mat4 projection(1);
+    projection[1][1] = 0.01f; // Keep the entire 24 m upward march in view.
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glm::mat4 inverseProjection(1);
+    inverseProjection[2][2] = -1; // Valid depth reconstruction; the near lane reads gPosition.
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    const auto settings = [&](float distance, float thickness, int steps) {
+        glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), distance);
+        glUniform1f(glGetUniformLocation(program, "u_caveThickness"), thickness);
+        glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+    };
+    const auto visibility = [&](const glm::vec3& position) {
+        probe.texture(0, {glm::vec4(position, 1)});
+        return probe.draw()[16].r;
+    };
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 8);
+        EXPECT_FLOAT_EQ(visibility({0, 0, -2}), 1)
+            << "foreground foliage eight metres from the ray is not a roof";
+        EXPECT_FLOAT_EQ(visibility({0, 0, 0}), 1) << "missing geometry leaves the sky open";
+        const float ceiling = visibility({0, 1.5f, -10});
+        EXPECT_GT(ceiling, 0.06f);
+        EXPECT_LT(ceiling, 0.3f) << "a nearby ceiling must still block sky ambient";
+        const float movedCeiling = visibility({0, 1.6f, -10});
+        EXPECT_GT(movedCeiling - ceiling, 0.003f)
+            << "occlusion must track observed distance within one march step";
+        settings(3, 1.5f, 2);
+        const float rayDepth = glm::length(glm::vec3(0, 3.05f, -10));
+        const auto unbracketedVisibility = [&](const glm::vec3& position) {
+            // A missing first coarse sample isolates the direct thickness
+            // acceptance interval from the known-open origin's refinement.
+            constexpr int rows = 512;
+            std::vector<glm::vec4> samples(rows, glm::vec4(position, 1));
+            const auto firstRow = static_cast<std::size_t>((0.5f + 0.005f * 1.55f) * rows);
+            samples[firstRow] = glm::vec4(0);
+            probe.texture(0, samples, rows);
+            return probe.draw()[16].r;
+        };
+        for (float gap : {-0.1f, 0.01f, 1.5f, 1.6f}) {
+            EXPECT_NEAR(unbracketedVisibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
+                << "only the open depth interval (0.05, thickness) occludes: " << gap;
+        }
+        const float innerBand = unbracketedVisibility({0, 0, -(rayDepth - 0.8f)});
+        const float outerBand = unbracketedVisibility({0, 0, -(rayDepth - 1.4f)});
+        EXPECT_LT(innerBand, outerBand);
+        EXPECT_LT(outerBand, 1);
+        settings(24, 1.5f, 32);
+        const float bounded = visibility({0, 20, -10});
+        EXPECT_LT(bounded, 0.9f);
+        settings(24, 1.5f, 64);
+        EXPECT_FLOAT_EQ(visibility({0, 20, -10}), bounded)
+            << "the capped march must still cover the requested distance";
+        for (float invalid : {0.0f, -1.0f}) {
+            settings(invalid, 1.5f, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+            settings(24, invalid, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        for (int invalid : {0, -1}) {
+            settings(24, 1.5f, invalid);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        settings(24, 1.5f, 8);
+        if (ladder != 0) {
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1)
+                << "cleared depth refuses an occluder even if position is stale";
+        }
+    }
+
+    // A level perspective camera sees the underside of a horizontal plane at
+    // y=1.5. Each texel stores its camera-ray/plane intersection, not a constant
+    // position. The fixed 4096-row buffer resolves the thin acceptance band.
+    constexpr int planeRows = 4096;
+    std::vector<glm::vec4> planePositions(planeRows, glm::vec4(0));
+    std::vector<glm::vec4> planeDepths(planeRows, glm::vec4(0));
+    projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    inverseProjection = glm::inverse(projection);
+    for (int row = 0; row < planeRows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 1.5f, -1.5f * projection[1][1] / ndcY, 1);
+        const glm::vec4 clip = projection * position;
+        if (clip.z <= 0) {
+            continue;
+        }
+        planePositions[static_cast<std::size_t>(row)] = position;
+        planeDepths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        ExpectCanopyRoomCrossings(program, probe, projection);
+
+        probe.texture(0, planePositions, planeRows);
+        probe.texture(1, planeDepths, planeRows);
+        settings(24, 1.5f, 8);
+        const auto ceiling = probe.draw()[16];
+        EXPECT_LT(ceiling.r, 0.3f) << "the default 3 m steps must retain a real ceiling";
+        EXPECT_GT(ceiling.g, 2) << "the two on-screen coarse taps need crossing refinement";
+        EXPECT_LE(ceiling.g, 40);
+        settings(24, 0.12f, 8);
+        const auto canopy = probe.draw()[16];
+        EXPECT_GT(canopy.r, 0.85f) << "a thin band must retain its thickness falloff";
+        EXPECT_LT(canopy.r, 0.99f) << "a thin crossing must still be found between coarse taps";
+        EXPECT_LE(canopy.g, 40);
+        settings(24, 0.05f, 8);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "a band inside the self-bias stays open";
+
+        settings(24, 1.5f, 8);
+        // The first midpoint lies at y=2.85. Missing geometry must abort the
+        // bracket rather than inventing a crossing from its endpoints.
+        const float midpointUv = 0.5f + 0.5f * projection[1][1] * 2.85f / 12;
+        const auto midpointRow = static_cast<std::size_t>(midpointUv * planeRows);
+        auto missing = planePositions;
+        missing[midpointRow] = glm::vec4(0);
+        probe.texture(0, missing, planeRows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1);
+        if (ladder != 0) {
+            probe.texture(0, planePositions, planeRows);
+            auto cleared = planeDepths;
+            cleared[midpointRow] = glm::vec4(0);
+            probe.texture(1, cleared, planeRows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                << "cleared depth invalidates a refined sample even with stale position";
+        }
+        probe.texture(1, planeDepths, planeRows);
+        auto silhouette = planePositions;
+        for (int row = 0; row < planeRows; ++row) {
+            const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+            silhouette[static_cast<std::size_t>(row)] =
+                glm::vec4(0, 0, uv < 0.7f ? -100.0f : -2.0f, 1);
+        }
+        probe.texture(0, silhouette, planeRows);
+        const auto discontinuity = probe.draw()[16];
+        EXPECT_FLOAT_EQ(discontinuity.r, 1)
+            << "a silhouette depth jump never supplies a sample inside the thickness band";
+        EXPECT_FLOAT_EQ(discontinuity.g, 10) << "two coarse taps plus eight failed refinements";
+    }
+
+    // Alternating foreground/background stripes make repeated false brackets.
+    // The refinement budget is shared across the whole march, not per bracket.
+    projection = glm::mat4(1);
+    projection[1][1] = 0.01f;
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    for (int row = 0; row < planeRows; ++row) {
+        const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+        const float viewY = (2 * uv - 1) / projection[1][1];
+        const int band = static_cast<int>(std::floor((viewY - 0.05f) / 0.75f + 0.5f));
+        planePositions[static_cast<std::size_t>(row)] =
+            glm::vec4(0, 0, band % 2 == 0 ? -2.0f : -100.0f, 1);
+    }
+    probe.texture(0, planePositions, planeRows);
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 64);
+        const auto bounded = probe.draw()[16];
+        EXPECT_FLOAT_EQ(bounded.r, 1);
+        EXPECT_FLOAT_EQ(bounded.g, 40) << "32 coarse taps and at most eight refinements total";
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
 
 TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     HiddenGlContext context;

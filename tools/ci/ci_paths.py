@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
 
     "tools/ci/test_compile_shaders.py",
@@ -37,6 +38,7 @@ PYTHON_TESTS = (
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
+    "tools/ci/test_terrain_shader_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_check_docs.py",
@@ -243,6 +245,7 @@ def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
     return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+            or path == "res/shaders/g_buffer.frag"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
