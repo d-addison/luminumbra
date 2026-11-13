@@ -19,10 +19,21 @@
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 namespace fs = std::filesystem;
@@ -173,11 +184,103 @@ bool RequestedCapture(fs::path& destination) {
     return true;
 }
 
+void PublishCapture(const fs::path& destination, const std::string& payload) {
+    // Stage on the destination filesystem; close before publishing on Windows.
+    std::error_code error;
+    const auto staging = Luminumbra::TestSupport::detail::ReserveTempDirectory(
+        destination.parent_path(),
+        Luminumbra::TestSupport::detail::UniqueTempStem("region_capture_"),
+        error);
+    if (staging.empty()) {
+        throw fs::filesystem_error("cannot stage capture", destination, error);
+    }
+    try {
+        const auto temporary = staging / "capture.json";
+        std::ofstream output(temporary, std::ios::binary);
+        output.exceptions(std::ios::badbit | std::ios::failbit);
+        output << payload;
+        output.close();
+        // The publication operation itself refuses existing names, including a
+        // destination created by another capture while these bytes were staged.
+#if defined(_WIN32)
+        if (!::MoveFileExW(temporary.c_str(), destination.c_str(), 0)) {
+            error = std::error_code(static_cast<int>(::GetLastError()), std::system_category());
+        }
+#else
+        fs::create_hard_link(temporary, destination, error);
+#endif
+        if (error) {
+            throw fs::filesystem_error(
+                "cannot publish capture: destination must be new", temporary, destination, error);
+        }
+    } catch (...) {
+        fs::remove_all(staging, error);
+        throw;
+    }
+    fs::remove_all(staging);
+}
+
+TEST(RegionFixtureCapture, PublicationRefusesExistingDestinationAndCleansStaging) {
+    const Luminumbra::TestSupport::ScopedTempFile file("capture_publish_", ".json");
+    const auto& destination = file.Path();
+    const std::string original = "previous capture\n";
+    {
+        std::ofstream output(destination, std::ios::binary);
+        output.exceptions(std::ios::badbit | std::ios::failbit);
+        output << original;
+    }
+    try {
+        PublishCapture(destination, "replacement capture\n");
+        FAIL() << "publication must refuse an existing destination";
+    } catch (const fs::filesystem_error& error) {
+        EXPECT_NE(std::string(error.what()).find("destination must be new"), std::string::npos);
+    }
+    std::ifstream input(destination, std::ios::binary);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    EXPECT_EQ(contents.str(), original);
+    // The destination is the only remaining entry; no reserved staging directory.
+    for (const auto& entry : fs::directory_iterator(destination.parent_path())) {
+        EXPECT_EQ(entry.path(), destination);
+    }
+}
+
+TEST(RegionFixtureCapture, PublicationCreatesNewDestinationAndCleansStaging) {
+    const Luminumbra::TestSupport::ScopedTempFile file("capture_publish_", ".json");
+    const auto& destination = file.Path();
+    const std::string payload = "new capture\n";
+    PublishCapture(destination, payload);
+    std::ifstream input(destination, std::ios::binary);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    EXPECT_EQ(contents.str(), payload);
+    for (const auto& entry : fs::directory_iterator(destination.parent_path())) {
+        EXPECT_EQ(entry.path(), destination);
+    }
+}
+
+TEST(RegionFixtureCapture, PublicationFailuresLeaveNoStagingOrDestination) {
+    const Luminumbra::TestSupport::ScopedTempFile file("capture_publish_", ".json");
+    const auto& destination = file.Path();
+    // A missing parent refuses staging without leaving a directory behind.
+    EXPECT_THROW(PublishCapture(destination / "missing/capture.json", "capture\n"),
+                 fs::filesystem_error);
+    EXPECT_TRUE(fs::is_empty(destination.parent_path()));
+    // An existing directory is also an occupied publication name.
+    fs::create_directory(destination);
+    EXPECT_THROW(PublishCapture(destination, "capture\n"), fs::filesystem_error);
+    EXPECT_TRUE(fs::is_empty(destination));
+    for (const auto& entry : fs::directory_iterator(destination.parent_path())) {
+        EXPECT_EQ(entry.path(), destination);
+    }
+}
+
 TEST(RegionFixtureCapture, Emit) {
     // Dormant during normal discovery/CI: no world, jobs or files are created.
     fs::path destination;
-    if (!RequestedCapture(destination))
-        return;
+    if (!RequestedCapture(destination)) {
+        GTEST_SKIP() << "set LUMINUMBRA_REGION_FIXTURE_CAPTURE to request a capture";
+    }
     ASSERT_TRUE(Luminumbra::Filesystem::IsAbsolutePath(destination));
     const auto parent = fs::canonical(destination.parent_path());
     destination = parent / destination.filename();
@@ -189,23 +292,6 @@ TEST(RegionFixtureCapture, Emit) {
     const auto payload = capture.dump() + '\n';
     // Match the regenerator's 16 MiB total input limit before staging any output.
     ASSERT_LE(payload.size(), 16U << 20);
-    // Stage on the destination filesystem, close and check before atomic rename.
-    std::error_code error;
-    const auto staging = Luminumbra::TestSupport::detail::ReserveTempDirectory(
-        parent, Luminumbra::TestSupport::detail::UniqueTempStem("region_capture_"), error);
-    ASSERT_FALSE(staging.empty()) << error.message();
-    try {
-        const auto temporary = staging / "capture.json";
-        std::ofstream output(temporary, std::ios::binary);
-        output.exceptions(std::ios::badbit | std::ios::failbit);
-        output << payload;
-        output.close();
-        fs::rename(temporary, destination);
-    } catch (...) {
-        fs::remove_all(staging, error);
-        throw;
-    }
-    fs::remove_all(staging, error);
-    ASSERT_FALSE(error) << error.message();
+    PublishCapture(destination, payload);
 }
 } // namespace

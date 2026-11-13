@@ -170,6 +170,25 @@ class CTestSkipAuditTests(unittest.TestCase):
         self.assertFalse(MODULE.skip_is_allowed(explicit))
         self.assertFalse(MODULE.skip_is_allowed(missing))
 
+    def test_opt_in_region_capture_requires_exact_name_and_reason(self):
+        reason = "set LUMINUMBRA_REGION_FIXTURE_CAPTURE to request a capture"
+        self.assertTrue(MODULE.skip_is_allowed(skipped_case("RegionFixtureCapture.Emit", reason)))
+        for name in ("RegionFixtureCapture.PublicationCreatesNewDestinationAndCleansStaging",
+                     "Other.Emit", "RegionFixtureCapture.EmitExtra"):
+            with self.subTest(name=name):
+                self.assertFalse(MODULE.skip_is_allowed(skipped_case(name, reason)))
+        for wrong in (None, "", "different reason", reason + " extra"):
+            with self.subTest(reason=wrong):
+                self.assertFalse(MODULE.skip_is_allowed(skipped_case("RegionFixtureCapture.Emit", wrong)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = ET.Element("testsuite")
+            root.append(skipped_case("RegionFixtureCapture.Emit", reason))
+            report = Path(directory) / "ctest.junit.xml"
+            ET.ElementTree(root).write(report, encoding="utf-8")
+            with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report)]), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(MODULE.main(), 0)
+            self.assertIn("1 tests; 1 approved skips", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

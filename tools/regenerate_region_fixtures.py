@@ -131,24 +131,51 @@ def validate_hashes(value: object) -> dict:
 
 
 def validate_index(document: dict, members: dict) -> None:
+    # Mirror decode_snapshot_index in persistence/SaveTransaction.cpp: uint64
+    # headers, float32 anchors, sorted members and all required member metadata.
+    # The fixture inventory and 1 MiB member cap are stricter than that decoder.
+    def unsigned(value: object, minimum: int = 0) -> bool:
+        return type(value) is int and minimum <= value < 1 << 64
+
+    require(document.get("schema") == "luminumbra.snapshot.v1"
+            and unsigned(document.get("generation"), 1)
+            and unsigned(document.get("tick")) and unsigned(document.get("txn_id")),
+            "invalid snapshot header fields")
+    anchors = document.get("anchors")
+    require(isinstance(anchors, list), "invalid snapshot anchors")
+    # Anchor traversal is bounded by the enclosing MAX_MEMBER_BYTES JSON cap.
+    for anchor in anchors:
+        require(isinstance(anchor, list) and len(anchor) == 3, "invalid snapshot anchor")
+        require(all(type(component) in (int, float)
+                    and abs(component) <= 3.4028234663852886e38 for component in anchor),
+                "snapshot anchor outside float range")
     # At most nine named payload/retirement entries in these fixed scenarios;
     # allow sixteen records to leave room for the production writer's metadata.
     records = document.get("members")
-    require(document.get("schema") == "luminumbra.snapshot.v1"
-            and isinstance(records, list) and len(records) <= 16, "invalid snapshot index")
+    require(isinstance(records, list) and len(records) <= 16, "invalid snapshot index")
     allowed = {REGION, MANIFEST, PLANTS, "world_info.json", "aether_state.efs",
                "chunks/region/plant-identities.json", "chunks/region/ground-objects.json",
                "chunks/region/field-pages.fpg", "chunks/region/active-regions.arl"}
-    seen, present = set(), set()
+    previous, present = "", set()
     for record in records:
         require(isinstance(record, dict), "invalid snapshot member")
         path, state = record.get("path"), record.get("state")
-        require(isinstance(path, str) and path in allowed and path not in seen,
-                "unknown or duplicate snapshot member")
+        require(isinstance(path, str) and path in allowed and path > previous,
+                "unknown, unsorted or duplicate snapshot member")
+        require(record.get("class") in ("authoritative", "derived"),
+                "unknown snapshot member class")
         require(state in ("present", "absent"), "unknown snapshot member state")
-        seen.add(path)
+        require(unsigned(record.get("bytes")) and unsigned(record.get("generation")),
+                "invalid snapshot member fields")
+        digest = record.get("fnv64")
+        require(isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{16}", digest) is not None,
+                "invalid snapshot member digest")
+        previous = path
         if state == "present":
             present.add(path)
+            require(path in members and record["bytes"] == members[path]["bytes"]
+                    and digest.lower() == members[path]["fnv64"],
+                    "snapshot member metadata does not match captured payload")
     require(present == set(members) - {INDEX}, "incomplete snapshot member inventory")
 
 
@@ -173,6 +200,7 @@ def artifacts(data: bytes) -> dict[str, bytes]:
         # intervening implementation. Indexed captures always include an envelope.
         require(set(members) in (legacy, legacy | {PLANTS, INDEX}),
                 "unexpected or missing capture member")
+        index_document = None
         for name in sorted(members):
             member = members[name]
             require(isinstance(member, dict) and set(member) == {"bytes", "hex", "fnv64"},
@@ -206,11 +234,13 @@ def artifacts(data: bytes) -> dict[str, bytes]:
                         require(type(cursor) is int and 1 <= cursor <= 1 << 63,
                                 "invalid plant allocator cursor")
                 else:
-                    validate_index(document, members)
+                    index_document = document
             else:
                 require(len(payload) >= 24 and payload[:4] == b"LMR1",
                         "invalid region capture")
             result[scenario + "/" + name.rsplit("/", 1)[-1]] = payload
+        if index_document is not None:
+            validate_index(index_document, members)
         hashes = validate_hashes(entry["hashes"])
         result[scenario + "/hashes.json"] = canonical_json(hashes)
     pins = {name: {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
@@ -224,6 +254,12 @@ def canonical_json(value: dict) -> bytes:
 
 
 def regenerate(capture: Path, output: Path) -> None:
+    require(capture.resolve() != output.resolve(), "capture and output identify the same file")
+    try:
+        same_file = os.path.samefile(capture, output)
+    except FileNotFoundError:
+        same_file = False
+    require(not same_file, "capture and output identify the same file")
     payloads = artifacts(read_capture(capture))  # Validate everything before creating output.
     descriptor, temporary = tempfile.mkstemp(prefix=".region-fixtures-", dir=output.parent)
     published = False

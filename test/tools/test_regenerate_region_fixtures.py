@@ -37,8 +37,11 @@ def capture(indexed=False):
                 "entities": [{}] if scenario.endswith("plant-edit") else [], "next_id": 2})
         if indexed:
             payloads[REGEN.INDEX] = REGEN.canonical_json({
-                "schema": "luminumbra.snapshot.v1", "members": [
-                    {"path": name, "state": "present"} for name in sorted(payloads)]})
+                "schema": "luminumbra.snapshot.v1", "generation": 1, "tick": 7,
+                "txn_id": 1, "anchors": [[0.0, 0.0, 0.0]], "members": [
+                    {"path": name, "state": "present", "class": "authoritative",
+                     "bytes": len(payloads[name]), "fnv64": REGEN.fnv64(payloads[name]),
+                     "generation": 1} for name in sorted(payloads)]})
         members = {name: {"bytes": len(data), "hex": data.hex(), "fnv64": REGEN.fnv64(data)}
                    for name, data in payloads.items()}
         parts = {key: "123456789abcdef0" for key in REGEN.SUBHASHES}
@@ -73,6 +76,153 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b"previous output")
         self.assertEqual(sorted(item.name for item in self.root.iterdir()),
                          ["capture.json", "fixtures.zip"])
+
+    @staticmethod
+    def replace_index(value, document):
+        payload = REGEN.canonical_json(document)
+        value["scenarios"]["devel-off"]["members"][REGEN.INDEX] = {
+            "bytes": len(payload), "hex": payload.hex(), "fnv64": REGEN.fnv64(payload)}
+
+    @staticmethod
+    def index(value):
+        return json.loads(bytes.fromhex(
+            value["scenarios"]["devel-off"]["members"][REGEN.INDEX]["hex"]))
+
+    def test_same_path_refused_without_modification(self):
+        self.write(capture())
+        original = self.source.read_bytes()
+        for output in (self.source, self.root / "." / self.source.name):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(ValueError, "same file"):
+                    REGEN.regenerate(self.source, output)
+                self.assertEqual(self.source.read_bytes(), original)
+                self.assertEqual(list(self.root.iterdir()), [self.source])
+        self.output = self.source
+        result = self.cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file", result.stderr)
+        self.assertEqual(self.source.read_bytes(), original)
+
+    def test_hard_link_alias_refused_without_modification(self):
+        self.write(capture())
+        original = self.source.read_bytes()
+        os.link(self.source, self.output)
+        with self.assertRaisesRegex(ValueError, "same file"):
+            REGEN.regenerate(self.source, self.output)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(self.output.read_bytes(), original)
+        self.assertTrue(os.path.samefile(self.source, self.output))
+        self.assertEqual(set(self.root.iterdir()), {self.source, self.output})
+
+    def test_resolved_alias_and_identity_errors_precede_writes(self):
+        self.write(capture())
+        original = self.source.read_bytes()
+        # Exercise a resolved alias without requiring Windows symlink privileges.
+        with mock.patch.object(REGEN.Path, "resolve", return_value=self.source):
+            with self.assertRaisesRegex(ValueError, "same file"):
+                REGEN.regenerate(self.source, self.output)
+        with mock.patch.object(REGEN.os.path, "samefile", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                REGEN.regenerate(self.source, self.output)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.root.iterdir()), [self.source])
+
+    def test_each_required_index_field_is_required(self):
+        for field in ("schema", "generation", "tick", "txn_id", "anchors", "members"):
+            with self.subTest(field=field):
+                value = capture(indexed=True)
+                document = self.index(value)
+                del document[field]
+                self.replace_index(value, document)
+                self.assert_refused(value)
+        for state in ("present", "absent"):
+            for field in ("path", "class", "state", "bytes", "fnv64", "generation"):
+                with self.subTest(member_field=field, state=state):
+                    value = capture(indexed=True)
+                    document = self.index(value)
+                    if state == "absent":
+                        document["members"].append({
+                            "path": "world_info.json", "state": "absent",
+                            "class": "authoritative", "bytes": 0,
+                            "fnv64": "0" * 16, "generation": 1})
+                    target = 0 if state == "present" else -1
+                    del document["members"][target][field]
+                    self.replace_index(value, document)
+                    self.assert_refused(value)
+
+    def test_index_numeric_domains_and_anchors(self):
+        for field in ("generation", "tick", "txn_id"):
+            for invalid in (None, True, -1, 1.0, 1e38, 1 << 64, "1"):
+                with self.subTest(field=field, invalid=invalid):
+                    value = capture(indexed=True)
+                    document = self.index(value)
+                    document[field] = invalid
+                    self.replace_index(value, document)
+                    self.assert_refused(value)
+        for anchors in (None, {}, [None], [[]], [[0, 0]], [[0, 0, 0, 0]],
+                        [[True, 0, 0]], [["0", 0, 0]], [[None, 0, 0]], [[3.5e38, 0, 0]]):
+            with self.subTest(anchors=anchors):
+                value = capture(indexed=True)
+                document = self.index(value)
+                document["anchors"] = anchors
+                self.replace_index(value, document)
+                self.assert_refused(value)
+        value = capture(indexed=True)
+        document = self.index(value)
+        document["generation"] = 0
+        self.replace_index(value, document)
+        self.assert_refused(value)
+
+    def test_index_member_metadata_and_order(self):
+        for field, invalids in (
+                ("class", (None, [], "unknown")), ("state", (None, [], "unknown")),
+                ("path", (None, [], "../escape", "C:/capture")),
+                ("bytes", (None, True, -1, 1.0, 1e38, 1 << 64, "1", 0)),
+                ("generation", (None, True, -1, 1.0, 1e38, 1 << 64, "1")),
+                ("fnv64", (None, [], "", "f" * 17, "g" * 16, "0" * 16))):
+            for invalid in invalids:
+                with self.subTest(field=field, invalid=invalid):
+                    value = capture(indexed=True)
+                    document = self.index(value)
+                    document["members"][0][field] = invalid
+                    self.replace_index(value, document)
+                    self.assert_refused(value)
+        value = capture(indexed=True)
+        document = self.index(value)
+        document["members"].reverse()
+        self.replace_index(value, document)
+        self.assert_refused(value)
+
+    def test_index_inventory_and_unvalidated_capture_metadata_refused(self):
+        for state in ("present", "absent"):
+            value = capture(indexed=True)
+            document = self.index(value)
+            document["members"].append({"path": "world_info.json", "state": state,
+                                        "class": "authoritative", "bytes": 0,
+                                        "fnv64": "0" * 16, "generation": 1})
+            if state == "absent":
+                document["members"][0]["state"] = "absent"
+            self.replace_index(value, document)
+            self.assert_refused(value)
+        for invalid in (None, [], {}, {"bytes": 1}, {"bytes": "1", "fnv64": "0" * 16}):
+            value = capture(indexed=True)
+            value["scenarios"]["devel-off"]["members"][REGEN.MANIFEST] = invalid
+            self.assert_refused(value)
+
+    def test_index_decoder_boundaries_and_extensions(self):
+        value = capture(indexed=True)
+        document = self.index(value)
+        document.update(generation=(1 << 64) - 1, tick=0, txn_id=0, anchors=[], future=True)
+        document["members"][0].update(generation=0, future=True, **{"class": "derived"})
+        document["members"][0]["fnv64"] = document["members"][0]["fnv64"].upper()
+        self.replace_index(value, document)
+        self.write(value)
+        self.assertEqual(self.cli().returncode, 0)
+        document.update(tick=(1 << 64) - 1, txn_id=(1 << 64) - 1,
+                        anchors=[[-3.4028234663852886e38, 0, 3.4028234663852886e38]])
+        self.replace_index(value, document)
+        self.write(value)
+        self.assertEqual(self.cli().returncode, 0)
 
     def test_reproducible_sorted_archive_and_computed_pins(self):
         for indexed in (False, True):
@@ -142,15 +292,16 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
         value = capture(indexed=True)
         entry = value["scenarios"]["devel-off"]
         document = json.loads(bytes.fromhex(entry["members"][REGEN.INDEX]["hex"]))
-        document["members"].append({"path": "world_info.json", "state": "absent"})
-        payload = REGEN.canonical_json(document)
-        entry["members"][REGEN.INDEX] = {"bytes": len(payload), "hex": payload.hex(),
-                                         "fnv64": REGEN.fnv64(payload)}
+        document["members"].append({"path": "world_info.json", "state": "absent",
+                                    "class": "authoritative", "bytes": 0,
+                                    "fnv64": "0" * 16, "generation": 1})
         for cursor in (1, 1 << 63):
             payload = REGEN.canonical_json({"schema": "luminumbra.plants.v2",
                                             "entities": [], "next_id": cursor})
             entry["members"][REGEN.PLANTS] = {"bytes": len(payload), "hex": payload.hex(),
                                               "fnv64": REGEN.fnv64(payload)}
+            document["members"][0].update(bytes=len(payload), fnv64=REGEN.fnv64(payload))
+            self.replace_index(value, document)
             self.write(value)
             self.assertEqual(self.cli().returncode, 0)
 
@@ -253,8 +404,9 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
                         [{"path": REGEN.REGION, "state": "present"}] * 2,
                         [{"path": REGEN.REGION, "state": "present"}] * 17):
             value = capture(indexed=True)
-            replace_document(value, REGEN.INDEX, {"schema": "luminumbra.snapshot.v1",
-                                                 "members": records})
+            document = self.index(value)
+            document["members"] = records
+            replace_document(value, REGEN.INDEX, document)
             self.assert_refused(value)
 
     def test_malformed_json_cli_preserves_existing_and_absent_output(self):
@@ -331,7 +483,7 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
         native = (ROOT / "test/common/RegionFixtureCapture_test.cpp").read_text(encoding="utf-8")
         self.assertLess(native.index('std::getenv("LUMINUMBRA_REGION_FIXTURE_CAPTURE")'),
                         native.index("Capture(false)"))
-        self.assertIn("if (!RequestedCapture(destination))\n        return;", native)
+        self.assertIn("if (!RequestedCapture(destination)) {\n        GTEST_SKIP()", native)
         self.assertIn('_wdupenv_s(&value, &size, L"LUMINUMBRA_REGION_FIXTURE_CAPTURE")', native)
         self.assertIn('_wgetenv(L"LUMINUMBRA_REGION_FIXTURE_CAPTURE")', native)
         for name in (REGEN.REGION, REGEN.MANIFEST, REGEN.PLANTS, REGEN.INDEX):
