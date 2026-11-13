@@ -406,7 +406,8 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     float occluded = 0.0;
     int steps = min(u_caveSkySteps, 32);
     float stepLen = u_caveSkyMaxDist / float(steps);
-    bool previousValid = false;
+    // The shaded fragment supplies a known-open start without another read.
+    bool previousValid = true;
     float previousDistance = 0.0;
     float previousDepthGap = 0.0;
     int refinementTaps = 0;
@@ -431,16 +432,18 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // the eye) within the thickness band, a ceiling/overhang occludes this
         // upward sample.
         float depthGap = length(p) - length(sampPos);
-        bool crossing = previousValid && previousDepthGap <= 0.0 && depthGap >= u_caveThickness;
+        bool crossing = previousValid && previousDepthGap <= 0.05 && depthGap > 0.05;
         float frontDistance = previousDistance;
         float backDistance = distanceAlongRay;
         previousValid = true;
         previousDistance = distanceAlongRay;
         previousDepthGap = depthGap;
-        // Coarse steps can jump past a real ceiling's entire thickness band.
-        // Bisect only a front-to-back bracket; silhouettes still have to yield
-        // an observed sample inside the band before they can occlude.
+        // Resolve every front-to-back bracket with the same fixed bisection,
+        // independent of thickness. Stopping on entry into the thickness band
+        // would make its outer edge select a different occlusion strength.
+        // Silhouettes must still supply an observed sample inside the band.
         if (crossing) {
+            bool originBracket = s == 1;
             for (int refinement = 0; refinement < 8; ++refinement) {
                 if (refinementTaps >= 8) break;
                 float midpoint = 0.5 * (frontDistance + backDistance);
@@ -452,17 +455,28 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
                 vec3 refinedPosition = vec3(0.0);
                 ++refinementTaps;
                 if (!farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition) ||
-                    dot(refinedPosition, refinedPosition) < 1e-6) break;
+                    dot(refinedPosition, refinedPosition) < 1e-6) {
+                    // The origin is already known open even when the first
+                    // interval projects onto sky before reaching the ceiling.
+                    // Once the open side has geometry, a hole invalidates it.
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
                 float refinedGap = length(refinedPoint) - length(refinedPosition);
                 if (refinedGap <= 0.05) {
                     frontDistance = midpoint;
+                    originBracket = false;
                 } else {
                     backDistance = midpoint;
                     sampPos = refinedPosition;
                     depthGap = refinedGap;
-                    if (depthGap < u_caveThickness) break;
                 }
             }
+            // Missing data or an exhausted budget retains the last observed
+            // back-side sample; neither condition changes selection at thickness.
         }
         if (depthGap > 0.05 && depthGap < u_caveThickness) {
             // A foreground silhouette is not a ceiling along this ray. Limit

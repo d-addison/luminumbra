@@ -2365,6 +2365,63 @@ private:
     GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
     std::array<GLuint, 6> inputs{};
 };
+void ExpectCanopyRoomCrossings(GLuint program,
+                               FullscreenFloatProbe& probe,
+                               const glm::mat4& projection) {
+    constexpr int planeRows = 4096;
+    const auto roomPositions = [&](float ceilingHeight, bool floorVisible = true) {
+        // The fixed row count bounds storage; include the fragment's floor so
+        // samples below the horizon contain actual open-side geometry.
+        std::vector<glm::vec4> room(planeRows, glm::vec4(0));
+        for (int row = 0; row < planeRows; ++row) {
+            const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+            if (!floorVisible && ndcY < 0) {
+                continue;
+            }
+            const float surfaceY = ndcY > 0 ? ceilingHeight : -1.7f;
+            room[static_cast<std::size_t>(row)] =
+                glm::vec4(0, surfaceY, -surfaceY * projection[1][1] / ndcY, 1);
+        }
+        return room;
+    };
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // All these room samples are near-lane positions; float depth still
+    // validates each Ladder read independently of the stored positions.
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (bool floorVisible : {false, true}) {
+        probe.texture(0, roomPositions(1, floorVisible), planeRows);
+        const auto firstCeiling = probe.draw()[16];
+        EXPECT_LT(firstCeiling.r, 0.3f) << "a ceiling crossed in the first 3 m interval occludes";
+        EXPECT_GT(firstCeiling.g, 2);
+        EXPECT_LE(firstCeiling.g, 40);
+    }
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -0.85f, -12);
+    probe.texture(0, roomPositions(0.1f, false), planeRows);
+    EXPECT_LT(probe.draw()[16].r, 0.3f)
+        << "the first refined back-side hit can precede an empty open-side probe";
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+
+    // Account for the sampled texel centre when placing the ceiling around
+    // the second coarse tap's thickness cutoff.
+    const float coarseY = -1.65f + 6;
+    const float coarseUv = 0.5f + 0.5f * projection[1][1] * coarseY / 12;
+    const float sampledNdc = 2 * (std::floor(coarseUv * planeRows) + 0.5f) / planeRows - 1;
+    const float surfaceScale = glm::length(glm::vec2(1, projection[1][1] / sampledNdc));
+    float cutoffVisibility[2]{};
+    int cutoffIndex = 0;
+    for (float gap : {1.499f, 1.501f}) {
+        const float height = (glm::length(glm::vec2(coarseY, 12)) - gap) / surfaceScale;
+        probe.texture(0, roomPositions(height), planeRows);
+        const auto result = probe.draw()[16];
+        EXPECT_LT(result.r, 0.4f);
+        EXPECT_LE(result.g, 40);
+        cutoffVisibility[cutoffIndex++] = result.r;
+    }
+    EXPECT_NEAR(cutoffVisibility[0], cutoffVisibility[1], 0.005f)
+        << "crossings on both sides of the thickness cutoff use the same intersection";
+}
 } // namespace
 
 TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
@@ -2461,14 +2518,24 @@ void main() {
         const float movedCeiling = visibility({0, 1.6f, -10});
         EXPECT_GT(movedCeiling - ceiling, 0.003f)
             << "occlusion must track observed distance within one march step";
-        settings(3, 1.5f, 1);
+        settings(3, 1.5f, 2);
         const float rayDepth = glm::length(glm::vec3(0, 3.05f, -10));
+        const auto unbracketedVisibility = [&](const glm::vec3& position) {
+            // A missing first coarse sample isolates the direct thickness
+            // acceptance interval from the known-open origin's refinement.
+            constexpr int rows = 512;
+            std::vector<glm::vec4> samples(rows, glm::vec4(position, 1));
+            const auto firstRow = static_cast<std::size_t>((0.5f + 0.005f * 1.55f) * rows);
+            samples[firstRow] = glm::vec4(0);
+            probe.texture(0, samples, rows);
+            return probe.draw()[16].r;
+        };
         for (float gap : {-0.1f, 0.01f, 1.5f, 1.6f}) {
-            EXPECT_NEAR(visibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
+            EXPECT_NEAR(unbracketedVisibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
                 << "only the open depth interval (0.05, thickness) occludes: " << gap;
         }
-        const float innerBand = visibility({0, 0, -(rayDepth - 0.8f)});
-        const float outerBand = visibility({0, 0, -(rayDepth - 1.4f)});
+        const float innerBand = unbracketedVisibility({0, 0, -(rayDepth - 0.8f)});
+        const float outerBand = unbracketedVisibility({0, 0, -(rayDepth - 1.4f)});
         EXPECT_LT(innerBand, outerBand);
         EXPECT_LT(outerBand, 1);
         settings(24, 1.5f, 32);
@@ -2527,6 +2594,8 @@ void main() {
     for (int ladder : {0, 1}) {
         SCOPED_TRACE(ladder);
         glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        ExpectCanopyRoomCrossings(program, probe, projection);
+
         probe.texture(0, planePositions, planeRows);
         probe.texture(1, planeDepths, planeRows);
         settings(24, 1.5f, 8);
