@@ -3446,4 +3446,231 @@ TEST(RegionalWaterExecution, NonfiniteAndOutOfRangeSeedHeightsDiscardPreparedArr
         EXPECT_EQ(shield.far_lod_authority_revision(), 0u);
     }
 }
+
+TEST(RegionalWaterTransaction, SourceActivityPublishesInjectionOnlyAndInteriorTargetsOnce) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool interior : {false, true}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0)};
+        chunks[0]->ticks_below_threshold = 119;
+        chunks[0]->is_water_sleeping.store(true);
+        chunks[0]->water_mesh_generated.store(true);
+        chunks[0]->water_mesh_dirty_ticks = 14;
+        const auto before = TransactionBytes(*chunks[0]);
+        Planning::Transaction stage;
+        stage.BeginSourceActivity(ledger, 0, chunks, {});
+        for (std::size_t cell = 0; cell < 64; ++cell) {
+            stage.Inject({chunks[0]->get_id(), cell, 3});
+            stage.Inject({chunks[0]->get_id(), cell, 5});
+        }
+        if (interior) {
+            const auto result = stage.StepInterior(chunks[0]->get_id(), shield, {});
+            ASSERT_TRUE(result.applied);
+            EXPECT_EQ(result.source_mm, 0);
+            EXPECT_EQ(result.depth_before, 64 * 1008);
+            stage.FinishInterior(chunks[0]->get_id());
+            stage.FinishInterior(chunks[0]->get_id());
+        }
+        EXPECT_EQ(stage.participants_visited(), 1u);
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        std::unordered_set<ChunkID> invalidations;
+        stage.Publish(nullptr, &invalidations);
+        EXPECT_EQ(Mass(*chunks[0]), 64 * 1008);
+        EXPECT_FLOAT_EQ(chunks[0]->max_water_delta_last_tick, 0.008f);
+        EXPECT_EQ(chunks[0]->ticks_below_threshold, 0);
+        EXPECT_FALSE(chunks[0]->is_water_sleeping.load());
+        EXPECT_EQ(chunks[0]->water_mesh_dirty_ticks, 0);
+        EXPECT_EQ(invalidations, std::unordered_set<ChunkID>{chunks[0]->get_id()});
+        EXPECT_THROW(stage.Publish(), std::invalid_argument);
+        EXPECT_EQ(chunks[0]->water_mesh_dirty_ticks, 0);
+    }
+}
+
+TEST(RegionalWaterTransaction, SourceActivityCapturesAfterPreparationAtEveryResolution) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int resolution : {2, 4, 8, 16, 32}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0, 1000, 4)};
+        chunks[0]->water_depth_mm.front() = 8000;
+        Planning::Transaction stage;
+        stage.BeginSourceActivity(ledger, 0, chunks, {});
+        if (resolution == 2) {
+            const auto before = TransactionBytes(*chunks[0]);
+            EXPECT_THROW(stage.PrepareGrid(chunks[0]->get_id(), shield, resolution),
+                         std::invalid_argument);
+            EXPECT_FALSE(stage.pending());
+            EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+            continue;
+        }
+        stage.PrepareGrid(chunks[0]->get_id(), shield, resolution);
+        const auto* prepared = stage.staged(chunks[0]->get_id());
+        ASSERT_NE(prepared, nullptr);
+        const auto origin = prepared->water_depth_mm;
+        for (std::size_t cell = 0; cell < origin.size(); ++cell) {
+            stage.Inject({chunks[0]->get_id(), cell, 8});
+        }
+        // Idempotent preparation must not discard the pre-injection origin.
+        stage.PrepareGrid(chunks[0]->get_id(), shield, resolution);
+        stage.Publish();
+        EXPECT_FLOAT_EQ(chunks[0]->max_water_delta_last_tick, 0.008f);
+        EXPECT_EQ(chunks[0]->water_mesh_dirty_ticks, 1);
+        for (std::size_t cell = 0; cell < origin.size(); ++cell) {
+            EXPECT_EQ(chunks[0]->water_depth_mm[cell], origin[cell] + 8);
+        }
+    }
+}
+
+TEST(RegionalWaterTransaction, SourceActivityCoalescesBothAxesAndEveryInteriorSeamOrder) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool is_x : {false, true}) {
+        for (const int order : {0, 1, 2}) {
+            auto ledger = PlanningLedger({{0, 0}});
+            const std::vector chunks{TransactionChunk(0, 2000),
+                                     TransactionChunkAt(is_x ? IVec3(1, 0, 0) : IVec3(0, 0, 1))};
+            for (const auto& chunk : chunks) {
+                chunk->water_mesh_generated.store(true);
+                chunk->water_mesh_dirty_ticks = 14;
+                chunk->ticks_below_threshold = 17;
+            }
+            Planning::Transaction stage;
+            stage.BeginSourceActivity(ledger, 0, chunks, {});
+            stage.Inject({chunks[0]->get_id(), 0, 8});
+            const auto interior = [&] {
+                ASSERT_TRUE(stage.StepInterior(chunks[0]->get_id(), shield, {}).applied);
+                stage.FinishInterior(chunks[0]->get_id());
+            };
+            if (order == 0) {
+                interior();
+            }
+            ASSERT_TRUE(stage.StepFace(chunks[0]->get_id(), chunks[1]->get_id(), is_x).applied);
+            if (order == 1) {
+                interior();
+            }
+            std::array<std::int64_t, 2> deltas{};
+            for (std::size_t index = 0; index < chunks.size(); ++index) {
+                const auto* grid = stage.staged(chunks[index]->get_id());
+                ASSERT_NE(grid, nullptr);
+                for (std::size_t cell = 0; cell < 64; ++cell) {
+                    const auto change = static_cast<std::int64_t>(grid->water_depth_mm[cell]) -
+                                        chunks[index]->water_depth_mm[cell];
+                    deltas[index] = std::max(deltas[index], change < 0 ? -change : change);
+                }
+                EXPECT_GT(deltas[index], 1);
+            }
+            std::unordered_set<ChunkID> invalidations;
+            stage.Publish(nullptr, &invalidations);
+            for (std::size_t index = 0; index < chunks.size(); ++index) {
+                EXPECT_FLOAT_EQ(chunks[index]->max_water_delta_last_tick,
+                                static_cast<float>(deltas[index]) / 1000.0f);
+                EXPECT_EQ(chunks[index]->water_mesh_dirty_ticks, 0);
+                EXPECT_EQ(chunks[index]->ticks_below_threshold, 0);
+                EXPECT_FALSE(chunks[index]->is_water_sleeping.load());
+                EXPECT_TRUE(invalidations.contains(chunks[index]->get_id()));
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterTransaction, SourceActivityCancellationUsesNetDepthAndOneCalmAdvance) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    chunks[0]->ticks_below_threshold = 118;
+    chunks[0]->water_mesh_generated.store(true);
+    chunks[0]->water_mesh_dirty_ticks = 14;
+    Planning::Transaction stage;
+    stage.BeginSourceActivity(ledger, 0, chunks, {});
+    for (std::size_t cell = 0; cell < 64; ++cell) {
+        stage.Inject({chunks[0]->get_id(), cell, 8});
+    }
+    const auto result = stage.StepInterior(chunks[0]->get_id(), shield, {.evap_mm = 8});
+    ASSERT_TRUE(result.applied);
+    EXPECT_EQ(result.sink_mm, 512);
+    stage.FinishInterior(chunks[0]->get_id());
+    stage.FinishInterior(chunks[0]->get_id());
+    std::unordered_set<ChunkID> invalidations;
+    stage.Publish(nullptr, &invalidations);
+    EXPECT_EQ(Mass(*chunks[0]), 64000);
+    EXPECT_FLOAT_EQ(chunks[0]->max_water_delta_last_tick, 0.0f);
+    EXPECT_EQ(chunks[0]->ticks_below_threshold, 119);
+    EXPECT_EQ(chunks[0]->water_mesh_dirty_ticks, 14);
+    EXPECT_TRUE(chunks[0]->water_mesh_generated.load());
+    EXPECT_TRUE(invalidations.empty());
+}
+
+TEST(RegionalWaterTransaction, SourceActivityInjectionRefusalsPreservePublishedState) {
+    for (const int failure : {0, 1, 2, 3}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0)};
+        chunks[0]->water_depth_mm.back() = std::numeric_limits<std::int32_t>::max();
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto registers = ledger.encode();
+        Planning::Transaction stage;
+        stage.BeginSourceActivity(ledger, 0, chunks, {});
+        stage.Inject({chunks[0]->get_id(), 0, 8});
+        if (failure == 0) {
+            EXPECT_THROW(stage.Inject({chunks[0]->get_id(), 63, 1}), std::invalid_argument);
+        } else if (failure == 1) {
+            EXPECT_THROW(stage.Inject({chunks[0]->get_id(), 64, 1}), std::invalid_argument);
+        } else if (failure == 2) {
+            EXPECT_THROW(stage.Inject({chunks[0]->get_id(), 0, -1}), std::invalid_argument);
+        } else {
+            EXPECT_THROW(stage.Inject({Chunk::calculate_id({1, 0, 0}), 0, 1}),
+                         std::invalid_argument);
+        }
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), registers);
+        EXPECT_THROW(stage.Publish(), std::invalid_argument);
+    }
+}
+
+TEST(RegionalWaterTransaction, SourceActivityLateRefusalsAndRollbackPreservePublishedState) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const int failure : {0, 1, 2, 3}) {
+        auto ledger = PlanningLedger({{0, 0}});
+        const std::vector chunks{TransactionChunk(0)};
+        chunks[0]->water_depth_mm.back() = std::numeric_limits<std::int32_t>::max();
+        const auto before = TransactionBytes(*chunks[0]);
+        const auto registers = ledger.encode();
+        Planning::Transaction stage;
+        stage.BeginSourceActivity(ledger, 0, chunks, {});
+        stage.Inject({chunks[0]->get_id(), 0, 8});
+        if (failure == 0) {
+            EXPECT_THROW(stage.PrepareGrid(chunks[0]->get_id(), shield, 16), std::invalid_argument);
+        } else if (failure == 1) {
+            EXPECT_THROW(stage.StepInterior(chunks[0]->get_id(), shield, {.rain_mm = 1}),
+                         std::invalid_argument);
+        } else if (failure == 2) {
+            stage.Rollback();
+        } else {
+            // A concurrent authority revision must reject the entire staged publication.
+            chunks[0]->mark_water_data_dirty();
+            const auto revised = TransactionBytes(*chunks[0]);
+            EXPECT_THROW(stage.Publish(), std::invalid_argument);
+            EXPECT_EQ(TransactionBytes(*chunks[0]), revised);
+            continue;
+        }
+        EXPECT_FALSE(stage.pending());
+        EXPECT_EQ(TransactionBytes(*chunks[0]), before);
+        EXPECT_EQ(ledger.encode(), registers);
+        EXPECT_THROW(stage.Publish(), std::invalid_argument);
+    }
+}
+
+TEST(RegionalWaterTransaction, SourceActivityReuseDiscardsRolledBackOrigins) {
+    auto ledger = PlanningLedger({{0, 0}});
+    const std::vector chunks{TransactionChunk(0)};
+    Planning::Transaction reused;
+    reused.BeginSourceActivity(ledger, 0, chunks, {});
+    reused.Inject({chunks[0]->get_id(), 0, 8});
+    reused.Rollback();
+    static_cast<void>(ledger.schedule(WorldClock(1)));
+    reused.BeginSourceActivity(ledger, 1, chunks, {});
+    reused.Inject({chunks[0]->get_id(), 0, 3});
+    reused.Publish();
+    EXPECT_EQ(chunks[0]->water_depth_mm.front(), 1003);
+    EXPECT_FLOAT_EQ(chunks[0]->max_water_delta_last_tick, 0.003f);
+}
+
 } // namespace

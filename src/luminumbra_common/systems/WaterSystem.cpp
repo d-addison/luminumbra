@@ -671,6 +671,134 @@ WaterKernels::Result WaterKernels::StepInterior(Chunk& chunk,
     return result;
 }
 
+void WaterKernels::ActivityBaseline::Reset() noexcept {
+    m_depth.clear();
+    m_resolution = 0;
+    m_finalized = false;
+}
+
+bool WaterKernels::ActivityBaseline::Matches(const Chunk& chunk) const noexcept {
+    return !m_finalized && m_resolution != 0 && m_id == chunk.get_id() &&
+           m_resolution == GetWaterResolution(chunk) &&
+           HasCompleteIntegerWaterGrid(chunk, m_resolution) &&
+           m_depth.size() == chunk.water_depth_mm.size();
+}
+
+bool WaterKernels::ActivityBaseline::Capture(const Chunk& chunk) {
+    if (m_finalized) {
+        return false;
+    }
+    if (m_resolution != 0) {
+        return Matches(chunk);
+    }
+    const int resolution = GetWaterResolution(chunk);
+    if (!HasCompleteIntegerWaterGrid(chunk, resolution)) {
+        return false;
+    }
+    m_depth = chunk.water_depth_mm;
+    m_id = chunk.get_id();
+    m_resolution = resolution;
+    m_calm_ticks = chunk.ticks_below_threshold;
+    m_sleeping = chunk.is_water_sleeping.load(std::memory_order_relaxed);
+    return true;
+}
+
+WaterKernels::Result WaterKernels::ActivityBaseline::Inject(Chunk& chunk,
+                                                            std::size_t cell,
+                                                            std::int32_t millimetres,
+                                                            OverflowPolicy policy) {
+    Result result;
+    const auto resolution = GetWaterResolution(chunk);
+    if (m_finalized || !HasCompleteIntegerWaterGrid(chunk, resolution) ||
+        (m_resolution != 0 && !Matches(chunk)) || cell >= chunk.water_depth_mm.size() ||
+        millimetres < 0) {
+        return result;
+    }
+    const std::int64_t before = chunk.water_depth_mm[cell];
+    const auto after =
+        ClampWaterDepth(static_cast<std::int64_t>(ClampWaterDepth(before)) + millimetres);
+    result.saturated = after - before != millimetres;
+    if (policy == OverflowPolicy::Refuse && result.saturated) {
+        return result;
+    }
+    if (after != before) {
+        if (!Capture(chunk)) {
+            return result;
+        }
+        chunk.water_depth_mm[cell] = after;
+        if (chunk.water_level_data.size() == chunk.water_depth_mm.size()) {
+            chunk.water_level_data[cell] =
+                static_cast<float>(static_cast<std::int64_t>(chunk.water_bed_mm[cell]) + after) /
+                1000.0f;
+        }
+        chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+        MarkRuntimeWaterMutation(chunk);
+    }
+    result.applied = true;
+    result.source_mm = after - before;
+    result.depth_before = before;
+    result.depth_after = after;
+    result.cells_visited = 1;
+    return result;
+}
+
+WaterKernels::Result WaterKernels::ActivityBaseline::StepInterior(Chunk& chunk,
+                                                                  SHIELD_WorldSystem& shield,
+                                                                  const InteriorInputs& inputs,
+                                                                  OverflowPolicy policy) {
+    if (inputs.rain_mm < 0 || inputs.evap_mm < 0 || inputs.weather_scale_mm < 0 ||
+        !Capture(chunk)) {
+        return {};
+    }
+    const auto mesh_ticks = chunk.water_mesh_dirty_ticks;
+    const auto mesh_generated = chunk.water_mesh_generated.load();
+    auto result = WaterKernels::StepInterior(chunk, shield, inputs, policy);
+    // The solver keeps its historical arithmetic; cadence belongs to finalization.
+    chunk.water_mesh_dirty_ticks = mesh_ticks;
+    chunk.water_mesh_generated.store(mesh_generated);
+    result.water_mesh_invalidated = false;
+    return result;
+}
+
+WaterKernels::Result WaterKernels::ActivityBaseline::Finalize(Chunk& chunk, bool advance_calm) {
+    Result result;
+    if (!Matches(chunk)) {
+        return result;
+    }
+    std::int64_t delta = 0;
+    for (std::size_t cell = 0; cell < m_depth.size(); ++cell) {
+        const auto change = static_cast<std::int64_t>(chunk.water_depth_mm[cell]) - m_depth[cell];
+        delta = std::max(delta, change < 0 ? -change : change);
+    }
+    const auto previous_delta = chunk.max_water_delta_last_tick;
+    const auto previous_calm = chunk.ticks_below_threshold;
+    const auto previous_sleep = chunk.is_water_sleeping.load();
+    chunk.max_water_delta_last_tick = static_cast<float>(delta) / 1000.0f;
+    if (delta > 1) {
+        result.water_mesh_invalidated = AdvanceWaterMeshCadence(chunk);
+    }
+    if (delta > 0) {
+        chunk.ticks_below_threshold = 0;
+        chunk.is_water_sleeping.store(false);
+    } else if (advance_calm) {
+        chunk.ticks_below_threshold =
+            m_calm_ticks < std::numeric_limits<int>::max() ? m_calm_ticks + 1 : m_calm_ticks;
+        chunk.is_water_sleeping.store(m_sleeping || chunk.ticks_below_threshold >= 120);
+    } else {
+        chunk.ticks_below_threshold = m_calm_ticks;
+        chunk.is_water_sleeping.store(m_sleeping);
+    }
+    if (previous_delta != chunk.max_water_delta_last_tick ||
+        previous_calm != chunk.ticks_below_threshold ||
+        previous_sleep != chunk.is_water_sleeping.load()) {
+        MarkWaterBookkeeping(chunk);
+    }
+    m_finalized = true;
+    result.applied = true;
+    result.cells_visited = m_depth.size();
+    return result;
+}
+
 WaterKernels::Result
 WaterKernels::StepSharedFace(Chunk& owner, Chunk& neighbor, bool is_x, OverflowPolicy policy) {
     Result result;
@@ -1243,6 +1371,20 @@ void WaterSystem::acknowledge_mesh_invalidation(ChunkID id) {
     m_mesh_invalidations.erase(id);
 }
 
+WaterKernels::ActivityBaseline& WaterSystem::activity_for(Chunk& chunk) {
+    const auto [position, inserted] =
+        m_activity_indices.try_emplace(chunk.get_id(), m_activity_count);
+    if (inserted) {
+        if (m_activity_count == m_activity_targets.size()) {
+            m_activity_targets.emplace_back();
+        }
+        auto& target = m_activity_targets[m_activity_count++];
+        target.chunk = &chunk;
+        target.baseline.Reset();
+    }
+    return m_activity_targets[position->second].baseline;
+}
+
 void WaterSystem::inject_water_sources(entt::registry& registry, bool deterministic_authority) {
     auto source_view = registry.view<const Components::TransformComponent,
                                      const Components::FlowingWaterSourceComponent>();
@@ -1303,6 +1445,19 @@ void WaterSystem::inject_water_sources(entt::registry& registry, bool determinis
             // sim-relevant float mutation the mm solver never saw.
             const std::int32_t add_mm = QuantizedWaterMm(water_added * 1000.0f + 0.5f);
             if (add_mm > 0 && index < static_cast<int>(chunk.water_depth_mm.size())) {
+                if constexpr (WaterKernels::kSourceInclusiveActivity) {
+                    const auto result =
+                        activity_for(chunk).Inject(chunk,
+                                                   static_cast<std::size_t>(index),
+                                                   add_mm,
+                                                   WaterKernels::OverflowPolicy::Saturate);
+                    m_debug_source_injected_mm += result.source_mm;
+                    if (result.applied && result.source_mm != 0) {
+                        MarkRuntimeWaterMutation(chunk, deterministic_authority);
+                        m_water_activity_cache.erase(chunk.get_id());
+                    }
+                    continue;
+                }
                 m_debug_source_injected_mm +=
                     AddWaterDepth(chunk.water_depth_mm[static_cast<std::size_t>(index)], add_mm);
                 if (index < static_cast<int>(chunk.water_level_data.size()) &&
@@ -1469,6 +1624,10 @@ void WaterSystem::update(entt::registry& registry,
         dbg_split(m_dbg_water.init);
     }
 
+    if constexpr (WaterKernels::kSourceInclusiveActivity) {
+        m_activity_indices.clear();
+        m_activity_count = 0;
+    }
     inject_water_sources(registry, deterministic_authority);
 
     // --- Step 2: Wake up sleeping chunks that are adjacent to active ones (propagation) ---
@@ -1672,15 +1831,17 @@ void WaterSystem::update(entt::registry& registry,
         if (deterministic_authority && !chunk->has_water_authority()) {
             chunk->mark_water_data_dirty();
         }
+        const WaterKernels::InteriorInputs inputs{.finite_hydrology = m_finite_hydrology,
+                                                  .rain_mm = m_rain_mm_per_tick,
+                                                  .evap_mm = m_evap_mm_per_tick,
+                                                  .weather_rain = m_weather_rain,
+                                                  .weather_scale_mm = m_weather_rain_scale_mm};
         const auto result =
-            WaterKernels::StepInterior(*chunk,
-                                       *m_shield_system,
-                                       {.finite_hydrology = m_finite_hydrology,
-                                        .rain_mm = m_rain_mm_per_tick,
-                                        .evap_mm = m_evap_mm_per_tick,
-                                        .weather_rain = m_weather_rain,
-                                        .weather_scale_mm = m_weather_rain_scale_mm},
-                                       WaterKernels::OverflowPolicy::Saturate);
+            WaterKernels::kSourceInclusiveActivity
+                ? activity_for(*chunk).StepInterior(
+                      *chunk, *m_shield_system, inputs, WaterKernels::OverflowPolicy::Saturate)
+                : WaterKernels::StepInterior(
+                      *chunk, *m_shield_system, inputs, WaterKernels::OverflowPolicy::Saturate);
         src_mm += result.source_mm;
         sink_mm += result.sink_mm;
         depth_before += result.depth_before;
@@ -1721,6 +1882,23 @@ void WaterSystem::update(entt::registry& registry,
     }
     dbg_split(m_dbg_water.seam);
 
+    if constexpr (WaterKernels::kSourceInclusiveActivity) {
+        // Includes accepted sources outside the solver window. No world scan.
+        for (std::size_t index = 0; index < m_activity_count; ++index) {
+            auto& target = m_activity_targets[index];
+            if (target.baseline.cells_captured() == 0) {
+                continue;
+            }
+            const auto result = target.baseline.Finalize(*target.chunk, true);
+            if (result.water_mesh_invalidated) {
+                m_mesh_invalidations.insert(target.chunk->get_id());
+            }
+            if (deterministic_authority) {
+                MarkWaterBookkeeping(*target.chunk, true);
+            }
+        }
+    }
+
     m_dbg_last_source_mm = src_mm;
     m_dbg_last_sink_mm = sink_mm;
     m_dbg_mass_ok = ((depth_after - depth_before) == (src_mm - sink_mm));
@@ -1731,6 +1909,12 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
+        if constexpr (WaterKernels::kSourceInclusiveActivity) {
+            if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
+                m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
+            }
+            continue;
+        }
         const auto previous_counter = chunk->ticks_below_threshold;
         const bool was_sleeping = chunk->is_water_sleeping.load(std::memory_order_relaxed);
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
