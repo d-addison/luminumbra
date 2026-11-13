@@ -327,6 +327,7 @@ add_executable(common_tests
     persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
+    sim/soil_fire_disease_ordering_test.cpp
     sim/pollination_test.cpp
     sim/plant_disease_test.cpp
     sim/irrigation_test.cpp
