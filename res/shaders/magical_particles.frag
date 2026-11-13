@@ -12,7 +12,15 @@
 // (inventory vert->geom->frag link), so the fragment stage links in both.
 // ===========================================================================
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 0)
+#endif
 out vec4 FragColor;
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 
 in VS_OUT {
     vec2  texCoord;
@@ -140,4 +148,8 @@ void main() {
     }
 
     FragColor = finalColor;
+
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }

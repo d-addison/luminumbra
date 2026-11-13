@@ -49,6 +49,12 @@ INCLUDES = frozenset({"config_constants.gen.glsl", "far_world_position.glsl"})
 EXCLUDED = frozenset({"pilot/debug_view.frag.hlsl", "pilot/ssao.frag.hlsl"})
 LADDER_FILES = frozenset({"g_buffer.vert", "g_buffer.frag", "instanced_mesh.vert", "skinned_mesh.vert"})
 LADDER_DEFINES = ("LUMINUMBRA_FAR_WORLD_LADDER 1",)
+DIAGNOSTIC_FILES = frozenset({
+    "g_buffer.frag", "static_asset.frag", "tree_impostor.frag", "plant_procgen.frag",
+    "scent_decal.frag", "foliage.frag", "water.frag", "glass_oit.frag", "waterfall.frag",
+    "magical_particles.frag",
+})
+DIAGNOSTIC_DEFINES = ("LUMIN_DIAG_IDS 1",)
 # Bounds cover the whole scan and expanded output, including repeated includes.
 MAX_ENTRIES = 256
 MAX_SOURCE_BYTES = 1024 * 1024
@@ -254,6 +260,8 @@ def compile_units(sources: dict[str, str]) -> list[Unit]:
             else:
                 source = expand_source(name, sources, used)
             permutations = ((), LADDER_DEFINES) if name in LADDER_FILES else ((),)
+            if name in DIAGNOSTIC_FILES:
+                permutations += tuple((*DIAGNOSTIC_DEFINES, *defines) for defines in permutations)
             for defines in permutations:
                 units.append(Unit(name, stage, defines,
                                   Source(inject_defines(source.text, defines), source.locations)))

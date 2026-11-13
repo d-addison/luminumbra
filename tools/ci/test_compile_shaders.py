@@ -38,16 +38,32 @@ class ShaderInventoryTests(unittest.TestCase):
         sources = shaders.inventory(ROOT / "res/shaders")
         self.assertEqual(len(sources), 63)
         units = shaders.compile_units(sources)
-        self.assertEqual(len(units), 63)
+        self.assertEqual(len(units), 74)
         self.assertEqual({unit.name for unit in units}, sources.keys() - shaders.INCLUDES - shaders.EXCLUDED)
-        self.assertEqual({unit.name for unit in units if unit.defines}, shaders.LADDER_FILES)
+        self.assertEqual({unit.name for unit in units if unit.defines},
+                         shaders.LADDER_FILES | shaders.DIAGNOSTIC_FILES)
+        self.assertEqual({name for name, text in sources.items() if "#ifdef LUMIN_DIAG_IDS" in text},
+                         shaders.DIAGNOSTIC_FILES)
         for unit in units:
             self.assertEqual(unit.source.text.splitlines()[0], "#version 450 core")
             self.assertNotIn('#include "', unit.source.text)
             if unit.defines:
-                self.assertEqual(unit.defines, shaders.LADDER_DEFINES)
-                self.assertIn("#define LUMINUMBRA_FAR_WORLD_LADDER 1\n#line 2\n",
-                              unit.source.text.replace("\r\n", "\n"))
+                expected = {shaders.LADDER_DEFINES} if unit.name in shaders.LADDER_FILES else set()
+                if unit.name in shaders.DIAGNOSTIC_FILES:
+                    expected.add(shaders.DIAGNOSTIC_DEFINES)
+                    if unit.name in shaders.LADDER_FILES:
+                        expected.add((*shaders.DIAGNOSTIC_DEFINES, *shaders.LADDER_DEFINES))
+                self.assertIn(unit.defines, expected)
+                injected = "".join(f"#define {define}\n" for define in unit.defines) + "#line 2\n"
+                self.assertIn(injected, unit.source.text.replace("\r\n", "\n"))
+        for name in shaders.STAGE_FILES["frag"]:
+            permutations = {unit.defines for unit in units if unit.name == name}
+            expected = {()}
+            if name in shaders.LADDER_FILES:
+                expected.add(shaders.LADDER_DEFINES)
+            if name in shaders.DIAGNOSTIC_FILES:
+                expected |= {(*shaders.DIAGNOSTIC_DEFINES, *defines) for defines in expected}
+            self.assertEqual(permutations, expected, name)
         self.assertEqual(sum(unit.stage == "comp" for unit in units), 5)
         self.assertEqual(sum(unit.stage == "geom" for unit in units), 1)
 

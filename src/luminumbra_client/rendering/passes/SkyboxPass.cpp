@@ -1,4 +1,6 @@
 #include "SkyboxPass.h"
+#include "../DiagnosticDrawTable.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -428,6 +430,13 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_windStrength", weather.wind_strength);
 
     glBindVertexArray(ctx.screen_quad_vao);
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        // This scene-compositing overlay has no exact contributor mask yet.
+        capture->unsupported("weather_overlay_contributor_uninstrumented",
+                             0,
+                             DiagnosticOwnership::Live,
+                             DiagnosticPass::Forward);
+    }
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
