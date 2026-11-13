@@ -12,6 +12,7 @@
 
 #include "app/DeveloperUiPolicy.h"
 #include "app/FarmSpeciesCache.h"
+#include "app/PhotoEnvironment.h"
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/HardwareInfo.h"
@@ -73,6 +74,7 @@ inline constexpr int kFrameScanWatchdogFrames = 4000;
 // the RML documents are only touched when the content actually changes.
 struct HudState {
     luminumbra::game::PhotoModeState photoMode;
+    PhotoEnvironmentOverride photoEnvironment;
     bool photoModeUiShown = false; //  photo_mode.rml vs hud.rml is the active in-game overlay
     luminumbra::game::PhotoCodex photoCodex;
     // Data-driven creature species metadata (display names + rarity) the

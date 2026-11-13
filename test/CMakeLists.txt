@@ -199,6 +199,7 @@ add_executable(common_tests
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
+    rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
     common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp

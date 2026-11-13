@@ -2113,6 +2113,53 @@ class TerrainMaterialWiring(unittest.TestCase):
             guarded = block(settings, "if (terrain_anisotropy_supported)")
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
 
+class PhotoEnvironmentWiring(unittest.TestCase):
+    def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
+        main = read(CLIENT / "main_client.cpp")
+        release = main.index("renderPipeline.set_time_of_day_hold(false);")
+        photo = main.index("UpdatePhotoEnvironment(")
+        for live in ("renderPipeline.set_world_clock(gameSession->GetWorldClock());",
+                     "renderPipeline.set_time_of_day_tick(sim_tick);",
+                     "renderPipeline.set_weather_state(weather_state);"):
+            self.assertLess(release, main.index(live))
+            self.assertLess(main.index(live), photo)
+        for pin in ("scenario_runner->onPreRenderCapturePins();",
+                    "renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);",
+                    "renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);",
+                    "scenario_runner->onPreRenderFoliage()"):
+            self.assertLess(photo, main.index(pin))
+        self.assertLess(photo, main.index("renderPipeline.render_frame(", photo))
+
+    def test_photo_capture_has_no_late_environment_writers(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = block(overlays, "void UpdatePhotoCapture(")
+        for setter in ("set_weather(", "set_time_of_day(", "set_time_of_day_hold(",
+                       "consume_tod_nudge()", "consume_weather_cycle()"):
+            self.assertNotIn(setter, capture)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("SelectPhotoEnvironment(live, photo, photo_active, capture_pinned)", update)
+        self.assertIn("renderPipeline.set_time_of_day(selected.time_of_day);",
+                      block(update, "if (selected.time_active)"))
+        self.assertIn("renderPipeline.set_weather(selected.weather, selected.intensity);",
+                      block(update, "if (selected.weather_active)"))
+
+    def test_all_capture_modes_disable_photo_overrides(self):
+        main = compact(read(CLIENT / "main_client.cpp"))
+        guard = re.search(r"const bool photo_capture_pinned = ([^;]+);", main).group(1)
+        flags = ("scenario_config.active()", "g_rb_active", "g_app.capture.timelapse_frames",
+                 "g_app.capture.scene_active", "g_app.capture.frame_scan_active",
+                 "g_app.capture.render_parity_active", "g_app.capture.survey_active",
+                 "g_app.capture.bake_impostor_path.empty()",
+                 "g_app.capture.ui_screenshot_screen.empty()", "g_app.capture.ui_thumbs")
+        defaults = {flag: flag.endswith(".empty()") for flag in flags}
+        self.assertFalse(cpp_expression(guard, **defaults))
+        for flag in flags:
+            with self.subTest(flag=flag):
+                inputs = dict(defaults)
+                inputs[flag] = not inputs[flag]
+                self.assertTrue(cpp_expression(guard, **inputs))
+
+
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
