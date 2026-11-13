@@ -41,6 +41,53 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_far_render_integration_uses_region_freshness_and_keeps_strict_default(self):
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        current = body(legacy, "bool FarLodSystem::build_result_current(")
+        self.assertIn("is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true)", current)
+        self.assertIn("far_lod_region_authority_revision(result.rx, result.rz)", current)
+        world_header = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.h")
+        self.assertIn("bool region_scoped = false", world_header)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        validation = body(world, "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(")
+        regional = body(validation, "if (region_scoped)")
+        self.assertIn("snapshot.region_authority_revision", regional)
+        self.assertIn("far_lod_region_authority_revision(", regional)
+        self.assertNotIn("m_far_lod_authority_revision.load", regional)
+        self.assertIn("} else if (snapshot.authority_revision !=", validation)
+        for retained in ("m_durable_read_failed", "snapshot.params_hash",
+                         "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
+            self.assertIn(retained, validation)
+
+    def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
+        gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
+        collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        tree = body(collect, "if (impostorsOn && lod == 3 &&")
+        guard = ("if (!input.far_selection.submit || "
+                 "(input.far_selection.effective == FarWorldMode::Legacy && "
+                 "(!input.legacy_far || !input.legacy_far->terrain_resident_at(cp.position))))")
+        self.assertIn(guard, compact(tree))
+        self.assertEqual(compact(body(compact(tree), guard)), "continue;")
+        self.assertLess(compact(tree).index(guard), compact(tree).index("if (cp.impostorLeaf)"))
+        self.assertLess(compact(tree).index(guard), compact(tree).index("impostorInstances.push_back"))
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        query = body(legacy, "bool FarLodSystem::terrain_resident_at(")
+        self.assertEqual(query.count("m_residents.find("), 1)
+        self.assertNotIn("for (", query)
+        for retained in ("!m_enabled", "std::isfinite", "m_outer_clip_m",
+                         "kFarClipInnerRadiusMeters", "m_preview_inner_radius",
+                         "found->second.element_count != 0"):
+            self.assertIn(retained, query)
+
+    def test_player_view_eye_is_above_the_surface_water_at_the_spawn(self):
+        source = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")
+        eye = compact(body(source, "Luminumbra::Vec3 PlayerViewEyePosition("))
+        self.assertIn("if (!game_session || !game_session->GetWorldSystem())", eye)
+        self.assertIn("GetTerrainHeightAt(spawn.x, spawn.z)", eye)
+        self.assertIn("WaterLevelAt(spawn.x, spawn.z)", eye)
+        self.assertIn("std::max(terrain_height, water_height) + 1.8f", eye)
+        self.assertIn("camera->Position = PlayerViewEyePosition(game_session);", source)
+
     def test_wiring_regression_runs_in_ctest_and_python_ci(self):
         registration = read(ROOT / "test/CMakeLists.txt")
         self.assertEqual(registration.count("add_test(NAME UploadBudgetWiringPython "), 1)

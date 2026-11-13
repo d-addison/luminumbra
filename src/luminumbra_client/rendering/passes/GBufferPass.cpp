@@ -727,7 +727,14 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const int lod =
             SelectTreeLod(dist, authoredTree ? AuthoredTreeLodConfig(impostorsOn) : kTreeLodCfg);
         if (impostorsOn && lod == 3 &&
-            cp.impostorTree) {     // a tree part -> impostor replaces it at LOD3
+            cp.impostorTree) { // a tree part -> impostor replaces it at LOD3
+            // Compatibility props wait for terrain at their own position,
+            // including when Legacy was selected by a Ladder refusal.
+            if (!input.far_selection.submit ||
+                (input.far_selection.effective == FarWorldMode::Legacy &&
+                 (!input.legacy_far || !input.legacy_far->terrain_resident_at(cp.position)))) {
+                continue;
+            }
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
                                    // billboard
                 const glm::vec3 c =

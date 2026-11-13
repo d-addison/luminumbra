@@ -75,7 +75,8 @@ Luminumbra::Vec3 PlayerViewEyePosition(Luminumbra::world::GameSession* game_sess
     const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
     const float terrain_height =
         game_session->GetWorldSystem()->GetTerrainHeightAt(spawn.x, spawn.z);
-    return Luminumbra::Vec3(spawn.x, terrain_height + 1.8f, spawn.z);
+    const float water_height = game_session->GetWorldSystem()->WaterLevelAt(spawn.x, spawn.z);
+    return Luminumbra::Vec3(spawn.x, std::max(terrain_height, water_height) + 1.8f, spawn.z);
 }
 
 std::vector<PlayerViewStation> BuildPlayerViewStations(Luminumbra::world::GameSession* game_session,

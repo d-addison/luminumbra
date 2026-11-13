@@ -1085,7 +1085,7 @@ bool FarLodSystem::build_result_current(const BuildResult& result) const {
            result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&
            result.region_authority_revision ==
                m_world->far_lod_region_authority_revision(result.rx, result.rz) &&
-           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);
 }
 
 void FarLodSystem::queue_completed_saves() {
@@ -1631,6 +1631,30 @@ FarLodSystem::region_admission(int rx, int rz, const glm::vec3& anchor) const {
     return {.nearest_m = nearest,
             .tier = nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2,
             .wanted = nearest <= m_wanted_radius_m};
+}
+
+bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
+    if (!m_enabled || !std::isfinite(position.x) || !std::isfinite(position.y) ||
+        !std::isfinite(position.z)) {
+        return false;
+    }
+    const float distance = glm::length(position - m_last_camera_position);
+    if (!std::isfinite(distance) || distance > m_outer_clip_m ||
+        (!m_preview_mode && distance < kFarClipInnerRadiusMeters) ||
+        (m_preview_mode &&
+         glm::length(glm::vec2(position.x - m_preview_anchor.x, position.z - m_preview_anchor.z)) <
+             m_preview_inner_radius)) {
+        return false;
+    }
+    const double region_x = std::floor(static_cast<double>(position.x) / kRegionSize);
+    const double region_z = std::floor(static_cast<double>(position.z) / kRegionSize);
+    if (region_x < std::numeric_limits<int>::min() || region_x > std::numeric_limits<int>::max() ||
+        region_z < std::numeric_limits<int>::min() || region_z > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    const auto found =
+        m_residents.find(region_key(static_cast<int>(region_x), static_cast<int>(region_z)));
+    return found != m_residents.end() && found->second.element_count != 0;
 }
 
 void FarLodSystem::draw_gbuffer(Shader& geometry_shader,

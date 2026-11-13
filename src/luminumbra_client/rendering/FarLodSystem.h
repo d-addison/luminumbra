@@ -249,6 +249,10 @@ public:
     // once per rendered frame from RenderPipeline::render_frame.
     void update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position);
 
+    // Render-thread residency query for far props. One region lookup; excludes
+    // the clipped live slice, empty terrain and positions outside the draw band.
+    bool terrain_resident_at(const glm::vec3& position) const;
+
     // Draws resident far-region meshes with the ALREADY BOUND terrain
     // geometry shader (VoxelVertex layout is identical). Region-AABB frustum
     // culling; depth-biased so overlapping live chunks win. Returns draw and
