@@ -33,6 +33,7 @@
 #include "core/Log.h"
 #include "persistence/ReplacementOutputFile.h"
 #include "persistence/SaveTransaction.h"
+#include "systems/WeatherSystem.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
@@ -177,6 +178,36 @@ struct Cursor {
 //   engine_version, system_config_identity, preset_content_hash (v3).
 constexpr std::size_t kTickCountOffset = 10;
 
+bool HeaderEncodingValid(const ReplayHeader& header) {
+    const bool scheduled = WeatherVersion(header.version);
+    if (!SupportedVersion(header.version) || scheduled != !header.weather_schedule.empty() ||
+        scheduled !=
+            header.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix))
+        return false;
+    if (!scheduled)
+        return true;
+    Systems::WeatherSchedule decoded;
+    return Systems::WeatherSchedule::Decode(header.weather_schedule, decoded);
+}
+
+bool HeaderWithinBudget(const ReplayHeader& header) {
+    // Encoded headers are capped at 64 MiB, independently of record storage.
+    std::size_t remaining =
+        BoundedReplayRecorder::kSegmentBytes - 66 - (WeatherVersion(header.version) ? 4u : 0u);
+    for (const auto* part : {&header.seed_string,
+                             &header.preset,
+                             &header.start_world_hash,
+                             &header.engine_version,
+                             &header.system_config_identity,
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
+        if (part->size() > remaining)
+            return false;
+        remaining -= part->size();
+    }
+    return true;
+}
+
 std::unique_ptr<const Persistence::ReplayPairReadGuard>
 AcquireReplayPublication(const fs::path& destination) {
     // The directory must exist before the shared publication guard opens it.
@@ -210,6 +241,8 @@ void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     PutString(out, h.engine_version);
     PutString(out, h.system_config_identity);
     PutString(out, h.preset_content_hash);
+    if (WeatherVersion(h.version))
+        PutString(out, h.weather_schedule);
 }
 
 template<typename Reader>
@@ -227,7 +260,7 @@ bool ParseHeader(Reader& c, ReplayHeader& h) {
     // Refuse a version mismatch LOUDLY (the header's binding contract): a future/unknown LREC1
     // version would have a different record layout, so parsing it under today's assumptions
     // would silently mis-decode into garbage. Reject instead (Factorio breaks silently; we don't).
-    if (h.version != kLrec1Version && h.version != kLrec1ElidedVersion)
+    if (!SupportedVersion(h.version))
         return false;
     if (!c.GetU16(h.tick_rate_hz))
         return false;
@@ -256,7 +289,10 @@ bool ParseHeader(Reader& c, ReplayHeader& h) {
         return false;
     if (!c.GetString(h.preset_content_hash))
         return false;
-    return c.ok;
+    if (WeatherVersion(h.version) &&
+        !c.GetField(h.weather_schedule, Systems::WeatherSchedule::kMaxEncodedBytes))
+        return false;
+    return c.ok && HeaderEncodingValid(h);
 }
 
 // One record frame: u8 type + u64 tick + u32 payload-length + payload. The
@@ -293,8 +329,8 @@ ReplayWriter::ReplayWriter() = default;
 ReplayWriter::~ReplayWriter() = default;
 
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
-    if (header.system_config_identity.starts_with("weather-schedule-v1:"))
-        return false; // This replay format cannot reconstruct scheduled weather.
+    if (!HeaderEncodingValid(header) || !HeaderWithinBudget(header))
+        return false;
     if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return false;
     m_replacement_guard.reset();
@@ -421,12 +457,11 @@ bool BoundedReplayRecorder::Refused(int formatted) {
 bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHeader& header) {
     // Every refusal below names its step in the fixed-size refusal text; the
     // full paths go to the logger only.
-    const bool unsupported_schedule =
-        header.system_config_identity.starts_with("weather-schedule-v1:");
-    const char* initial_refusal = unsupported_schedule
-                                      ? "unsupported: weather schedule requires a versioned replay"
+    const bool invalid_header = !HeaderEncodingValid(header);
+    const char* initial_refusal = invalid_header
+                                      ? "unsupported: invalid version or weather schedule"
                                       : "unconfigured: Configure must succeed before Open";
-    if (m_byte_limit == 0 || unsupported_schedule)
+    if (m_byte_limit == 0 || invalid_header)
         return Refused(
             std::snprintf(m_open_refusal.data(), kOpenRefusalBytes, "%s", initial_refusal));
     if (!m_directory.empty())
@@ -437,14 +472,15 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                                      PathTailLength(m_directory),
                                      PathTail(m_directory)));
     // Header allocation is bounded independently of the tick/segment budget.
-    std::size_t remaining = kSegmentBytes - 66; // fixed fields + six u32 lengths
+    std::size_t remaining = kSegmentBytes - 66 - (WeatherVersion(header.version) ? 4u : 0u);
     std::size_t part_index = 0;
     for (const auto* part : {&header.seed_string,
                              &header.preset,
                              &header.start_world_hash,
                              &header.engine_version,
                              &header.system_config_identity,
-                             &header.preset_content_hash}) {
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
         if (part->size() > remaining)
             return Refused(std::snprintf(m_open_refusal.data(),
                                          kOpenRefusalBytes,
@@ -659,7 +695,8 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
         Persistence::report_snapshot_step("replay-segment-close", destination);
         std::vector<std::uint8_t> header;
         if (m_elided_tick != 0)
-            m_header.version = kLrec1ElidedVersion;
+            m_header.version =
+                WeatherVersion(m_header.version) ? kLrec1WeatherElidedVersion : kLrec1ElidedVersion;
         AppendHeader(header, m_header);
         for (std::size_t i = 0; i < 8; ++i)
             header[kTickCountOffset + i] =
@@ -1274,9 +1311,10 @@ struct ReplayCursor {
     }
 
     template<typename Field>
-    bool GetField(Field& field) {
+    bool GetField(Field& field,
+                  std::uint32_t max_bytes = (std::numeric_limits<std::uint32_t>::max)()) {
         std::uint32_t length = 0;
-        if (!GetU32(length) || !Remaining(length) || !budget.Field(length)) {
+        if (!GetU32(length) || length > max_bytes || !Remaining(length) || !budget.Field(length)) {
             ok = false;
             return false;
         }
@@ -1370,10 +1408,9 @@ ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
                 break;
             }
             contents.checkpoints.push_back(std::move(rec));
-        } else if (type == RecordType::ElidedPrefix &&
-                   contents.header.version == kLrec1ElidedVersion && contents.inputs.empty() &&
-                   contents.checkpoints.empty() && contents.elided_through_tick == 0 && tick != 0 &&
-                   payload_len == 8) {
+        } else if (type == RecordType::ElidedPrefix && ElidedVersion(contents.header.version) &&
+                   contents.inputs.empty() && contents.checkpoints.empty() &&
+                   contents.elided_through_tick == 0 && tick != 0 && payload_len == 8) {
             if (!payload.GetU64(contents.elided_prefix_digest)) {
                 break;
             }

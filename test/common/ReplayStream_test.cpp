@@ -38,6 +38,7 @@
 #include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -2188,6 +2189,8 @@ TEST_F(ReplayStreamTest, OpenRefusalsNameTheFailingStepAndStayBounded) {
     auto header = MakeHeader();
     const auto oversized = replay::BoundedReplayRecorder::kSegmentBytes;
     header.preset.assign(oversized, 'p');
+    replay::ReplayWriter writer;
+    EXPECT_FALSE(writer.Open(m_path, header));
     EXPECT_FALSE(recorder.Open(m_path, header));
     EXPECT_TRUE(recorder.OpenRefusal().starts_with("header-budget: part 1 holds " +
                                                    std::to_string(oversized) + " bytes, "))
@@ -2405,6 +2408,33 @@ TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayo
     EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
 }
 
+TEST_F(ReplayStreamTest, UnscheduledVersionsKeepThe98ByteGolden) {
+    for (const auto version : {replay::kLrec1Version, replay::kLrec1ElidedVersion}) {
+        replay::ReplayHeader header;
+        header.version = version;
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+        std::string expected(98, '\0');
+        expected.replace(0, 5, "LREC1");
+        expected[6] = static_cast<char>(version);
+        expected[8] = 30;
+        expected[34] = 4;
+        expected[38] = 2;
+        expected.replace(66, 8, "LRECEND1");
+        EXPECT_EQ(ReadBytes(), expected);
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (!parsed.has_value()) {
+            return;
+        }
+        EXPECT_EQ(parsed->header.version, version);
+        EXPECT_TRUE(parsed->header.weather_schedule.empty());
+        EXPECT_TRUE(parsed->trailer_present);
+        EXPECT_FALSE(parsed->truncated);
+    }
+}
+
 TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick) {
     replay::BoundedReplayRecorder recorder;
     constexpr std::size_t payload_bytes = replay::BoundedReplayRecorder::kSegmentBytes;
@@ -2487,12 +2517,16 @@ TEST_F(ReplayStreamTest, SamePresetNameWithDifferentResolvedContentRefusesVerifi
 
 TEST_F(ReplayStreamTest, VersionTwoWithoutPresetIdentityIsRejected) {
     auto header = MakeHeader();
-    header.version = 2;
     header.preset_content_hash.clear();
     replay::ReplayWriter writer;
     ASSERT_TRUE(writer.Open(m_path, header));
     ASSERT_TRUE(writer.Finalize(0));
-    EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+    auto bytes = ReadBytes();
+    bytes[6] = 2;
+    std::istringstream input(bytes);
+    EXPECT_FALSE(replay::ReadReplay(input).has_value());
+    header.version = 2;
+    EXPECT_FALSE(writer.Open(m_path, header));
 }
 
 TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback) {
@@ -2523,12 +2557,188 @@ TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayb
 
 TEST_F(ReplayStreamTest, LegacyHeaderWithoutConfigIdentityIsRejected) {
     auto header = MakeHeader();
-    header.version = 1;
     header.system_config_identity.clear();
     replay::ReplayWriter writer;
     ASSERT_TRUE(writer.Open(m_path, header));
     ASSERT_TRUE(writer.Finalize(0));
-    EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+    auto bytes = ReadBytes();
+    bytes[6] = 1;
+    std::istringstream input(bytes);
+    EXPECT_FALSE(replay::ReadReplay(input).has_value());
+    header.version = 1;
+    EXPECT_FALSE(writer.Open(m_path, header));
+}
+
+TEST_F(ReplayStreamTest, ScheduledHeadersRoundtripAcrossAllRecordersAndVersions) {
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    Schedule schedule;
+    for (std::uint64_t tick = 0; tick < Schedule::kMaxPhases; ++tick) {
+        schedule.phases.push_back({tick, Luminumbra::Systems::WeatherCategory::Rain, 65535, 65535});
+    }
+    schedule.strike_tick = 1;
+    auto header = MakeHeader();
+    header.weather_schedule = schedule.canonical_bytes();
+    ASSERT_EQ(header.weather_schedule.size(), Schedule::kMaxEncodedBytes);
+    Luminumbra::world::GameSession identity;
+    ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+    header.system_config_identity = identity.SystemConfigIdentity();
+    for (const auto version : {replay::kLrec1WeatherVersion, replay::kLrec1WeatherElidedVersion}) {
+        header.version = version;
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        writer.RecordInput(1, {9});
+        ASSERT_TRUE(writer.Finalize(1));
+        const auto expected = ReadBytes();
+        replay::BoundedReplayRecorder bounded;
+        ASSERT_TRUE(bounded.Configure(18, 0));
+        ASSERT_TRUE(bounded.Open(m_path, header)) << bounded.OpenRefusal();
+        ASSERT_TRUE(bounded.RecordTick(1, {9}, nullptr, 1));
+        ASSERT_TRUE(bounded.Finalize(m_path, 1, 1));
+        EXPECT_EQ(ReadBytes(), expected);
+        replay::QueuedReplayRecorder queued;
+        ASSERT_TRUE(queued.Configure(18, 0));
+        ASSERT_TRUE(queued.Open(m_path, header)) << queued.OpenRefusal();
+        ASSERT_TRUE(queued.RecordTick(1,
+                                      std::make_shared<const std::vector<std::uint8_t>>(
+                                          std::initializer_list<std::uint8_t>{9}),
+                                      nullptr,
+                                      1));
+        ASSERT_TRUE(queued.Finalize(m_path, 1, 1));
+        EXPECT_EQ(ReadBytes(), expected);
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (!parsed.has_value()) {
+            return;
+        }
+        EXPECT_EQ(parsed->header.weather_schedule, header.weather_schedule);
+        EXPECT_EQ(parsed->header.version, version);
+        EXPECT_TRUE(replay::ConfigurationMatches(
+            parsed->header, header.system_config_identity, header.preset_content_hash));
+    }
+    header.version = replay::kLrec1WeatherVersion;
+    replay::BoundedReplayRecorder suffix;
+    ASSERT_TRUE(suffix.Configure(18, 0));
+    ASSERT_TRUE(suffix.Open(m_path, header)) << suffix.OpenRefusal();
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick) {
+        ASSERT_TRUE(suffix.RecordTick(tick, {9}, nullptr, tick));
+    }
+    ASSERT_TRUE(suffix.Finalize(m_path, 2048, 2048));
+    const auto parsed = replay::ReadReplay(m_path);
+    ASSERT_TRUE(parsed.has_value());
+    if (!parsed.has_value()) {
+        return;
+    }
+    EXPECT_FALSE(parsed->truncated);
+    EXPECT_TRUE(parsed->trailer_present);
+    EXPECT_EQ(parsed->header.version, replay::kLrec1WeatherElidedVersion);
+    EXPECT_EQ(parsed->header.weather_schedule, header.weather_schedule);
+    EXPECT_EQ(parsed->elided_through_tick, 1024u);
+    ASSERT_EQ(parsed->inputs.size(), 1024u);
+    EXPECT_EQ(parsed->inputs.front().tick, 1025u);
+    auto downgraded = ReadBytes();
+    downgraded[6] = static_cast<char>(replay::kLrec1WeatherVersion);
+    std::istringstream input(downgraded);
+    const auto refused_suffix = replay::ReadReplay(input);
+    ASSERT_TRUE(refused_suffix.has_value());
+    if (!refused_suffix.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(refused_suffix->truncated);
+    EXPECT_EQ(refused_suffix->elided_through_tick, 0u);
+    EXPECT_EQ(refused_suffix->header.weather_schedule, header.weather_schedule);
+}
+
+TEST_F(ReplayStreamTest, ScheduledHeaderFailuresRefuseBeforePublishingOrReplacingState) {
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    const Schedule schedule{.phases = {{0, Luminumbra::Systems::WeatherCategory::Clear, 0, 0}},
+                            .strike_tick = std::nullopt};
+    auto header = MakeHeader();
+    header.version = replay::kLrec1WeatherVersion;
+    header.weather_schedule = schedule.canonical_bytes();
+    Luminumbra::world::GameSession identity;
+    ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+    header.system_config_identity = identity.SystemConfigIdentity();
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, header));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto original = ReadBytes();
+    const auto schedule_offset = original.size() - 32 - header.weather_schedule.size();
+    for (std::size_t length = 0; length < schedule_offset + header.weather_schedule.size();
+         ++length) {
+        std::istringstream input(original.substr(0, length));
+        EXPECT_FALSE(replay::ReadReplay(input).has_value()) << length;
+    }
+    std::vector<std::string> malformed;
+    auto bytes = original;
+    bytes[schedule_offset + 3] = '2';
+    malformed.push_back(bytes);
+    for (const std::uint32_t size : {0u,
+                                     static_cast<std::uint32_t>(Schedule::kMaxEncodedBytes + 1),
+                                     (std::numeric_limits<std::uint32_t>::max)()}) {
+        bytes = original;
+        for (std::size_t index = 0; index < 4; ++index) {
+            bytes[schedule_offset - 4 + index] = static_cast<char>((size >> (8 * index)) & 255);
+        }
+        malformed.push_back(bytes);
+    }
+    for (const unsigned version : {0u, 1u, 2u, 3u, 4u, 7u, 255u}) {
+        bytes = original;
+        bytes[6] = static_cast<char>(version);
+        malformed.push_back(bytes);
+    }
+    for (const auto& invalid : malformed) {
+        std::istringstream input(invalid);
+        EXPECT_FALSE(replay::ReadReplay(input).has_value());
+    }
+    // The oversized field fits this sparse provider and its owned-byte budget.
+    // Refuse at the length, before allocating or reading any schedule payload.
+    bytes = original;
+    PatchU32(
+        bytes, schedule_offset - 4, static_cast<std::uint32_t>(Schedule::kMaxEncodedBytes + 1));
+    ReplayProvider oversized(bytes, std::uint64_t{1} << 40);
+    std::istream oversized_input(&oversized);
+    EXPECT_FALSE(replay::ReadReplay(oversized_input).has_value());
+    EXPECT_EQ(oversized.bytes_read, schedule_offset);
+    std::istringstream budgeted(original);
+    EXPECT_FALSE(replay::ReadReplay(budgeted, {.field_bytes = 1, .records = 1}).has_value());
+    std::vector<replay::ReplayHeader> refused;
+    for (const auto& encoding :
+         {std::string{}, std::string{"WSC2"}, std::string(Schedule::kMaxEncodedBytes + 1, '0')}) {
+        auto invalid = header;
+        invalid.weather_schedule = encoding;
+        refused.push_back(invalid);
+    }
+    auto invalid = header;
+    invalid.system_config_identity = MakeHeader().system_config_identity;
+    refused.push_back(invalid);
+    for (const std::uint16_t version : {std::uint16_t{3}, std::uint16_t{4}, std::uint16_t{7}}) {
+        invalid = header;
+        invalid.version = version;
+        refused.push_back(invalid);
+    }
+    ASSERT_TRUE(writer.Open(m_path, header));
+    writer.RecordInput(1, {});
+    for (const auto& rejected : refused) {
+        EXPECT_FALSE(writer.Open(m_path, rejected));
+        EXPECT_EQ(writer.InputRecordCount(), 1u);
+        replay::BoundedReplayRecorder bounded;
+        ASSERT_TRUE(bounded.Configure(18, 0));
+        EXPECT_FALSE(bounded.Open(m_path, rejected));
+        EXPECT_FALSE(bounded.OpenRefusal().empty());
+        EXPECT_EQ(bounded.SegmentCount(), 0u);
+        replay::QueuedReplayRecorder queued;
+        ASSERT_TRUE(queued.Configure(18, 0));
+        EXPECT_FALSE(queued.Open(m_path, rejected));
+        EXPECT_EQ(ReadBytes(), original);
+    }
+    ASSERT_TRUE(writer.Finalize(1));
+    const auto retained = replay::ReadReplay(m_path);
+    ASSERT_TRUE(retained.has_value());
+    if (!retained.has_value()) {
+        return;
+    }
+    ASSERT_EQ(retained->inputs.size(), 1u);
+    EXPECT_EQ(retained->header.weather_schedule, header.weather_schedule);
 }
 
 // Input records (including an EMPTY input set) and checkpoints round-trip with

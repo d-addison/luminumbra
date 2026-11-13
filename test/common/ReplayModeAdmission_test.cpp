@@ -5,6 +5,7 @@
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
@@ -128,6 +129,87 @@ protected:
 
 class ReplayModeRoundtrip : public ReplayModeAdmission,
                             public testing::WithParamInterface<std::uint64_t> {};
+
+class ReplayModeWeatherRoundtrip : public ReplayModeAdmission,
+                                   public testing::WithParamInterface<bool> {};
+
+TEST_P(ReplayModeWeatherRoundtrip, ScheduledRecordPlaybackRestoresWeatherBeforeBoot) {
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    using Category = Luminumbra::Systems::WeatherCategory;
+    const Schedule schedule{.phases = {{0, Category::Clear, 0, 0},
+                                       {2, Category::Rain, 65535, 65535},
+                                       {5, Category::Clear, 0, 0}},
+                            .strike_tick = 3};
+    const bool regional = GetParam();
+    SCOPED_TRACE(regional);
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        regional ? R"({"sim":{"active_regions":{"enabled":true}}})"
+                 : R"({"sim":{"active_regions":{"enabled":false}}})");
+    options.weather_schedule = std::make_shared<const Schedule>(schedule);
+    options.ticks = 6;
+    ASSERT_EQ(RunRecord(options), 0) << logs.str();
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded.has_value()) {
+        return;
+    }
+    EXPECT_EQ(recorded->header.version, replay::kLrec1WeatherVersion);
+    EXPECT_EQ(recorded->header.weather_schedule, schedule.canonical_bytes());
+    EXPECT_EQ(RuntimeHelloFrom(options).system_config_identity,
+              recorded->header.system_config_identity);
+    // Playback must restore from the file, independently of recording options.
+    options.weather_schedule.reset();
+    const auto admitted = ReplayRunnerConfigFrom(options, recorded->header);
+    ASSERT_TRUE(admitted.has_value());
+    if (!admitted.has_value()) {
+        return;
+    }
+    ASSERT_NE(admitted->weather_schedule, nullptr);
+    EXPECT_EQ(*admitted->weather_schedule, schedule);
+    ASSERT_EQ(RunReplay(options), 0) << logs.str();
+    const auto artifact = Artifact();
+    EXPECT_EQ(artifact.at("passed"), true);
+    EXPECT_EQ(artifact.at("start_world_hash_match"), true);
+    EXPECT_EQ(artifact.at("end_hash_match"), true);
+    auto changed = recorded->header;
+    auto altered = schedule;
+    altered.phases[1].storm = 65534;
+    changed.weather_schedule = altered.canonical_bytes();
+    EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed).has_value());
+    for (const auto& invalid :
+         {std::string{}, std::string{"WSC2"}, std::string(Schedule::kMaxEncodedBytes + 1, '0')}) {
+        changed.weather_schedule = invalid;
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed).has_value());
+    }
+    changed = recorded->header;
+    changed.version = replay::kLrec1Version;
+    EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed).has_value());
+    changed.version = 7;
+    EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed).has_value());
+    const auto complete = ReadReplayModeFile(options.record_path);
+    ASSERT_FALSE(complete.empty());
+    {
+        std::ofstream output(options.record_path, std::ios::binary | std::ios::trunc);
+        output << complete.substr(0, complete.size() - 1);
+        ASSERT_TRUE(output.good());
+    }
+    ExpectAdmissionRefused("truncated (no valid trailer)");
+}
+
+INSTANTIATE_TEST_SUITE_P(WeatherBackends, ReplayModeWeatherRoundtrip, testing::Bool());
+
+TEST_F(ReplayModeAdmission, InvalidRecordingSchedulePreservesOutputAndDoesNotCreateWorld) {
+    {
+        std::ofstream output(options.record_path);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    options.weather_schedule = std::make_shared<const Luminumbra::Systems::WeatherSchedule>();
+    EXPECT_TRUE(RuntimeHelloFrom(options).system_config_identity.empty());
+    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), "retained");
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+}
 
 TEST_F(ReplayModeAdmission, FixtureMutationRecoversInterruptedPublicationBeforeReplacing) {
     using Identity = std::array<std::uint64_t, 3>;

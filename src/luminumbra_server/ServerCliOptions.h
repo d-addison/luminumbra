@@ -5,8 +5,13 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
+
+namespace Luminumbra::Systems {
+struct WeatherSchedule;
+}
 
 struct ServerCliOptions {
     std::string root;
@@ -14,6 +19,8 @@ struct ServerCliOptions {
     std::string preset_json_path;
     std::optional<luminumbra::core::SystemConfig> systems_config_override;
     std::optional<std::string> preset_json_override;
+    // Programmatic recording workload; playback always uses the recorded header.
+    std::shared_ptr<const Luminumbra::Systems::WeatherSchedule> weather_schedule;
     std::string preset = "default";
     std::string seed = "424242";
     std::string world_id;
