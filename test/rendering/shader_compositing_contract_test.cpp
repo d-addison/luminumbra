@@ -1,15 +1,21 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/app/GroundCoverHull.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 #include "luminumbra_client/rendering/WeatherRenderBridge.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -115,6 +121,137 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     ExpectContains(source, "background_has_opaque_depth ? u_sky_color : resolved_background_color");
     ExpectContains(source, "if (!has_opaque_depth(mid_depth))");
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
+}
+
+TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
+    const auto source = ReadShader("src/luminumbra_client/app/ProcgenPalettes.cpp");
+    for (const char* kind : {"Rock", "Bush"}) {
+        const auto palette =
+            ExtractBlock(source, std::string("void BuildProcgen") + kind + "Palette(");
+        ASSERT_FALSE(palette.empty());
+        for (int lod = 1; lod <= 3; ++lod) {
+            ExpectContains(palette,
+                           "rp.register_procgen_mesh(base + \".lod" + std::to_string(lod) +
+                               "\", BuildGroundCoverMesh(lo, hi, " + (lod == 3 ? "true" : "false") +
+                               "));");
+        }
+        EXPECT_EQ(palette.find("Billboard"), std::string::npos);
+    }
+    const auto upload = ExtractBlock(source, "BuildGroundCoverMesh(");
+    ExpectContains(upload, "BuildGroundCoverHull(lo, hi, farthest)");
+    ExpectContains(upload, "f < hull.faceCount");
+    ExpectContains(upload, "face.positions[0], face.normal");
+    ExpectContains(upload, "face.positions[1], face.normal");
+    ExpectContains(upload, "face.positions[2], face.normal");
+    ExpectContains(upload, "MeshLoader::CreateFromArrays(vertices, indices)");
+}
+
+void ExpectClosedGroundCoverHull(const Luminumbra::Client::App::GroundCoverHull& hull,
+                                 const glm::vec3& lo,
+                                 const glm::vec3& hi) {
+    ASSERT_GT(hull.faceCount, 0u);
+    ASSERT_LE(hull.faceCount, hull.faces.size());
+    std::vector<glm::vec3> positions;
+    std::map<std::pair<std::size_t, std::size_t>, std::pair<int, int>> edges;
+    for (std::size_t f = 0; f < hull.faceCount; ++f) {
+        std::array<std::size_t, 3> welded{};
+        for (std::size_t v = 0; v < welded.size(); ++v) {
+            const auto& position = hull.faces[f].positions[v];
+            auto found = std::find(positions.begin(), positions.end(), position);
+            welded[v] = static_cast<std::size_t>(found - positions.begin());
+            if (found == positions.end()) {
+                positions.push_back(position);
+            }
+        }
+        for (std::size_t v = 0; v < welded.size(); ++v) {
+            const auto a = welded[v];
+            const auto b = welded[(v + 1) % welded.size()];
+            ASSERT_NE(a, b);
+            auto& edge = edges[std::minmax(a, b)];
+            ++edge.first;
+            edge.second += a < b ? 1 : -1;
+        }
+    }
+    for (const auto& [edge, uses] : edges) {
+        SCOPED_TRACE(::testing::Message() << "edge " << edge.first << "-" << edge.second);
+        EXPECT_EQ(uses.first, 2);
+        EXPECT_EQ(uses.second, 0);
+    }
+    glm::vec3 center(0.0f);
+    glm::vec3 actualLo = positions.front(), actualHi = positions.front();
+    for (const auto& position : positions) {
+        center += position;
+        actualLo = glm::min(actualLo, position);
+        actualHi = glm::max(actualHi, position);
+    }
+    center /= static_cast<float>(positions.size());
+    EXPECT_EQ(actualLo, lo);
+    EXPECT_EQ(actualHi, hi);
+    for (std::size_t f = 0; f < hull.faceCount; ++f) {
+        const auto& face = hull.faces[f];
+        const glm::vec3 cross = glm::cross(face.positions[1] - face.positions[0],
+                                           face.positions[2] - face.positions[0]);
+        ASSERT_GT(glm::length(cross), 0.0f);
+        EXPECT_GT(glm::dot(cross, face.positions[0] - center), 0.0f);
+        EXPECT_NEAR(glm::length(face.normal), 1.0f, 1e-5f);
+        EXPECT_GT(glm::dot(glm::normalize(cross), face.normal), 0.99999f);
+        EXPECT_TRUE(std::isfinite(face.normal.x));
+        EXPECT_TRUE(std::isfinite(face.normal.y));
+        EXPECT_TRUE(std::isfinite(face.normal.z));
+    }
+}
+
+TEST(GroundCoverContract, CoarseHullGeometryIsClosedOutwardAndReducesTheFarthestBudget) {
+    using Luminumbra::Client::App::BuildGroundCoverHull;
+    // Rock-like tall bounds and bush-like wide bounds, including translated and small props.
+    const std::array<std::pair<glm::vec3, glm::vec3>, 4> bounds = {
+        {{{-1, -2, -1}, {1, 2, 1}},
+         {{-2, -0.2f, -3}, {2, 0.8f, 3}},
+         {{3, 1, -5}, {5, 2, -2}},
+         {{-0.01f, -0.01f, -0.01f}, {0.01f, 0.01f, 0.01f}}}};
+    for (const auto& [lo, hi] : bounds) {
+        SCOPED_TRACE(::testing::Message() << "bounds " << lo.x << "," << lo.y << "," << lo.z);
+        const auto lod2 = BuildGroundCoverHull(lo, hi, false);
+        const auto lod3 = BuildGroundCoverHull(lo, hi, true);
+        EXPECT_EQ(lod2.faceCount, 8u);
+        EXPECT_LE(lod3.faceCount, 4u);
+        EXPECT_LT(lod3.faceCount, lod2.faceCount);
+        ExpectClosedGroundCoverHull(lod2, lo, hi);
+        ExpectClosedGroundCoverHull(lod3, lo, hi);
+    }
+}
+
+TEST(GroundCoverContract, DegenerateCoarseHullFacesKeepFiniteFallbackNormals) {
+    using Luminumbra::Client::App::BuildGroundCoverHull;
+    for (bool farthest : {false, true}) {
+        const auto hull = BuildGroundCoverHull(glm::vec3(0), glm::vec3(0), farthest);
+        for (std::size_t f = 0; f < hull.faceCount; ++f) {
+            EXPECT_EQ(hull.faces[f].normal, glm::vec3(0, 1, 0));
+        }
+    }
+}
+
+TEST(GroundCoverContract, GrassHasSeparatedCurvedBladesAndClutterHasCutoutCorners) {
+    const auto source = ReadShader("res/shaders/foliage.frag");
+    const auto blade = ExtractBlock(source, "float bladeDistance(");
+    ExpectContains(blade, "float t = clamp(p.y / height, 0.0, 1.0);");
+    ExpectContains(blade, "float center = root + lean * t * t;");
+    ExpectContains(blade, "float halfWidth = 0.11 * (1.0 - t * t);");
+    ExpectContains(blade, "return max(abs(p.x - center) - halfWidth, p.y - height);");
+    const auto main = ExtractBlock(source, "void main()");
+    EXPECT_EQ(CountOccurrences(main, "bladeDistance("), 3u);
+    ExpectContains(main, "bladeDistance(p, -0.55, -0.20, 0.78)");
+    ExpectContains(main, "bladeDistance(p, 0.0, 0.16, 1.0)");
+    ExpectContains(main, "bladeDistance(p, 0.55, 0.20, 0.88)");
+    ExpectContains(main, "length(vec2(p.x, p.y * 2.0 - 1.0)) - 1.0");
+    ExpectContains(main, "fs_in.color.a > 0.5 ? grassDistance : clutterDistance");
+    ExpectContains(main, "max(fwidth(silhouette), 0.015)");
+    ExpectContains(main, "smoothstep(-edgeAA, edgeAA, silhouette)) * fs_in.fade");
+    ExpectContains(ExtractBlock(main, "if (alpha < 0.02)"), "discard;");
+    // CPU, compute and frozen replay draw the same vertex/fragment pair.
+    const auto pass = ReadShader("src/luminumbra_client/rendering/passes/FoliagePass.cpp");
+    ExpectContains(pass, "res/shaders/foliage.vert");
+    ExpectContains(pass, "res/shaders/foliage.frag");
 }
 
 TEST(WeatherFrameContract, LiveRainReachesSkyAndOverlayWithoutANearbyStorm) {
@@ -333,7 +470,7 @@ TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedH
                         "ssao_bilateral_upsample.frag",
                         "scent_decal.frag",
                         "debug_view.frag"};
-    const std::size_t expected_calls[]{2, 2, 3, 2, 1, 1};
+    const std::size_t expected_calls[]{3, 2, 3, 2, 1, 1};
     for (std::size_t i = 0; i < 6; ++i) {
         SCOPED_TRACE(files[i]);
         const auto source = ReadShader(std::filesystem::path("res/shaders") / files[i]);
@@ -629,6 +766,287 @@ TEST(FarWorldShadowContract, NegativeAOBypassesOnlyTheThreeCascadeLookups) {
     ExpectContains(body, "* shadow * (1.0 - cloud_shadow) * shadowTint;");
     ExpectContains(body, "texture(u_ssao, TexCoords).r");
     ExpectContains(body, "skyVis = computeSkyVisibility(viewPos, viewNormal);");
+}
+
+TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
+    const auto source = ReadShader("res/shaders/lighting_pass.frag");
+    const auto body = ExtractBlock(source, "float computeSkyVisibility(");
+    ASSERT_FALSE(body.empty());
+    ExpectContains(body,
+                   "u_caveSkyMaxDist <= 0.0 || u_caveThickness <= 0.0 || u_caveSkySteps <= 0");
+    ExpectContains(body, "int steps = min(u_caveSkySteps, 32);");
+    ExpectContains(body, "float stepLen = u_caveSkyMaxDist / float(steps);");
+    ExpectContains(body, "if (s > steps) break;");
+    ExpectContains(body, "bool previousValid = true;");
+    ExpectContains(body, "float previousDistance = 0.0;");
+    ExpectContains(body, "float previousDepthGap = 0.0;");
+    ExpectContains(body, "previousValid && previousDepthGap <= 0.05 && depthGap > 0.05");
+    ExpectContains(body, "for (int refinement = 0; refinement < 8; ++refinement)");
+    ExpectContains(body, "if (refinementTaps >= 8) break;");
+    ExpectContains(body, "float midpoint = 0.5 * (frontDistance + backDistance);");
+    ExpectContains(body, "previousValid = false;");
+    ExpectContains(body, "if (refinedGap <= 0.05)");
+    ExpectContains(body, "frontDistance = midpoint;");
+    ExpectContains(body, "backDistance = midpoint;");
+    ExpectContains(body, "sampPos = refinedPosition;");
+    ExpectContains(body, "depthGap = refinedGap;");
+    ExpectContains(body, "bool originBracket = s == 1;");
+    ExpectContains(body, "if (originBracket)");
+    ExpectContains(body, "originBracket = false;");
+    const auto refinement = ExtractBlock(body, "if (crossing)");
+    EXPECT_EQ(refinement.find("u_caveThickness"), std::string::npos)
+        << "intersection selection must not branch or stop at the thickness cutoff";
+    ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition)");
+    ExpectContains(body, "depthGap > 0.05 && depthGap < u_caveThickness");
+    ExpectContains(body, "length(sampPos - ro) / u_caveSkyMaxDist");
+    ExpectContains(body, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
+    ExpectContains(body, "occluded = max(occluded, distanceWeight * thicknessWeight);");
+    EXPECT_EQ(body.find("float(s - 1)"), std::string::npos);
+    // Legacy and Ladder G-buffers share this march; authored studio bypasses it.
+    ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)");
+    ExpectContains(ExtractBlock(source, "void main()"),
+                   "skyVis = computeSkyVisibility(viewPos, viewNormal);");
+}
+
+namespace {
+struct CanopySample {
+    double gap;
+    double surfaceDistance;
+    bool valid;
+    bool onScreen;
+};
+
+struct CanopyProbe {
+    double visibility;
+    int taps;
+};
+
+// Scalar mirror of computeSkyVisibility; the source contract above pins the
+// origin, crossing predicate, bisection, read budget and both falloff factors.
+template<typename Sample>
+CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickness, int steps) {
+    if (maxDistance <= 0 || thickness <= 0 || steps <= 0) {
+        return {1, 0};
+    }
+    steps = std::min(steps, 32);
+    const double stepLength = maxDistance / steps;
+    bool previousValid = true;
+    double previousDistance = 0;
+    double previousGap = 0;
+    int refinementTaps = 0;
+    int taps = 0;
+    double occluded = 0;
+    for (int step = 1; step <= steps; ++step) {
+        const double distance = stepLength * step;
+        auto hit = sample(distance);
+        if (!hit.onScreen) {
+            break;
+        }
+        ++taps;
+        if (!hit.valid) {
+            previousValid = false;
+            continue;
+        }
+        const bool crossing = previousValid && previousGap <= 0.05 && hit.gap > 0.05;
+        double frontDistance = previousDistance;
+        double backDistance = distance;
+        previousValid = true;
+        previousDistance = distance;
+        previousGap = hit.gap;
+        if (crossing) {
+            bool originBracket = step == 1;
+            for (int refinement = 0; refinement < 8; ++refinement) {
+                if (refinementTaps >= 8) {
+                    break;
+                }
+                const double midpoint = 0.5 * (frontDistance + backDistance);
+                const auto refined = sample(midpoint);
+                if (!refined.onScreen) {
+                    break;
+                }
+                ++refinementTaps;
+                ++taps;
+                if (!refined.valid) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
+                if (refined.gap <= 0.05) {
+                    frontDistance = midpoint;
+                    originBracket = false;
+                } else {
+                    backDistance = midpoint;
+                    hit = refined;
+                }
+            }
+        }
+        if (hit.gap > 0.05 && hit.gap < thickness) {
+            const double distanceWeight =
+                1 - std::clamp(hit.surfaceDistance / maxDistance, 0.0, 1.0);
+            const double ramp =
+                std::clamp((hit.gap - 0.5 * thickness) / (0.5 * thickness), 0.0, 1.0);
+            const double thicknessWeight = 1 - ramp * ramp * (3 - 2 * ramp);
+            occluded = std::max(occluded, distanceWeight * thicknessWeight);
+        }
+    }
+    return {1 - 0.94 * std::clamp(occluded, 0.0, 1.0), taps};
+}
+
+// Level perspective camera, fragment (0,-1.7,-12), upward normal, 60 degree
+// vertical FOV. A floor supplies the known-open geometry below the horizon.
+CanopySample CanopyRoomSample(double distance, double ceilingHeight, double originY = -1.65) {
+    const double rayY = originY + distance;
+    if (rayY == 0) {
+        return {0, 0, false, true};
+    }
+    const double surfaceY = rayY > 0 ? ceilingHeight : originY - 0.05;
+    const double surfaceZ = -12 * surfaceY / rayY;
+    return {std::hypot(rayY, 12) - std::hypot(surfaceY, surfaceZ),
+            std::hypot(surfaceY - originY, surfaceZ + 12),
+            true,
+            std::abs(rayY) <= 12 / std::sqrt(3.0)};
+}
+
+void ExpectCanopyMirrorContract() {
+    const auto body =
+        ExtractBlock(ReadShader("res/shaders/lighting_pass.frag"), "float computeSkyVisibility(");
+    ExpectContains(body, "bool previousValid = true;");
+    ExpectContains(body, "previousValid && previousDepthGap <= 0.05 && depthGap > 0.05");
+    EXPECT_EQ(ExtractBlock(body, "if (crossing)").find("u_caveThickness"), std::string::npos);
+}
+} // namespace
+
+TEST(CanopyAmbientContract, FirstIntervalCeilingIsOccluded) {
+    ExpectCanopyMirrorContract();
+    for (bool floorVisible : {false, true}) {
+        const auto room = [floorVisible](double distance) {
+            auto sample = CanopyRoomSample(distance, 1);
+            sample.valid = sample.valid && (floorVisible || distance > 1.65);
+            return sample;
+        };
+        ASSERT_GT(room(3).gap, 1.5) << "the first coarse tap has crossed the entire band";
+        const auto result = ProbeCanopy(room, 24, 1.5, 8);
+        EXPECT_LT(result.visibility, 0.3);
+        EXPECT_GT(result.taps, 2);
+        EXPECT_LE(result.taps, 40);
+    }
+    const auto ceilingBeforeOpenGeometry = [](double distance) {
+        auto sample = CanopyRoomSample(distance, 0.1, -0.8);
+        sample.valid = sample.valid && distance > 0.8;
+        return sample;
+    };
+    EXPECT_LT(ProbeCanopy(ceilingBeforeOpenGeometry, 24, 1.5, 8).visibility, 0.3)
+        << "a back-side hit before an empty open-side probe must retain the origin bracket";
+}
+
+TEST(CanopyAmbientContract, CrossingWeightsAreContinuousAtThicknessCutoff) {
+    ExpectCanopyMirrorContract();
+    // Tune the ceiling so the second coarse gap straddles 1.5 m. The first
+    // coarse sample is in front of the ceiling on both sides of the cutoff.
+    const double rayY = -1.65 + 6;
+    const double rayDepth = std::hypot(rayY, 12);
+    double visibility[2]{};
+    int index = 0;
+    for (double gap : {1.499, 1.501}) {
+        const double ceilingHeight = rayY * (1 - gap / rayDepth);
+        const auto room = [ceilingHeight](double distance) {
+            return CanopyRoomSample(distance, ceilingHeight);
+        };
+        ASSERT_LE(room(3).gap, 0);
+        ASSERT_NEAR(room(6).gap, gap, 1e-12);
+        const auto result = ProbeCanopy(room, 24, 1.5, 8);
+        EXPECT_LT(result.visibility, 0.4);
+        EXPECT_LE(result.taps, 40);
+        visibility[index++] = result.visibility;
+    }
+    EXPECT_NEAR(visibility[0], visibility[1], 0.005);
+}
+
+TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) {
+    ExpectCanopyMirrorContract();
+    for (double missingDistance : {4.5, 3.75}) {
+        for (bool onScreen : {false, true}) {
+            const auto missing = [onScreen, missingDistance](double distance) {
+                const bool present = distance != missingDistance;
+                return CanopySample{distance <= 3 ? 0.0 : 8.0, 1, present, present || onScreen};
+            };
+            const auto result = ProbeCanopy(missing, 6, 1.5, 2);
+            EXPECT_DOUBLE_EQ(result.visibility, 1);
+            const int validTaps = missingDistance == 4.5 ? 2 : 3;
+            EXPECT_EQ(result.taps, validTaps + (onScreen ? 1 : 0));
+        }
+    }
+    const auto emptyOriginInterval = [](double distance) {
+        return CanopySample{8, 1, distance == 3, true};
+    };
+    const auto empty = ProbeCanopy(emptyOriginInterval, 3, 1.5, 1);
+    EXPECT_DOUBLE_EQ(empty.visibility, 1) << "empty probes cannot invent a hit inside the band";
+    EXPECT_EQ(empty.taps, 9);
+    const auto originHole = [](double distance) {
+        return CanopySample{distance <= 1.5 ? 0.0 : 8.0, 1, distance != 2.25, true};
+    };
+    const auto hole = ProbeCanopy(originHole, 3, 1.5, 1);
+    EXPECT_DOUBLE_EQ(hole.visibility, 1)
+        << "a hole after observed open geometry invalidates the origin bracket";
+    EXPECT_EQ(hole.taps, 3);
+    const auto stripes = [](double distance) {
+        const auto band = static_cast<int>(std::floor(distance / 0.75 + 0.5));
+        return CanopySample{band % 2 == 0 ? 8.0 : -80.0, 1, true, true};
+    };
+    const auto exhausted = ProbeCanopy(stripes, 24, 1.5, 64);
+    EXPECT_DOUBLE_EQ(exhausted.visibility, 1);
+    EXPECT_EQ(exhausted.taps, 40);
+    const auto laterHit = [](double distance) {
+        const double gap = distance < 1.125 || (distance > 1.5 && distance <= 2.25) ? -80
+                           : distance > 2.25 && distance <= 3                       ? 0.5
+                                                                                    : 8;
+        return CanopySample{gap, 1, true, true};
+    };
+    const auto retained = ProbeCanopy(laterHit, 24, 1.5, 32);
+    EXPECT_LT(retained.visibility, 0.2)
+        << "an observed in-band hit survives exhaustion of the shared refinement budget";
+    EXPECT_EQ(retained.taps, 40);
+    const auto interruptedHit = [](double distance) {
+        return CanopySample{distance <= 3 ? 0 : 0.5, 1, distance != 4.5, true};
+    };
+    const auto interrupted = ProbeCanopy(interruptedHit, 6, 1.5, 2);
+    EXPECT_NEAR(interrupted.visibility, 0.06 + 0.94 / 6, 1e-12)
+        << "missing refinement data retains an already observed in-band sample";
+    EXPECT_EQ(interrupted.taps, 3);
+    const auto room = [](double distance) {
+        return CanopyRoomSample(distance, 1);
+    };
+    for (double invalid : {0.0, -1.0}) {
+        EXPECT_EQ(ProbeCanopy(room, invalid, 1.5, 8).taps, 0);
+        EXPECT_EQ(ProbeCanopy(room, 24, invalid, 8).taps, 0);
+    }
+    for (int invalid : {0, -1}) {
+        EXPECT_EQ(ProbeCanopy(room, 24, 1.5, invalid).taps, 0);
+    }
+}
+
+TEST(CanopyAmbientContract, BiasAndMissingSamplesPreserveThicknessAcceptance) {
+    ExpectCanopyMirrorContract();
+    const auto shallowFront = [](double distance) {
+        return CanopySample{distance <= 3 ? 0.03 : 0.5, 1, true, true};
+    };
+    const auto crossing = ProbeCanopy(shallowFront, 6, 1.5, 2);
+    EXPECT_NEAR(crossing.visibility, 0.06 + 0.94 / 6, 1e-12);
+    EXPECT_EQ(crossing.taps, 10) << "a positive gap below the self-bias is still an open bracket";
+    for (double gap : {-0.1, 0.01, 0.05, 0.8, 1.4, 1.5, 1.6}) {
+        const auto unbracketed = [gap](double distance) {
+            return CanopySample{gap, 1, distance != 1.5, true};
+        };
+        const auto result = ProbeCanopy(unbracketed, 3, 1.5, 2);
+        EXPECT_EQ(result.taps, 2) << "missing geometry must invalidate the bracket";
+        if (gap > 0.05 && gap < 1.5) {
+            EXPECT_LT(result.visibility, 1);
+        } else {
+            EXPECT_DOUBLE_EQ(result.visibility, 1);
+        }
+    }
 }
 
 TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawAccess) {

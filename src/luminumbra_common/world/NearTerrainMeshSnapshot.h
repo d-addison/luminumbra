@@ -48,7 +48,7 @@ struct NearTerrainMeshSnapshot {
     bool unedited_halo = false;
     bool complete_height_like_sdf = false;
     std::array<Dependency, 27> halo{};
-    // At most 4913 floats. Streaming transfers the mesher's existing SDF copy.
+    // At most 4913 floats, retained only on explicit refinement request.
     std::vector<float> densities;
 
     [[nodiscard]] bool dependencies_current() const {
@@ -72,9 +72,9 @@ struct NearTerrainMeshSnapshot {
     [[nodiscard]] bool
     eligible(const Chunk& chunk, u32 version, float chunk_distance_squared) const {
         return generated_current_params && unedited_halo && complete_height_like_sdf &&
-               sample_step == 1 && densities.size() == kNearTerrainDensityCount &&
-               std::isfinite(chunk_distance_squared) && chunk_distance_squared >= 0.0f &&
-               chunk_distance_squared <= 32.0f * 32.0f && matches(chunk, version);
+               sample_step == 1 && std::isfinite(chunk_distance_squared) &&
+               chunk_distance_squared >= 0.0f && chunk_distance_squared <= 32.0f * 32.0f &&
+               matches(chunk, version);
     }
 };
 
@@ -84,11 +84,13 @@ CurrentNearTerrainMeshSnapshot(const Chunk& chunk, u32 version) {
     return snapshot && snapshot->matches(chunk, version) ? snapshot : nullptr;
 }
 
-// Complete only after meshing has finished reading the lattice. Invalid input
-// retains diagnostic flags but never an unbounded or partial density payload.
+// Complete only after meshing has finished reading the lattice. Eligibility
+// needs only its classification; refinement can explicitly retain the payload.
+// Invalid input never retains an unbounded or partial density payload.
 inline std::shared_ptr<const NearTerrainMeshSnapshot>
 CompleteNearTerrainMeshSnapshot(const NearTerrainMeshSnapshot& evidence,
-                                std::vector<float>& densities) {
+                                std::vector<float>& densities,
+                                bool retain_densities = false) {
     auto snapshot = std::make_shared<NearTerrainMeshSnapshot>(
         NearTerrainMeshSnapshot{.mesh_version = evidence.mesh_version,
                                 .sample_step = evidence.sample_step,
@@ -98,7 +100,7 @@ CompleteNearTerrainMeshSnapshot(const NearTerrainMeshSnapshot& evidence,
                                 .halo = evidence.halo,
                                 .densities = {}});
     snapshot->complete_height_like_sdf = IsHeightLikeNearTerrainSdf(densities);
-    if (snapshot->sample_step == 1 && snapshot->generated_current_params &&
+    if (retain_densities && snapshot->sample_step == 1 && snapshot->generated_current_params &&
         snapshot->unedited_halo && snapshot->complete_height_like_sdf) {
         snapshot->densities = std::move(densities);
     }

@@ -715,6 +715,10 @@ std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     // Teardown fences every owned callback without publishing or admitting work.
     quiesce_streaming_jobs_for_save();
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        chunk->invalidate_near_terrain_snapshot();
+    }
     if (m_far_world_changes) {
         m_far_world_changes->clear();
     }
@@ -4458,6 +4462,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         m_activation_index.erase(*chunk);
                         note_digest_chunk(it->second, false, false);
                         invalidate_renderable_chunks();
+                        chunk->invalidate_near_terrain_snapshot();
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4503,6 +4508,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             m_activation_index.erase(*it->second);
             note_digest_chunk(it->second, false, false);
             invalidate_renderable_chunks();
+            it->second->invalidate_near_terrain_snapshot();
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -4859,10 +4865,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         const auto& chunk = built.chunk;
         const auto evidence = CaptureNearTerrainMeshEvidence(
             *this, *chunk, built.step, chunk->mesh_version.load(std::memory_order_acquire));
-        std::vector<float> densities;
-        if (built.step == 1 && chunk->sdf_data.size() == kFullSdfLattice) {
-            densities = chunk->sdf_data;
-        }
+        std::vector<float> empty_densities;
+        auto& densities = built.step == 1 ? chunk->sdf_data : empty_densities;
         chunk->near_terrain_snapshot.store(
             World::CompleteNearTerrainMeshSnapshot(*evidence, densities),
             std::memory_order_release);
@@ -7323,6 +7327,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         if (resident == m_streaming_state.chunks.end())
             return;
         if (resident->second) {
+            resident->second->invalidate_near_terrain_snapshot();
             m_activation_index.erase(*resident->second);
             note_digest_chunk(resident->second, false, false);
         }

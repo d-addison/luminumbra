@@ -1,7 +1,9 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/rendering/NearTerrainRefinement.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 
 #include <gtest/gtest.h>
 
@@ -427,7 +429,7 @@ TEST(NearTerrainEligibility, PublishesMatchingMeshVersionAndOwnsItsLattice) {
     EligibilityPatch patch;
     auto densities = MakePatch().densities;
     const auto expected = densities;
-    const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities);
+    const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities, true);
     auto& chunk = *patch.chunks[13];
     chunk.near_terrain_snapshot.store(snapshot);
     EXPECT_EQ(World::CurrentNearTerrainMeshSnapshot(chunk, 7), nullptr);
@@ -470,6 +472,141 @@ TEST(NearTerrainEligibility, EveryEditInvalidatesSelfAndAllHaloNeighbours) {
             EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
         }
     }
+}
+
+TEST(NearTerrainEligibility, WaterPromotionInvalidatesSourceAndEveryHaloNeighbour) {
+    for (std::size_t index = 0; index < 27; ++index) {
+        for (bool publish : {false, true}) {
+            SCOPED_TRACE(index);
+            SCOPED_TRACE(publish);
+            EligibilityPatch patch;
+            const auto snapshot = patch.Publish();
+            auto& promoted = *patch.chunks[index];
+            ASSERT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
+            if (publish) {
+                promoted.publish_water_state();
+            } else {
+                promoted.set_water_authority();
+            }
+            EXPECT_FALSE(snapshot->matches(*patch.chunks[13], 7));
+            EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+            EXPECT_EQ(promoted.sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+            EXPECT_EQ(promoted.voxel_revision(), 1u);
+            const auto epoch = promoted.near_terrain_epoch.load();
+            promoted.set_water_authority();
+            EXPECT_EQ(promoted.near_terrain_epoch.load(), epoch);
+            EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+        }
+    }
+    Chunk edited(IVec3(0));
+    edited.mark_voxel_data_dirty();
+    const auto epoch = edited.near_terrain_epoch.load();
+    edited.set_water_authority();
+    EXPECT_EQ(edited.near_terrain_epoch.load(), epoch);
+}
+
+TEST(NearTerrainEligibility, ResidentRemovalRefusesRetainedOwnersAfterReplacement) {
+    for (std::size_t index = 0; index < 27; ++index) {
+        for (int removal = 0; removal < 3; ++removal) {
+            SCOPED_TRACE(index);
+            SCOPED_TRACE(removal);
+            EligibilityPatch patch;
+            auto state = std::make_unique<WorldStreamingState>();
+            for (const auto& chunk : patch.chunks) {
+                ASSERT_TRUE(state->insert_chunk(chunk));
+            }
+            const auto snapshot = patch.Publish();
+            EXPECT_FALSE(state->insert_chunk(nullptr));
+            EXPECT_FALSE(state->insert_chunk(patch.chunks[index]));
+            EXPECT_FALSE(state->erase_chunk(IVec3(10)));
+            ASSERT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
+            const auto& retired = patch.chunks[index];
+            if (removal == 0) {
+                ASSERT_TRUE(state->erase_chunk(retired->get_id()));
+                EXPECT_FALSE(state->erase_chunk(retired->get_id()));
+            } else if (removal == 1) {
+                ASSERT_TRUE(state->erase_chunk(retired->get_coords()));
+            } else {
+                state->clear();
+                state->clear();
+            }
+            const auto replacement = state->get_or_create_chunk(retired->get_coords());
+            ASSERT_NE(replacement, retired);
+            EXPECT_EQ(state->get_or_create_chunk(retired->get_coords()), replacement);
+            EXPECT_EQ(state->find_chunk(retired->get_coords()), replacement);
+            // Every old owner remains strongly held by patch, including the source.
+            EXPECT_FALSE(snapshot->matches(*patch.chunks[13], 7));
+            EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+        }
+    }
+}
+
+TEST(NearTerrainEligibility, LiveWorldEvictionRefusesRetainedOwnersAfterReplacement) {
+    for (int removal = 0; removal < 4; ++removal) {
+        SCOPED_TRACE(removal);
+        EligibilityPatch patch;
+        auto world = std::make_unique<Systems::SHIELD_WorldSystem>(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        world->debug_set_streaming_radius_cap(1);
+        world->set_durable_residency(removal == 1);
+        for (std::size_t index = 0; index < 27; ++index) {
+            patch.chunks[index]->set_state(ChunkState::Ready);
+            patch.chunks[index]->current_lod.store(0);
+            // A pending remesh must not refresh the evidence before eviction.
+            patch.chunks[index]->pending_lod.store(1);
+            ASSERT_TRUE(world->adopt_streamed_chunk(patch.chunks[index]));
+            patch.evidence.halo[index].epoch = patch.chunks[index]->near_terrain_epoch.load();
+        }
+        const auto snapshot = patch.Publish();
+        ASSERT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
+        if (removal < 2) {
+            entt::registry registry;
+            // Activation runs every four updates; no simulation or job threads.
+            for (int frame = 0; frame < 4; ++frame) {
+                world->update(registry, Vec3(1024, 0, 1024), nullptr, false);
+                if (frame < 3) {
+                    ASSERT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
+                }
+            }
+        } else if (removal == 2) {
+            world->clear_world(nullptr);
+        } else {
+            world.reset();
+            world = std::make_unique<Systems::SHIELD_WorldSystem>(
+                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        }
+        ASSERT_EQ(world->find_streamed_chunk(IVec3(0)), nullptr);
+        const auto replacement = std::make_shared<Chunk>(IVec3(0));
+        ASSERT_TRUE(world->adopt_streamed_chunk(replacement));
+        EXPECT_EQ(world->find_streamed_chunk(IVec3(0)), replacement);
+        EXPECT_FALSE(snapshot->matches(*patch.chunks[13], 7));
+        EXPECT_FALSE(snapshot->eligible(*patch.chunks[13], 7, 0));
+    }
+}
+
+TEST(NearTerrainEligibility, EvidenceWithoutRefinementRetainsNoLattice) {
+    EligibilityPatch patch;
+    auto densities = MakePatch().densities;
+    const auto expected = densities;
+    const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities);
+    patch.chunks[13]->mesh_version.store(7);
+    patch.chunks[13]->near_terrain_snapshot.store(snapshot);
+    EXPECT_TRUE(snapshot->densities.empty());
+    EXPECT_EQ(snapshot->densities.capacity(), 0u);
+    EXPECT_EQ(densities, expected);
+    EXPECT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
+}
+
+TEST(NearTerrainEligibility, TemporaryViewsPreserveResidentEvidence) {
+    EligibilityPatch patch;
+    const auto snapshot = patch.Publish();
+    {
+        WorldStreamingState view;
+        for (const auto& chunk : patch.chunks) {
+            ASSERT_TRUE(view.insert_chunk(chunk));
+        }
+    }
+    EXPECT_TRUE(snapshot->eligible(*patch.chunks[13], 7, 0));
 }
 
 TEST(NearTerrainEligibility, RejectsStaleQueuedRecordsAndRetiredOwners) {
@@ -532,12 +669,19 @@ TEST(NearTerrainEligibility, RefusesMissingPartialEditedCoarseAndCaveEvidence) {
         } else {
             patch.evidence.halo[0].epoch = std::numeric_limits<u64>::max();
         }
-        const auto snapshot = World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities);
-        auto& chunk = *patch.chunks[13];
-        chunk.mesh_version.store(7);
-        chunk.near_terrain_snapshot.store(snapshot);
-        EXPECT_FALSE(snapshot->eligible(chunk, 7, 0));
-        EXPECT_LE(snapshot->densities.size(), World::kNearTerrainDensityCount);
+        for (bool retain_densities : {false, true}) {
+            SCOPED_TRACE(retain_densities);
+            const auto snapshot =
+                World::CompleteNearTerrainMeshSnapshot(patch.evidence, densities, retain_densities);
+            auto& chunk = *patch.chunks[13];
+            chunk.mesh_version.store(7);
+            chunk.near_terrain_snapshot.store(snapshot);
+            EXPECT_FALSE(snapshot->eligible(chunk, 7, 0));
+            EXPECT_LE(snapshot->densities.size(), World::kNearTerrainDensityCount);
+            if (!retain_densities || invalid < 9) {
+                EXPECT_TRUE(snapshot->densities.empty());
+            }
+        }
     }
 }
 

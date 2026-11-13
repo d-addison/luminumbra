@@ -2309,6 +2309,9 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionFixtureRegeneratorContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_regenerate_region_fixtures.py")
+
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
 set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)
@@ -2393,6 +2396,10 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(NAME FrozenTerrainPresetsContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B ${CMAKE_SOURCE_DIR}/tools/test_frozen_terrain_presets.py)
+endif()
 # File-only PowerShell checks are optional on hosts without PowerShell. The Lua
 # source mode only inspects source files; neither check runs the engine or graphics APIs.
 if(WIN32)
@@ -2528,6 +2535,24 @@ if(_tl_python)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
+endif()
+
+# Capture diagnostics need both image packages in the same interpreter.
+set(_vl_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -I -B -c "import PIL, numpy"
+        RESULT_VARIABLE _vl_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_vl_rc EQUAL 0)
+        set(_vl_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_vl_python)
+    add_test(NAME VisualLintCaptures
+        COMMAND "${_vl_python}" -I -B ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_lint.py)
+    set_tests_properties(VisualLintCaptures PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+else()
+    message(FATAL_ERROR "VisualLintCaptures requires a Python interpreter with Pillow and NumPy.")
 endif()
 
 # SDF-contract doc-lint. Assert docs/shield/sdf-contract.md

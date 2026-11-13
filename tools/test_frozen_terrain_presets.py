@@ -24,7 +24,8 @@ def preset_checksum(preset):
 class FrozenTerrainPresetsTests(unittest.TestCase):
     def test_original_bytes_match_manifest(self):
         manifest = json.loads((FROZEN / "sha256.json").read_text())
-        self.assertEqual(set(manifest), {p.name for p in SHIPPING.glob("*.json")})
+        self.assertEqual(set(manifest) | {"mountains_band_limited.json"},
+                         {p.name for p in SHIPPING.glob("*.json")})
         self.assertEqual(len(manifest), 8)
         self.assertEqual(set(manifest), {p.name for p in FROZEN.glob("*.json")} -
                          {"provenance.json", "sha256.json"})
@@ -83,7 +84,29 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
             with self.subTest(preset=path.name):
                 self.assertEqual(json.loads(path.read_text())["schema_rev"], 8)
                 self.assertEqual(json.loads(path.read_text())["generation_params"]["terrain"]["surface_sampling_revision"], 2)
-                self.assertEqual(json.loads((FROZEN / path.name).read_text())["schema_rev"], 6)
+        manifest = json.loads((FROZEN / "sha256.json").read_text())
+        for name in manifest:
+            with self.subTest(historical_preset=name):
+                self.assertEqual(json.loads((FROZEN / name).read_text())["schema_rev"], 6)
+
+    def test_band_limited_mountains_changes_only_the_candidate_controls(self):
+        expected = json.loads((SHIPPING / "mountains.json").read_text())
+        expected["name"] = "Mountainous (band limited)"
+        expected["description"] = "Mountain ranges with reduced high-frequency base detail"
+        terrain = expected["generation_params"]["terrain"]
+        terrain["octaves"] = 4
+        terrain["base_amplitude"] = 66.6666667
+        terrain["shaping"]["continental_spline"] = [
+            [-1, -6], [-0.2, 4], [0.3, 8], [0.65, 25], [1, 44]]
+        terrain["shaping"]["erosion_spline"] = [
+            [-1, 0.44], [-0.6, 0.34], [-0.35, 0.26], [0, 0.20], [0.4, 0.15], [1, 0.12]]
+        terrain["shaping"]["peaks_spline"] = [
+            [-1, 0], [0.35, 0.10], [0.72, 0.48], [1, 0.85]]
+        preset = json.loads((SHIPPING / "mountains_band_limited.json").read_text())
+        self.assertEqual(preset, expected)
+        self.assertEqual(preset_checksum(preset), "eea04619c5226ec9")
+        self.assertEqual(preset_checksum({"dependencies": [], "preset": preset}),
+                         "957792f21f80de77")
 
     def test_old_hills_keeps_its_island_mask_off(self):
         old = json.loads((FROZEN / "default.json").read_text())
