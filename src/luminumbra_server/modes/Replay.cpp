@@ -2,6 +2,7 @@
 #include "Modes.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 
 #include <algorithm>
 #include <vector>
@@ -79,6 +80,10 @@ int RunRecord(const ServerCliOptions& options) {
     header.start_world_hash = runner.ComputeWorldHash();
     header.system_config_identity = runner.Session()->SystemConfigIdentity();
     header.preset_content_hash = runner.Session()->PresetContentHash();
+    if (const auto* schedule = runner.Session()->GetWeatherSchedule()) {
+        header.version = Luminumbra::Replay::kLrec1WeatherVersion;
+        header.weather_schedule = schedule->canonical_bytes();
+    }
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
@@ -184,12 +189,8 @@ int RunReplay(const ServerCliOptions& options) {
     // Refuse a version / engine mismatch loudly (Factorio replays break silently
     // across versions; we refuse instead -- research Area 2 takeaway 8).
     const std::string engine_now(luminumbra::core::GetEngineVersionString());
-    if (header.version != Luminumbra::Replay::kLrec1Version &&
-        header.version != Luminumbra::Replay::kLrec1ElidedVersion) {
-        LUMINUMBRA_CORE_ERROR("replay: unsupported LREC version {} (accepted: {}, {})",
-                              header.version,
-                              Luminumbra::Replay::kLrec1Version,
-                              Luminumbra::Replay::kLrec1ElidedVersion);
+    if (!Luminumbra::Replay::SupportedVersion(header.version)) {
+        LUMINUMBRA_CORE_ERROR("replay: unsupported LREC version {}", header.version);
         return 1;
     }
 

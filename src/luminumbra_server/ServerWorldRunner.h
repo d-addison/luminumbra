@@ -41,6 +41,8 @@ struct ServerWorldRunnerConfig {
     world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
     // Playback rechecks dependencies before creating any save directory.
     std::string required_preset_content_hash;
+    // Immutable schedule applied before fresh-world creation and boot hashing.
+    std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).

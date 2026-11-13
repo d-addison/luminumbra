@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <optional>
 
 #include "../ServerCliOptions.h"
@@ -13,6 +14,7 @@
 #include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -54,6 +56,9 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
+    if (runner_config.weather_schedule &&
+        !session.SetWeatherSchedule(*runner_config.weather_schedule))
+        return hello;
     // Network hosts create a new world with this calendar, even when active regions are off.
     hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     try {
@@ -79,6 +84,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.root_path = options.root;
     config.systems_config_override = options.systems_config_override;
     config.preset_json_override = options.preset_json_override;
+    config.weather_schedule = options.weather_schedule;
     config.seed = options.seed;
     config.preset = options.preset;
     config.world_id = options.world_id;
@@ -140,6 +146,17 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
     identity_session.SetFiniteHydrologyEnabled(config.finite_hydrology);
     if (config.region_scheduler)
         identity_session.SetRegionSchedulerConfig(*config.region_scheduler);
+    if (!Luminumbra::Replay::SupportedVersion(header.version) ||
+        Luminumbra::Replay::WeatherVersion(header.version) != !header.weather_schedule.empty())
+        return std::nullopt;
+    if (!header.weather_schedule.empty()) {
+        Luminumbra::Systems::WeatherSchedule schedule;
+        if (!Luminumbra::Systems::WeatherSchedule::Decode(header.weather_schedule, schedule) ||
+            !identity_session.SetWeatherSchedule(schedule))
+            return std::nullopt;
+        config.weather_schedule =
+            std::make_shared<const Luminumbra::Systems::WeatherSchedule>(schedule);
+    }
     try {
         nlohmann::json source;
         std::filesystem::path preset_path;
