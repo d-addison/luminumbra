@@ -58,6 +58,23 @@ struct TerrainGenParams;
 namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
 
+// Context-free saved-world admission decisions. The state belongs to the
+// pipeline owner; no source or graphics resources are accessed here.
+void FarWorldSessionAttachmentFailed(std::uint32_t& retry_frames,
+                                     bool& retryable,
+                                     bool recoverable) noexcept;
+bool RetryFarWorldSessionAttachment(std::uint32_t& retry_frames,
+                                    bool retryable,
+                                    bool attached,
+                                    bool source_enabled) noexcept;
+bool FarWorldSessionCaptureAdmission(bool discovering, bool admitted) noexcept;
+bool FarWorldSessionCaptureAge(bool discovering, bool admitted, bool active) noexcept;
+FarWorldSelection FarWorldSessionSelection(const FarWorldSelection& selected,
+                                           FarWorldPurpose purpose,
+                                           FarWorldRefusal attachment,
+                                           FarWorldRefusal request,
+                                           FarWorldRefusal preparation) noexcept;
+
 class Shader;
 class Camera;
 class ShadowPass;
@@ -1415,6 +1432,8 @@ private:
     std::unique_ptr<FarWorldRenderer> m_far_world;
     std::unique_ptr<SessionFarWorldPreparation> m_far_world_session;
     FarWorldRefusal m_session_attachment_refusal = FarWorldRefusal::None;
+    std::uint32_t m_session_attachment_retry_frames = 0;
+    bool m_session_attachment_retryable = false;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;

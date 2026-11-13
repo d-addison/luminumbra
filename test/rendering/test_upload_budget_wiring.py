@@ -33,7 +33,7 @@ def returned(text):
 
 
 def body(text, signature):
-    start = text.index("{", text.index(signature) + len(signature))
+    start = text.index("{", text.index(signature))
     depth = 1
     end = start + 1
     while depth:
@@ -353,7 +353,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(pump.index("preparation.Request("),
                         pump.index("session.PumpFarWorldAuthorityCapture();"))
         self.assertLess(pump.index("session.PumpFarWorldAuthorityCapture();"),
-                        pump.index("producer->capture_status()"))
+                        pump.index("const auto status = producer->capture_status()"))
         self.assertIn("const bool requested = preparation.Request(", pump)
         self.assertLess(pump.index("session.PumpFarWorldAuthorityCapture();"),
                         pump.index("if (!requested)"))
@@ -375,12 +375,17 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertNotIn(forbidden, replay)
 
     def test_preparation_refusal_and_qualification_reach_reporting(self):
-        selection = body(self.pipeline, "FarWorldSelection RenderPipeline::prepared_far_world_selection(")
+        forwarding = body(self.pipeline, "FarWorldSelection RenderPipeline::prepared_far_world_selection(")
+        self.assertIn("FarWorldSessionSelection(", forwarding)
+        for argument in ("m_session_attachment_refusal", "m_far_world_session->request_refusal",
+                         "m_far_world_session->refusal"):
+            self.assertIn(argument, forwarding)
+        selection = body(read(RENDERING / "FarWorldHandoffRenderer.cpp"), "FarWorldSelection FarWorldSessionSelection(")
         self.assertIn("purpose == FarWorldPurpose::World", selection)
-        self.assertIn("m_far_world_session->refusal != FarWorldRefusal::None", selection)
-        self.assertIn("SelectFarWorld(selected.requested, purpose, m_far_world_session->refusal)", selection)
-        self.assertIn("m_session_attachment_refusal != FarWorldRefusal::None", selection)
-        self.assertIn("SelectFarWorld(selected.requested, purpose, m_session_attachment_refusal)", selection)
+        self.assertIn("selected.requested == FarWorldMode::Ladder", selection)
+        self.assertIn("{attachment, request, preparation}", selection)
+        self.assertIn("if (refusal != FarWorldRefusal::None)", selection)
+        self.assertIn("SelectFarWorld(selected.requested, purpose, refusal)", selection)
         self.assertIn("return selected;", selection)
         report = body(self.header, "FarWorldReportingState far_world_reporting_state() const")
         self.assertIn("FarWorldReportState(diagnostic, terrain_submission)", report)
@@ -402,8 +407,6 @@ class UploadBudgetWiring(unittest.TestCase):
                             r"(?<!_)\brefusal\s*=")
         self.assertIn("refusal = FarWorldRefusal::AdmissionFailed;",
                       body(request, "if (!unchanged)"))
-        self.assertIn("m_far_world_session->request_refusal != FarWorldRefusal::None", selection)
-        self.assertIn("SelectFarWorld(selected.requested, purpose, m_far_world_session->request_refusal)", selection)
         self.assertIn("!std::isfinite(camera[1])", request)
         self.assertIn("World::ComputeFarWantedSet(", request)
         self.assertIn("!producer.request_capture({candidate_windows.data(), wanted.size()})", request)
@@ -445,9 +448,17 @@ class UploadBudgetWiring(unittest.TestCase):
         guard = re.search(r"if \((status.error.*?)\) \{", facade, re.S).group(1)
         errors = SimpleNamespace(None_=0)
         guard = guard.replace("::None", "::None_")
-        for active, queued, paused in product((False, True), repeat=3):
-            status = SimpleNamespace(error=0, active=active, queued=queued, paused=paused)
-            self.assertEqual(predicate(guard, dict(status=status, Errors=errors)), paused)
+        native = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        for regression in ("CompletedSourceStagesWhileNewerCapturesQueueAndBecomeActive",
+                           "FreshCompletedSerialStagesDuringActiveCaptureButFencedReadsRefuse"):
+            self.assertIn("TEST_F(SavedPlayDispatch, " + regression + ")", native)
+        guard = guard.replace("handoff_->State().target_serial", "target_serial")
+        for active, queued, paused, ready, serial, target in product(
+                (False, True), (False, True), (False, True), (False, True), (0, 7, 8), (0, 7, 8)):
+            status = SimpleNamespace(error=0, active=active, queued=queued, paused=paused,
+                                     latest_ready=ready, serving_serial=serial)
+            self.assertEqual(predicate(guard, dict(status=status, Errors=errors, target_serial=target)),
+                             paused or (not ready and serial <= target))
         current = body(self.pipeline, "bool RenderPipeline::far_world_source_current() const")
         unavailable = re.search(r"if \((!producer.*?)\) \{", current, re.S).group(1)
         unavailable = unavailable.replace("::None", "::None_")
@@ -511,9 +522,208 @@ class UploadBudgetWiring(unittest.TestCase):
                                                   source=present, matches=matches)),
                              paused or not present or not matches)
 
+    def test_body_preserves_signatures_containing_an_open_brace(self):
+        self.assertEqual(body("loop { const auto& chunk = entry; keep(); } next {}",
+                              "loop { const auto& chunk"),
+                         " const auto& chunk = entry; keep(); ")
+        self.assertEqual(body("fn() { if (ready) { use(); } done(); }", "fn()"),
+                         " if (ready) { use(); } done(); ")
+
+    def test_history_reclaims_only_keys_outside_serving_and_target(self):
+        self.assertIn("bool ReclaimHistory(", self.pipeline)
+        reclaim = body(self.pipeline, "bool ReclaimHistory(")
+        self.assertIn("std::array<World::FarTileKey, 2 * kSlots>", reclaim)
+        self.assertIn("std::copy_n(requested.begin(), count, retained.begin())", reclaim)
+        self.assertIn("retained[retained_count++] = tile.key;", reclaim)
+        self.assertIn("std::sort(retained.begin(), retained.begin() + retained_count)", reclaim)
+        self.assertIn("std::binary_search( retained.begin(), retained.begin() + retained_count,", compact(reclaim))
+        self.assertIn("history_keys[index]", reclaim)
+        self.assertIn("candidate_keys[candidate_count] = history_keys[index];", reclaim)
+        self.assertIn("candidate_history[candidate_count++] = history[index];", reclaim)
+        self.assertNotIn("history[index] =", reclaim)
+        descriptors = body(reclaim, "for (std::size_t index = 0; index < snapshot->tile_count;")
+        self.assertEqual(compact(descriptors),
+                         "const auto& tile = snapshot->tiles[index]; retained[retained_count++] = tile.key;")
+        # Idle descriptors still enforce span containment in the handoff. Keep
+        # them as well as both cohorts, until the handoff actually retires them.
+        handoff = read(RENDERING / "FarVolumeHandoff.cpp")
+        self.assertIn("resolved.span.min_y > old->history_span.span.min_y", handoff)
+        invalid = re.search(r"if \((.*?)\) \{", reclaim, re.S).group(1)
+        invalid = invalid.replace("snapshot->", "snapshot.")
+        for present, complete, size, history in product((False, True), (False, True),
+                                                       (0, 512, 513), (0, 512)):
+            snapshot = SimpleNamespace(complete=complete, tile_count=size) if present else None
+            self.assertEqual(bool(predicate(invalid, dict(snapshot=snapshot, history_count=history, kSlots=512))),
+                             (not present and history != 0) or (present and (not complete or size > 512)))
+        # Repeated travel exceeds the lifetime key bound; in-use extrema and
+        # generations survive stable compaction, retired keys admit fresh history.
+        history = dict.fromkeys(range(512), (-32, 64, 7))
+        for location in range(512, 2048):
+            serving, target = {location - 1}, {location}
+            idle = set(range(max(0, location - 320), location - 1))
+            history = {key: value for key, value in history.items() if key in serving | target | idle}
+            if location - 1 in history:
+                self.assertEqual(history[location - 1][2], 7)
+            history[location] = (-32, 64, 7)
+            self.assertLessEqual(len(history), 512)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertIn("if (!preparation.ReclaimHistory(m_far_world->SessionDiagnostic()))", pump)
+
+    def test_attachment_failures_retry_and_capture_cooldown_blocks_admission(self):
+        activation = read(RENDERING / "FarWorldHandoffRenderer.cpp")
+        self.assertIn("void FarWorldSessionAttachmentFailed(", activation)
+        failure = body(activation, "void FarWorldSessionAttachmentFailed(")
+        self.assertIn("retryable = recoverable;", failure)
+        self.assertIn("retry_frames = recoverable ? 30 : 0;", failure)
+        resume = body(activation, "bool RetryFarWorldSessionAttachment(")
+        guard = re.search(r"if \((attached.*?)\) \{", resume, re.S).group(1)
+        self.assertEqual(compact(body(resume, "if (retry_frames != 0)")),
+                         "--retry_frames; return false;")
+        for attached, enabled, retryable in product((False, True), repeat=3):
+            self.assertEqual(predicate(guard, dict(attached=attached, source_enabled=enabled,
+                                                  retryable=retryable)),
+                             attached and (enabled or not retryable))
+        attach = body(self.pipeline, "void RenderPipeline::bind_far_world_session(")
+        self.assertLess(attach.index("FarWorldSessionAttachmentFailed("),
+                        attach.index("SessionFarWorldPreparation::Create(session)"))
+        self.assertIn("m_session_attachment_retryable, false", compact(body(attach, "if (!caves)")))
+        self.assertIn("m_session_attachment_retry_frames = 0;", attach[attach.index("preparation.source_enabled ="):])
+        self.assertIn("m_session_attachment_retryable = false;", attach[attach.index("preparation.source_enabled ="):])
+        admission = returned(body(activation, "bool FarWorldSessionCaptureAdmission("))
+        aging = returned(body(activation, "bool FarWorldSessionCaptureAge("))
+        for discovering, admitted, active in product((False, True), repeat=3):
+            state = dict(discovering=discovering, admitted=admitted, active=active)
+            self.assertEqual(predicate(admission, state), not discovering and admitted)
+            self.assertEqual(predicate(aging, state), active and (discovering or not admitted))
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        self.assertLess(request.index("if ((Recoverable(status.error) || request_failed) && retry_frames != 0)"),
+                        request.index("if (unchanged && !request_failed && !RetryNeeded("))
+        self.assertEqual(compact(body(request, "if ((Recoverable(status.error) || request_failed) && retry_frames != 0)")),
+                         "request_refusal = FarWorldRefusal::AdmissionFailed; return false;")
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertIn("preparation.discovering, preparation.capture_admitted, producer->capture_status().active", compact(pump))
+        age = body(pump, "else if (FarWorldSessionCaptureAge(")
+        self.assertLess(age.index("producer->fence_source_reads(true)"), age.index("session.PumpFarWorldAuthorityCapture()"))
+        self.assertLess(age.index("session.PumpFarWorldAuthorityCapture()"), age.index("producer->fence_source_reads(paused)"))
+        session_source = read(ROOT / "src/luminumbra_common/world/GameSession.cpp")
+        session_pump = body(session_source, "void GameSession::PumpFarWorldAuthorityCapture()")
+        paused = body(session_pump, "if (m_farWorldAuthorityProducer->capture_status().paused)")
+        self.assertEqual(compact(paused), "m_farWorldAuthorityProducer->pump_capture(); return;")
+        self.assertLess(session_pump.index("if (m_farWorldAuthorityProducer->capture_status().paused)"),
+                        session_pump.index("if (m_farWorldSourceNeedsRefresh)"))
+        self.assertIn("!IsSimulationTickBoundary()", session_pump)
+        self.assertIn("const bool paused = producer->capture_status().paused;", age)
+        error = body(pump, "if (status.error != World::FarWorldAuthorityProducer::Error::None)")
+        self.assertIn("preparation.retry_frames = SessionFarWorldPreparation::kRetryFrames;", error)
+        # The native regression uses these shipping decisions rather than a
+        # renderer-only fixture; the source assertions above pin every caller.
+        native = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        regression = body(native, "TEST(FarWorldLegacyIsolation, SavedWorldActivationDecisionsBindPumpRefuseAndReport)")
+        for method in ("RetryFarWorldSessionAttachment(", "FarWorldSessionAttachmentFailed(",
+                       "FarWorldSessionCaptureAdmission(", "FarWorldSessionCaptureAge(",
+                       "FarWorldSessionSelection("):
+            self.assertIn(method, regression)
+
+    def test_capture_failure_cooldown_precedes_dirty_queue_admission(self):
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        guard = "if ((Recoverable(status.error) || request_failed) && retry_frames != 0)"
+        self.assertIn(guard, request)
+        self.assertLess(request.index(guard), request.index("if (unchanged && !request_failed && !RetryNeeded("))
+        condition = guard[4:-1]
+        for error, frames, queued, request_failed in product(("None", "AllocationFailure", "DeadlineExceeded",
+                                              "CommittedReadRefused", "SourceReadExpired",
+                                              "AuthorityUnavailable", "WaterUnavailable"),
+                                             (0, 1, 29, 30), (False, True), (False, True)):
+            recovery = error in {"AllocationFailure", "DeadlineExceeded",
+                                 "CommittedReadRefused", "SourceReadExpired"}
+            self.assertEqual(predicate(condition, dict(
+                status=SimpleNamespace(error=error, queued=queued), retry_frames=frames, request_failed=request_failed,
+                Recoverable=lambda value: value in {"AllocationFailure", "DeadlineExceeded",
+                                                    "CommittedReadRefused", "SourceReadExpired"})),
+                (recovery or request_failed) and frames != 0)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertIn("session.PumpFarWorldAuthorityCapture();", body(
+            pump, "if (FarWorldSessionCaptureAdmission("))
+
+    def test_capture_admission_keeps_the_first_refused_request_refreshable(self):
+        request = body(self.pipeline, "bool Request(Producer& producer,")
+        self.assertLess(request.index("capture_admitted = false;"), request.index("!std::isfinite(camera[1])"))
+        # Invalid input, pause and both cooldown branches leave admission closed.
+        for signature in ("if ((Recoverable(status.error) || request_failed) && retry_frames != 0)",
+                          "if (status.paused ||"):
+            self.assertNotIn("capture_admitted = true", body(request, signature))
+        unchanged = body(request, "if (unchanged && !request_failed && !RetryNeeded(status, producer.capture()))")
+        self.assertEqual(compact(unchanged), "capture_admitted = true; return true;")
+        attempt = request[request.index("retry_frames = kRetryFrames;"):]
+        self.assertLess(attempt.index("capture_admitted = true;"), attempt.index("!producer.request_capture("))
+        refused = body(attempt, "wanted.size()}))")
+        self.assertNotIn("capture_admitted = false", refused)
+        self.assertIn("request_failed = true;", refused)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        admitted = "if (FarWorldSessionCaptureAdmission("
+        self.assertIn("session.PumpFarWorldAuthorityCapture();", body(pump, admitted))
+        self.assertLess(pump.index(admitted), pump.index("if (!requested)"))
+
+    def test_pipeline_admission_decisions_are_exercised_by_registered_native_tests(self):
+        native = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        self.assertIn("rendering/FarWorldLegacyIsolation_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+        self.assertIn("TEST(FarWorldLegacyIsolation, SavedWorldActivationDecisionsBindPumpRefuseAndReport)", native)
+        activation = body(native, "TEST(FarWorldLegacyIsolation, SavedWorldActivationDecisionsBindPumpRefuseAndReport)")
+        matrix = body(native, "TEST(FarWorldLegacyIsolation, AttachmentRetryAndCaptureDecisionFailureMatrix)")
+        for name in ("FarWorldSessionAttachmentFailed", "RetryFarWorldSessionAttachment",
+                     "FarWorldSessionCaptureAdmission", "FarWorldSessionCaptureAge", "FarWorldSessionSelection"):
+            # Declarations agree, and both the real pipeline and executable
+            # regressions call the shared implementation linked into common_tests.
+            pattern = rf"(?:void|bool|FarWorldSelection) {name}\(.*?noexcept;"
+            self.assertEqual(compact(re.search(pattern, self.header, re.S).group()),
+                             compact(re.search(pattern, native, re.S).group()))
+            self.assertIn(name + "(", self.pipeline)
+            self.assertIn(name + "(", activation)
+            self.assertIn(name + "(", matrix)
+
+    def test_discovery_work_caps_columns_records_and_water_cells(self):
+        declared = re.search(r"kDiscoveryWorkPerPump = ([0-9']+);", self.pipeline)
+        self.assertIsNotNone(declared)
+        budget = int(declared.group(1).replace("'", ""))
+        self.assertEqual(budget, 65536)
+        discovery = body(self.pipeline, "bool Discover(")
+        self.assertIn("discovery_column < 131u * 131u && work != 0", discovery)
+        self.assertIn("discovery_record < records && work != 0", discovery)
+        self.assertIn("discovery_cell < bed.size() && work != 0", discovery)
+        self.assertEqual(discovery.count("--work;"), 3)
+        self.assertEqual(discovery.count("source.deadline.expired()"), 3)
+        self.assertIn("discovery_column % 131", discovery)
+        self.assertIn("discovery_column / 131", discovery)
+        self.assertIn("auto& low = discovery_low;", discovery)
+        self.assertIn("auto& high = discovery_high;", discovery)
+        self.assertIn("if (discovery_record != records)", discovery)
+        self.assertLess(discovery.index("if (discovery_record != records)"),
+                        discovery.index("candidate_history[position].Extend"))
+        self.assertIn("discovery_tile_complete = true;", discovery)
+        self.assertIn("discovery_column = discovery_record = discovery_cell = 0;", discovery)
+        # Visit oracle: zero, exact bound, partial last frame and maximal tile
+        # work keep the unbounded ordering and extrema across every boundary.
+        for size in (0, 1, 17161, budget, budget + 1, 512 * 17161):
+            cursor, visited, extrema = 0, 0, (0, 0)
+            while cursor < size:
+                stop = min(size, cursor + budget)
+                self.assertLessEqual(stop - cursor, budget)
+                values = range(cursor, stop)
+                extrema = (min(extrema[0], cursor), max(extrema[1], stop - 1))
+                visited += len(values)
+                cursor = stop
+            self.assertEqual(visited, size)
+            self.assertEqual(extrema, (0, max(0, size - 1)))
+        for refusal in ("!std::isfinite(height)", "!std::isfinite(water)", "!chunk",
+                        "bed.size() != depth.size()", "bed.size() > 32u * 32u"):
+            self.assertIn(refusal, discovery)
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertIn("auto work = SessionFarWorldPreparation::kDiscoveryWorkPerPump;", pump)
+        self.assertIn("preparation.discovery_tile_complete", pump)
+
     def test_unchanged_failed_or_expired_capture_retries_with_frame_backoff(self):
         request = body(self.pipeline, "bool Request(Producer& producer,")
-        self.assertIn("if (unchanged && !RetryNeeded(status, producer.capture()))", request)
+        self.assertIn("if (unchanged && !request_failed && !RetryNeeded(status, producer.capture()))", request)
         producer = read(ROOT / "src/luminumbra_common/world/FarWorldAuthorityProducer.h")
         names = re.search(r"enum class Error \{(.*?)\};", producer, re.S).group(1)
         errors = SimpleNamespace(**{name.strip(): index for index, name in
@@ -545,7 +755,7 @@ class UploadBudgetWiring(unittest.TestCase):
                     self.assertEqual(predicate(retry, state), expected, state)
         self.assertNotIn("expired()", retry)
         request = body(self.pipeline, "bool Request(Producer& producer,")
-        self.assertIn("if (unchanged && !RetryNeeded(status, producer.capture()))", request)
+        self.assertIn("if (unchanged && !request_failed && !RetryNeeded(status, producer.capture()))", request)
         decrement = compact(body(request, "if (retry_frames != 0)"))
         self.assertEqual(decrement, "--retry_frames;")
         backoff = int(re.search(r"kRetryFrames = (\d+);", self.pipeline).group(1))
@@ -559,8 +769,7 @@ class UploadBudgetWiring(unittest.TestCase):
                                  paused or ((unchanged or failed) and frames != 0))
         self.assertLess(request.index("retry_frames = kRetryFrames;"),
                         request.index("!producer.request_capture("))
-        refused = body(request,
-                       "if (!producer.request_capture({candidate_windows.data(), wanted.size()}))")
+        refused = body(request, "wanted.size()}))")
         self.assertIn("request_failed = true;", refused)
         self.assertNotIn("windows =", refused)
         self.assertNotIn("count =", refused)
@@ -572,7 +781,8 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_regenerated_saved_world_reattaches_only_after_publication_settles(self):
         self.assertIn("void RenderPipeline::resume_far_world_session(", self.pipeline)
         resume = body(self.pipeline, "void RenderPipeline::resume_far_world_session(")
-        self.assertIn("m_far_world_session ||", resume)
+        self.assertIn("!RetryFarWorldSessionAttachment(", resume)
+        self.assertIn("m_far_world_session && m_far_world_session->source_enabled", compact(resume))
         self.assertIn("requested != FarWorldMode::Ladder", resume)
         self.assertIn("!world_system || !session.IsSimulationTickBoundary() ||", resume)
         self.assertIn("world_system->pending_publication_chunks() != 0 ||", resume)
@@ -623,7 +833,7 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertEqual(visited, list(range(count)))
         pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
         self.assertIn("session.PumpFarWorldAuthorityCapture();", body(
-            pump, "if (!preparation.discovering)"))
+            pump, "if (FarWorldSessionCaptureAdmission("))
         self.assertEqual(compact(body(pump, "if (!requested)")),
                          "preparation.discovering = false; return;")
         replacement = body(pump, "if (preparation.discovering && source->serial != preparation.attempted_serial)")
@@ -637,6 +847,8 @@ class UploadBudgetWiring(unittest.TestCase):
         loop = body(pump, "for (; preparation.discovery_index < end;")
         self.assertIn("preparation.discovery_camera", loop)
         self.assertIn("preparation.discovery_index", loop)
+        self.assertIn("work", loop)
+        self.assertIn("if (!preparation.discovery_tile_complete)", loop)
         self.assertIn("preparation.discovering = false;", loop)
         self.assertNotIn("preparation.history =", loop)
         self.assertEqual(compact(body(pump,

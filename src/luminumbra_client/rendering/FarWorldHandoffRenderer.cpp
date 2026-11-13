@@ -24,6 +24,46 @@
 #include <utility>
 
 namespace Luminumbra::Rendering {
+void FarWorldSessionAttachmentFailed(std::uint32_t& retry_frames,
+                                     bool& retryable,
+                                     bool recoverable) noexcept {
+    retryable = recoverable;
+    retry_frames = recoverable ? 30 : 0;
+}
+bool RetryFarWorldSessionAttachment(std::uint32_t& retry_frames,
+                                    bool retryable,
+                                    bool attached,
+                                    bool source_enabled) noexcept {
+    if (attached && (source_enabled || !retryable)) {
+        return false;
+    }
+    if (retry_frames != 0) {
+        --retry_frames;
+        return false;
+    }
+    return true;
+}
+bool FarWorldSessionCaptureAdmission(bool discovering, bool admitted) noexcept {
+    return !discovering && admitted;
+}
+bool FarWorldSessionCaptureAge(bool discovering, bool admitted, bool active) noexcept {
+    return active && (discovering || !admitted);
+}
+FarWorldSelection FarWorldSessionSelection(const FarWorldSelection& selected,
+                                           FarWorldPurpose purpose,
+                                           FarWorldRefusal attachment,
+                                           FarWorldRefusal request,
+                                           FarWorldRefusal preparation) noexcept {
+    if (purpose == FarWorldPurpose::World && selected.requested == FarWorldMode::Ladder) {
+        for (const auto refusal : {attachment, request, preparation}) {
+            if (refusal != FarWorldRefusal::None) {
+                return SelectFarWorld(selected.requested, purpose, refusal);
+            }
+        }
+    }
+    return selected;
+}
+
 namespace {
 class HandoffMemoryDomain {
 public:
@@ -165,7 +205,11 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
         return false;
     }
     const auto status = producer.capture_status();
-    if (status.error == World::FarWorldAuthorityProducer::Error::None && status.paused) {
+    // A completed serial may make progress under continuous publication, but
+    // restaging an older target must never qualify a pending source request.
+    if (status.error == World::FarWorldAuthorityProducer::Error::None &&
+        (status.paused ||
+         (!status.latest_ready && status.serving_serial <= handoff_->State().target_serial))) {
         admission_refusal_ = FarWorldRefusal::AdmissionFailed;
         return false;
     }

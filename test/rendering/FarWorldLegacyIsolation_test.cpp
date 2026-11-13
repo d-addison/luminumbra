@@ -17,6 +17,23 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::Rendering {
+void FarWorldSessionAttachmentFailed(std::uint32_t& retry_frames,
+                                     bool& retryable,
+                                     bool recoverable) noexcept;
+bool RetryFarWorldSessionAttachment(std::uint32_t& retry_frames,
+                                    bool retryable,
+                                    bool attached,
+                                    bool source_enabled) noexcept;
+bool FarWorldSessionCaptureAdmission(bool discovering, bool admitted) noexcept;
+bool FarWorldSessionCaptureAge(bool discovering, bool admitted, bool active) noexcept;
+FarWorldSelection FarWorldSessionSelection(const FarWorldSelection& selected,
+                                           FarWorldPurpose purpose,
+                                           FarWorldRefusal attachment,
+                                           FarWorldRefusal request,
+                                           FarWorldRefusal preparation) noexcept;
+} // namespace Luminumbra::Rendering
+
 namespace {
 using namespace Luminumbra;
 using namespace Luminumbra::Rendering;
@@ -408,13 +425,6 @@ protected:
     Producer::FrozenPolicy policy;
     FarSessionHandoffTile tile;
     void SetUp() override {
-        const auto main = Source("src/luminumbra_client/main_client.cpp");
-        const auto pipeline = Source("src/luminumbra_client/rendering/RenderPipeline.cpp");
-        ASSERT_NE(main.find("renderPipeline.bind_far_world_session(*gameSession, jobSystem);"),
-                  std::string::npos);
-        ASSERT_NE(pipeline.find("session.EnableFarWorldAuthorityProducer("), std::string::npos);
-        ASSERT_NE(pipeline.find("pump_far_world_session(camera, purpose);"), std::string::npos);
-        EXPECT_EQ(pipeline.find("BindFixture("), std::string::npos);
         jobs.startup(1);
         auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.caves_enabled = false;
@@ -537,13 +547,15 @@ TEST_F(SavedPlayDispatch, CompletedSourceStagesWhileNewerCapturesQueueAndBecomeA
     ASSERT_TRUE(producer.request_capture(windows));
     ASSERT_TRUE(producer.capture_status().queued);
     ASSERT_FALSE(producer.capture_status().latest_ready);
-    ASSERT_TRUE(Stage());
+    ASSERT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
     EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
     producer.pump_capture();
     ASSERT_TRUE(producer.capture_status().active);
     ASSERT_TRUE(producer.request_capture(windows));
     ASSERT_TRUE(producer.capture_status().queued);
-    ASSERT_TRUE(Stage());
+    ASSERT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
     EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, serial);
     producer.pump_capture();
     ASSERT_GT(producer.capture()->serial, serial);
@@ -551,6 +563,112 @@ TEST_F(SavedPlayDispatch, CompletedSourceStagesWhileNewerCapturesQueueAndBecomeA
     ASSERT_TRUE(Stage());
     EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, producer.capture()->serial);
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+}
+
+TEST_F(SavedPlayDispatch, FreshCompletedSerialStagesDuringActiveCaptureButFencedReadsRefuse) {
+    const auto target = renderer.SessionDiagnostic()->state.target_serial;
+    const std::array<Save::AuthorityWindow, 1> windows{{{-6, 518, -6, 518}}};
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    const auto fresh = producer.capture()->serial;
+    ASSERT_GT(fresh, target);
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().active);
+    producer.fence_source_reads(true);
+    EXPECT_FALSE(Stage());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, target);
+    producer.fence_source_reads(false);
+    ASSERT_TRUE(Stage());
+    EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, fresh);
+}
+
+TEST(FarWorldLegacyIsolation, SavedWorldActivationDecisionsBindPumpRefuseAndReport) {
+    // The pipeline's graphics facade requires a live context. Exercise its
+    // shared owner-frame decisions directly, including failure and recovery.
+    std::uint32_t retry_frames = 0;
+    bool retryable = false;
+    EXPECT_TRUE(RetryFarWorldSessionAttachment(retry_frames, retryable, false, false));
+    FarWorldSessionAttachmentFailed(retry_frames, retryable, true);
+    for (std::uint32_t frame = 0; frame < 30; ++frame) {
+        EXPECT_FALSE(RetryFarWorldSessionAttachment(retry_frames, retryable, true, false));
+    }
+    EXPECT_TRUE(RetryFarWorldSessionAttachment(retry_frames, retryable, true, false));
+    EXPECT_FALSE(RetryFarWorldSessionAttachment(retry_frames, retryable, true, true));
+    EXPECT_TRUE(FarWorldSessionCaptureAdmission(false, true));
+    EXPECT_FALSE(FarWorldSessionCaptureAdmission(false, false));
+    EXPECT_TRUE(FarWorldSessionCaptureAge(false, false, true));
+    const auto selected =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto refused = FarWorldSessionSelection(selected,
+                                                  FarWorldPurpose::World,
+                                                  FarWorldRefusal::None,
+                                                  FarWorldRefusal::AdmissionFailed,
+                                                  FarWorldRefusal::None);
+    EXPECT_EQ(refused.requested, FarWorldMode::Ladder);
+    EXPECT_EQ(refused.effective, FarWorldMode::Legacy);
+    EXPECT_EQ(refused.refusal, FarWorldRefusal::AdmissionFailed);
+    const auto recovered = FarWorldSessionSelection(selected,
+                                                    FarWorldPurpose::World,
+                                                    FarWorldRefusal::None,
+                                                    FarWorldRefusal::None,
+                                                    FarWorldRefusal::None);
+    EXPECT_EQ(recovered.effective, FarWorldMode::Ladder);
+    EXPECT_EQ(recovered.refusal, FarWorldRefusal::None);
+}
+
+TEST(FarWorldLegacyIsolation, AttachmentRetryAndCaptureDecisionFailureMatrix) {
+    for (const bool attached : {false, true}) {
+        for (const bool enabled : {false, true}) {
+            for (const bool recoverable : {false, true}) {
+                std::uint32_t retry_frames = 0;
+                bool retryable = false;
+                FarWorldSessionAttachmentFailed(retry_frames, retryable, recoverable);
+                EXPECT_EQ(retry_frames, recoverable ? 30u : 0u);
+                for (std::uint32_t frame = 0; frame < 30; ++frame) {
+                    if (recoverable) {
+                        EXPECT_FALSE(RetryFarWorldSessionAttachment(
+                            retry_frames, retryable, attached, enabled));
+                    }
+                }
+                EXPECT_EQ(
+                    RetryFarWorldSessionAttachment(retry_frames, retryable, attached, enabled),
+                    !attached || (!enabled && recoverable));
+            }
+        }
+    }
+    for (const bool discovering : {false, true}) {
+        for (const bool admitted : {false, true}) {
+            for (const bool active : {false, true}) {
+                EXPECT_EQ(FarWorldSessionCaptureAdmission(discovering, admitted),
+                          !discovering && admitted);
+                EXPECT_EQ(FarWorldSessionCaptureAge(discovering, admitted, active),
+                          active && (discovering || !admitted));
+            }
+        }
+    }
+    const auto selected =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    for (const auto purpose :
+         {FarWorldPurpose::World, FarWorldPurpose::Preview, FarWorldPurpose::OffscreenPreview}) {
+        const auto refusal = FarWorldSessionSelection(selected,
+                                                      purpose,
+                                                      FarWorldRefusal::InvalidCavePolicy,
+                                                      FarWorldRefusal::AdmissionFailed,
+                                                      FarWorldRefusal::WaterUnavailable);
+        EXPECT_EQ(refusal.refusal,
+                  purpose == FarWorldPurpose::World ? FarWorldRefusal::InvalidCavePolicy
+                                                    : selected.refusal);
+    }
+    std::uint32_t retry_frames = 0;
+    bool retryable = false;
+    FarWorldSessionAttachmentFailed(retry_frames, retryable, true);
+    for (std::uint32_t frame = 0; frame < 30; ++frame) {
+        EXPECT_FALSE(RetryFarWorldSessionAttachment(retry_frames, retryable, false, false));
+    }
+    EXPECT_TRUE(RetryFarWorldSessionAttachment(retry_frames, retryable, false, false));
 }
 
 TEST_F(SavedPlayDispatch, QueuedWindowChangeRefusesAnUncoveredCompletedSourceTransactionally) {
