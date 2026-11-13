@@ -528,6 +528,7 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
             if (!reg.all_of<Comp::CreaturePhysicsComponent>(e)) {
                 tf.position.x += cr.wish_x * dt;
                 tf.position.z += cr.wish_z * dt;
+                reg.patch<Comp::TransformComponent>(e);
             }
         }
         cr.hunger =

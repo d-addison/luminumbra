@@ -112,6 +112,7 @@
 #include <system_error>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <array>
 #include <bit>
 #include <chrono>
 
@@ -258,6 +259,7 @@ void StepCreatureAvatars(entt::registry& registry,
         const auto& motor = view.get<Comp::CreaturePhysicsComponent>(entity);
         view.get<Comp::TransformComponent>(entity).position =
             physics.get_avatar_position(motor.avatar_index);
+        registry.patch<Comp::TransformComponent>(entity);
     }
 }
 } // namespace
@@ -299,53 +301,222 @@ bool FoliageOwnsRegion(const FoliageFieldPages& channel, RegionKey owner) {
     }
     return false;
 }
-entt::registry
-SelectFoliageRegistry(const entt::registry& original,
-                      const luminumbra::foliage::RegionalFoliageWindows& windows,
-                      const std::set<FieldPageKey>& borders,
-                      const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
-    namespace Comp = Luminumbra::Components;
-    entt::registry selected;
-    const auto collect = [&]<typename T>() {
-        for (auto entity : original.view<const T>()) {
-            if (selected.valid(entity)) {
+// Runtime-only owner membership. Signals queue topology/ownership changes; mutable
+// payloads are read when selecting. Membership is bounded by EnTT's entity mask;
+// the queue records changed components only, never a per-tick roster copy.
+class FoliageParticipants {
+public:
+    explicit FoliageParticipants(entt::registry& original)
+        : m_original(original) {
+        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
+            for (const auto entity : original.view<const T>()) {
+                ++m_visits;
+                Changed(original, entity);
+            }
+        });
+        try {
+            Tracked([&]<typename T> {
+                original.on_construct<T>().template connect<&FoliageParticipants::Changed>(*this);
+                original.on_update<T>().template connect<&FoliageParticipants::Changed>(*this);
+                original.on_destroy<T>().template connect<&FoliageParticipants::Changed>(*this);
+            });
+        } catch (...) {
+            Disconnect();
+            throw;
+        }
+    }
+    ~FoliageParticipants() {
+        Disconnect();
+    }
+    FoliageParticipants(const FoliageParticipants&) = delete;
+    FoliageParticipants& operator=(const FoliageParticipants&) = delete;
+    FoliageParticipants(FoliageParticipants&&) = delete;
+    FoliageParticipants& operator=(FoliageParticipants&&) = delete;
+
+    void Changed(entt::registry&, entt::entity entity) {
+        auto& slot = ChangeSlot(entity);
+        if (slot == kAbsent) {
+            m_changes.push_back(entity);
+            slot = m_changes.size() - 1;
+        } else {
+            // Retain the newest generation, even across many idle-tick births.
+            m_changes[slot] = entity;
+        }
+    }
+    // At most one queued entry per entity slot, including recycled handles.
+    // Reserve only the actual birth slots before the no-throw commit, including
+    // sparse handles beyond an unrelated roster. No whole-index expansion.
+    void ReservePublication(std::span<const entt::entity> births) {
+        const auto count = births.size();
+        const auto limit = m_changes.max_size();
+        if (count > limit - m_selected || count + m_selected > limit - m_changes.size()) {
+            throw std::length_error("Foliage change queue too large");
+        }
+        for (const auto entity : births) {
+            ChangeSlot(entity);
+        }
+        m_changes.reserve(std::min(kSlotCount, m_changes.size() + count + m_selected));
+    }
+    entt::registry Select(const luminumbra::foliage::RegionalFoliageWindows& windows,
+                          const luminumbra::ai::CreatureTickAdmission* admission = nullptr) {
+        namespace Comp = Luminumbra::Components;
+        std::set<entt::entity> candidates;
+        for (const auto entity : m_changes) {
+            ++m_visits;
+            const auto index = static_cast<std::size_t>(entt::to_entity(entity));
+            const auto old = m_members.find(index);
+            if (old != m_members.end()) {
+                auto& bucket = m_owners.at(old->second.owner);
+                bucket.erase(old->second.entity);
+                if (bucket.empty()) {
+                    m_owners.erase(old->second.owner);
+                }
+                m_members.erase(old);
+            }
+            bool participant = false;
+            if (m_original.valid(entity)) {
+                luminumbra::foliage::stage_detail::Participants(
+                    [&]<typename T> { participant = participant || m_original.all_of<T>(entity); });
+            }
+            if (!participant) {
                 continue;
             }
-            const auto* owner = original.try_get<const Comp::PlantRegionComponent>(entity);
-            const auto* transform = original.try_get<const Comp::TransformComponent>(entity);
-            // Incomplete opt-ins still participate in staging; consumers reject
-            // missing transforms without mutating their payloads.
+            const auto* owner = m_original.try_get<const Comp::PlantRegionComponent>(entity);
+            const auto* transform = m_original.try_get<const Comp::TransformComponent>(entity);
+            std::optional<RegionKey> key;
+            if (owner) {
+                key = RegionKey{owner->owner_x, owner->owner_z};
+            } else if (transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                key = ActiveRegionLedger::region_at(transform->position);
+            }
+            // Invalid anchors are distinct from incomplete opt-ins and cannot
+            // participate through the fallback bucket.
+            if (key || !transform) {
+                m_members.emplace(index, Member{entity, key});
+                m_owners[key].insert(entity);
+            }
+            // An admitted mover can have left its due owner since capture.
+            if (admission && m_original.all_of<Comp::CreatureComponent>(entity) &&
+                admission->Allows(entity)) {
+                candidates.insert(entity);
+            }
+        }
+        for (const auto entity : m_changes) {
+            ChangeSlot(entity) = kAbsent;
+        }
+        m_changes.clear();
+        for (const auto& [key, elapsed] : windows.elapsed) {
+            const auto found = m_owners.find(key);
+            if (found != m_owners.end()) {
+                candidates.insert(found->second.begin(), found->second.end());
+            }
+        }
+        const auto unowned = m_owners.find(std::nullopt);
+        if (!windows.elapsed.empty() && unowned != m_owners.end()) {
+            candidates.insert(unowned->second.begin(), unowned->second.end());
+        }
+        entt::registry selected;
+        std::vector<entt::entity> ordered;
+        for (const auto entity : candidates) {
+            ++m_visits;
+            const auto* owner = m_original.try_get<const Comp::PlantRegionComponent>(entity);
+            const auto* transform = m_original.try_get<const Comp::TransformComponent>(entity);
             bool include = (!owner && !transform && !windows.elapsed.empty()) ||
                            (owner && windows.elapsed.contains({owner->owner_x, owner->owner_z}));
-            if (!owner && !include && transform &&
-                ActiveRegionLedger::valid_anchor(transform->position)) {
-                const auto cell = luminumbra::foliage::FoliageCell(transform->position);
-                const auto found = windows.elapsed.find(FieldPageState::region_of_scent_cell(cell));
-                const auto page = [](int value) {
-                    return value >= 0 ? value / 16 : (value - 15) / 16;
-                };
-                include = (found != windows.elapsed.end() && found->second != 0) ||
-                          borders.contains({page(cell.x), page(cell.z)});
+            if (!owner && transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                const auto found =
+                    windows.elapsed.find(ActiveRegionLedger::region_at(transform->position));
+                include = found != windows.elapsed.end() && found->second != 0;
             }
-            // Creature ownership was captured before movement. Keep admitted
-            // creatures even when their current position crossed a region boundary.
-            if (admission && original.all_of<Comp::CreatureComponent>(entity)) {
+            if (admission && m_original.all_of<Comp::CreatureComponent>(entity)) {
                 include = admission->Allows(entity);
             }
             if (include) {
+                ordered.push_back(entity);
+            }
+        }
+        // Match the previous participant-pool order exactly: the first pool
+        // containing an entity wins, with reverse dense-index order within it.
+        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
+            std::vector<entt::entity> pool;
+            for (const auto entity : ordered) {
+                ++m_visits;
+                if (!selected.valid(entity) && m_original.all_of<T>(entity)) {
+                    pool.push_back(entity);
+                }
+            }
+            const auto* storage = std::as_const(m_original).storage<T>();
+            std::sort(pool.begin(), pool.end(), [storage](auto left, auto right) {
+                return storage->index(left) > storage->index(right);
+            });
+            for (const auto entity : pool) {
                 if (selected.create(entity) != entity) {
                     throw std::runtime_error("Foliage handle refused");
                 }
-                luminumbra::foliage::stage_detail::CopyFoliage(original, entity, selected, entity);
+                luminumbra::foliage::stage_detail::CopyFoliage(
+                    m_original, entity, selected, entity);
             }
-        }
+        });
+        m_selected = ordered.size();
+        return selected;
+    }
+    [[nodiscard]] std::uint64_t visits() const {
+        return m_visits;
+    }
+
+private:
+    void Disconnect() {
+        Tracked([&]<typename T> {
+            if (std::as_const(m_original).storage<T>()) {
+                m_original.on_construct<T>().template disconnect<&FoliageParticipants::Changed>(
+                    *this);
+                m_original.on_update<T>().template disconnect<&FoliageParticipants::Changed>(*this);
+                m_original.on_destroy<T>().template disconnect<&FoliageParticipants::Changed>(
+                    *this);
+            }
+        });
+    }
+    template<typename Function>
+    static void Tracked(const Function& function) {
+        luminumbra::foliage::stage_detail::Participants(function);
+        function.template operator()<Components::TransformComponent>();
+        function.template operator()<Components::PlantRegionComponent>();
+    }
+    struct Member {
+        entt::entity entity;
+        std::optional<RegionKey> owner;
     };
-    luminumbra::foliage::stage_detail::Participants(collect);
-    return selected;
-}
+    static constexpr auto kAbsent = std::numeric_limits<std::size_t>::max();
+    static constexpr std::size_t kSlotCount =
+        static_cast<std::size_t>(entt::entt_traits<entt::entity>::entity_mask) + 1;
+    static constexpr std::size_t kSlotPageSize = 1024;
+    using SlotPage = std::array<std::size_t, kSlotPageSize>;
+    std::size_t& ChangeSlot(entt::entity entity) {
+        const auto index = static_cast<std::size_t>(entt::to_entity(entity));
+        auto& page = m_slots[index / kSlotPageSize];
+        if (!page) {
+            auto prepared = std::make_unique<SlotPage>();
+            prepared->fill(kAbsent);
+            page = std::move(prepared);
+        }
+        return (*page)[index % kSlotPageSize];
+    }
+    entt::registry& m_original;
+    std::map<std::optional<RegionKey>, std::set<entt::entity>> m_owners;
+    std::map<std::size_t, Member> m_members;
+    // At most entity_mask + 1 slots/changes, independent of elapsed ticks.
+    // Slot payloads allocate only for changed handles, in 1024-entry pages.
+    std::array<std::unique_ptr<SlotPage>, (kSlotCount - 1) / kSlotPageSize + 1> m_slots{};
+    std::vector<entt::entity> m_changes;
+    std::size_t m_selected = 0;
+    std::uint64_t m_visits = 0;
+};
 } // namespace
 
 struct GameSession::FoliageStep {
+    explicit FoliageStep(entt::registry& original)
+        : participants(original) {}
+    FoliageParticipants participants;
     luminumbra::foliage::FoliageRegistryStage registry;
     luminumbra::foliage::RegionalFoliageWindows windows;
     FieldPageState pages;
@@ -407,7 +578,7 @@ struct GameSession::FoliageStep {
         if (!session.m_activeRegionsEnabled || session.m_foliageStep) {
             return;
         }
-        auto candidate = std::make_unique<FoliageStep>();
+        auto candidate = std::make_unique<FoliageStep>(session.m_registry);
         auto& step = *candidate;
         for (const auto& [key, record] : session.m_activeRegionLedger.records()) {
             step.last_ticks.emplace(key, luminumbra::foliage::FoliagePriorTick(record));
@@ -535,29 +706,6 @@ struct GameSession::FoliageStep {
             step.last_ticks.try_emplace(key, luminumbra::foliage::FoliagePriorTick(found->second));
             step.committed_ticks.try_emplace(key, found->second.last_ticked);
         }
-        const auto index_borders = [&]<typename T>() {
-            for (const auto entity :
-                 session.m_registry.view<const T, const Components::TransformComponent>()) {
-                const auto& position =
-                    session.m_registry.get<Components::TransformComponent>(entity).position;
-                if (!ActiveRegionLedger::valid_anchor(position)) {
-                    continue;
-                }
-                const auto owner = ActiveRegionLedger::region_at(position);
-                const auto* identity =
-                    session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
-                if (identity && RegionKey{identity->owner_x, identity->owner_z} != owner) {
-                    continue;
-                }
-                const auto window = step.windows.elapsed.find(owner);
-                if (window != step.windows.elapsed.end() && window->second != 0 &&
-                    FoliageOwnsRegion(session.m_fieldPages.irrigation(), owner)) {
-                    step.border_owners[ledger.records().at(owner).cadence_shift].insert(owner);
-                }
-            }
-        };
-        index_borders.template operator()<Components::PlantTag>();
-        index_borders.template operator()<Components::WaterSourceComponent>();
         // At most kMaxRegions admitted owners; dormant index entries are not traversed.
         std::vector<RegionKey> owners;
         for (const auto& [key, elapsed] : step.windows.elapsed) {
@@ -590,7 +738,6 @@ struct GameSession::FoliageStep {
                 staged.insert(key);
             }
         }
-        std::set<FieldPageKey> border_pages;
         for (const auto& [cell, next] : step.borders) {
             for (const auto endpoint : {cell, next}) {
                 const auto owner = FieldPageState::region_of_scent_cell(endpoint);
@@ -602,14 +749,9 @@ struct GameSession::FoliageStep {
                 }
                 step.field_owners.insert(owner);
                 step.border_owners[ledger.records().at(owner).cadence_shift].insert(owner);
-                const auto page = [](int value) {
-                    return value >= 0 ? value / 16 : (value - 15) / 16;
-                };
-                border_pages.insert({page(endpoint.x), page(endpoint.z)});
             }
         }
-        auto selected =
-            SelectFoliageRegistry(session.m_registry, step.windows, border_pages, admission);
+        auto selected = participants.Select(step.windows, admission);
         // Admission is shared by every creation/load path through the sealed
         // registry selection. No live page is inserted before publication.
         const auto admit = [&](entt::entity entity, bool soil, bool activate) {
@@ -655,8 +797,6 @@ struct GameSession::FoliageStep {
                                            fresh ? std::min(elapsed, std::uint32_t{1}) : elapsed);
             }
         }
-        step.border_fluxes =
-            luminumbra::foliage::FoliageBorderFluxes(step.pages.irrigation(), step.borders);
         has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(selected);
         if (has_registry_work || !step.pages.empty() || !windows.resumes.empty()) {
             step.registry.Begin(selected, ledger.next_persistent_id());
@@ -780,10 +920,8 @@ struct GameSession::FoliageStep {
             // Early tick consumers move creatures and may allocate identities.
             // Refresh their live payloads; only feeder absorption changed during
             // historical replay, whose sources stayed sealed between updates.
-            auto selected = SelectFoliageRegistry(
-                session.m_registry,
+            auto selected = step.participants.Select(
                 step.windows,
-                {},
                 session.m_registry.ctx().find<luminumbra::ai::CreatureTickAdmission>());
             for (auto entity :
                  step.registry.registry().view<const Components::SoilFeederComponent>()) {
@@ -792,6 +930,7 @@ struct GameSession::FoliageStep {
                         step.registry.registry().get<const Components::SoilFeederComponent>(entity);
                 }
             }
+            step.has_registry_work = luminumbra::foliage::FoliageRegistryStage::HasWork(selected);
             step.registry.Abort();
             step.registry.Begin(selected, session.m_activeRegionLedger.next_persistent_id());
         }
@@ -815,8 +954,11 @@ struct GameSession::FoliageStep {
         }
         step.RestoreUnpublishedTicks(session);
         step.AdvanceReplay();
+        const auto live_owners = step.AdmitLiveSources(session);
+        step.border_fluxes =
+            luminumbra::foliage::FoliageBorderFluxes(step.pages.irrigation(), step.borders);
         for (const auto& [key, work] :
-             step.replay->FinishLiveTick(step.registry.registry(), step.pages)) {
+             step.replay->FinishLiveTick(step.registry.registry(), step.pages, live_owners)) {
             step.replay_work[key] += work;
         }
         step.replay_cell_visits = step.replay->work().evolved_cells;
@@ -843,6 +985,62 @@ struct GameSession::FoliageStep {
         }
         step.active = true;
         return &step;
+    }
+    std::vector<RegionKey> AdmitLiveSources(const GameSession& session) {
+        std::set<RegionKey> owners;
+        if (!has_registry_work) {
+            return {};
+        }
+        const auto& selected = registry.registry();
+        const auto admit = [&](entt::entity entity, bool soil) {
+            const auto* transform = selected.try_get<const Components::TransformComponent>(entity);
+            if (!transform || !ActiveRegionLedger::valid_anchor(transform->position)) {
+                return;
+            }
+            const auto cell = luminumbra::foliage::FoliageCell(transform->position);
+            const auto owner = FieldPageState::region_of_scent_cell(cell);
+            const auto window = windows.elapsed.find(owner);
+            if (window == windows.elapsed.end() || window->second == 0) {
+                return;
+            }
+            const auto* identity = selected.try_get<const Components::PlantRegionComponent>(entity);
+            if (identity && RegionKey{identity->owner_x, identity->owner_z} != owner) {
+                return;
+            }
+            const auto floor16 = [](int value) {
+                return value >= 0 ? value / 16 : (value - 15) / 16;
+            };
+            const auto& channel = soil ? pages.soil() : pages.irrigation();
+            const auto page = channel.pages().find({floor16(cell.x), floor16(cell.z)});
+            const bool complete =
+                page != channel.pages().end() &&
+                std::all_of(page->second.mask.begin(), page->second.mask.end(), [](auto mask) {
+                    return mask == std::numeric_limits<std::uint64_t>::max();
+                });
+            if (!complete) {
+                if (!luminumbra::foliage::ActivateFoliagePage(pages, cell, soil)) {
+                    throw std::runtime_error("Live foliage page admission refused");
+                }
+                owners.insert(owner);
+            }
+            field_owners.insert(owner);
+            if (!soil) {
+                border_owners[session.m_activeRegionLedger.records().at(owner).cadence_shift]
+                    .insert(owner);
+            }
+        };
+        for (const auto entity : selected.view<const Components::PlantTag,
+                                               const Components::SoilFeederComponent,
+                                               const Components::PlantGrowthComponent>()) {
+            admit(entity, true);
+        }
+        for (const auto entity : selected.view<const Components::WaterSourceComponent>()) {
+            admit(entity, false);
+        }
+        if (!session.m_fieldPages.can_adopt_foliage(pages)) {
+            throw std::runtime_error("Foliage page capacity reached");
+        }
+        return {owners.begin(), owners.end()};
     }
     void RestoreUnpublishedTicks(GameSession& session) const noexcept {
         for (const auto& [key, elapsed] : windows.elapsed) {
@@ -902,6 +1100,7 @@ struct GameSession::FoliageStep {
             throw std::runtime_error("Foliage page capacity reached");
         }
         registry.PreparePublication(session.m_registry);
+        participants.ReservePublication(registry.birth_handles());
     }
     void Commit(GameSession& session) noexcept {
         registry.Commit(session.m_registry);
@@ -940,6 +1139,9 @@ struct GameSession::FoliageStep {
     };
 };
 
+std::uint64_t GameSession::GetFoliageSelectionVisits() const {
+    return m_foliageStep ? m_foliageStep->participants.visits() : 0;
+}
 std::uint64_t GameSession::GetFoliageRegistryStageVisits() const {
     return m_foliageStep ? m_foliageStep->registry.visits() : 0;
 }
@@ -1006,7 +1208,7 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
     }
     luminumbra::foliage::RegionalFoliageWindows windows;
     windows.elapsed.emplace(owner, static_cast<std::uint32_t>(elapsed));
-    auto selected = SelectFoliageRegistry(m_registry, windows, {});
+    auto selected = m_foliageStep->participants.Select(windows);
     luminumbra::foliage::FoliageRegistryStage registry;
     registry.Begin(selected, ledger.next_persistent_id());
     luminumbra::foliage::FoliageWindowReplay replay(pages, windows.elapsed, m_worldClock.tick());
@@ -1025,6 +1227,7 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
         edited_record.cadence_phase = 0;
     }
     registry.PreparePublication(m_registry);
+    m_foliageStep->participants.ReservePublication(registry.birth_handles());
     // Reserve runtime index nodes before publishing the edited state. The edit
     // tick is persisted by matching edit/work stamps; resume clips to it.
     m_foliageStep->last_ticks.try_emplace(owner, prior);

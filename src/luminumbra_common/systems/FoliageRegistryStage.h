@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <entt/entt.hpp>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -88,7 +89,8 @@ inline void CopyFoliage(const entt::registry& from,
     Components([&]<typename T> { Copy<T>(from, source, to, target); });
 }
 } // namespace stage_detail
-// Candidate storage; the owner keeps live pools stable and free of mutation listeners.
+// Candidate storage; the owner keeps live pools stable. Publication listeners
+// must reserve their storage beforehand and must not throw.
 // Retained handles stay stable; births acquire live handles after consumers succeed.
 class FoliageRegistryStage {
 public:
@@ -254,6 +256,11 @@ public:
             TrimIndex(detached.storage, size);
         });
         m_prepared = true;
+    }
+    // Reserved live handles after PreparePublication, before Commit or Abort.
+    // Incremental consumers can reserve their notification storage before publication.
+    [[nodiscard]] std::span<const entt::entity> birth_handles() const {
+        return m_births;
     }
     void Commit(entt::registry& original) noexcept {
         if (!m_prepared || m_committed) {

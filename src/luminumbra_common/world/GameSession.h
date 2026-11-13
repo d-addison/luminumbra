@@ -541,6 +541,7 @@ public:
         return m_fieldPages;
     }
     // Observational foliage preparation/publication counts; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
     // Runtime-only diagnostics; neither encoded nor hashed.

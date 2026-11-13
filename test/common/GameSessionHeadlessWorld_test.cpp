@@ -15651,6 +15651,16 @@ TEST(GameSessionHeadlessWorldTest, FoliageLiveStepRefreshesSourcesAndRefusesInco
     Foliage::FoliageWindowReplay empty(fields, {}, 34, true);
     EXPECT_TRUE(empty.FinishLiveTick(registry, fields).empty());
     EXPECT_EQ(fields.serialize(), after);
+    // A source can enter an empty due owner after the historical topology seals.
+    const RegionKey destination{1, 0};
+    const std::array<RegionKey, 1> live_owners{destination};
+    registry.get<C::TransformComponent>(spring).position = {520, 0, 8};
+    ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, {520, 8}, false));
+    empty.FinishLiveTick(registry, fields, live_owners);
+    EXPECT_EQ(fields.irrigation().sample({520, 8}, -1), 394);
+    const auto admitted = fields.serialize();
+    EXPECT_TRUE(empty.FinishLiveTick(registry, fields, live_owners).empty());
+    EXPECT_EQ(fields.serialize(), admitted);
 }
 
 TEST(GameSessionHeadlessWorldTest, FoliageMidReplayEditRefusesWithoutPublishingOrLosingHistory) {
@@ -15936,4 +15946,227 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChang
         EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
     }
 }
+} // namespace
+
+namespace {
+TEST(GameSessionHeadlessWorldTest, IrrigationBorderFluxUsesCompletedHistoricalLevels) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey left{-1, 0}, right{0, 0};
+    auto ledger =
+        ScheduledFieldLedger(84, {{left, RegionState::Active}, {right, RegionState::Active}});
+    for (const auto key : {left, right}) {
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(key);
+        record.first_active = 0;
+        record.last_ticked = 19;
+        record.frozen_at = 20;
+    }
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_irrigation({-1, 8}, 8000));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    const auto plant = ClockTestPlant(session.GetRegistry(), {-1, 0, 8});
+    session.GetRegistry().emplace<C::PlantRegionComponent>(plant, id, -1, 0, std::uint64_t{20});
+    session.GetRegistry().emplace<C::WaterSourceComponent>(plant).output = 800;
+    const std::vector<RegionKey> owners{left, right};
+    const auto edges = Foliage::SelectFoliageBorderEdges(
+        Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true), ledger.records(), 85);
+    ASSERT_FALSE(edges.empty());
+    for (const auto& [a, b] : edges) {
+        ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, a, false));
+        ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, b, false));
+    }
+    const auto stale_flux = Foliage::FoliageBorderFluxes(fields.irrigation(), edges);
+    entt::registry sources;
+    ASSERT_EQ(sources.create(plant), plant);
+    Foliage::stage_detail::CopyFoliage(session.GetRegistry(), plant, sources, plant);
+    const std::map<RegionKey, std::uint32_t> due{{left, 1}, {right, 1}};
+    Foliage::FoliageInteriorReplay history;
+    for (std::uint64_t tick = 21; tick < 85; ++tick) {
+        history.Step(sources, fields, due, tick, true);
+    }
+    const auto flux = Foliage::FoliageBorderFluxes(fields.irrigation(), edges);
+    ASSERT_NE(flux, stale_flux);
+    history.LiveStep(sources, fields, due);
+    Foliage::ExchangeFoliageBorders(fields, flux, edges);
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
+}
+
+void CheckMovingLiveFoliageSource(bool capacity) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    auto ledger = ScheduledFieldLedger(84,
+                                       {{{0, 0}, RegionState::Active},
+                                        {{1, 0}, RegionState::Frozen},
+                                        {{2, 0}, RegionState::Frozen},
+                                        {{3, 0}, RegionState::Frozen},
+                                        {{4, 0}, RegionState::Frozen}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 19;
+    record.frozen_at = 20;
+    FieldPageState fields;
+    ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, {15, 8}, false));
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    if (capacity) {
+        for (int x = 32; x < 160; ++x) {
+            for (int z = 0; z < 32; ++z) {
+                if (x != 159 || z != 31) {
+                    ASSERT_TRUE(fields.set_irrigation({x * 16, z * 16}, 0));
+                }
+            }
+        }
+        ASSERT_EQ(fields.irrigation().pages().size(),
+                  Luminumbra::world::FoliageFieldPages::kMaxPages);
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    auto& registry = session.GetRegistry();
+    const auto spring = registry.create();
+    registry.emplace<C::TransformComponent>(spring).position = {15.99f, 0, 8};
+    registry.emplace<C::CreatureComponent>(spring).move_speed = 60;
+    registry.emplace<C::WaterSourceComponent>(spring).output = 800;
+    const auto predator = registry.create();
+    registry.emplace<C::TransformComponent>(predator).position = {10, 0, 8};
+    auto& hunter = registry.emplace<C::CreatureComponent>(predator);
+    hunter.is_predator = true;
+    hunter.move_speed = 0;
+    const auto before = fields.serialize();
+    // Two complete history budgets leave the live tick for a third update.
+    for (unsigned update = 0; update < 2; ++update) {
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    }
+    TickOnce(session);
+    const auto position = registry.get<C::TransformComponent>(spring).position;
+    ASSERT_GE(position.x, 16);
+    ASSERT_LT(position.x, 32);
+    const auto cell = Foliage::FoliageCell(position);
+    if (capacity) {
+        EXPECT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 19u);
+        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(),
+                  ledger.next_persistent_id());
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+        return;
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    Foliage::FoliageInteriorReplay history;
+    for (unsigned tick = 0; tick < 64; ++tick) {
+        history.Step(fields, {{kFieldOwner, 1}});
+    }
+    ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, cell, false));
+    Foliage::FoliageInteriorReplay reference;
+    reference.Step(registry, fields, {{kFieldOwner, 1}});
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
+    EXPECT_EQ(session.GetFieldPages().soil().pages(), fields.soil().pages());
+    EXPECT_EQ(session.GetFieldPages().irrigation().sample(cell, -1), 394);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    Foliage::FoliageInteriorReplay next;
+    next.Step(registry, fields, {{kFieldOwner, 1}});
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
+    EXPECT_EQ(session.GetFieldPages().soil().pages(), fields.soil().pages());
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest, MovingLiveFoliageSourceAdmitsItsDestinationExactlyOnce) {
+    ASSERT_NO_FATAL_FAILURE(CheckMovingLiveFoliageSource(false));
+}
+TEST(GameSessionHeadlessWorldTest, MovingLiveFoliageSourceAtCapacityPreservesAuthority) {
+    ASSERT_NO_FATAL_FAILURE(CheckMovingLiveFoliageSource(true));
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageSelectionVisitsOnlyDueOwnerParticipantsAfterWarmup) {
+    for (const int count : {1, 64}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active}};
+        for (int index = 1; index < count; ++index) {
+            owners.emplace(RegionKey{index, 0}, RegionState::Frozen);
+        }
+        const auto ledger = ScheduledFieldLedger(31, owners);
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+        session.SetReplicatedSimulationAnchors({});
+        auto& registry = session.GetRegistry();
+        for (int index = 0; index < count; ++index) {
+            const auto source = registry.create();
+            registry.emplace<C::TransformComponent>(source).position = {
+                static_cast<float>(index * 512 + 8), 0, 8};
+            registry.emplace<C::WaterSourceComponent>(source);
+        }
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto visits = session.GetFoliageSelectionVisits();
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFoliageSelectionVisits() - visits, 13u);
+    }
+}
+TEST(GameSessionHeadlessWorldTest, FoliageOwnerIndexTracksOwnershipRemovalAndRecycledHandles) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {{1, 0}, RegionState::Frozen}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    session.SetReplicatedSimulationAnchors({});
+    auto& registry = session.GetRegistry();
+    const auto entity = StagedMortal(registry);
+    registry.patch<C::TransformComponent>(
+        entity, [](auto& transform) { transform.position = {520, 0, 8}; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 0u);
+    registry.patch<C::TransformComponent>(entity,
+                                          [](auto& transform) { transform.position = {8, 0, 8}; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
+    registry.emplace<C::PlantRegionComponent>(entity, std::uint64_t{1}, 1, 0, std::uint64_t{0});
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
+    registry.patch<C::PlantRegionComponent>(entity, [](auto& identity) { identity.owner_x = 0; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 2u);
+    registry.remove<C::PlantRegionComponent>(entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 3u);
+    registry.remove<C::TransformComponent>(entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    // Missing transforms remain staged opt-ins; position-gated consumers ignore them.
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 3u);
+    registry.destroy(entity);
+    for (unsigned generation = 0; generation < 64; ++generation) {
+        registry.destroy(StagedMortal(registry));
+    }
+    const auto replacement = StagedMortal(registry);
+    ASSERT_NE(replacement, entity);
+    const auto visits = session.GetFoliageSelectionVisits();
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(replacement).age_ticks, 1u);
+    EXPECT_EQ(session.GetFoliageSelectionVisits() - visits, 14u);
+}
+
 } // namespace
