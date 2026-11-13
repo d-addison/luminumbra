@@ -790,6 +790,29 @@ struct GameSession::FoliageStep {
                 }
             }
         }
+        // Reconstruct deferred work from committed pages and completion stamps.
+        // A stale input alone must not pull a future cadence phase forward.
+        // This bootstrap scan is bounded by the persisted field-owner set.
+        for (const auto key : step.field_owners) {
+            const auto& record = session.m_activeRegionLedger.records().at(key);
+            if (record.state == RegionState::Frozen) {
+                continue;
+            }
+            const auto prior = FoliageInputPriorTick(record);
+            const auto tick = session.m_worldClock.tick();
+            const auto mask = (std::uint64_t{1} << record.cadence_shift) - 1;
+            const auto since_due = (tick - record.cadence_phase) & mask;
+            const bool missed_due =
+                since_due <= tick && tick - since_due > prior &&
+                tick - since_due - prior > luminumbra::foliage::FoliageWindowReplay::kStepBudget;
+            const bool resumed =
+                record.frozen_at != 0 && prior <= tick &&
+                tick - prior >= luminumbra::foliage::FoliageWindowReplay::kStepBudget;
+            if (missed_due || resumed) {
+                step.deferred.insert(key);
+                step.blocked = true;
+            }
+        }
         // Bootstrap only: participants without field pages still own history.
         // Match selection's explicit-owner precedence and incomplete opt-ins.
         bool unowned = false;
@@ -1005,7 +1028,7 @@ struct GameSession::FoliageStep {
         preparation_pages = staged_pages + replay->work().preparation_pages;
     }
     // Replay stalls the next simulation tick, not the host update. Only the
-    // participating cadence buckets are visited. Pending persistence is refused.
+    // participating cadence buckets are visited.
     static bool ReadyForTick(GameSession& session) {
         Initialize(session);
         if (!session.m_activeRegionsEnabled) {
@@ -1498,8 +1521,7 @@ std::string GameSession::WorldPreparationError(const WorldPreparation& prepared)
 
 bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
                                      Persistence::CreatedWorldArtifacts* artifacts) {
-    if (!prepared || (!prepared->create &&
-                      (!IsSimulationTickBoundary() || FoliageStep::PersistencePending(*this))))
+    if (!prepared || (!prepared->create && !IsSimulationTickBoundary()))
         return false;
     m_worldOpenError = WorldPreparationError(*prepared);
     if (!prepared->ready || !m_worldOpenError.empty())
@@ -2979,13 +3001,13 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (!IsSimulationTickBoundary())
         return false;
     return AdoptPreparedWorld(PrepareWorldLoad(CaptureWorldPreparationOptions(), worldId));
 }
 
 bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save_root) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (!IsSimulationTickBoundary())
         return false;
     auto options = CaptureWorldPreparationOptions();
     options.save_root = save_root;
@@ -4884,7 +4906,7 @@ bool PersistSavedPreset(const fs::path& save_dir,
 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
                                       Persistence::CreatedWorldArtifacts* artifacts) const {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary() || save_dir.empty() ||
+    if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
         ((m_transientWorld || m_metadata.worldId.empty()) &&
          (m_activeRegionsEnabled || !m_renderCalendar)) ||
@@ -5003,7 +5025,7 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
-    if (FoliageStep::PersistencePending(*this)) {
+    if (!IsSimulationTickBoundary()) {
         return false;
     }
     if (report) {
@@ -5028,7 +5050,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
                                        bool write_metadata) {
-    if (!m_worldUsable || FoliageStep::PersistencePending(*this)) {
+    if (!m_worldUsable || !IsSimulationTickBoundary()) {
         return false;
     }
     // Drain before lending session state to the worker: a one-worker pool must
@@ -5427,7 +5449,7 @@ bool GameSession::LoadWorldState() {
 }
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (!IsSimulationTickBoundary())
         return false;
     if (!m_worldUsable || !m_worldSystem || save_dir.empty()) {
         return false;
@@ -5580,25 +5602,6 @@ bool GameSession::ReadPreparedWorldState(
             state.input_refused = true;
             error = errors.empty() ? "Corrupt field pages." : errors.front();
             return false;
-        }
-        for (const bool soil : {true, false}) {
-            const auto& channel = soil ? state.field_pages.soil() : state.field_pages.irrigation();
-            for (const auto& [key, page] : channel.pages()) {
-                const auto owner = FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16});
-                const auto found = state.ledger->records().find(owner);
-                if (found == state.ledger->records().end() ||
-                    found->second.state == RegionState::Frozen) {
-                    continue;
-                }
-                const auto prior = FoliageInputPriorTick(found->second);
-                if (prior <= state.clock.tick() &&
-                    state.clock.tick() - prior >=
-                        luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
-                    state.input_refused = true;
-                    error = "Pending foliage history cannot be loaded.";
-                    return false;
-                }
-            }
         }
         if (options.scheduler_override && state.ledger->config() != *options.scheduler_override) {
             error = "Incompatible configuration: persisted region scheduler differs "

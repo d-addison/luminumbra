@@ -13315,6 +13315,29 @@ std::string FoliageSnapshot(const entt::registry& registry) {
         Foliage::BuildPlantEntitySnapshot(registry));
 }
 
+void ExpectCommittedFoliageEqual(GameSession& actual, GameSession& expected) {
+    for (auto* session : {&actual, &expected}) {
+        Luminumbra::Ecs::EntityRegistrySnapshot snapshot;
+        std::string error;
+        ASSERT_TRUE(Foliage::BuildPlantEntitySnapshot(session->GetRegistry(), snapshot, error))
+            << error;
+        ASSERT_TRUE(Foliage::ValidatePlantEntitySnapshot(
+            snapshot, session->GetActiveRegionLedger(), session->GetGroundObjects(), error))
+            << error;
+    }
+    EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                  Foliage::BuildPlantEntitySnapshot(actual.GetRegistry(), true)),
+              Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                  Foliage::BuildPlantEntitySnapshot(expected.GetRegistry(), true)));
+    EXPECT_EQ(actual.GetFieldPages().serialize(), expected.GetFieldPages().serialize());
+    auto actual_ledger = actual.GetActiveRegionLedger();
+    auto expected_ledger = expected.GetActiveRegionLedger();
+    actual_ledger.mark_saved(actual.GetWorldClock());
+    expected_ledger.mark_saved(expected.GetWorldClock());
+    EXPECT_EQ(actual_ledger.encode(), expected_ledger.encode());
+    EXPECT_EQ(actual.GetWorldClock().canonical_bytes(), expected.GetWorldClock().canonical_bytes());
+}
+
 void CheckFoliageSessionPublication() {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -14418,7 +14441,10 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayAllowanceIsIndependentOfHostFram
     JobSystem jobs;
     jobs.startup(1);
     GameSession batched, separate;
-    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    std::vector<std::pair<GameSession*, entt::entity>> handles;
     FieldPageState fields;
     ASSERT_TRUE(fields.set_soil({8, 8}, 0));
     ASSERT_TRUE(fields.set_irrigation({8, 8}, 8000));
@@ -14427,6 +14453,9 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayAllowanceIsIndependentOfHostFram
         session->SetReplicatedSimulationAnchors({});
         const auto plant = ClockTestPlant(session->GetRegistry(), {8, 0, 8});
         session->GetRegistry().emplace<C::SoilFeederComponent>(plant);
+        session->GetRegistry().emplace<C::PlantRegionComponent>(
+            plant, id, kFieldOwner.x, kFieldOwner.z, std::uint64_t{0});
+        handles.emplace_back(session, plant);
     }
     ASSERT_EQ(batched.TickSimulation(2 * batched.GetSimulationClock().fixed_dt()), 2u);
     TickOnce(separate);
@@ -14436,7 +14465,10 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayAllowanceIsIndependentOfHostFram
     EXPECT_EQ(batched.GetFoliageRegistryPublications(), 2u);
     EXPECT_GT(batched.GetFieldPages().soil().sample({8, 8}, -1), 0);
     EXPECT_EQ(batched.GetFieldPages().serialize(), separate.GetFieldPages().serialize());
-    EXPECT_EQ(FoliageSnapshot(batched.GetRegistry()), FoliageSnapshot(separate.GetRegistry()));
+    ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(batched, separate));
+    for (const auto& [session, plant] : handles) {
+        EXPECT_TRUE(session->GetRegistry().valid(plant));
+    }
     EXPECT_EQ(batched.GetActiveRegionLedger().canonical_bytes(),
               separate.GetActiveRegionLedger().canonical_bytes());
 }
@@ -14952,50 +14984,133 @@ TEST(GameSessionHeadlessWorldTest, StaleFoliageInputsRefuseCreationBeforeTheNext
     EXPECT_TRUE(farming.Harvest(registry, plant).harvestable);
 }
 
-TEST(GameSessionHeadlessWorldTest, PendingFoliagePersistenceRefusesBeforeMutatingLiveOrDiskState) {
+entt::entity PersistentReplayPlant(GameSession& session, RegionKey owner) {
+    auto& ledger = const_cast<ActiveRegionLedger&>(session.GetActiveRegionLedger());
+    std::uint64_t id = 0;
+    if (!ledger.allocate_persistent_id(id)) {
+        ADD_FAILURE() << "Fixture identity allocation failed";
+        return entt::null;
+    }
+    auto& registry = session.GetRegistry();
+    const auto plant = ClockTestPlant(
+        registry,
+        {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
+    const auto tick = session.GetWorldClock().tick();
+    registry.emplace<C::PlantRegionComponent>(plant, id, owner.x, owner.z, tick);
+    auto& growth = registry.get<C::PlantGrowthComponent>(plant);
+    growth.planted_tick = tick;
+    growth.last_tick = tick;
+    registry.emplace<C::SoilFeederComponent>(plant).uptake = 7;
+    registry.emplace<C::WaterSourceComponent>(plant).output = 13;
+    registry.emplace<C::PlantHealthComponent>(plant).resistance = 29;
+    registry.emplace<C::PollinationComponent>(plant).crosses = 3;
+    registry.emplace<C::PollinationTag>(plant);
+    registry.emplace<C::CropLifecycleComponent>(plant).generations = 2;
+    registry.emplace<C::CombustibleComponent>(plant).fuel_milli = 17;
+    registry.emplace<C::MortalComponent>(plant).age_ticks = 11;
+    registry.emplace<C::GrazeableComponent>(plant).biomass = 0.25f;
+    registry.emplace<C::IgnitionSourceComponent>(plant).intensity = 0;
+    return plant;
+}
+
+TEST(GameSessionHeadlessWorldTest, PendingFoliageSavesCommittedBytesAndReconstructsContinuation) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session, synchronous, prepared_state, prepared_world, alternate;
     ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, 0));
-    const auto input = root.path() / "scheduled-field-input";
-    const auto prepared =
-        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
-    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
-    for (unsigned phase = 0; phase < 2; ++phase) {
+    const auto plant = PersistentReplayPlant(session, LongCadenceOwner());
+    ASSERT_TRUE(session.GetRegistry().valid(plant));
+    const auto snapshot = Foliage::BuildPlantEntitySnapshot(session.GetRegistry(), true);
+    ASSERT_EQ(snapshot.entities.size(), 1u);
+    EXPECT_EQ(snapshot.entities.front().components.size(), 14u);
+    for (auto* target : {&synchronous, &prepared_state, &prepared_world, &alternate}) {
+        EnableSnapshotSession(*target, root, jobs);
+        ASSERT_TRUE(target->CreateWorld("Committed foliage reload", "1337", "default"));
+    }
+    std::map<std::string, std::string> before_replay;
+    for (unsigned phase = 0; phase < 3; ++phase) {
+        SCOPED_TRACE(phase);
         const auto fields = session.GetFieldPages().serialize();
-        const auto ledger = session.GetActiveRegionLedger().encode();
-        const auto revision = session.WorldRevision();
-        const auto failures = session.GetPersistenceStatus().failures;
-        const auto canonical = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
-        const auto target = root.path() / "refused-foliage-save";
-        Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
-        EXPECT_FALSE(session.SaveWorldState(&report));
-        EXPECT_EQ(report.chunks_total, 1u);
-        EXPECT_EQ(report.chunks_dirty, 2u);
-        EXPECT_EQ(report.chunks_saved, 3u);
+        Luminumbra::world::WorldStateSaveReport report;
+        ASSERT_TRUE(session.SaveWorldState(&report));
         EXPECT_TRUE(report.saved);
-        EXPECT_FALSE(session.SaveWorld());
-        EXPECT_FALSE(session.SaveWorldState());
-        EXPECT_FALSE(session.SaveWorldStateTo(target));
-        EXPECT_FALSE(fs::exists(target));
-        EXPECT_FALSE(session.LoadWorldStateFrom(input));
-        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
-        EXPECT_FALSE(session.LoadWorld(session.GetMetadata().worldId));
-        EXPECT_FALSE(session.LoadWorldFrom(session.GetMetadata().worldId, root.path()));
+        ASSERT_TRUE(session.SaveWorld());
+        const auto canonical = session.GetWorldSaveDir();
+        const auto bytes = SavedPresetTestDiskBytes(canonical);
+        const auto target = root.path() / "committed-foliage-save";
+        ASSERT_TRUE(session.SaveWorldStateTo(target));
+        EXPECT_EQ(SavedPresetTestDiskBytes(target), bytes);
         EXPECT_EQ(session.GetFieldPages().serialize(), fields);
-        EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
-        EXPECT_EQ(session.WorldRevision(), revision);
-        EXPECT_EQ(session.GetPersistenceStatus().failures, failures);
-        EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), canonical);
+        EXPECT_TRUE(session.GetRegistry().valid(plant));
+        if (phase == 1) {
+            before_replay = bytes;
+        }
+        if (phase == 2) {
+            EXPECT_EQ(bytes, before_replay);
+        }
+        ASSERT_TRUE(synchronous.LoadWorld(session.GetMetadata().worldId))
+            << synchronous.GetWorldOpenError();
+        ASSERT_TRUE(alternate.LoadWorldFrom(session.GetMetadata().worldId, root.path()))
+            << alternate.GetWorldOpenError();
         if (phase == 0) {
+            ASSERT_TRUE(prepared_state.LoadWorld(session.GetMetadata().worldId))
+                << prepared_state.GetWorldOpenError();
+        }
+        const auto state = GameSession::PrepareWorldState(
+            prepared_state.CaptureWorldPreparationOptions(), canonical);
+        ASSERT_TRUE(GameSession::WorldPreparationError(*state).empty())
+            << GameSession::WorldPreparationError(*state);
+        ASSERT_TRUE(prepared_state.AdoptPreparedWorld(state));
+        EXPECT_FALSE(prepared_state.AdoptPreparedWorld(state));
+        const auto world = GameSession::PrepareWorldLoad(
+            prepared_world.CaptureWorldPreparationOptions(), session.GetMetadata().worldId);
+        ASSERT_TRUE(GameSession::WorldPreparationError(*world).empty())
+            << GameSession::WorldPreparationError(*world);
+        ASSERT_TRUE(prepared_world.AdoptPreparedWorld(world));
+        for (auto* loaded : {&synchronous, &prepared_state, &prepared_world, &alternate}) {
+            loaded->SetReplicatedSimulationAnchors({});
+            ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(*loaded, session));
+            EXPECT_FALSE(Foliage::FarmingActionsAllowed(loaded->GetRegistry()));
+            constexpr entt::entity kNullEntity = entt::null;
+            EXPECT_EQ(Foliage::PlantSeed(
+                          loaded->GetRegistry(), {8, 0, 8}, {}, 0, loaded->GetWorldClock().tick()),
+                      kNullEntity);
+            ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(*loaded, session));
+        }
+        if (phase == 0) {
+            // Tick 33 is not due. Tick 34 defers a window larger than one budget.
             TickOnce(session);
             TickOnce(session);
             ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_EQ(session.GetWorldClock().tick(), 34u);
+        } else if (phase == 1) {
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+            ASSERT_EQ(session.GetFoliageReplayRemainingSteps(), 3u);
         }
     }
-    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
-    EXPECT_TRUE(session.AdoptPreparedWorld(prepared));
+    for (unsigned tick = 0; tick < 3; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+        const auto expected_save = root.path() / "expected-continuation";
+        ASSERT_TRUE(session.SaveWorldStateTo(expected_save));
+        const auto expected_bytes = SavedPresetTestDiskBytes(expected_save);
+        for (auto* loaded : {&synchronous, &prepared_state, &prepared_world, &alternate}) {
+            ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(*loaded));
+            ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(*loaded, session));
+            EXPECT_TRUE(Foliage::FarmingActionsAllowed(loaded->GetRegistry()));
+            const auto actual_save = root.path() / "actual-continuation";
+            ASSERT_TRUE(loaded->SaveWorldStateTo(actual_save));
+            EXPECT_EQ(SavedPresetTestDiskBytes(actual_save), expected_bytes);
+            for (const auto& member : {P::WorldSaveService::plant_entities_path,
+                                       P::WorldSaveService::field_pages_path,
+                                       P::WorldSaveService::active_regions_path}) {
+                const auto expected_member = ReadClockTestFile(member(expected_save));
+                ASSERT_FALSE(expected_member.empty());
+                EXPECT_EQ(ReadClockTestFile(member(actual_save)), expected_member);
+            }
+        }
+    }
+    EXPECT_TRUE(session.GetRegistry().valid(plant));
 }
 
 TEST(GameSessionHeadlessWorldTest, FoliageReplayVisitBudgetExcludesDormantPages) {
@@ -15024,35 +15139,248 @@ TEST(GameSessionHeadlessWorldTest, FoliageReplayVisitBudgetExcludesDormantPages)
 } // namespace
 
 namespace {
-TEST(GameSessionHeadlessWorldTest, PendingFoliageLoadRefusesBeforeAdoption) {
+TEST(GameSessionHeadlessWorldTest, PendingFoliageStateReloadReplacesHandlesAndResetClearsGate) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession source, session;
-    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(source, root, jobs, 0));
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, 0));
+    const auto plant = PersistentReplayPlant(session, LongCadenceOwner());
+    ASSERT_TRUE(session.GetRegistry().valid(plant));
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldState());
+    EXPECT_FALSE(session.GetRegistry().valid(plant));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
     const auto input = root.path() / "pending-foliage-input";
-    ASSERT_NO_FATAL_FAILURE(WriteSessionFieldInput(source, input, source.GetFieldPages()));
-    EnableSnapshotSession(session, root, jobs);
-    ASSERT_TRUE(session.CreateWorld("Foliage load refusal", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldStateTo(input));
+    const auto bytes = SavedPresetTestDiskBytes(input);
+    ASSERT_TRUE(session.LoadWorldStateFrom(input)) << session.GetWorldOpenError();
+    EXPECT_FALSE(session.GetRegistry().valid(plant));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
+    EXPECT_EQ(SavedPresetTestDiskBytes(input), bytes);
+    // Rejected preparations must not consume or replace the current committed state.
     const auto fields = session.GetFieldPages().serialize();
     const auto ledger = session.GetActiveRegionLedger().encode();
-    const auto clock = session.GetWorldClock().canonical_bytes();
-    const auto revision = session.WorldRevision();
-    const auto disk = SavedPresetTestDiskBytes(input);
-    EXPECT_FALSE(session.LoadWorldStateFrom(input));
-    EXPECT_EQ(session.GetWorldOpenError(), "Pending foliage history cannot be loaded.");
-    const auto prepared =
-        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
-    EXPECT_EQ(GameSession::WorldPreparationError(*prepared),
-              "Pending foliage history cannot be loaded.");
-    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    const auto plants = Foliage::BuildPlantEntitySnapshot(session.GetRegistry(), true);
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    const auto refused = GameSession::PrepareWorldState(
+        session.CaptureWorldPreparationOptions(), input, cancelled.get_token());
+    EXPECT_FALSE(session.AdoptPreparedWorld(refused));
     EXPECT_EQ(session.GetFieldPages().serialize(), fields);
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
-    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock);
-    EXPECT_EQ(session.WorldRevision(), revision);
-    EXPECT_EQ(SavedPresetTestDiskBytes(input), disk);
+    EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                  Foliage::BuildPlantEntitySnapshot(session.GetRegistry(), true)),
+              Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(plants));
+    const auto prepared =
+        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    unsigned callbacks = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic == "persistence-boundary") {
+            ++callbacks;
+            const auto before = session.GetFieldPages().serialize();
+            const auto before_ledger = session.GetActiveRegionLedger().encode();
+            Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
+            EXPECT_FALSE(session.SaveWorldState(&report));
+            EXPECT_FALSE(session.SaveWorldStateTo(input, &report));
+            EXPECT_FALSE(session.SaveWorld());
+            EXPECT_FALSE(session.LoadWorldStateFrom(input));
+            EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+            EXPECT_EQ(report.chunks_total, 1u);
+            EXPECT_EQ(report.chunks_dirty, 2u);
+            EXPECT_EQ(report.chunks_saved, 3u);
+            EXPECT_TRUE(report.saved);
+            EXPECT_EQ(session.GetFieldPages().serialize(), before);
+            EXPECT_EQ(session.GetActiveRegionLedger().encode(), before_ledger);
+            EXPECT_EQ(SavedPresetTestDiskBytes(input), bytes);
+        }
+    });
+    session.GetSimulationEventBus().publish(33, "persistence-boundary", "");
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(callbacks, 1u);
+    // The in-tick refusal did not consume the prepared result.
+    ASSERT_TRUE(session.AdoptPreparedWorld(prepared));
+    ASSERT_TRUE(session.CreateWorld("Reset foliage gate", "1337", "default"));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
+    EXPECT_TRUE(session.GetFieldPages().soil().empty());
+    EXPECT_TRUE(session.GetRegistry().view<C::PlantTag>().empty());
     EXPECT_TRUE(session.SaveWorld());
 }
+
+void CheckFoliageReloadBoundary(unsigned elapsed) {
+    SCOPED_TRACE(elapsed);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reloaded;
+    auto ledger = ScheduledFieldLedger(elapsed, {{kFieldOwner, RegionState::Active}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 0;
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), decoded, error)) << error;
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_TRUE(fields.set_irrigation({8, 8}, 500));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    PersistentReplayPlant(session, kFieldOwner);
+    const auto input = root.path() / "boundary-save";
+    ASSERT_TRUE(session.SaveWorldStateTo(input));
+    EnableSnapshotSession(reloaded, root, jobs);
+    ASSERT_TRUE(reloaded.CreateWorld("Replay boundary", "1337", "default"));
+    ASSERT_TRUE(reloaded.LoadWorldStateFrom(input)) << reloaded.GetWorldOpenError();
+    reloaded.SetReplicatedSimulationAnchors({});
+    const auto before = SavedPresetTestDiskBytes(input);
+    const auto tick = session.GetWorldClock().tick();
+    const auto advanced = session.TickSimulation(session.GetSimulationClock().fixed_dt());
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    if (advanced == 0) {
+        EXPECT_EQ(session.GetWorldClock().tick(), tick);
+        ASSERT_TRUE(session.SaveWorldStateTo(input));
+        EXPECT_EQ(SavedPresetTestDiskBytes(input), before);
+    }
+    if (advanced == 0) {
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    }
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(reloaded));
+    ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(reloaded, session));
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(reloaded));
+    ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(reloaded, session));
+}
+
+void CheckResumedFoliageReload(RegionState state) {
+    SCOPED_TRACE(static_cast<int>(state));
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reloaded;
+    auto ledger = ScheduledFieldLedger(65, {{kFieldOwner, state}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 19;
+    record.frozen_at = 20;
+    record.frozen_digest = 123;
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), decoded, error)) << error;
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_TRUE(fields.set_irrigation({8, 8}, 500));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto input = root.path() / "resumed-field-save";
+    ASSERT_TRUE(session.SaveWorldStateTo(input));
+    EnableSnapshotSession(reloaded, root, jobs);
+    ASSERT_TRUE(reloaded.CreateWorld("Resumed fields", "1337", "default"));
+    ASSERT_TRUE(reloaded.LoadWorldStateFrom(input)) << reloaded.GetWorldOpenError();
+    reloaded.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(Foliage::FarmingActionsAllowed(reloaded.GetRegistry()), state == RegionState::Frozen);
+    if (state != RegionState::Frozen) {
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        EXPECT_EQ(reloaded.TickSimulation(reloaded.GetSimulationClock().fixed_dt()), 0u);
+        const auto before = SavedPresetTestDiskBytes(input);
+        ASSERT_TRUE(session.SaveWorldStateTo(input));
+        EXPECT_EQ(SavedPresetTestDiskBytes(input), before);
+    }
+    for (unsigned tick = 0; tick < 3; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(reloaded));
+        ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(reloaded, session));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, CommittedFoliageReloadMatchesAtReplayBudgetBoundaries) {
+    for (const unsigned elapsed : {31u, 32u, 33u, 34u, 64u, 65u}) {
+        ASSERT_NO_FATAL_FAILURE(CheckFoliageReloadBoundary(elapsed));
+    }
+    for (const auto state : {RegionState::Active, RegionState::Reduced, RegionState::Frozen}) {
+        ASSERT_NO_FATAL_FAILURE(CheckResumedFoliageReload(state));
+    }
+}
+
+void CheckParticipantOnlyFoliageReload(RegionState state) {
+    SCOPED_TRACE(static_cast<int>(state));
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, control;
+    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, 0));
+    auto ledger = ScheduledFieldLedger(64, {{kFieldOwner, state}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 19;
+    if (state == RegionState::Frozen) {
+        record.frozen_at = 20;
+    }
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), decoded, error)) << error;
+    entt::registry registry;
+    const auto plant = ClockTestPlant(registry, {8, 0, 8});
+    registry.emplace<C::PlantRegionComponent>(plant, id, 0, 0, std::uint64_t{19});
+    registry.get<C::PlantGrowthComponent>(plant).last_tick = 19;
+    registry.emplace<C::MortalComponent>(plant).age_ticks = 7;
+    auto snapshot = Foliage::BuildPlantEntitySnapshot(registry, true);
+    ASSERT_TRUE(Foliage::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error)) << error;
+    const auto input = root.path() / "participant-only-input";
+    fs::create_directories(input);
+    nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+    WorldClock(64).write_metadata(metadata);
+    {
+        P::WorldSaveService::SaveFactsScope facts(input);
+        P::SaveTransaction transaction(input, 64, {}, &P::WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(snapshot, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, input, &errors))
+            << ::testing::PrintToString(errors);
+        ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    // Replace a live pending window with history represented only by a persistent participant.
+    ASSERT_TRUE(session.LoadWorldStateFrom(input)) << session.GetWorldOpenError();
+    EnableSnapshotSession(control, root, jobs);
+    ASSERT_TRUE(control.CreateWorld("Participant control", "1337", "default"));
+    const auto prepared =
+        GameSession::PrepareWorldState(control.CaptureWorldPreparationOptions(), input);
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    ASSERT_TRUE(control.AdoptPreparedWorld(prepared));
+    for (auto* target : {&session, &control}) {
+        target->SetReplicatedSimulationAnchors({});
+        EXPECT_TRUE(target->GetFieldPages().soil().empty());
+        EXPECT_TRUE(target->GetFieldPages().irrigation().empty());
+        EXPECT_EQ(Foliage::FarmingActionsAllowed(target->GetRegistry()),
+                  state == RegionState::Frozen);
+    }
+    ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(session, control));
+    const auto checkpoint = root.path() / "participant-checkpoint";
+    ASSERT_TRUE(session.SaveWorldStateTo(checkpoint));
+    ASSERT_TRUE(session.LoadWorldStateFrom(checkpoint)) << session.GetWorldOpenError();
+    ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(session, control));
+    EXPECT_EQ(Foliage::FarmingActionsAllowed(session.GetRegistry()), state == RegionState::Frozen);
+    for (unsigned tick = 0; tick < 2; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(control));
+        ASSERT_NO_FATAL_FAILURE(ExpectCommittedFoliageEqual(session, control));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ParticipantOnlyHistoryRestoresImmediateFarmingGate) {
+    for (const auto state : {RegionState::Active, RegionState::Reduced, RegionState::Frozen}) {
+        ASSERT_NO_FATAL_FAILURE(CheckParticipantOnlyFoliageReload(state));
+    }
+}
+
 } // namespace
 
 namespace {
