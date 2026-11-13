@@ -2285,8 +2285,9 @@ protected:
             tile.wanted.intent.extra_span =
                 key.tier == 1 ? FarVolumeCoverageSpan{-256, 0} : FarVolumeCoverageSpan{-256, 512};
             tile.wanted.build_headroom_bytes = limits.build_headroom_bytes;
+            // Include the -8 m surface's 256 m interior depth at each brick alignment.
             tile.capture = {tile.wanted.intent.key,
-                            key.tier == 1 ? FarVolumeSpan{-256, 16} : FarVolumeSpan{-256, 768},
+                            key.tier == 1 ? FarVolumeSpan{-272, 16} : FarVolumeSpan{-512, 768},
                             policy.pristine_identity};
         }
         return result;
@@ -2321,7 +2322,7 @@ protected:
 
 TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileFingerprints) {
     EXPECT_EQ(renderer.Residency(), nullptr);
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     renderer.BeginLiveOwnership(frame);
     ASSERT_TRUE(renderer.FinishLiveOwnership());
@@ -2342,7 +2343,7 @@ TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileF
 }
 
 TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOldServing) {
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     const auto serving = renderer.SessionDiagnostic()->state.serving_serial;
     producer.fence_source_reads(true);
@@ -2350,14 +2351,27 @@ TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOld
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
     EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving);
     producer.fence_source_reads(false);
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(producer.request_capture(windows));
     EXPECT_FALSE(Stage());
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
     EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving);
     producer.pump_capture();
     producer.pump_capture();
-    ASSERT_TRUE(Stage());
+    const auto target = renderer.SessionDiagnostic()->state.target_serial;
+    const auto complete = Tiles();
+    for (std::size_t i = 0; i < complete.size(); ++i) {
+        auto truncated = complete;
+        truncated[i].capture.span.min_y = -256;
+        EXPECT_FALSE(renderer.StageSessionTarget(
+            producer, *world, truncated, policy, capture_limits, samples))
+            << i;
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected)
+            << i;
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, serving) << i;
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, target) << i;
+    }
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     Capture();
     const std::array<FarTileKey, 2> expected{{{1, 0, 0}, {5, 0, 0}}};
     EXPECT_NE(CheckFarWorldStation(renderer.Diagnostic(), expected, 1),
@@ -2384,13 +2398,13 @@ TEST_F(SessionRendererTest, TargetSerialPendingSourceAndRefusalsCannotQualifyOld
     Capture();
     EXPECT_EQ(renderer.Diagnostic().source_failure.capture,
               FarFrozenCaptureError::DeadlineExceeded);
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
 }
 
 TEST_F(SessionRendererTest,
        SessionStationChecksAcceptedIdentityPoliciesSpansKeysAndActualSubmission) {
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     renderer.BeginLiveOwnership(frame);
     ASSERT_TRUE(renderer.FinishLiveOwnership());
@@ -2552,7 +2566,7 @@ TEST(FarWorldHandoffRenderer, SessionImageLivesThroughHeldWorkerBackendTransfer)
 }
 
 TEST_F(SessionRendererTest, BackendAndFixtureTransitionsDrainSessionBeforeRebinding) {
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     renderer.PrepareWorldSwap();
     EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
@@ -2602,7 +2616,7 @@ TEST(FarWorldRenderer, StationRejectsUnknownNumericPolicyAndRepeatedExpectedKeys
 }
 
 TEST_F(SessionRendererTest, SessionProjectionRefusesMalformedBoundsAndStaleFrame) {
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     ASSERT_TRUE(Settle());
     Capture();
     auto input = std::make_unique<FarWorldHandoffDiagnosticSnapshot>(*renderer.SessionDiagnostic());
@@ -2649,7 +2663,7 @@ TEST_F(SessionRendererTest, SessionAdmissionKeepsTypedBindingAndInputRefusals) {
     EXPECT_FALSE(
         renderer.StageSessionTarget(producer, *world, Tiles(), policy, incomplete, samples));
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::MissingLimits);
-    ASSERT_TRUE(Stage());
+    ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);
     EXPECT_EQ(renderer.BindSession(jobs, 0, policy.caves, policy.numeric, limits),
               FarWorldRefusal::InvalidRequests);
     EXPECT_EQ(renderer.BindSession(jobs, 1, static_cast<FarCaveMode>(255), policy.numeric, limits),
