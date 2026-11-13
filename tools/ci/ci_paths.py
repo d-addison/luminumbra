@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_diagnostic_capture.py",
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
@@ -80,6 +81,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/gates/check-diagnostic-capture.py",
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
@@ -158,6 +160,7 @@ CI_ENTRYPOINTS = (
     set(PYTHON_TESTS)
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
+        "tools/gates/check-diagnostic-capture.py",
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
         "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
         "tools/config_codegen.py", "tools/perf/capture_sim_budget.py",
