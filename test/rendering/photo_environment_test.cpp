@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_client/app/PhotoEnvironment.h"
+#include "luminumbra_client/rendering/ExposureModel.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 
 #include <algorithm>
@@ -10,10 +11,25 @@ namespace {
 using Luminumbra::Client::App::CyclePhotoWeather;
 using Luminumbra::Client::App::PhotoEnvironmentOverride;
 using Luminumbra::Client::App::PhotoEnvironmentValues;
+using Luminumbra::Client::App::PhotoExposureOverride;
 using Luminumbra::Client::App::PhotoWeatherOverride;
 using Luminumbra::Client::App::SelectPhotoEnvironment;
 using Luminumbra::Rendering::WeatherRenderState;
 using Luminumbra::Rendering::WeatherType;
+
+// CPU-only exposure setter/getter with the renderer's negative automatic sentinel.
+struct ExposurePipeline {
+    float multiplier = -1.0f;
+    int writes = 0;
+
+    void set_exposure_override(float value) {
+        multiplier = value;
+        ++writes;
+    }
+    float get_exposure_override() const {
+        return multiplier;
+    }
+};
 
 // CPU-only renderer interface with the same driven/debug setter distinction.
 struct WeatherPipeline {
@@ -61,6 +77,74 @@ static_assert(SelectPhotoEnvironment(kLive, {}, true, false).weather == kLive.we
 static_assert(SelectPhotoEnvironment(kLive, kPhoto, false, false).time_of_day == kLive.time_of_day);
 static_assert(SelectPhotoEnvironment(kLive, kPhoto, true, true).weather == kLive.weather);
 } // namespace
+
+TEST(PhotoEnvironment, NonScenarioCapturePinExitRestoresAutomaticExposure) {
+    // Cover pins remaining active, ending before exit, and starting after entry.
+    for (const bool entry_pinned : {false, true}) {
+        for (const bool exit_pinned : {false, true}) {
+            ExposurePipeline pipeline;
+            PhotoExposureOverride exposure;
+            auto photo = SelectPhotoEnvironment(kLive, kPhoto, true, entry_pinned);
+            EXPECT_EQ(photo.time_active, !entry_pinned);
+            luminumbra::game::LensSettings lens;
+            exposure.Apply(pipeline, Luminumbra::Rendering::ManualExposureMultiplier(lens));
+            const float initial = pipeline.get_exposure_override();
+            // Non-scenario captures, including render benchmarks, still run lens nudges.
+            lens.iso *= 2.0f;
+            exposure.ReleaseIfInactive(pipeline, true);
+            exposure.Apply(pipeline, Luminumbra::Rendering::ManualExposureMultiplier(lens));
+            EXPECT_GT(pipeline.get_exposure_override(), initial);
+            // Environment resets cannot clear exposure ownership.
+            photo = SelectPhotoEnvironment(kLive, {}, false, exit_pinned);
+            EXPECT_FALSE(photo.time_active);
+            EXPECT_FALSE(photo.weather_active);
+            const int writes = pipeline.writes;
+            exposure.ReleaseIfInactive(pipeline, false);
+            EXPECT_FLOAT_EQ(pipeline.get_exposure_override(), -1.0f);
+            EXPECT_FLOAT_EQ(Luminumbra::Rendering::SelectRenderExposure(
+                                pipeline.get_exposure_override(), 0.75f),
+                            0.75f);
+            EXPECT_EQ(pipeline.writes, writes + 1);
+            exposure.ReleaseIfInactive(pipeline, false);
+            EXPECT_EQ(pipeline.writes, writes + 1);
+        }
+    }
+}
+
+TEST(PhotoEnvironment, UnengagedExposureLeavesOtherWritersUntouched) {
+    for (const float multiplier : {-1.0f, 2.0f}) {
+        for (const bool active : {false, true}) {
+            ExposurePipeline pipeline;
+            pipeline.set_exposure_override(multiplier);
+            PhotoExposureOverride exposure;
+            exposure.ReleaseIfInactive(pipeline, active);
+            EXPECT_FLOAT_EQ(pipeline.get_exposure_override(), multiplier);
+            EXPECT_EQ(pipeline.writes, 1);
+        }
+    }
+}
+
+TEST(PhotoEnvironment, ActiveExposureSurvivesUpdatesWithoutCaptureAndReleasesOnEachExit) {
+    ExposurePipeline pipeline;
+    PhotoExposureOverride exposure;
+    for (int session = 0; session < 2; ++session) {
+        exposure.Apply(pipeline, 1.0f);
+        exposure.Apply(pipeline, 2.0f);
+        const int writes = pipeline.writes;
+        // A paused frame skips the capture push but keeps photo mode active.
+        exposure.ReleaseIfInactive(pipeline, true);
+        EXPECT_FLOAT_EQ(pipeline.get_exposure_override(), 2.0f);
+        EXPECT_EQ(pipeline.writes, writes);
+        // An inactive or absent controller releases even if capture is skipped.
+        exposure.ReleaseIfInactive(pipeline, false);
+        EXPECT_FLOAT_EQ(pipeline.get_exposure_override(), -1.0f);
+        EXPECT_EQ(pipeline.writes, writes + 1);
+        pipeline.set_exposure_override(3.0f);
+        exposure.ReleaseIfInactive(pipeline, false);
+        EXPECT_FLOAT_EQ(pipeline.get_exposure_override(), 3.0f);
+        EXPECT_EQ(pipeline.writes, writes + 2);
+    }
+}
 
 TEST(PhotoEnvironment, OverrideRemainsSelectedAfterEveryLivePush) {
     // The frame writes live defaults before asking which photo channels to apply.

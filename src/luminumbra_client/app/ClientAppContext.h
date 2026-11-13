@@ -75,6 +75,7 @@ inline constexpr int kFrameScanWatchdogFrames = 4000;
 struct HudState {
     luminumbra::game::PhotoModeState photoMode;
     PhotoEnvironmentOverride photoEnvironment;
+    PhotoExposureOverride photoExposure;
     PhotoWeatherOverride photoWeather;
     bool photoModeUiShown = false; //  photo_mode.rml vs hud.rml is the active in-game overlay
     luminumbra::game::PhotoCodex photoCodex;

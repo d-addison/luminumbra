@@ -2398,6 +2398,44 @@ class TerrainMaterialWiring(unittest.TestCase):
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
 
 class PhotoEnvironmentWiring(unittest.TestCase):
+    def test_exposure_release_is_independent_of_time_capture_pins_and_pause(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = compact(block(overlays, "void UpdatePhotoCapture("))
+        self.assertIn("app.hud.photoExposure.Apply( renderPipeline, "
+                      "Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));",
+                      capture)
+        self.assertNotIn("set_exposure_override(", capture)
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoExposureOverride photoExposure;", context)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        release = "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);"
+        self.assertIn(release, update)
+        self.assertNotIn("if (", update.split(release, 1)[0])
+        self.assertLess(update.index(release), update.index("if (!photo_active || capture_pinned)"))
+        self.assertNotIn("set_exposure_override(", update)
+        self.assertNotIn("photoExposure =", update)
+        self.assertIn("const bool photo_active = playerController && "
+                      "playerController->photo_mode_active();", compact(update))
+        hud = compact(block(overlays, "void UpdatePhotoModeAndHud("))
+        self.assertIn("app.hud.photoMode.active = playerController->photo_mode_active();", hud)
+        self.assertNotIn("capture_pinned", hud)
+        exposure = block(read(CLIENT / "app/PhotoEnvironment.h"), "class PhotoExposureOverride")
+        self.assertIn("bool applied_ = false;", exposure)
+        self.assertNotIn("time_active", exposure)
+        apply = block(exposure, "void Apply(")
+        self.assertIn("pipeline.set_exposure_override(multiplier);", apply)
+        self.assertIn("applied_ = true;", apply)
+        release_body = block(exposure, "void ReleaseIfInactive(")
+        guard = re.search(r"if\s*\(([^()]*)\)", release_body).group(1)
+        self.assertIn("return;", block(release_body, "if ("))
+        self.assertIn("pipeline.set_exposure_override(-1.0f);", release_body)
+        self.assertIn("applied_ = false;", release_body)
+        for active in (False, True):
+            for applied in (False, True):
+                with self.subTest(active=active, applied=applied):
+                    self.assertEqual(cpp_expression(guard, photo_mode_active=active, applied_=applied),
+                                     active or not applied)
+
     def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
         main = read(CLIENT / "main_client.cpp")
         release = main.index("renderPipeline.set_time_of_day_hold(false);")

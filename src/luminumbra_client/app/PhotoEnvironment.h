@@ -22,6 +22,29 @@ struct PhotoEnvironmentOverride {
     int weather_index = 0; // Six UI choices: live, clear, fog, rain, snow, storm.
 };
 
+// Exposure can engage while capture pins suppress the time/weather channels.
+// Keep its ownership separate so an inactive photo mode releases it exactly once.
+class PhotoExposureOverride {
+public:
+    template<typename Pipeline>
+    void Apply(Pipeline& pipeline, float multiplier) {
+        pipeline.set_exposure_override(multiplier);
+        applied_ = true;
+    }
+
+    template<typename Pipeline>
+    void ReleaseIfInactive(Pipeline& pipeline, bool photo_mode_active) {
+        if (photo_mode_active || !applied_) {
+            return;
+        }
+        pipeline.set_exposure_override(-1.0f);
+        applied_ = false;
+    }
+
+private:
+    bool applied_ = false;
+};
+
 // Restore before the next frame's live writers, even when no weather writer runs.
 // Retain the full driven state: type/intensity alone lose wetness and wind.
 // One fixed-size snapshot; no allocation or per-frame scan.

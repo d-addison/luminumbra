@@ -363,7 +363,8 @@ void UpdatePhotoCapture(ClientAppContext& app,
         // so stopping down darkens and opening up brightens the frame —
         // the photographer exposes for the light. Render-only; never
         // world_hash.
-        renderPipeline.set_exposure_override(
+        app.hud.photoExposure.Apply(
+            renderPipeline,
             Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));
 
         //  live-bind the viewfinder readouts to the current lens.
@@ -553,10 +554,8 @@ void UpdatePhotoEnvironment(ClientAppContext& app,
                             bool capture_pinned) {
     auto& photo = app.hud.photoEnvironment;
     const bool photo_active = playerController && playerController->photo_mode_active();
+    app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);
     if (!photo_active || capture_pinned) {
-        if (photo.time_active) {
-            renderPipeline.set_exposure_override(-1.0f);
-        }
         photo = {};
     } else if (!app.hud.paused) {
         if (!photo.time_active) {
