@@ -25,6 +25,31 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_far_authority_capture_is_bounded_and_regressions_are_registered(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        capture = function(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
+        for full_scan in ("snapshot_authoritative_chunks(", "snapshot_streamed_chunks(",
+                          "snapshot_parked_chunks(",
+                          "m_streaming_state.chunks", "m_parked)"):
+            self.assertNotIn(full_scan, capture)
+        for token in ("m_activation_index.columns()", "m_parked_columns.find(key)",
+                      "++m_far_lod_capture_input_items;", "z <= max_chunk_z", "x <= max_chunk_x",
+                      "HasPublishedFarLodSdf(chunk.get())", "std::sort(snapshot->entries.begin()"):
+            self.assertIn(token, capture)
+        membership = function(source, "void SHIELD_WorldSystem::note_digest_chunk(")
+        self.assertLess(membership.index("m_parked_columns[key].insert_or_assign"),
+                        membership.index("if (!m_durable_residency)"))
+        self.assertIn("m_parked_columns.erase(column)", membership)
+        self.assertIn("m_parked_columns.clear()", function(
+            source, "void SHIELD_WorldSystem::clear_world("))
+        native = (ROOT / "test/common/world_streaming_hardening_test.cpp").read_text(encoding="utf-8")
+        for case in ("FarAuthorityCaptureMatchesFullScanAcrossSeededResidencyChanges",
+                     "FarAuthorityCaptureTickVisitsOnlyFootprintParticipants"):
+            self.assertIn("TEST(StreamingHardening, " + case + ")", native)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/world_streaming_hardening_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_suite_is_discovered_by_registered_replay_contract(self):
         runner = (ROOT / "tools/ci/test_replay_source_contract.py").read_text(encoding="utf-8")
         self.assertIn("def load_tests(loader, tests, pattern):", runner)

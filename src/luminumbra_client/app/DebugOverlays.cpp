@@ -313,8 +313,7 @@ void UpdateCodexObjectivesFarmHud(ClientAppContext& app,
     }
 }
 
-// Photo-mode environment scrub, lens/exposure nudges, viewfinder readouts,
-// and the shutter capture (verbatim; same guard note as above).
+// Photo-mode lens/exposure nudges, viewfinder readouts and shutter capture.
 void UpdatePhotoCapture(ClientAppContext& app,
                         GLFWwindow* window,
                         const std::string& root_path_str,
@@ -324,23 +323,6 @@ void UpdatePhotoCapture(ClientAppContext& app,
                         Luminumbra::Client::IAudioManager* audioManager,
                         Luminumbra::world::GameSession* gameSession,
                         Luminumbra::Rendering::RenderPipeline& renderPipeline) {
-    // photo-mode ENVIRONMENT scrub state (time-of-day + weather).
-    // Render-only overrides of the visual day clock + weather overlay; they
-    // NEVER touch the sim clock or WeatherSystem (world_hash unaffected).
-    static bool s_photoEnvEngaged = false;
-    static float s_photoTod = 0.5f;
-    static int s_photoWeatherIdx = 0;
-    static bool s_photoWeatherActive = false;
-    if (!app.hud.photoMode.active && s_photoEnvEngaged) {
-        // Left photo mode: release the day-clock hold (live clock resumes); the
-        // per-frame sim weather push restores driven weather next frame.
-        s_photoEnvEngaged = false;
-        s_photoWeatherActive = false;
-        renderPipeline.set_time_of_day_hold(false);
-        //  rendering: drop the manual exposure override so
-        // the automatic time-of-day exposure curve resumes.
-        renderPipeline.set_exposure_override(-1.0f);
-    }
     if (app.hud.photoMode.active) {
         // Apply lens nudges (aperture stops + focus metres), clamped
         // to sane photographic ranges.
@@ -381,30 +363,9 @@ void UpdatePhotoCapture(ClientAppContext& app,
         // so stopping down darkens and opening up brightens the frame —
         // the photographer exposes for the light. Render-only; never
         // world_hash.
-        renderPipeline.set_exposure_override(
+        app.hud.photoExposure.Apply(
+            renderPipeline,
             Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));
-
-        //  /0.2: TIME-OF-DAY scrub (K/L) + WEATHER cycle (T).
-        // On entry, seed the scrub from the live clock and HOLD it (so the
-        // per-frame auto-advance stops); each frame push the scrubbed values to
-        // the render pipeline. Render-only — the sim is never touched.
-        if (!s_photoEnvEngaged) {
-            s_photoEnvEngaged = true;
-            s_photoTod = renderPipeline.get_time_of_day();
-            renderPipeline.set_time_of_day_hold(true);
-        }
-        s_photoTod += playerController->consume_tod_nudge();
-        s_photoTod -= std::floor(s_photoTod); // wrap to [0,1)
-        renderPipeline.set_time_of_day(s_photoTod);
-        if (const int wc = playerController->consume_weather_cycle(); wc != 0) {
-            s_photoWeatherActive = true;
-            s_photoWeatherIdx = (((s_photoWeatherIdx + wc) % 5) + 5) % 5;
-        }
-        if (s_photoWeatherActive) {
-            using WT = Luminumbra::Rendering::WeatherType;
-            static const WT kW[5] = {WT::None, WT::Fog, WT::Rain, WT::Snow, WT::Storm};
-            renderPipeline.set_weather(kW[s_photoWeatherIdx], s_photoWeatherIdx == 0 ? 0.0f : 0.7f);
-        }
 
         //  live-bind the viewfinder readouts to the current lens.
         if (uiManager && uiManager->GetContext()) {
@@ -459,8 +420,8 @@ void UpdatePhotoCapture(ClientAppContext& app,
                     e->SetInnerRML(ph);
                 }
                 if (auto* e = doc->GetElementById("ro_weather")) {
-                    static const char* kWN[5] = {"clear", "fog", "rain", "snow", "storm"};
-                    e->SetInnerRML(s_photoWeatherActive ? kWN[s_photoWeatherIdx] : "live");
+                    static const char* kWN[6] = {"live", "clear", "fog", "rain", "snow", "storm"};
+                    e->SetInnerRML(kWN[app.hud.photoEnvironment.weather_index]);
                 }
             }
         }
@@ -586,6 +547,39 @@ void UpdatePhotoCapture(ClientAppContext& app,
 }
 
 } // namespace
+
+void UpdatePhotoEnvironment(ClientAppContext& app,
+                            Luminumbra::Client::PlayerController* playerController,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                            bool capture_pinned) {
+    auto& photo = app.hud.photoEnvironment;
+    const bool photo_active = playerController && playerController->photo_mode_active();
+    app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);
+    if (!photo_active || capture_pinned) {
+        photo = {};
+    } else if (!app.hud.paused) {
+        if (!photo.time_active) {
+            photo.time_active = true;
+            photo.time_of_day = renderPipeline.get_time_of_day();
+        }
+        photo.time_of_day += playerController->consume_tod_nudge();
+        photo.time_of_day -= std::floor(photo.time_of_day);
+        if (const int cycle = playerController->consume_weather_cycle(); cycle != 0) {
+            photo = CyclePhotoWeather(photo, cycle);
+        }
+    }
+    const PhotoEnvironmentValues live{.time_of_day = renderPipeline.get_time_of_day(),
+                                      .weather = renderPipeline.get_weather_type(),
+                                      .intensity = renderPipeline.get_weather_intensity()};
+    const auto selected = SelectPhotoEnvironment(live, photo, photo_active, capture_pinned);
+    renderPipeline.set_time_of_day_hold(selected.time_active);
+    if (selected.time_active) {
+        renderPipeline.set_time_of_day(selected.time_of_day);
+    }
+    if (selected.weather_active) {
+        app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);
+    }
+}
 
 // --- feature: photo-mode capture loop ---
 // Runs AFTER render_frame, on the RENDER side, against a CONST
