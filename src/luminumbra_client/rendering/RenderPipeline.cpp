@@ -1,11 +1,13 @@
 #include "RenderPipeline.h"
 #include "../../include/luminumbra/core/Types.h"
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
-#include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
+#include "DiagnosticDrawTable.h"
+#include "ExposureModel.h" //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
 #include "FarVolumeGlBackend.h"
 #include "FarWorldReplay.h"
 #include "FarWorldReplayGl.h"
+#include "GBufferTargets.h"
 #include "GraphicsRuntimeConfig.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
@@ -2073,6 +2075,20 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         return;
     }
 
+    auto* diagnostic_capture = GBufferDiagnosticCapture::Current();
+    if (diagnostic_capture && !diagnostic_capture->deferred_attached()) {
+        diagnostic_capture = nullptr; // The shared shadow submitter has no identity attachment.
+    }
+    // Capture staging is bounded by the registry's 65,536 draws (512 KiB of
+    // pointers on 64-bit hosts). Normal rendering allocates no diagnostic staging.
+    std::vector<const ChunkCullEntry*> diagnostic_chunks;
+    if (diagnostic_capture) {
+        if (running > 65536) {
+            diagnostic_capture->unsupported("terrain_identity_draw_limit");
+            throw std::runtime_error("Terrain diagnostic draw limit exceeded");
+        }
+        diagnostic_chunks.resize(running);
+    }
     m_mdi_command_scratch.resize(running);
     m_mdi_origin_scratch.resize(running);
 
@@ -2093,6 +2109,9 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         cmd.firstIndex = a.index_offset;
         cmd.baseVertex = a.vertex_offset;
         cmd.baseInstance = static_cast<GLuint>(dst); // origins[baseInstance]
+        if (diagnostic_capture) {
+            diagnostic_chunks[dst] = chunk;
+        }
 
         const glm::ivec3 cc = chunk->coords;
         m_mdi_origin_scratch[dst] = glm::vec4(static_cast<float>(cc.x * CHUNK_SIZE_X),
@@ -2136,13 +2155,46 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         PreserveReplayObject(ReplayObjectKind::VertexArray, blocks[b].vao);
         glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
-        Luminumbra::Rendering::AttributedGl::Submit(
-            glMultiDrawElementsIndirect,
-            GLenum{GL_TRIANGLES},
-            GLenum{GL_UNSIGNED_INT},
-            reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
-            static_cast<GLsizei>(count),
-            static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
+        if (diagnostic_capture) {
+            // Submit each original indirect command once, preserving its index,
+            // base vertex and base instance, in the same pool-bucket order.
+            for (std::size_t draw = first; draw < first + count; ++draw) {
+                const auto& chunk = *diagnostic_chunks[draw];
+                const auto& resident = m_chunk_render_data.at(chunk.id);
+                if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255) {
+                    diagnostic_capture->unsupported("terrain_resident_lod_unavailable");
+                    throw std::runtime_error("Terrain diagnostic resident LOD unavailable");
+                }
+                const std::string mesh_key = "terrain/" + std::to_string(chunk.coords.x) + "/" +
+                                             std::to_string(chunk.coords.y) + "/" +
+                                             std::to_string(chunk.coords.z) + "/version/" +
+                                             std::to_string(resident.mesh_version);
+                diagnostic_capture->write_current(
+                    {.mesh_path = {},
+                     .shader_variant = m_frame_far_selection.effective == FarWorldMode::Ladder
+                                           ? "terrain_mdi_ladder"
+                                           : "terrain_mdi",
+                     .chunk = {chunk.coords.x, chunk.coords.y, chunk.coords.z},
+                     .lod = static_cast<std::uint32_t>(resident.diagnostic_lod),
+                     .ownership = DiagnosticOwnership::Live,
+                     .pass = DiagnosticPass::GBuffer,
+                     .provenance = DiagnosticProvenance::Unknown,
+                     .generated_mesh = mesh_key});
+                Luminumbra::Rendering::AttributedGl::Submit(
+                    glDrawElementsIndirect,
+                    GLenum{GL_TRIANGLES},
+                    GLenum{GL_UNSIGNED_INT},
+                    reinterpret_cast<const void*>(draw * sizeof(DrawElementsIndirectCommand)));
+            }
+        } else {
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glMultiDrawElementsIndirect,
+                GLenum{GL_TRIANGLES},
+                GLenum{GL_UNSIGNED_INT},
+                reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
+                static_cast<GLsizei>(count),
+                static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
+        }
         m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b));
     }
 
@@ -4614,6 +4666,7 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
         return false;
 
     payload.mesh_version = version_before;
+    payload.diagnostic_lod = chunk.source_chunk->current_lod.load(std::memory_order_acquire);
     payload.vertices = chunk.source_chunk->mesh_vertices;
     payload.indices = chunk.source_chunk->mesh_indices;
 
@@ -4862,6 +4915,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
     render_data.mesh_version = payload.mesh_version;
+    render_data.diagnostic_lod = payload.diagnostic_lod;
     render_data.frames_since_inactive = 0;
 
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
