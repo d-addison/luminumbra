@@ -553,14 +553,9 @@ void main() {
         // rather than crushing the already-dark scene to black. (Was a flat 0.5.)
         float moonShadowFloor = mix(0.70, 0.25, u_moonIllum);
         if (!isFarSurface) moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
-        // Cool moonlight key. Brighter than the old fill so a moonlit night is
-        // clearly NAVIGABLE (form + value), but obviously cooler + dimmer than day.
-        // Terrain albedos are dark (linear ~0.01-0.07), so the albedo*radiance
-        // product needs a strong cool key to lift night ground to a moonlit tone.
-        //  rendering: scaled by u_moonIllum (lunar phase) -> a full moon is a
-        // proper light source, a new moon barely lights the ground (the two night modes).
-        // Moon key COLOUR now comes from u_moonRadiance (its dedicated C++ channel, ).
-        const float kMoonKeyScale = 1.5; // overall full-moon brightness lever (DayZ-style navigable night)
+        // The CPU radiance includes horizon attenuation; apply lunar phase once.
+        // Keep the full-moon key well below the calibrated daylight irradiance.
+        const float kMoonKeyScale = 0.12;
         float moonKey = nightFactor * kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE;
         vec3 moonRadiance = u_moonRadiance * moonKey;
         // WRAPPED Lambert: an overhead midnight moon gives camera-facing SLOPES

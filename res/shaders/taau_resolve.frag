@@ -8,17 +8,33 @@
 in vec2 TexCoords;
 out vec4 FragColor;
 
-uniform sampler2D u_current;   // this frame's lit HDR color (RGBA16F)
-uniform sampler2D u_history;   // previous resolved color (RGBA16F)
-uniform sampler2D u_motion;    // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
+uniform sampler2D u_current;    // this frame's lit HDR color (RGBA16F)
+uniform sampler2D u_history;    // previous resolved color (RGBA16F)
+uniform sampler2D u_motion;     // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
 uniform sampler2D u_sceneDepth; // reversed-Z: cleared depth has no geometry motion
-uniform vec2  u_texel;         // 1 / screen size
-uniform float u_blend;         // history weight when stable (e.g. 0.9); first frame forced to 0
-uniform float u_sharpness;     // post-resolve unsharp strength (recovers temporal-blur softness)
-uniform int   u_history_valid; // 0 on the first frame / after a resize -> use current only
+uniform vec2 u_texel;           // 1 / screen size
+uniform float u_blend;          // history weight when stable (e.g. 0.9); first frame forced to 0
+uniform float u_sharpness;      // post-resolve unsharp strength (recovers temporal-blur softness)
+uniform int u_history_valid;    // 0 on the first frame / after a resize -> use current only
+
+vec2 currentUv(vec2 uv) {
+    // Clamp to texel centres, including when upsampling: the lighting input can
+    // have REPEAT addressing, and filtering must never reach the opposite edge.
+    return clamp(uv, u_texel * 0.5, vec2(1.0) - u_texel * 0.5);
+}
+
+vec3 sharpenLuma(vec3 color, vec3 mean, vec3 lower, vec3 upper) {
+    const vec3 weights = vec3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(color, weights);
+    float detail = luminance - dot(mean, weights);
+    // A shared RGB gain preserves chroma. Bound the result before storing it in
+    // history so high-contrast silhouettes cannot accumulate sharpen overshoot.
+    float gain = max(1.0 + u_sharpness * detail / max(luminance, 1e-6), 0.0);
+    return clamp(color * gain, lower, upper);
+}
 
 void main() {
-    vec3 curr = texture(u_current, TexCoords).rgb;
+    vec3 curr = texture(u_current, currentUv(TexCoords)).rgb;
 
     // The sky is drawn after the G-buffer and has no motion vectors. Reusing
     // zero-motion history smears moving clouds/camera turns; sharpening that
@@ -41,7 +57,7 @@ void main() {
     }
 
     // Reproject: previous UV = current UV - motionNDC * 0.5 (uv = ndc*0.5+0.5, so duv = dndc*0.5).
-    vec2 motion = texture(u_motion, TexCoords).rg;
+    vec2 motion = texture(u_motion, currentUv(TexCoords)).rg;
     vec2 histUV = TexCoords - motion * 0.5;
 
     // Disoccluded / off-screen history: no reliable sample -> keep the current pixel (no ghosting).
@@ -56,11 +72,13 @@ void main() {
     // surface that changed shading/occlusion this frame cannot drag an old color forward.
     vec3 nmin = curr;
     vec3 nmax = curr;
-    vec3 nsum = curr;  // 3x3 sum (incl. centre) -> mean, for the unsharp sharpen below
+    vec3 nsum = curr; // 3x3 sum (incl. centre) -> mean, for the unsharp sharpen below
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) continue;
-            vec3 c = texture(u_current, TexCoords + vec2(float(dx), float(dy)) * u_texel).rgb;
+            if (dx == 0 && dy == 0)
+                continue;
+            vec2 sampleUV = currentUv(TexCoords + vec2(float(dx), float(dy)) * u_texel);
+            vec3 c = texture(u_current, sampleUV).rgb;
             nmin = min(nmin, c);
             nmax = max(nmax, c);
             nsum += c;
@@ -74,9 +92,7 @@ void main() {
     float blend = u_blend * (1.0 - clamp(speed * 8.0, 0.0, 1.0) * 0.6);
     vec3 resolved = mix(curr, hist, blend);
 
-    // Unsharp sharpen: TAA's history blend + bilinear reprojection soften the image; pull the result
-    // away from the 3x3 current-color mean to recover crispness (clamped non-negative for HDR).
     vec3 mean = nsum * (1.0 / 9.0);
-    resolved = max(resolved + u_sharpness * (resolved - mean), vec3(0.0));
+    resolved = sharpenLuma(resolved, mean, nmin, nmax);
     FragColor = vec4(resolved, 1.0);
 }
