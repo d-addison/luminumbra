@@ -43,11 +43,15 @@
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -1361,6 +1365,194 @@ TEST(StreamingHardening, FarLodSnapshotFiltersAndOrdersNegativeRegionWithHalo) {
     EXPECT_EQ(snapshot->entries[3].coords, IVec3(0, 0, 0));
     EXPECT_TRUE(snapshot->entries[2].payload->material_data.empty());
     EXPECT_EQ(snapshot->entries[1].payload->material_data.size(), full_lattice);
+}
+
+// Independent full-map oracle, retaining the old eligibility and z/x/y ordering.
+void ExpectFarCaptureMatchesFullScan(SHIELD_WorldSystem& world, int rx, int rz) {
+    const auto copies = world.snapshot_copies();
+    const auto visits = world.far_lod_capture_input_items();
+    const auto captured = world.capture_far_lod_sdf_snapshot(rx, rz);
+    ASSERT_TRUE(captured);
+    EXPECT_EQ(world.snapshot_copies(), copies);
+    constexpr std::size_t samples = 17u * 17u * 17u;
+    std::vector<std::shared_ptr<Chunk>> expected;
+    std::size_t participants = 0;
+    for (const auto& chunk : world.snapshot_authoritative_chunks()) {
+        const auto coords = chunk->get_coords();
+        const bool in_footprint = coords.x >= rx * 32 - 1 && coords.x <= rx * 32 + 32 &&
+                                  coords.z >= rz * 32 - 1 && coords.z <= rz * 32 + 32;
+        participants += in_footprint ? 1u : 0u;
+        if (chunk->get_state() != ChunkState::Loading && chunk->sdf_data.size() == samples &&
+            (chunk->material_data.empty() || chunk->material_data.size() == samples) &&
+            in_footprint) {
+            expected.push_back(chunk);
+        }
+    }
+    EXPECT_EQ(world.far_lod_capture_input_items() - visits, participants);
+    std::sort(expected.begin(), expected.end(), [](const auto& lhs, const auto& rhs) {
+        const auto a = lhs->get_coords();
+        const auto b = rhs->get_coords();
+        return std::tuple(a.z, a.x, a.y) < std::tuple(b.z, b.x, b.y);
+    });
+    ASSERT_EQ(captured->entries.size(), expected.size());
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const auto& entry = captured->entries[index];
+        const auto& chunk = expected[index];
+        ASSERT_TRUE(entry.payload);
+        EXPECT_EQ(entry.coords, chunk->get_coords());
+        EXPECT_EQ(entry.provenance, chunk->sdf_provenance());
+        EXPECT_EQ(entry.voxel_revision, chunk->voxel_revision());
+        EXPECT_EQ(entry.authority_durable, !chunk->is_voxel_data_dirty());
+        EXPECT_EQ(entry.payload->coords, chunk->get_coords());
+        EXPECT_EQ(entry.payload->revision, chunk->voxel_revision());
+        EXPECT_EQ(entry.payload->source_kind,
+                  chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited
+                      ? World::FarLodBrickSourceKind::Authoritative
+                      : World::FarLodBrickSourceKind::RegenerableCache);
+        ASSERT_EQ(entry.payload->sdf_data.size(), chunk->sdf_data.size());
+        EXPECT_EQ(std::memcmp(entry.payload->sdf_data.data(),
+                              chunk->sdf_data.data(),
+                              chunk->sdf_data.size() * sizeof(float)),
+                  0);
+        EXPECT_EQ(entry.payload->material_data, chunk->material_data);
+    }
+}
+
+TEST(StreamingHardening, FarAuthorityCaptureMatchesFullScanAcrossSeededResidencyChanges) {
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    world.set_durable_residency(true);
+    world.debug_set_streaming_radius_cap(1);
+    entt::registry registry;
+    u32 random = 0x610u;
+    const auto next = [&random] {
+        random = random * 1664525u + 1013904223u;
+        return random;
+    };
+    constexpr std::array coordinates{-33, -32, -1, 0, 1, 31, 32, 33, 64};
+    std::vector<std::shared_ptr<Chunk>> roster;
+    for (int round = 0; round < 4; ++round) {
+        SCOPED_TRACE(round);
+        for (int item = 0; item < 12; ++item) {
+            const int x = coordinates[next() % coordinates.size()];
+            const int z = coordinates[next() % coordinates.size()];
+            const int y = round * 12 + item;
+            auto chunk = std::make_shared<Chunk>(IVec3(x, y - 24, z));
+            chunk->sdf_data.assign(item == 0 ? 3u : 17u * 17u * 17u,
+                                   static_cast<float>(item - round));
+            chunk->sdf_data[0] = std::bit_cast<float>(0x80000000u); // negative zero
+            if (item % 3 == 0) {
+                chunk->material_data.assign(item == 3 ? 3u : 17u * 17u * 17u,
+                                            static_cast<u8>(item));
+            }
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            if (item == 1) {
+                chunk->set_state(ChunkState::Loading);
+            }
+            roster.push_back(chunk);
+        }
+        for (int rz = -1; rz <= 1; ++rz) {
+            for (int rx = -1; rx <= 1; ++rx) {
+                ExpectFarCaptureMatchesFullScan(world, rx, rz);
+            }
+        }
+        for (const auto& chunk : roster) {
+            chunk->set_state(ChunkState::Loading);
+        }
+        // Four updates reach the ordinary eviction cadence, with a minimal wanted disc.
+        // Keep synthetic partial lattices out of meshing until eviction runs before dispatch.
+        for (int frame = 0; frame < 4; ++frame) {
+            if (frame == 3) {
+                for (const auto& chunk : roster) {
+                    chunk->set_state(ChunkState::Idle);
+                }
+            }
+            world.update(registry, Vec3(32008.0f, 8.0f, 32008.0f), nullptr);
+            world.wait_for_streaming_jobs();
+        }
+        ASSERT_GT(world.parking_status().parked_count, 0u);
+        for (int rx = -1; rx <= 1; ++rx) {
+            ExpectFarCaptureMatchesFullScan(world, rx, rx);
+        }
+        const auto parked = world.snapshot_parked_chunks();
+        ASSERT_GT(parked.size(), 1u);
+        const auto chosen_index = next() % parked.size();
+        const auto chosen = parked[chosen_index];
+        ASSERT_TRUE(world.unpark_chunk(chosen->get_id()));
+        ExpectFarCaptureMatchesFullScan(world, 0, 0);
+        // Replace a parked identity through the public adoption path.
+        const auto replaced = parked[(chosen_index + 1) % parked.size()];
+        ASSERT_FALSE(world.find_streamed_chunk(replaced->get_coords()));
+        auto replacement = std::make_shared<Chunk>(replaced->get_coords());
+        replacement->sdf_data.assign(17u * 17u * 17u, 9.0f);
+        replacement->mark_voxel_data_dirty();
+        ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
+        world.set_durable_residency(false);
+        ExpectFarCaptureMatchesFullScan(world, -1, -1);
+        world.set_durable_residency(true);
+    }
+    world.set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, {});
+    std::vector<IVec3> durable;
+    const auto parked = world.snapshot_parked_chunks();
+    ASSERT_GT(parked.size(), 1u);
+    for (std::size_t index = 0; index < parked.size(); ++index) {
+        const auto& chunk = parked[index];
+        // Retain one dirty parked chunk to exercise clear with both indexes populated.
+        if (index != 0) {
+            chunk->clear_voxel_data_dirty();
+            chunk->clear_water_state_dirty();
+        }
+        durable.push_back(chunk->get_coords());
+    }
+    world.remember_durable_chunks(durable);
+    world.release_clean_parked_chunks();
+    EXPECT_EQ(world.parking_status().parked_count, 1u);
+    for (int rz = -1; rz <= 1; ++rz) {
+        for (int rx = -1; rx <= 1; ++rx) {
+            ExpectFarCaptureMatchesFullScan(world, rx, rz);
+        }
+    }
+    world.clear_world(nullptr);
+    for (int rz = -1; rz <= 1; ++rz) {
+        for (int rx = -1; rx <= 1; ++rx) {
+            ExpectFarCaptureMatchesFullScan(world, rx, rz);
+        }
+    }
+}
+
+TEST(StreamingHardening, FarAuthorityCaptureTickVisitsOnlyFootprintParticipants) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), kSeed);
+    // A 5,614-resident world: unrelated and malformed chunks must not be staged.
+    for (int item = 0; item < 5611; ++item) {
+        ASSERT_TRUE(world.adopt_streamed_chunk(std::make_shared<Chunk>(IVec3(1000 + item, 0, 0))));
+    }
+    constexpr std::array levels{Chunk::kPackedMinY, Chunk::kPackedMaxY, 0};
+    for (std::size_t item = 0; item < levels.size(); ++item) {
+        auto chunk = std::make_shared<Chunk>(IVec3(0, levels[item], 0));
+        if (item != 2) {
+            chunk->sdf_data.assign(17u * 17u * 17u, -1.0f);
+        }
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    }
+    for (int tick = 0; tick < 3; ++tick) {
+        world.begin_tick(tick);
+        const auto visits = world.far_lod_capture_input_items();
+        const auto copies = world.snapshot_copies();
+        for (int preparation = 0; preparation < 3; ++preparation) {
+            const auto capture = world.capture_far_lod_sdf_snapshot(0, 0);
+            ASSERT_TRUE(capture);
+            EXPECT_EQ(capture->entries.size(), 2u);
+        }
+        EXPECT_EQ(world.far_lod_capture_input_items() - visits, 9u);
+        EXPECT_EQ(world.snapshot_copies(), copies);
+    }
+    const auto visits = world.far_lod_capture_input_items();
+    EXPECT_FALSE(world.capture_far_lod_sdf_snapshot(std::numeric_limits<int>::max(), 0));
+    EXPECT_FALSE(world.capture_far_lod_sdf_snapshot(0, std::numeric_limits<int>::min()));
+    EXPECT_EQ(world.far_lod_capture_input_items(), visits);
 }
 
 TEST(StreamingHardening, PristineTileBuildIsDeterministic) {

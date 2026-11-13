@@ -1001,6 +1001,10 @@ public:
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
+    // Owner-thread diagnostic: candidate chunks visited by captures, including rejected payloads.
+    u64 far_lod_capture_input_items() const {
+        return m_far_lod_capture_input_items;
+    }
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.
     // Render integration may validate only the captured region and its halo;
@@ -1246,6 +1250,9 @@ private:
         std::int64_t tick = -1;
     };
     std::unordered_map<ChunkID, ParkedChunk> m_parked;
+    // Parked membership survives durable-residency mode changes, just like m_parked.
+    std::unordered_map<u64, std::unordered_map<ChunkID, std::shared_ptr<Chunk>>> m_parked_columns;
+    mutable u64 m_far_lod_capture_input_items = 0;
     struct DigestMembership {
         std::unordered_map<ChunkID, std::shared_ptr<Chunk>> live;
         std::unordered_map<ChunkID, std::shared_ptr<Chunk>> parked;
