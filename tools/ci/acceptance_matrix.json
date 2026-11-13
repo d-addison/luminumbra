@@ -8140,6 +8140,20 @@
         }
       ],
       "requirements": []
+    },
+    {
+      "id": "terrain.resolution-options",
+      "source": "issue #876",
+      "statement": "Terrain resolution design compares an opt-in band-limited new-world preset and a half-metre authoritative grid, including parameter sources, identity and save compatibility, resource costs, consumer audit and bounded delivery slices. Implementation, measured candidate facet reduction and native performance qualification remain pending.",
+      "status": "planned",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/development/terrain-resolution-options.md",
+          "planned": "Qualify captured-pose terrain, existing-world continuation, grid admission and High/Ultra performance before activation; owner: terrain"
+        }
+      ]
     }
   ]
 }
