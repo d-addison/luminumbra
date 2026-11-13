@@ -30,6 +30,15 @@ float flashResponse(float distanceToStrike, float sceneLuma) {
     return (1.0 - smoothstep(0.0, 1.6, distanceToStrike)) * clamp(sceneLuma * 4.0, 0.0, 1.0);
 }
 
+// The flash centre is the strongest strike. When that centre lies outside the
+// view, including the kLiveBoltPenUp sentinel used for strikes behind the
+// camera, a bounded scene-wide floor remains so a stronger offscreen strike
+// cannot remove the flash of a weaker visible bolt. strikeExtent is the larger
+// absolute NDC component of the centre; the floor ramps in smoothly past the edge.
+float offscreenFlashFloor(float strikeExtent, float sceneLuma) {
+    return 0.35 * smoothstep(1.0, 1.3, strikeExtent) * clamp(sceneLuma * 4.0, 0.0, 1.0);
+}
+
 // Shortest distance (aspect-corrected NDC) from a screen point to the bolt
 // polyline. The explicit kLiveBoltPenUp marker breaks disjoint strokes.
 float boltDistance(vec2 ndc) {
@@ -61,7 +70,10 @@ void main() {
 
         float distanceToStrike = length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0));
         float sceneLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-        color += u_color * (u_pulse * flashResponse(distanceToStrike, sceneLuma));
+        float strikeExtent = max(abs(u_strikeNdc.x), abs(u_strikeNdc.y));
+        float flash = max(flashResponse(distanceToStrike, sceneLuma),
+                          offscreenFlashFloor(strikeExtent, sceneLuma));
+        color += u_color * (u_pulse * flash);
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
         // halo along the polyline. The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits

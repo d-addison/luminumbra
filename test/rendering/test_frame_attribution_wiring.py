@@ -2113,13 +2113,73 @@ class StormLightningWiring(unittest.TestCase):
         main = block(shader, "void main()")
         self.assertIn("length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0))", main)
         self.assertIn("dot(color, vec3(0.2126, 0.7152, 0.0722))", main)
-        self.assertIn("u_pulse * flashResponse(distanceToStrike, sceneLuma)", main)
+        self.assertIn("flashResponse(distanceToStrike, sceneLuma)", main)
+        self.assertIn("u_pulse * flash", main)
         self.assertIn("if (u_active == 1 && u_pulse > 0.0)", main)
         self.assertNotIn("u_cloud", shader)
         self.assertNotIn("fbm(", shader)
         lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
         self.assertNotIn('setVec2("u_cloudNdc"', lighting)
         self.assertNotIn('setFloat("u_cloudDark"', lighting)
+
+    def test_offscreen_strongest_strike_keeps_a_bounded_scene_flash(self):
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("float offscreenFlashFloor(", shader)
+
+        def clamp(value, low, high):
+            return max(low, min(high, value))
+
+        def smoothstep(low, high, value):
+            fraction = clamp((value - low) / (high - low), 0.0, 1.0)
+            return fraction * fraction * (3.0 - 2.0 * fraction)
+
+        def compiled(signature):
+            expression = re.search(r"return\s+([^;]+);", block(shader, signature))[1]
+            tree = ast.parse(expression, mode="eval")
+            allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Call,
+                       ast.Name, ast.Load, ast.Constant)
+            self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+            return compile(tree, "<shader " + signature + ">", "eval")
+
+        response = compiled("float flashResponse(")
+        floor = compiled("float offscreenFlashFloor(")
+        names = dict(smoothstep=smoothstep, clamp=clamp)
+
+        def flash(strike_ndc, pixel_ndc, luma, aspect=1.777):
+            distance = math.hypot((pixel_ndc[0] - strike_ndc[0]) * aspect,
+                                  pixel_ndc[1] - strike_ndc[1])
+            extent = max(abs(strike_ndc[0]), abs(strike_ndc[1]))
+            local = eval(response, {"__builtins__": {}},
+                         dict(names, distanceToStrike=distance, sceneLuma=luma))
+            ambient = eval(floor, {"__builtins__": {}},
+                           dict(names, strikeExtent=extent, sceneLuma=luma))
+            return max(local, ambient)
+
+        pen_up = (-3.0, -3.0)
+        visible_bolt = (0.6, 0.2)
+        for luma in (0.001, 0.05, 0.5):
+            with self.subTest(luma=luma):
+                self.assertGreater(flash(pen_up, visible_bolt, luma), 0.0)
+                self.assertGreater(flash(pen_up, (-0.9, 0.9), luma), 0.0)
+                self.assertLessEqual(flash(pen_up, visible_bolt, luma), 0.35)
+                self.assertGreater(flash((5.0, 0.0), (-1.0, 0.0), luma), 0.0)
+        for extent in (0.0, 0.5, 1.0):
+            with self.subTest(extent=extent):
+                self.assertEqual(eval(floor, {"__builtins__": {}},
+                                      dict(names, strikeExtent=extent, sceneLuma=1.0)), 0.0)
+        self.assertEqual(flash(pen_up, visible_bolt, 0.0), 0.0)
+        previous = 0.0
+        for step in range(0, 41):
+            extent = 0.9 + step * 0.01
+            value = eval(floor, {"__builtins__": {}},
+                         dict(names, strikeExtent=extent, sceneLuma=1.0))
+            self.assertGreaterEqual(value, previous)
+            self.assertLessEqual(value - previous, 0.05)
+            previous = value
+        main = block(shader, "void main()")
+        self.assertIn("max(abs(u_strikeNdc.x), abs(u_strikeNdc.y))", main)
+        self.assertIn("offscreenFlashFloor(strikeExtent, sceneLuma)", main)
+        self.assertIn("max(flashResponse(distanceToStrike, sceneLuma),", main)
 
     def test_storm_does_not_add_a_night_visibility_floor(self):
         weather = read(ROOT / "res/shaders/weather_system.frag")
