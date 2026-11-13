@@ -437,7 +437,7 @@ target_include_directories(rendering_defaults_test PRIVATE ../src)
 target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(rendering_defaults_test)
 
-# GL-free capture provenance builder and filesystem publication lifecycle.
+# GL-free capture codecs, bounded draw registry and filesystem publication lifecycle.
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
@@ -592,6 +592,7 @@ add_executable(render_smoke_test
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
+    rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 
