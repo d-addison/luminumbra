@@ -2047,7 +2047,12 @@ TEST(ActiveRegionLedgerTest, GroundSettersRefuseTheOriginalFileCapWithoutMutatio
     EXPECT_THROW(ledger.publish_completed_work(completed), std::length_error);
     EXPECT_TRUE(ledger.completed_work().empty());
     std::uint64_t id = 42;
+    const auto visits = ledger.capacity_record_visits();
     EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    EXPECT_FALSE(ledger.reserve_persistent_ids(2));
+    EXPECT_FALSE(ledger.reserve_persistent_ids(ActiveRegionLedger::kPersistentIdLimit));
+    EXPECT_TRUE(ledger.reserve_persistent_ids(1));
+    EXPECT_EQ(ledger.capacity_record_visits(), visits);
     EXPECT_EQ(id, 42u);
     EXPECT_EQ(ledger.next_persistent_id(), 1u);
     EXPECT_TRUE(ledger.energy_ages().empty());
@@ -2336,7 +2341,14 @@ TEST(ActiveRegionLedgerTest, CombinedExtensionsShareTheFileCapAndRefuseAtomicall
     ASSERT_TRUE(ledger.set_energy_ages(ages));
     ASSERT_TRUE(ledger.set_water_debts(debts));
     std::uint64_t id = 42;
+    const auto visits = ledger.capacity_record_visits();
     EXPECT_THROW(ledger.allocate_persistent_id(id), std::length_error);
+    const auto before_reservation = ledger.encode();
+    EXPECT_FALSE(ledger.reserve_persistent_ids(2));
+    EXPECT_EQ(ledger.encode(), before_reservation);
+    EXPECT_FALSE(ledger.prepare_energy_work({}, {}, 2));
+    EXPECT_EQ(ledger.encode(), before_reservation);
+    EXPECT_EQ(ledger.capacity_record_visits(), visits);
     EXPECT_EQ(id, 42u);
     EXPECT_EQ(ledger.next_persistent_id(), 1u);
     EXPECT_EQ(ledger.energy_ages(), ages);
@@ -2361,6 +2373,62 @@ TEST(ActiveRegionLedgerTest, CombinedExtensionsShareTheFileCapAndRefuseAtomicall
               (std::map<RegionKey, std::uint64_t>{{first, 1}, {second, 2}}));
     EXPECT_EQ(ledger.next_persistent_id(), 2u);
     EXPECT_LE(ledger.encode().size(), ActiveRegionLedger::kMaxFileBytes);
+}
+
+TEST(ActiveRegionLedgerTest,
+     FrozenCapacityAccountingSurvivesCopiesMovesAcknowledgementAndEviction) {
+    for (const auto digest : {std::uint64_t{0}, std::uint64_t{7}}) {
+        ActiveRegionLedger ledger({0, 1, 1});
+        ledger.activate_owned(kFar, WorldClock{});
+        const auto freeze = [digest](RegionKey) {
+            return digest;
+        };
+        for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+            const std::array work{RegionWork{kFar, 1, 0, 0, 0}};
+            ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, work, freeze);
+        }
+        ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
+        ASSERT_EQ(Version(ledger.encode()), 2u);
+        EXPECT_GT(ledger.capacity_record_visits(), 0u);
+        const auto frozen_bytes = ledger.encode();
+        ActiveRegionLedger copied(ledger);
+        ActiveRegionLedger assigned;
+        assigned = ledger;
+        ActiveRegionLedger moved(std::move(copied));
+        ActiveRegionLedger move_assigned;
+        move_assigned = std::move(assigned);
+        for (const auto* candidate : {&ledger, &moved, &move_assigned}) {
+            EXPECT_EQ(candidate->encode(), frozen_bytes);
+            EXPECT_EQ(Reload(*candidate).encode(), frozen_bytes);
+        }
+        // Reset moved-from ledgers before reuse; their destination retains the history.
+        copied = ActiveRegionLedger{};
+        assigned = ActiveRegionLedger{};
+        EXPECT_EQ(copied.encode(), ActiveRegionLedger{}.encode());
+        EXPECT_EQ(assigned.encode(), ActiveRegionLedger{}.encode());
+
+        // A zero digest can lose its last history at acknowledgement. A nonzero
+        // digest must continue declaring the projection until its owner is evicted.
+        ledger.activate_owned(kFar, WorldClock(3));
+        ledger.schedule(WorldClock(4), std::span<const Vec3>{});
+        ASSERT_TRUE(ledger.acknowledge_resume(kFar, 3));
+        EXPECT_EQ(Version(ledger.encode()), digest == 0 ? 1u : 2u);
+        EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+
+        const auto nobody_owns = [](RegionKey) {
+            return false;
+        };
+        for (auto* candidate : {&ledger, &moved, &move_assigned}) {
+            candidate->schedule(WorldClock(4 + ActiveRegionLedger::kIdleEvictionTicks),
+                                std::span<const Vec3>{},
+                                {},
+                                freeze,
+                                nobody_owns);
+            EXPECT_TRUE(candidate->records().empty());
+            EXPECT_EQ(Version(candidate->encode()), 1u);
+            EXPECT_EQ(Reload(*candidate).encode(), candidate->encode());
+        }
+    }
 }
 
 } // namespace
