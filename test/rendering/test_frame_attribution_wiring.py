@@ -1991,5 +1991,106 @@ class FrameAttributionWiring(unittest.TestCase):
                                          requested in (2, 4, 8, 16) and resolution == requested)
 
 
+class CloudRenderingWiring(unittest.TestCase):
+    """Exercise scalar shader policy and its shipping pass bindings without GL."""
+
+    @staticmethod
+    def scalar(expression, **values):
+        def smoothstep(lo, hi, value):
+            t = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+            return t * t * (3.0 - 2.0 * t)
+
+        tree = ast.parse(compact(expression), mode="eval")
+        allowed = (ast.Expression, ast.Call, ast.Name, ast.Load, ast.Constant,
+                   ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.UnaryOp, ast.USub)
+        if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+            raise AssertionError("Unsupported cloud scalar expression")
+        values.update(smoothstep=smoothstep, mix=lambda a, b, t: a * (1.0 - t) + b * t)
+        return eval(compile(tree, "<cloud scalar>", "eval"), {"__builtins__": {}}, values)
+
+    def test_cloud_horizon_is_continuous_for_clear_and_storm(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        fade = block(source, "float cloudHorizonFade(")
+        expression = re.search(r"return (.*?);", fade, re.S).group(1)
+        march = block(source, "vec3 renderClouds(")
+        self.assertIn("if (viewDir.y <= 0.0) return baseColor;", march)
+        self.assertIn("cloudHorizonFade(viewDir.y, structureWeight)", march)
+        for structure in (0.0, 0.5, 1.0):
+            def sample(elevation):
+                return self.scalar(expression, elevation=elevation, structureWeight=structure)
+            self.assertEqual(sample(-0.01), 0.0)
+            self.assertEqual(sample(0.0), 0.0)
+            self.assertLess(sample(0.00001), 1e-6)
+            self.assertLess(abs(sample(0.020001) - sample(0.019999)), 0.0001)
+            self.assertEqual(sample(1.0), 1.0)
+
+    def test_cloud_volume_has_independent_height_and_advects_both_scales(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        noise = compact(block(source, "float cloudNoise3D("))
+        self.assertIn("vec3 cell = floor(p)", noise)
+        self.assertEqual(noise.count("hash("), 8)
+        self.assertEqual(noise.count("f.x)"), 4)
+        self.assertEqual(noise.count("f.z)"), 2)
+        self.assertIn("return mix(a, b, f.y)", noise)
+        density = block(source, "float cloudDensity(")
+        self.assertIn("advected = p + vec3(u_cloudScrollOffset.x, 0.0, u_cloudScrollOffset.y)", density)
+        self.assertIn("cloudNoise3D(advected * (1.0 / 430.0))", density)
+        self.assertIn("cloudNoise3D(advected * (1.0 / 120.0))", density)
+        self.assertNotIn("vec2(p.y", density)
+        profile = re.search(r"float profile = (.*?);", density, re.S).group(1)
+        base = re.search(r"float base = (.*?);", density, re.S).group(1)
+        for shape in (0.0, 0.5, 1.0):
+            height = self.scalar(base, shape=shape)
+            for hf in (-0.1, 0.0, 1.0, 1.1):
+                self.assertEqual(self.scalar(profile, base=height, hf=hf), 0.0)
+            self.assertGreater(self.scalar(profile, base=height, hf=0.49), 0.99)
+        march = compact(block(source, "vec3 renderClouds("))
+        self.assertIn("float jitter = hash(gl_FragCoord.xy)", march)
+        self.assertIn("float lightDt = (cloudSlabTop() - cloudSlabBottom()) / float(kLightSteps)", march)
+        self.assertIn("kSteps = 28", march)
+        self.assertIn("kLightSteps = 5", march)
+
+    def test_cloud_opacity_is_applied_once_and_empty_volume_preserves_sky(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        march = compact(block(source, "vec3 renderClouds("))
+        self.assertIn("vec3 stepColor = sunTerm + ambient;", march)
+        self.assertIn("scatter += transmittance * stepColor * (1.0 - stepExt)", march)
+        self.assertIn("vec3 cloudColor = scatter / max(1.0 - transmittance, 1e-4)", march)
+        self.assertIn("return mix(baseColor, cloudColor, alpha)", march)
+        self.assertIn("float alpha = clamp((1.0 - transmittance) * horizonFade, 0.0, 1.0)", march)
+
+    def test_night_clouds_receive_no_sunlight_or_warm_power_grade(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        march = block(source, "vec3 renderClouds(")
+        expression = re.search(r"float sunlight = (.*?);", march, re.S).group(1)
+        for elevation in (-1.0, -0.1, -0.08):
+            self.assertEqual(self.scalar(expression, u_sunCosZenith=elevation), 0.0)
+        for elevation in (0.06, 0.5, 1.0):
+            self.assertEqual(self.scalar(expression, u_sunCosZenith=elevation), 1.0)
+        self.assertIn("sunTransmittance(u_sunCosZenith) * (2.4 * sunlight)", march)
+        self.assertIn("mix(vec3(0.025, 0.028, 0.035), vec3(0.42, 0.47, 0.58), dayFactor)", march)
+        self.assertNotIn("cloudColor * 0.12", march)
+        self.assertIn("pow(skyColor, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor))", source)
+
+    def test_taau_sky_bypass_precedes_history_and_sharpen_in_live_and_replay(self):
+        shader = read(ROOT / "res/shaders/taau_resolve.frag")
+        main = block(shader, "void main()")
+        early = block(main, "if (u_history_valid == 0 || texture(u_sceneDepth, TexCoords).r <= 0.0)")
+        self.assertIn("FragColor = vec4(curr, 1.0)", early)
+        self.assertIn("return;", early)
+        self.assertLess(main.index("texture(u_sceneDepth"), main.index("texture(u_history"))
+        self.assertLess(main.index("texture(u_sceneDepth"), main.index("vec3 mean"))
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        context = compact(block(pipeline, "RenderContext RenderPipeline::make_taau_context()"))
+        self.assertRegex(context, r'ctx\.gbuffer_depth = m_render_registry\.adopt_texture\(\s*'
+                                  r'"gbuffer_depth", m_gbuffer_pass->gbuffer\(\)\.depth_texture\)')
+        stage = block(pipeline, "void RenderPipeline::execute_stage_taau_resolve(")
+        self.assertIn("make_taau_context()", stage)
+        self.assertIn("m_far_world_paired ? &m_far_world_pair_taau : nullptr", stage)
+        execute = compact(block(read(CLIENT / "rendering/passes/TaauPass.cpp"), "void TaauPass::execute("))
+        self.assertIn("glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id)", execute)
+        self.assertIn('m_shader->setInt("u_sceneDepth", 3)', execute)
+
+
 if __name__ == "__main__":
     unittest.main()

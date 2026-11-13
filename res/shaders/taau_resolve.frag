@@ -11,6 +11,7 @@ out vec4 FragColor;
 uniform sampler2D u_current;   // this frame's lit HDR color (RGBA16F)
 uniform sampler2D u_history;   // previous resolved color (RGBA16F)
 uniform sampler2D u_motion;    // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
+uniform sampler2D u_sceneDepth; // reversed-Z: cleared depth has no geometry motion
 uniform vec2  u_texel;         // 1 / screen size
 uniform float u_blend;         // history weight when stable (e.g. 0.9); first frame forced to 0
 uniform float u_sharpness;     // post-resolve unsharp strength (recovers temporal-blur softness)
@@ -19,7 +20,10 @@ uniform int   u_history_valid; // 0 on the first frame / after a resize -> use c
 void main() {
     vec3 curr = texture(u_current, TexCoords).rgb;
 
-    if (u_history_valid == 0) {
+    // The sky is drawn after the G-buffer and has no motion vectors. Reusing
+    // zero-motion history smears moving clouds/camera turns; sharpening that
+    // stale color independently per channel creates cyan cloud fringes.
+    if (u_history_valid == 0 || texture(u_sceneDepth, TexCoords).r <= 0.0) {
         FragColor = vec4(curr, 1.0);
         return;
     }

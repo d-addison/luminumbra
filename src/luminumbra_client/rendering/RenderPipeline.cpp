@@ -4195,6 +4195,8 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
