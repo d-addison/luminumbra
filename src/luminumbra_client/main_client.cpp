@@ -5393,6 +5393,7 @@ int main(int argc, char* argv[]) {
                                scenario_config.lod_boundary_oscillation_smoke() ||
                                scenario_config.lod_seam_arrival_smoke() ||
                                scenario_config.player_view_smoke() ||
+                               scenario_config.world_visual_sweep() ||
                                scenario_config.farlod_horizon_smoke() ||
                                scenario_config.skinned_mesh_visual_smoke() ||
                                scenario_config.creature_slice_smoke()) &&
