@@ -21,14 +21,17 @@ namespace {
 float ray_sphere_nearest(const glm::vec3& origin, const glm::vec3& dir, float radius) {
     const float b = glm::dot(origin, dir);
     const float c = glm::dot(origin, origin) - radius * radius;
-    if (c > 0.0f && b > 0.0f) return -1.0f;
+    if (c > 0.0f && b > 0.0f)
+        return -1.0f;
     const float disc = b * b - c;
-    if (disc < 0.0f) return -1.0f;
+    if (disc < 0.0f)
+        return -1.0f;
     const float sqrt_disc = std::sqrt(disc);
     const float t0 = -b - sqrt_disc;
     const float t1 = -b + sqrt_disc;
-    if (t1 < 0.0f) return -1.0f;
-    return t0 < 0.0f ? t1: t0;
+    if (t1 < 0.0f)
+        return -1.0f;
+    return t0 < 0.0f ? t1 : t0;
 }
 
 // Density-ratio of Rayleigh / Mie at a given altitude (metres above ground).
@@ -236,7 +239,8 @@ void main() {
 )GLSL";
 
 // GPU-compute port of build_multiscatter_cpu (32x32, 16 dirs x 20 samples; samples
-// the transmittance texture). Hillaire isotropic 1-bounce, folded as the analytic series L2/(1-fms).
+// the transmittance texture). Hillaire isotropic 1-bounce, folded as the analytic series
+// L2/(1-fms).
 const char* kMultiscatterComputeSrc = R"GLSL(
 #version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -355,7 +359,8 @@ void SkyAtmosphereLut::build_transmittance_cpu() {
     const glm::vec3 beta_m_ext = glm::vec3(kMieScatteringPerM + kMieAbsorptionPerM);
     const float top = kAtmosphereTopM - kPlanetRadiusM;
 
-    m_transmittance_cpu.assign(static_cast<std::size_t>(kTransmittanceWidth) * kTransmittanceHeight, glm::vec3(0.0f));
+    m_transmittance_cpu.assign(static_cast<std::size_t>(kTransmittanceWidth) * kTransmittanceHeight,
+                               glm::vec3(0.0f));
     constexpr int kSamples = 40;
 
     for (int y = 0; y < kTransmittanceHeight; ++y) {
@@ -363,7 +368,8 @@ void SkyAtmosphereLut::build_transmittance_cpu() {
         const float altitude = v * top;
         const float r = kPlanetRadiusM + altitude;
         for (int x = 0; x < kTransmittanceWidth; ++x) {
-            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kTransmittanceWidth);
+            const float u =
+                (static_cast<float>(x) + 0.5f) / static_cast<float>(kTransmittanceWidth);
             const float mu = u * 2.0f - 1.0f; // cos(zenith)
             // Viewer at (0, r, 0); sun direction with zenith cosine mu.
             const glm::vec3 origin(0.0f, r, 0.0f);
@@ -397,7 +403,8 @@ glm::vec3 SkyAtmosphereLut::sample_transmittance(float altitude_m, float cos_zen
 }
 
 glm::vec3 SkyAtmosphereLut::sun_transmittance(float sun_cos_zenith) const {
-    if (m_transmittance_cpu.empty()) return glm::vec3(1.0f);
+    if (m_transmittance_cpu.empty())
+        return glm::vec3(1.0f);
     return sample_transmittance(kEpsilonM, sun_cos_zenith);
 }
 
@@ -412,10 +419,11 @@ void SkyAtmosphereLut::build_multiscatter_cpu() {
     const glm::vec3 beta_m_ext = glm::vec3(kMieScatteringPerM + kMieAbsorptionPerM);
     const float top = kAtmosphereTopM - kPlanetRadiusM;
 
-    m_multiscatter_cpu.assign(static_cast<std::size_t>(kMultiScatterWidth) * kMultiScatterHeight, glm::vec3(0.0f));
+    m_multiscatter_cpu.assign(static_cast<std::size_t>(kMultiScatterWidth) * kMultiScatterHeight,
+                              glm::vec3(0.0f));
 
-    constexpr int kDirSamples = 16;     // sphere directions
-    constexpr int kMarchSamples = 20;   // along each direction
+    constexpr int kDirSamples = 16;   // sphere directions
+    constexpr int kMarchSamples = 20; // along each direction
     const float uniform_phase = 1.0f / (4.0f * glm::pi<float>());
 
     for (int y = 0; y < kMultiScatterHeight; ++y) {
@@ -425,24 +433,28 @@ void SkyAtmosphereLut::build_multiscatter_cpu() {
         for (int x = 0; x < kMultiScatterWidth; ++x) {
             const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(kMultiScatterWidth);
             const float mu_sun = u * 2.0f - 1.0f;
-            const glm::vec3 sun_dir(std::sqrt(std::max(0.0f, 1.0f - mu_sun * mu_sun)), mu_sun, 0.0f);
+            const glm::vec3 sun_dir(
+                std::sqrt(std::max(0.0f, 1.0f - mu_sun * mu_sun)), mu_sun, 0.0f);
             const glm::vec3 origin(0.0f, r, 0.0f);
 
-            glm::vec3 L2nd(0.0f);   // single-scatter gathered over sphere
-            glm::vec3 fms(0.0f);    // multi-scatter feedback factor
+            glm::vec3 L2nd(0.0f); // single-scatter gathered over sphere
+            glm::vec3 fms(0.0f);  // multi-scatter feedback factor
 
             for (int d = 0; d < kDirSamples; ++d) {
                 // Spread sample directions over the sphere (Fibonacci-ish).
                 const float fd = (static_cast<float>(d) + 0.5f) / static_cast<float>(kDirSamples);
                 const float cos_t = 1.0f - 2.0f * fd;
                 const float sin_t = std::sqrt(std::max(0.0f, 1.0f - cos_t * cos_t));
-                const float phi = fd * glm::pi<float>() * (3.0f - std::sqrt(5.0f)) * static_cast<float>(d);
+                const float phi =
+                    fd * glm::pi<float>() * (3.0f - std::sqrt(5.0f)) * static_cast<float>(d);
                 const glm::vec3 dir(sin_t * std::cos(phi), cos_t, sin_t * std::sin(phi));
 
                 float t_max = ray_sphere_nearest(origin, dir, kAtmosphereTopM);
                 const float t_planet = ray_sphere_nearest(origin, dir, kPlanetRadiusM);
-                if (t_planet > 0.0f) t_max = std::min(t_max, t_planet);
-                if (t_max <= 0.0f) continue;
+                if (t_planet > 0.0f)
+                    t_max = std::min(t_max, t_planet);
+                if (t_max <= 0.0f)
+                    continue;
                 const float dt = t_max / static_cast<float>(kMarchSamples);
 
                 glm::vec3 throughput(1.0f);
@@ -460,10 +472,12 @@ void SkyAtmosphereLut::build_multiscatter_cpu() {
                     const glm::vec3 step_tr = glm::exp(-sigma_e * dt);
                     // Uniform-phase single scatter contributing to the feedback.
                     const glm::vec3 scattered = sigma_s * uniform_phase * t_sun;
-                    const glm::vec3 integ = (scattered - scattered * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
+                    const glm::vec3 integ =
+                        (scattered - scattered * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
                     L2nd += throughput * integ;
                     // Multi-scatter feedback: integral of scattering * throughput.
-                    const glm::vec3 integ_f = (sigma_s - sigma_s * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
+                    const glm::vec3 integ_f =
+                        (sigma_s - sigma_s * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
                     fms += throughput * integ_f;
                     throughput *= step_tr;
                 }
@@ -484,6 +498,20 @@ void SkyAtmosphereLut::build_multiscatter_cpu() {
 // the sun, y = view zenith. Each texel ray-marches single + multi scatter.
 // Sun-dependent: recomputed on sun motion.
 void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
+    // GPU initialization can leave both CPU base LUTs absent. Validate once per
+    // CPU build, before either integration samples them, including after a GPU
+    // readback failure or a GPU-to-CPU mode change. Pinned dimensions bound the
+    // lazy allocations to 16,384 + 1,024 vec3 texels; size_t products fit even on
+    // 32-bit hosts. Correctly sized buffers are reused without rebuilding.
+    if (m_transmittance_cpu.size() !=
+        static_cast<std::size_t>(kTransmittanceWidth) * kTransmittanceHeight) {
+        build_transmittance_cpu();
+    }
+    if (m_multiscatter_cpu.size() !=
+        static_cast<std::size_t>(kMultiScatterWidth) * kMultiScatterHeight) {
+        build_multiscatter_cpu();
+    }
+
     const glm::vec3 beta_r = rayleigh_scattering_per_m();
     const glm::vec3 beta_m_sca = glm::vec3(kMieScatteringPerM);
     const glm::vec3 beta_r_ext = beta_r;
@@ -507,7 +535,8 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     // bearing, right is the orthogonal horizontal axis.
     glm::vec3 sun_horiz(sun_dir_world.x, 0.0f, sun_dir_world.z);
     const float sun_horiz_len = glm::length(sun_horiz);
-    glm::vec3 forward = sun_horiz_len > 1e-4f ? sun_horiz / sun_horiz_len: glm::vec3(0.0f, 0.0f, 1.0f);
+    glm::vec3 forward =
+        sun_horiz_len > 1e-4f ? sun_horiz / sun_horiz_len : glm::vec3(0.0f, 0.0f, 1.0f);
     const glm::vec3 right(-forward.z, 0.0f, forward.x); // 90 deg CCW about +Y
 
     constexpr int kMarchSamples = 30;
@@ -526,11 +555,13 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
             // View ray in the sun-relative horizontal frame: azimuth 0 points at
             // the sun's bearing, so column u mirrors the shader's sun-relative az.
             const glm::vec3 view_dir =
-                up * cos_view + (forward * std::cos(azimuth) + right * std::sin(azimuth)) * sin_view;
+                up * cos_view +
+                (forward * std::cos(azimuth) + right * std::sin(azimuth)) * sin_view;
 
             float t_max = ray_sphere_nearest(origin, view_dir, kAtmosphereTopM);
             const float t_planet = ray_sphere_nearest(origin, view_dir, kPlanetRadiusM);
-            if (t_planet > 0.0f) t_max = std::min(t_max, t_planet);
+            if (t_planet > 0.0f)
+                t_max = std::min(t_max, t_planet);
             if (t_max <= 0.0f) {
                 continue;
             }
@@ -570,7 +601,8 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
 
                 const glm::vec3 step_tr = glm::exp(-sigma_e * dt);
                 const glm::vec3 in_scatter = single + multi;
-                const glm::vec3 integ = (in_scatter - in_scatter * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
+                const glm::vec3 integ =
+                    (in_scatter - in_scatter * step_tr) / glm::max(sigma_e, glm::vec3(1e-9f));
                 L += throughput * integ;
                 throughput *= step_tr;
             }
@@ -588,7 +620,8 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     }
 
     m_skyview_sun_dir = sun_dir_world;
-    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>(): glm::vec3(0.0f);
+    m_sky_ambient =
+        ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>() : glm::vec3(0.0f);
     (void)sun_cos_zenith;
 }
 
@@ -597,7 +630,8 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
 bool SkyAtmosphereLut::ensure_skyview_compute_resources() {
     if (m_skyview_compute_prog == 0) {
         m_skyview_compute_prog = compile_compute(kSkyViewComputeSrc);
-        if (m_skyview_compute_prog == 0) return false;
+        if (m_skyview_compute_prog == 0)
+            return false;
     }
     if (m_skyview_ssbo == 0) {
         glGenBuffers(1, &m_skyview_ssbo);
@@ -606,7 +640,8 @@ bool SkyAtmosphereLut::ensure_skyview_compute_resources() {
         // so the same SSBO is reused as the dispatch target + PBO upload source for all three.
         glBufferData(GL_SHADER_STORAGE_BUFFER,
                      static_cast<GLsizeiptr>(sizeof(float) * 3u * kSkyViewWidth * kSkyViewHeight),
-                     nullptr, GL_DYNAMIC_DRAW);
+                     nullptr,
+                     GL_DYNAMIC_DRAW);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     }
     return m_skyview_ssbo != 0;
@@ -615,7 +650,8 @@ bool SkyAtmosphereLut::ensure_skyview_compute_resources() {
 namespace {
 // Allocate an empty RGB16F texture (GPU init fills it via glTexSubImage2D from the PBO).
 void allocate_empty_lut_texture(GLuint& tex, int width, int height, const char* label) {
-    if (tex != 0) return;
+    if (tex != 0)
+        return;
     glGenTextures(1, &tex);
     PassGl::label_gl_object(GL_TEXTURE, tex, label);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -626,29 +662,38 @@ void allocate_empty_lut_texture(GLuint& tex, int width, int height, const char* 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
-}  // namespace
+} // namespace
 
 void SkyAtmosphereLut::prewarm_gpu_compute() {
-    if (!m_use_gpu_skyview) return;
-    ensure_skyview_compute_resources();  // compiles sky-view prog + allocates the shared SSBO
-    if (m_transmittance_compute_prog == 0) m_transmittance_compute_prog = compile_compute(kTransmittanceComputeSrc);
-    if (m_multiscatter_compute_prog == 0) m_multiscatter_compute_prog = compile_compute(kMultiscatterComputeSrc);
+    if (!m_use_gpu_skyview)
+        return;
+    ensure_skyview_compute_resources(); // compiles sky-view prog + allocates the shared SSBO
+    if (m_transmittance_compute_prog == 0)
+        m_transmittance_compute_prog = compile_compute(kTransmittanceComputeSrc);
+    if (m_multiscatter_compute_prog == 0)
+        m_multiscatter_compute_prog = compile_compute(kMultiscatterComputeSrc);
 }
 
 bool SkyAtmosphereLut::build_sky_lut_gpu_init(const glm::vec3& sun_dir_world) {
-    if (!ensure_skyview_compute_resources()) return false;
+    if (!ensure_skyview_compute_resources())
+        return false;
     if (m_transmittance_compute_prog == 0) {
         m_transmittance_compute_prog = compile_compute(kTransmittanceComputeSrc);
-        if (m_transmittance_compute_prog == 0) return false;
+        if (m_transmittance_compute_prog == 0)
+            return false;
     }
     if (m_multiscatter_compute_prog == 0) {
         m_multiscatter_compute_prog = compile_compute(kMultiscatterComputeSrc);
-        if (m_multiscatter_compute_prog == 0) return false;
+        if (m_multiscatter_compute_prog == 0)
+            return false;
     }
-    allocate_empty_lut_texture(m_transmittance_tex, kTransmittanceWidth, kTransmittanceHeight, "sky.lut.transmittance");
-    allocate_empty_lut_texture(m_multiscatter_tex, kMultiScatterWidth, kMultiScatterHeight, "sky.lut.multiscatter");
+    allocate_empty_lut_texture(
+        m_transmittance_tex, kTransmittanceWidth, kTransmittanceHeight, "sky.lut.transmittance");
+    allocate_empty_lut_texture(
+        m_multiscatter_tex, kMultiScatterWidth, kMultiScatterHeight, "sky.lut.multiscatter");
     allocate_empty_lut_texture(m_skyview_tex, kSkyViewWidth, kSkyViewHeight, "sky.lut.skyview");
-    if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0) return false;
+    if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0)
+        return false;
 
     auto dispatch_and_upload = [&](const AttributedGl::Program& prog, int w, int h, GLuint tex) {
         Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, prog);
@@ -670,28 +715,36 @@ bool SkyAtmosphereLut::build_sky_lut_gpu_init(const glm::vec3& sun_dir_world) {
     };
 
     // 1. Transmittance (no input). 2. Multiscatter (samples transmittance). 3. Sky-view + ambient.
-    dispatch_and_upload(m_transmittance_compute_prog, kTransmittanceWidth, kTransmittanceHeight, m_transmittance_tex);
+    dispatch_and_upload(m_transmittance_compute_prog,
+                        kTransmittanceWidth,
+                        kTransmittanceHeight,
+                        m_transmittance_tex);
 
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_multiscatter_compute_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_transmittance_tex);
     glUniform1i(glGetUniformLocation(m_multiscatter_compute_prog, "u_transmittance"), 0);
-    dispatch_and_upload(m_multiscatter_compute_prog, kMultiScatterWidth, kMultiScatterHeight, m_multiscatter_tex);
+    dispatch_and_upload(
+        m_multiscatter_compute_prog, kMultiScatterWidth, kMultiScatterHeight, m_multiscatter_tex);
 
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
-    return build_sky_view_gpu(sun_dir_world);  // dispatch + upload + ambient readback
+    return build_sky_view_gpu(sun_dir_world); // dispatch + upload + ambient readback
 }
 
 bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     // Needs the transmittance/multiscatter textures (the compute samples them) and the sky-view
     // texture (the compute writes it); all three are uploaded by the CPU initialize. Refuse if
     // any is missing or the compute program/SSBO can't be created -> caller falls back to CPU.
-    if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0) return false;
-    if (!ensure_skyview_compute_resources()) return false;
+    if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0)
+        return false;
+    if (!ensure_skyview_compute_resources())
+        return false;
 
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_skyview_compute_prog);
     glUniform3f(glGetUniformLocation(m_skyview_compute_prog, "u_sunDir"),
-                sun_dir_world.x, sun_dir_world.y, sun_dir_world.z);
+                sun_dir_world.x,
+                sun_dir_world.y,
+                sun_dir_world.z);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_transmittance_tex);
     glUniform1i(glGetUniformLocation(m_skyview_compute_prog, "u_transmittance"), 0);
@@ -711,7 +764,8 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_skyview_ssbo);
     glBindTexture(GL_TEXTURE_2D, m_skyview_tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kSkyViewWidth, kSkyViewHeight, GL_RGB, GL_FLOAT, nullptr);
+    glTexSubImage2D(
+        GL_TEXTURE_2D, 0, 0, 0, kSkyViewWidth, kSkyViewHeight, GL_RGB, GL_FLOAT, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
@@ -749,7 +803,7 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     }
     Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
     if (!readback_ok) {
-        return false;  // caller falls back to the CPU sky-view path
+        return false; // caller falls back to the CPU sky-view path
     }
 
     glm::vec3 ambient_accum(0.0f);
@@ -758,7 +812,8 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
         const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(kSkyViewHeight);
         const float view_zenith = v * glm::pi<float>();
         const float cos_view = std::cos(view_zenith);
-        if (cos_view <= 0.0f) continue;
+        if (cos_view <= 0.0f)
+            continue;
         const float sin_view = std::sin(view_zenith);
         for (int x = 0; x < kSkyViewWidth; ++x) {
             const glm::vec3 L = m_skyview_cpu[static_cast<std::size_t>(y) * kSkyViewWidth +
@@ -768,14 +823,15 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
         }
     }
     m_skyview_sun_dir = sun_dir_world;
-    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>(): glm::vec3(0.0f);
+    m_sky_ambient =
+        ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>() : glm::vec3(0.0f);
     return true;
 }
 
 // --- GL upload --------------------------------------------------------------
 
-void SkyAtmosphereLut::upload_texture(GLuint& tex, int width, int height,
-                                      const std::vector<glm::vec3>& cpu, const char* label) {
+void SkyAtmosphereLut::upload_texture(
+    GLuint& tex, int width, int height, const std::vector<glm::vec3>& cpu, const char* label) {
     glGenTextures(1, &tex);
     PassGl::label_gl_object(GL_TEXTURE, tex, label);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -787,8 +843,12 @@ void SkyAtmosphereLut::upload_texture(GLuint& tex, int width, int height,
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void SkyAtmosphereLut::update_texture(GLuint tex, int width, int height, const std::vector<glm::vec3>& cpu) {
-    if (tex == 0) return;
+void SkyAtmosphereLut::update_texture(GLuint tex,
+                                      int width,
+                                      int height,
+                                      const std::vector<glm::vec3>& cpu) {
+    if (tex == 0)
+        return;
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_FLOAT, cpu.data());
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -809,9 +869,18 @@ bool SkyAtmosphereLut::initialize(const glm::vec3& sun_dir_world, double* out_fu
         build_multiscatter_cpu();
         build_sky_view_cpu(glm::normalize(sun_dir_world));
 
-        upload_texture(m_transmittance_tex, kTransmittanceWidth, kTransmittanceHeight, m_transmittance_cpu, "sky.lut.transmittance");
-        upload_texture(m_multiscatter_tex, kMultiScatterWidth, kMultiScatterHeight, m_multiscatter_cpu, "sky.lut.multiscatter");
-        upload_texture(m_skyview_tex, kSkyViewWidth, kSkyViewHeight, m_skyview_cpu, "sky.lut.skyview");
+        upload_texture(m_transmittance_tex,
+                       kTransmittanceWidth,
+                       kTransmittanceHeight,
+                       m_transmittance_cpu,
+                       "sky.lut.transmittance");
+        upload_texture(m_multiscatter_tex,
+                       kMultiScatterWidth,
+                       kMultiScatterHeight,
+                       m_multiscatter_cpu,
+                       "sky.lut.multiscatter");
+        upload_texture(
+            m_skyview_tex, kSkyViewWidth, kSkyViewHeight, m_skyview_cpu, "sky.lut.skyview");
     }
 
     m_base_built = true;
@@ -823,7 +892,8 @@ bool SkyAtmosphereLut::initialize(const glm::vec3& sun_dir_world, double* out_fu
 }
 
 bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* out_refresh_ms) {
-    if (!m_base_built) return false;
+    if (!m_base_built)
+        return false;
     const glm::vec3 sun = glm::normalize(sun_dir_world);
     // Only refresh when the sun has moved past the threshold (cosine of arc).
     if (glm::dot(sun, m_skyview_sun_dir) >= 1.0f - kSunRefreshCosThreshold) {
@@ -848,9 +918,18 @@ bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* 
 }
 
 void SkyAtmosphereLut::destroy() {
-    if (m_transmittance_tex) { glDeleteTextures(1, &m_transmittance_tex); m_transmittance_tex = 0; }
-    if (m_multiscatter_tex) { glDeleteTextures(1, &m_multiscatter_tex); m_multiscatter_tex = 0; }
-    if (m_skyview_tex) { glDeleteTextures(1, &m_skyview_tex); m_skyview_tex = 0; }
+    if (m_transmittance_tex) {
+        glDeleteTextures(1, &m_transmittance_tex);
+        m_transmittance_tex = 0;
+    }
+    if (m_multiscatter_tex) {
+        glDeleteTextures(1, &m_multiscatter_tex);
+        m_multiscatter_tex = 0;
+    }
+    if (m_skyview_tex) {
+        glDeleteTextures(1, &m_skyview_tex);
+        m_skyview_tex = 0;
+    }
     //  GPU sky-view resources.
     if (m_skyview_compute_prog) {
         Luminumbra::Rendering::AttributedGl::DeleteProgram(glDeleteProgram, m_skyview_compute_prog);
@@ -866,7 +945,10 @@ void SkyAtmosphereLut::destroy() {
                                                            m_multiscatter_compute_prog);
         m_multiscatter_compute_prog = {};
     }
-    if (m_skyview_ssbo) { glDeleteBuffers(1, &m_skyview_ssbo); m_skyview_ssbo = 0; }
+    if (m_skyview_ssbo) {
+        glDeleteBuffers(1, &m_skyview_ssbo);
+        m_skyview_ssbo = 0;
+    }
     m_base_built = false;
 }
 

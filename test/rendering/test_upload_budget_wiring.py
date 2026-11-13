@@ -1423,6 +1423,75 @@ class SkyLutContinuity(unittest.TestCase):
     def setUpClass(cls):
         cls.source = read(RENDERING / "SkyAtmosphereLut.ipp")
 
+    def test_cpu_fallback_repairs_empty_partial_and_oversized_base_luts_before_sampling(self):
+        sky = body(self.source, "void SkyAtmosphereLut::build_sky_view_cpu(")
+        prefix = sky.split("const glm::vec3 beta_r =", 1)[0]
+        header = read(RENDERING / "SkyAtmosphereLut.h")
+        constants = {name: int(value) for name, value in re.findall(
+            r"static constexpr int (k\w+) = (\d+);", header)}
+        sizes = {"m_transmittance_cpu": 256 * 64, "m_multiscatter_cpu": 32 * 32}
+        guards = re.findall(r"if\s*\((.*?)\)\s*\{\s*(build_\w+_cpu)\(\);\s*\}",
+                            prefix, re.S)
+        self.assertEqual([builder for _, builder in guards],
+                         ["build_transmittance_cpu", "build_multiscatter_cpu"])
+        # Execute the production size predicates for all 25 shape pairs. Empty
+        # covers GPU-only startup; short/long covers incomplete or stale buffers;
+        # exact sizes must reuse the existing CPU output without another build.
+        for trans in (0, 1, 256 * 64 - 1, 256 * 64, 256 * 64 + 1):
+            for multi in (0, 1, 32 * 32 - 1, 32 * 32, 32 * 32 + 1):
+                state = dict(m_transmittance_cpu=trans, m_multiscatter_cpu=multi)
+                rebuilt = []
+                for predicate, builder in guards:
+                    expression = compact(predicate).replace("static_cast<std::size_t>", "int")
+                    expression = expression.replace(".size()", "")
+                    if eval(expression, {"__builtins__": {}}, dict(constants, int=int, **state)):
+                        if builder == "build_multiscatter_cpu":
+                            self.assertEqual(state["m_transmittance_cpu"], sizes["m_transmittance_cpu"])
+                        buffer = "m_" + builder.removeprefix("build_")
+                        state[buffer] = sizes[buffer]
+                        rebuilt.append(buffer)
+                with self.subTest(trans=trans, multi=multi):
+                    self.assertEqual(state, sizes)
+                    self.assertEqual(rebuilt, [name for name, count in
+                                              (("m_transmittance_cpu", trans),
+                                               ("m_multiscatter_cpu", multi))
+                                              if count != sizes[name]])
+
+    def test_every_cpu_entry_and_gpu_failure_converges_on_guarded_builder(self):
+        # There are only two CPU entry sites, shared by all platforms/backends.
+        self.assertEqual(self.source.count("build_sky_view_cpu("), 3)
+        for method, branch in (("initialize", "if (!gpu_init_done)"),
+                               ("refresh_sky_view", "if (!gpu_done)")):
+            entry = body(self.source, "bool SkyAtmosphereLut::" + method + "(")
+            self.assertIn("build_sky_view_cpu(", body(entry, branch))
+        gpu = body(self.source, "bool SkyAtmosphereLut::build_sky_view_gpu(")
+        failure = body(gpu, "if (!readback_ok)")
+        self.assertIn("return false;", failure)
+        self.assertIn("mapped_bytes >= skyview_bytes", gpu)
+        self.assertIn("std::chrono::steady_clock::now() >= readback_deadline", gpu)
+        # Resize/quality never changes the fixed LUT geometry or clears its CPU
+        # storage; a subsequent refresh still enters the same guarded builder.
+        pipeline = read(RENDERING / "RenderPipeline.cpp")
+        for method in ("void RenderPipeline::on_resize(",
+                       "bool RenderPipeline::resize_graphics_targets(",
+                       "bool RenderPipeline::apply_graphics(",
+                       "void RenderPipeline::set_cloud_quality("):
+            self.assertNotIn("m_sky_lut", body(pipeline, method))
+
+    def test_gpu_success_then_fallback_regressions_are_registered_without_skips(self):
+        registration = read(ROOT / "test/CMakeLists.txt")
+        target = registration.split("add_executable(render_smoke_test", 1)[1].split(")", 1)[0]
+        self.assertIn("rendering/SkyAtmosphereLutGl_test.cpp", target)
+        native = read(ROOT / "test/rendering/SkyAtmosphereLutGl_test.cpp")
+        for name in ("GpuInitializationThenReadbackDeadlineMatchesCpu",
+                     "GpuInitializationThenCpuModeMatchesCpu",
+                     "InitializationShaderFailureMatchesCpu",
+                     "InitializationReadbackDeadlineMatchesCpu"):
+            self.assertIn("TEST_F(SkyAtmosphereLutGl, " + name + ")", native)
+        self.assertNotIn("GTEST_SKIP", native)
+        self.assertIn("EXPECT_EQ(Pixels(actual), Pixels(reference));", native)
+        self.assertIn("EXPECT_EQ(lut.sun_transmittance(0.0f), glm::vec3(1.0f));", native)
+
     def cpu_sampler(self, width, height, values):
         if "sample_lut_linear(" not in self.source:
             # Model the old production lookup too, so the numeric regressions
