@@ -1003,7 +1003,11 @@ public:
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.
-    bool is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const;
+    // Render integration may validate only the captured region and its halo;
+    // unrelated authority changes must not starve its immutable tile builds.
+    // Persistence retains the default whole-world revision check.
+    bool is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot,
+                                         bool region_scoped = false) const;
     u64 far_lod_authority_revision() const {
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
