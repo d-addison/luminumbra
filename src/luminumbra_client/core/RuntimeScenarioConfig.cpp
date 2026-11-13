@@ -5,6 +5,7 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
+#include "rendering/DiagnosticCapture.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -192,6 +193,15 @@ void ParseSurfaceRadiusOptions(int argc,
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
     // Admission precedes --save-root directory creation.
+    const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
+    const auto diagnostics = Rendering::ResolveDiagnosticCaptureOptions(
+        std::span<char* const>(argv + 1, static_cast<std::size_t>(std::max(0, argc - 1))),
+        diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
+                               : std::nullopt);
+    if (diagnostics.enabled) {
+        throw std::invalid_argument(
+            "capture diagnostics require the completed-frame scenario readback adapter");
+    }
     int surface_radius = 0;
     int collision_radius = 0;
     int benchmark_stream_radius = 0;

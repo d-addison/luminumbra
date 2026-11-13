@@ -613,6 +613,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertEqual(sources[1].split(), [
             "client/runtime_surface_options_test.cpp",
             "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+            "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
         ])
         for command, dependencies in (
             ("target_include_directories", ("../src", "../src/luminumbra_client")),
@@ -659,6 +660,7 @@ class ReplaySourceContract(unittest.TestCase):
         native = read_source("test/client/runtime_surface_options_test.cpp")
         for token in ("client/runtime_surface_options_test.cpp",
                       "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+                      "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
                       "    runtime_surface_options_test\n"):
             # Mutate the new target itself, even when another target owns the
             # same production source. The target must retain every dependency.

@@ -442,12 +442,21 @@ add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
     rendering/diagnostic_attribution_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
     ../src/luminumbra_client/rendering/CaptureManifest.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json glad)
 target_compile_definitions(capture_manifest_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 luminumbra_configure_first_party_target(capture_manifest_test)
+
+add_executable(diagnostic_bundle_test
+    rendering/diagnostic_bundle_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
+target_include_directories(diagnostic_bundle_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(diagnostic_bundle_test PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(diagnostic_bundle_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -1685,6 +1694,7 @@ target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_comm
 add_executable(runtime_surface_options_test
     client/runtime_surface_options_test.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(runtime_surface_options_test PRIVATE
     ../src
@@ -1949,6 +1959,7 @@ target_link_libraries(audio_volume_readback_test PRIVATE
 add_executable(audio_disabled_test
     audio/audio_disabled_test.cpp
 ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(audio_disabled_test PRIVATE
 ../src
@@ -2114,6 +2125,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     rendering_defaults_test
     capture_manifest_test
+    diagnostic_bundle_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
