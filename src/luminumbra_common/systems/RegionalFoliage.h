@@ -278,7 +278,7 @@ inline bool ActivateFoliagePage(FieldPageState& pages, ScentCellKey cell, bool s
 
 // Short-lived, sealed preparation across interleaved interior steps. Supply only
 // touched/due owners; each is prepared on first use. Storage topology must remain
-// unchanged for this object's lifetime. Recreate it after admissions or loading.
+// unchanged between historical steps. LiveStep refreshes after live admissions.
 // Each Step evolves once for nonzero entries; scheduling/window expansion is the
 // caller's responsibility.
 class FoliageInteriorReplay {
@@ -379,6 +379,21 @@ public:
             }
         }
         return Step(pages, due);
+    }
+    // Early consumers may move emitters onto newly admitted pages. Rebuild live
+    // topology from pages, which already contain every completed historical step.
+    // Registry and owner lists contain only participants; each channel retains
+    // the kMaxPages * 256 cell bound. Refreshed owners need at most 64 page probes.
+    std::map<RegionKey, std::uint64_t> LiveStep(entt::registry& registry,
+                                                FieldPageState& pages,
+                                                const std::map<RegionKey, std::uint32_t>& due,
+                                                std::span<const RegionKey> refreshed_owners = {}) {
+        m_sources.clear();
+        m_sourcesPrepared = false;
+        for (const auto key : refreshed_owners) {
+            m_owners.erase(key);
+        }
+        return Step(registry, pages, due);
     }
     std::map<RegionKey, std::uint64_t> Step(FieldPageState& pages,
                                             const std::map<RegionKey, std::uint32_t>& due) {
@@ -564,8 +579,10 @@ public:
     static constexpr std::uint32_t kStepBudget = 32;
     FoliageWindowReplay(const FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
-                        std::optional<std::uint64_t> tick = {})
-        : m_tick(tick) {
+                        std::optional<std::uint64_t> tick = {},
+                        bool live_tick = false)
+        : m_tick(tick)
+        , m_liveTick(live_tick) {
         // Validate every window before preparing storage or modifying any state.
         for (const auto& [key, ticks] : windows) {
             if (ticks > 65536 || (tick && ticks > *tick)) {
@@ -598,12 +615,16 @@ public:
     [[nodiscard]] std::uint32_t remaining_steps() const {
         return m_maximum - m_step;
     }
+    [[nodiscard]] std::uint32_t remaining_history_steps() const {
+        const auto remaining = remaining_steps();
+        return remaining - static_cast<std::uint32_t>(m_liveTick && remaining != 0);
+    }
     [[nodiscard]] const FoliageInteriorReplay::Work& work() const {
         return m_replay.work();
     }
     std::map<RegionKey, std::uint64_t> Advance(entt::registry& registry, FieldPageState& pages) {
         std::map<RegionKey, std::uint64_t> completed;
-        const auto steps = std::min(kStepBudget, remaining_steps());
+        const auto steps = std::min(kStepBudget, remaining_history_steps());
         for (std::uint32_t advanced = 0; advanced < steps; ++advanced) {
             const auto added = m_starts.find(m_step);
             if (added != m_starts.end()) {
@@ -625,11 +646,65 @@ public:
         return completed;
     }
 
+    // Sessions reserve the last step for the current tick, after early consumers
+    // and their live registry refresh. Pure historical cursors keep the default.
+    // The caller budgets this one live step in addition to Advance's history.
+    std::map<RegionKey, std::uint64_t> FinishLiveTick(entt::registry& registry,
+                                                      FieldPageState& pages,
+                                                      std::span<const RegionKey> live_owners = {}) {
+        if (!m_liveTick || m_liveFinished || (remaining_steps() == 0 && live_owners.empty())) {
+            return {};
+        }
+        if (remaining_history_steps() != 0) {
+            throw std::invalid_argument("Incomplete foliage history");
+        }
+        // A mover can reach an otherwise empty due owner after history was
+        // sealed. It needs one live step, with no invented historical work.
+        const bool added_live_step = remaining_steps() == 0;
+        // Track only new participating owners, bounded by the supplied owner
+        // list plus this step's starts. A refused refresh must not retain them.
+        std::vector<RegionKey> admitted;
+        const auto admit = [&](RegionKey key) {
+            if (m_due.emplace(key, 1).second) {
+                try {
+                    admitted.push_back(key);
+                } catch (...) {
+                    m_due.erase(key);
+                    throw;
+                }
+            }
+        };
+        try {
+            for (const auto key : live_owners) {
+                admit(key);
+            }
+            const auto added = m_starts.find(m_step);
+            if (added != m_starts.end()) {
+                for (const auto key : added->second) {
+                    admit(key);
+                }
+            }
+            auto completed = m_replay.LiveStep(registry, pages, m_due, live_owners);
+            if (added_live_step) {
+                ++m_maximum;
+            }
+            m_liveFinished = true;
+            ++m_step;
+            return completed;
+        } catch (...) {
+            for (const auto key : admitted) {
+                m_due.erase(key);
+            }
+            throw;
+        }
+    }
+
 private:
     FoliageInteriorReplay m_replay;
     std::map<std::uint32_t, std::vector<RegionKey>> m_starts;
     std::map<RegionKey, std::uint32_t> m_due;
     std::optional<std::uint64_t> m_tick;
+    bool m_liveTick = false, m_liveFinished = false;
     std::uint32_t m_maximum = 0, m_step = 0;
 };
 using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
