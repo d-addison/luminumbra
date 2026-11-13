@@ -20,16 +20,34 @@ namespace Luminumbra::world {
 // steady-state tick allocates nothing. Sources and targets share one membership per tick.
 class RegionConsumerGate {
 public:
+    enum class PlantIdentity {
+        Legacy,
+        Simulation
+    };
     RegionConsumerGate() = default;
+    explicit RegionConsumerGate(PlantIdentity identity)
+        : m_simulationIdentity(identity == PlantIdentity::Simulation) {}
     RegionConsumerGate(const entt::registry& registry, std::span<const RegionKey> due)
         : m_registry(&registry)
         , m_due(due) {}
     RegionConsumerGate(const entt::registry& registry,
                        std::span<const RegionKey> due,
-                       std::vector<std::uint64_t>& scratch)
+                       std::vector<std::uint64_t>& scratch,
+                       PlantIdentity identity = PlantIdentity::Legacy)
         : m_registry(&registry)
         , m_due(due)
-        , m_scratch(&scratch) {}
+        , m_scratch(&scratch)
+        , m_simulationIdentity(identity == PlantIdentity::Simulation) {}
+
+    // Explicit candidate selection, independent of regional scheduling. Shipping
+    // construction keeps the legacy identity/ordering path until activation.
+    [[nodiscard]] bool UsesSimulationPlantIdentity() const {
+        return m_simulationIdentity;
+    }
+    // Candidate callers retain the gate across ticks to reuse radix-order storage.
+    [[nodiscard]] std::vector<entt::entity>& PlantIdentityScratch() const {
+        return m_plantIdentityScratch;
+    }
 
     // Installed gates select persistent IDs and tagged legacy IDs for simulation streams.
     [[nodiscard]] bool UsesPersistentPlantIdentity() const {
@@ -85,6 +103,8 @@ private:
     const entt::registry* m_registry = nullptr;
     std::span<const RegionKey> m_due;
     std::vector<std::uint64_t>* m_scratch = nullptr;
+    bool m_simulationIdentity = false;
+    mutable std::vector<entt::entity> m_plantIdentityScratch;
     mutable std::vector<std::uint64_t> m_owned;
     mutable bool m_built = false;
     mutable std::size_t m_ownerVisits = 0;

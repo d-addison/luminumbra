@@ -1949,7 +1949,7 @@
     {
       "id": "sim.budget-capture",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; representative-world capture receipts remain required.",
+      "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; retained populated default/mountains/archipelago before/after captures with per-stage p50/p95/p99 durations and measured workload identities remain PENDING.",
       "status": "needs-native-run",
       "evidence": [
         {
@@ -1970,7 +1970,7 @@
     {
       "id": "sim.budget-enforcement",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Production enforcement remains deferred: all committed baseline limits are null and CI runs check_sim_budgets.py without --require-complete. Measured limits must be pinned and --require-complete enabled in CI before production coverage can be claimed.",
+      "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Performance CI captures shipping simulation defaults on populated default/mountains/archipelago worlds with seed 1337, 600 ticks, surface radius 1 and collision radius 1, then runs check_sim_budgets.py with --require-complete against the committed baseline. Each preset has nonnegative integer max_work_per_tick limits for all 30 stages and the per-tick total (221289), including zero limits for idle stages; wind and weather are explicitly expected inactive on the combined wind_weather path. The checker rejects stage or total overages and incomplete entries or unexpected inactivity; durations remain advisory. Revision and fixture hash remain unpinned. Representative-world capture, duration and equality qualification remains PENDING.",
       "status": "partial",
       "evidence": [
         {
@@ -1991,8 +1991,16 @@
         },
         {
           "kind": "script",
-          "ref": "tools/perf/baselines/sim-budgets.json",
-          "planned": "pin measured limits and workload identity, then enable --require-complete in CI; owner: ac"
+          "ref": "tools/perf/baselines/sim-budgets.json"
+        },
+        {
+          "kind": "script",
+          "ref": ".github/workflows/performance.yml"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md",
+          "planned": "retain representative-world before/after captures, per-stage p50/p95/p99 durations, measured workload identities and telemetry-on/off state-hash and replay-work equality receipts; owner: ac"
         }
       ],
       "requirements": [
@@ -2078,9 +2086,49 @@
       ]
     },
     {
+      "id": "audio.startup-acceptance",
+      "source": "docs/audio-release-policy.md",
+      "statement": "Issues #68, #70 and #71 amend historical default-off startup acceptance: ordinary client startup has audio on; qualification, preview and capture commands must pass `--no-audio` explicitly. Preserve saved volumes, explicit-disable precedence, truthful unavailable controls and opt-in-only null request history/telemetry. Exact-package native startup/settings, saved-world and clean-exit qualification and preview delivery remain pending; source tests do not establish audible quality or package qualification.",
+      "status": "needs-native-run",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AudioDisabledTest.RealLaunchParserDefaultsOnAndDisableWinsInEitherOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AudioDisabledTest.SavedNonzeroVolumesCannotEnablePlaybackOrRetainRequestHistory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AudioDisabledTest.ExplicitTelemetryPreservesSuppressionAndReportsItsRealActivation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UiSmokeTest.DisabledAudioShowsStatusAndPreservesSavedVolumes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AudioPhysicsBinding.FailedDeviceInitializationReportsUnavailableAndSuppressesPlayback"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/audio-release-policy.md"
+        },
+        {
+          "kind": "native",
+          "ref": "tools/gates/run-v03-acceptance.ps1",
+          "planned": "Align the historical default-null checklist with the amended startup policy; retain exact-package startup/settings, explicit --no-audio, saved-world and clean-exit evidence plus separate preview delivery evidence; owner: release",
+          "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
+          "receipt_schema": "luminumbra.v03_acceptance.v1"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "iss.68",
       "source": "issue #68",
-      "statement": "Serial loading, the networking soak and the performance gates are qualified together in one v0.3 acceptance receipt.",
+      "statement": "Serial loading, the networking soak and the performance gates are qualified together in one v0.3 acceptance receipt. Ordinary client startup has audio on; qualification commands pass `--no-audio` explicitly. Native startup/settings/package qualification remains pending under the amended audio policy.",
       "status": "needs-native-run",
       "evidence": [
         {
@@ -2094,6 +2142,7 @@
         {
           "kind": "native",
           "ref": "tools/gates/run-v03-acceptance.ps1",
+          "planned": "Align the historical default-null checklist with ordinary-startup audio-on acceptance, then qualify the exact package; owner: release",
           "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
           "receipt_schema": "luminumbra.v03_acceptance.v1"
         }
@@ -3050,7 +3099,7 @@
     {
       "id": "iss.129",
       "source": "issue #129",
-      "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs; representative-world capture and proposal receipts remain required.",
+      "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs. Complete pinned integer work limits for the 600-tick shipping workload do not qualify representative-world captures, duration distributions or telemetry-on/off state-hash and replay-work equality; those remain PENDING. Retain populated default/mountains/archipelago before/after capture and proposal receipts, per-stage p50/p95/p99 durations and measured workload identities. Equality qualification includes the existing populated 3,600-tick parity configurations with active regions enabled and disabled.",
       "status": "needs-native-run",
       "evidence": [
         {
@@ -3118,12 +3167,13 @@
     {
       "id": "iss.141",
       "source": "issue #141",
-      "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Measured simulation limits and --require-complete in CI remain outstanding; residency classes are unevaluated until the engine emits samples. The aggregate v0.3 driver does not evaluate simulation or residency budgets.",
+      "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Performance CI already enforces complete pinned integer stage and total work limits for the 600-tick shipping workload with --require-complete. Representative-world capture and equality qualification remains PENDING; residency classes without engine samples remain unevaluated. The aggregate v0.3 driver does not evaluate simulation or residency budgets; separate budget qualification remains required.",
       "status": "needs-native-run",
       "evidence": [
         {
           "kind": "script",
-          "ref": "tools/perf/check_residency.py"
+          "ref": "tools/perf/check_residency.py",
+          "planned": "production residency samples and separate budget qualification remain outstanding; owner: ac"
         },
         {
           "kind": "ctest",
@@ -3131,14 +3181,25 @@
         },
         {
           "kind": "script",
-          "ref": "tools/perf/baselines/sim-budgets.json",
-          "planned": "pin measured limits and require complete CI checks; production residency samples and separate budget qualification are outstanding; owner: ac"
+          "ref": "tools/perf/baselines/sim-budgets.json"
         },
         {
           "kind": "native",
           "ref": "tools/gates/run-v03-acceptance.ps1",
           "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
           "receipt_schema": "luminumbra.v03_acceptance.v1"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/perf/check_sim_budgets.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetGateContract"
+        },
+        {
+          "kind": "script",
+          "ref": ".github/workflows/performance.yml"
         }
       ],
       "requirements": [
@@ -3905,7 +3966,7 @@
     {
       "id": "contract.dw.scope.03",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: Raising the camera far plane over the existing heightfield far tiles does not satisfy this contract. / - Simulation over distance runs only in **persistent active regions** and only while the world host runs. / There is no wall-clock progression while a world is shut down. / - Ordinary audio playback is enabled; / nothing in this contract depends on audio. / every qualification run launches with `--no-audio`;",
+      "statement": "Acceptance obligations: Raising the camera far plane over the existing heightfield far tiles does not satisfy this contract. / - Simulation over distance runs only in **persistent active regions** and only while the world host runs. / There is no wall-clock progression while a world is shut down. / - Ordinary client startup has audio on by default; / nothing in this contract depends on audio. / qualification, preview and capture commands pass `--no-audio` explicitly;",
       "status": "planned",
       "requirements": [
         "dw.scope.013",
@@ -8018,6 +8079,39 @@
         "sim.identity.100",
         "sim.identity.101"
       ]
+    },
+    {
+      "id": "render.far-volume-page-planner",
+      "source": "issue #239",
+      "statement": "The dormant constant-size page planner admits brick-aligned signed-grid windows with a 4096 metre maximum stride and an explicit cap of at most 1024 pages. Indexed windows clip outer bounds and retain stable interiors during extension. Exact ordered acknowledgements reject skipped, duplicate, reordered, overlapping, shortened or identity-mismatched requests. Single-page admission bounds canonical candidate and sample work, contiguous buffers and mesher cache entry counts including normal halos before callbacks or allocation. Map-node bytes remain subject to the charged APIs. Only tests call the planner; explicit-span compilation, equivalence and seam qualification, production ownership and native execution remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.Pages*",
+          "planned": "Run registered signed-grid, maximum stride and cap regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.InvalidAndOverflowingPagePlansPreserveDescriptor",
+          "planned": "Run registered invalid-span and overflow regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.Page*",
+          "planned": "Run registered interior stability, completeness and admission regressions; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeRuntime.RefusedPageAdmissionPrecedesCanonicalCallbacksAndAllocation",
+          "planned": "Run registered transactional pre-callback admission regression; owner: rendering"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-volume-memory.md"
+        }
+      ],
+      "requirements": []
     }
   ]
 }

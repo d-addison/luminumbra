@@ -75,6 +75,54 @@ retained output, so only the pool is required for them.
   A retained lease must stay paired with the one output it describes.
 - A caller-supplied `upstream` must be thread-safe if operations share it.
 
+## Dormant page planning
+
+Issue #239 adds `FarVolumePagePlan` and `FarVolumePageCompleteness` in
+`FarVolumeRuntime.h`. Only tests call these APIs. Planning does not activate
+streaming or change build queues, span generations, world identity or save formats.
+
+A plan stores one canonical `FarVolumeRequest` and a signed grid descriptor.
+Reset, indexed lookup, admission and acknowledgement take constant time and allocate
+no storage. Strides are positive brick multiples up to 4096 metres, with an
+explicit caller page cap from 1 to 1024. Invalid tiers, coordinates, unaligned or
+empty spans, unsupported strides and excessive page counts are refused before
+sampling or allocation. The complete one-sample normal halo must remain strictly
+inside the facade's exact-coordinate domain. Refusals preserve the previous plan
+or output.
+
+Windows are anchored at world zero using signed floor division, including negative
+and zero crossings. Only outer windows are clipped to the request. Existing full
+interior windows remain identical as either end extends. The completeness fold
+copies its plan and accepts each exact request in ascending order, including its
+key and field identity. Skipped, duplicate, reordered, overlapping, shortened or
+otherwise changed acknowledgements leave progress unchanged. An empty plan never
+reports completion.
+
+Admission describes the worst single page for sequential compilation with every
+candidate mixed. With `A = tile_edge / brick_edge`, `L = page_extent / brick_edge`,
+`H = 4A` and `V = 4L`, generation visits `A*A*L` candidates and makes 125 calls per
+candidate. Mesh work admits 64 cells per candidate and at most 15 indices per cell.
+The mesher sample cache and its normal halo fit within `(H+3)^2*(V+3)` entries,
+gradients within `(H+1)^2*(V+1)`, and vertices and edge-cache entries within
+`2H*(H+1)*(V+1) + V*(H+1)^2`. The sample rectangle conservatively includes unused
+halo corners. Density calls include generation and mesher samples, while height
+calls fit within `(H+3)^2` cached columns.
+
+`FarVolumePageBudget` independently bounds candidates, combined height/density
+calls, contiguous buffer bytes and total mesher cache entries. The contiguous
+byte bound includes twice the worst tile and mesh buffers for simultaneous growth,
+the height cache and two brick-order pointer buffers for meshing and legacy
+checksum work. Use the reported candidate, cell, sample, vertex and index bounds
+as the canonical compilation limits so charged vector growth remains capped.
+Map-node allocation sizes depend on the library ABI and are bounded here by entry
+counts, separately from contiguous bytes. Actual node and buffer allocations must
+still use the canonical charged APIs and their byte pool. This admission is not an
+aggregate byte reservation for concurrent or retained pages.
+
+Explicit-span charged facade compilation, full-span/page geometry equivalence,
+seam qualification and production page ownership remain separate work. Registered
+planner regressions await native execution.
+
 ## Out of scope
 
 - Queue and worker integration, and a charged `CompilePristineFarVolume` (needs the world).

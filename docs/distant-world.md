@@ -45,8 +45,8 @@ is waived by source landing.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Ordinary audio playback is enabled; every qualification run launches with
-  `--no-audio`; nothing in this contract depends on audio.
+- Ordinary client startup has audio on by default; qualification, preview and
+  capture commands pass `--no-audio` explicitly; nothing in this contract depends on audio.
 
 ## Three explicit sets
 

@@ -13,9 +13,11 @@
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
+#include "../components/SimulationIdentityComponent.h"
 #include "../components/SoilComponents.h"
 #include "../core/WaterComponents.h"
 #include "../world/ActiveRegionLedger.h"
+#include "PlantGrowthSystem.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -62,6 +64,7 @@ void Participants(const Function& function) {
 template<typename Function>
 void Components(const Function& function) {
     function.template operator()<C::TransformComponent>();
+    function.template operator()<C::SimulationIdentityComponent>();
     function.template operator()<C::PlantTag>();
     function.template operator()<C::PlantRegionComponent>();
     function.template operator()<C::PlantGenomeComponent>();
@@ -108,6 +111,7 @@ public:
         m_prepared = false;
         m_committed = false;
         m_initialId = m_nextId = next_id;
+        m_simulationIdentity = false;
         m_registry.clear();
         m_retained.clear();
         // EnTT pools have the entity-mask bound; known capacities survive ticks.
@@ -122,10 +126,30 @@ public:
             stage_detail::CopyFoliage(original, entity, m_registry, entity);
         }
     }
+    // Detached v2 preparation. The live ledger remains the sole published cursor;
+    // its existing register preparation must admit next_id() before Commit. Never
+    // copy ledger records on the tick path: only the scalar cursor is staged.
+    void Begin(const entt::registry& original,
+               const ::Luminumbra::world::ActiveRegionLedger& allocator) {
+        Begin(original, allocator.next_persistent_id());
+        m_identityAllocator = ::Luminumbra::world::ActiveRegionLedger{};
+        if (!m_identityAllocator.reserve_persistent_ids(m_initialId))
+            throw std::runtime_error("Invalid foliage allocator cursor");
+        m_simulationIdentity = true;
+    }
+    // Candidate factories reserve through the same checked allocator as live factories.
+    // Discarding this stage is allowed only while none of its new identities escaped.
+    ::Luminumbra::world::ActiveRegionLedger& identity_allocator() {
+        if (!m_simulationIdentity)
+            throw std::runtime_error("Foliage simulation identity path is not selected");
+        return m_identityAllocator;
+    }
     entt::registry& registry() {
         return m_registry;
     }
     bool AllocatePersistentId(std::uint64_t& id) {
+        if (m_simulationIdentity)
+            return m_identityAllocator.allocate_persistent_id(id);
         if (m_nextId >= ::Luminumbra::world::ActiveRegionLedger::kPersistentIdLimit) {
             return false;
         }
@@ -136,7 +160,7 @@ public:
         return m_initialId;
     }
     std::uint64_t next_id() const {
-        return m_nextId;
+        return m_simulationIdentity ? m_identityAllocator.next_persistent_id() : m_nextId;
     }
     std::uint64_t visits() const {
         return m_visits;
@@ -165,6 +189,14 @@ public:
             if (!m_registry.valid(entity)) {
                 continue;
             }
+            if (m_simulationIdentity) {
+                using Identity = ::Luminumbra::Components::SimulationIdentityComponent;
+                const auto* previous = original.try_get<const Identity>(entity);
+                const auto* candidate = m_registry.try_get<const Identity>(entity);
+                if (previous &&
+                    (!candidate || previous->id != candidate->id || previous->id >= initial_id()))
+                    throw std::runtime_error("Foliage simulation identity changed");
+            }
             stage_detail::Components([&]<typename T> {
                 if (original.all_of<T>(entity) != m_registry.all_of<T>(entity)) {
                     throw std::runtime_error("Foliage component topology changed");
@@ -180,15 +212,47 @@ public:
                 m_newPlants.push_back(entity);
             }
         }
-        // Persistent identities retain birth order even when candidate handles recycle.
-        std::sort(m_newPlants.begin(), m_newPlants.end(), [this](auto left, auto right) {
-            using Region = ::Luminumbra::Components::PlantRegionComponent;
-            const auto* left_region = m_registry.try_get<const Region>(left);
-            const auto* right_region = m_registry.try_get<const Region>(right);
-            const auto left_id = left_region ? left_region->persistent_id : std::uint64_t{0};
-            const auto right_id = right_region ? right_region->persistent_id : std::uint64_t{0};
-            return left_id == right_id ? left < right : left_id < right_id;
-        });
+        if (m_simulationIdentity) {
+            // A consumed identity cannot become a birth, even if its former owner died.
+            // Retained identities were checked separately against the committed roster.
+            for (const auto entity : m_newPlants) {
+                ++m_publicationEntityVisits;
+                const auto id = RequirePlantSimulationId(m_registry, entity);
+                if (id < initial_id() || id >= next_id())
+                    throw std::runtime_error("Unissued foliage birth identity");
+            }
+            // The candidate contains only participating residents and their births.
+            // Validate every plant, including unowned plants, before live preparation.
+            for (const auto entity : plants) {
+                ++m_publicationEntityVisits;
+                const auto id = RequirePlantSimulationId(m_registry, entity);
+                const auto* region =
+                    m_registry.try_get<const ::Luminumbra::Components::PlantRegionComponent>(
+                        entity);
+                if (id >= next_id() || (region && region->persistent_id != id))
+                    throw std::runtime_error("Inconsistent foliage simulation identity");
+            }
+            m_identified.clear();
+            for (const auto entity :
+                 m_registry.view<const ::Luminumbra::Components::SimulationIdentityComponent>()) {
+                ++m_publicationEntityVisits;
+                m_identified.push_back(entity);
+            }
+            OrderPlantsBySimulationIdentity(
+                m_registry, m_identified, m_identityScratch, &m_publicationEntityVisits);
+            OrderPlantsBySimulationIdentity(
+                m_registry, m_newPlants, m_identityScratch, &m_publicationEntityVisits);
+        } else {
+            // Legacy birth ordering remains selected by shipping sessions.
+            std::sort(m_newPlants.begin(), m_newPlants.end(), [this](auto left, auto right) {
+                using Region = ::Luminumbra::Components::PlantRegionComponent;
+                const auto* left_region = m_registry.try_get<const Region>(left);
+                const auto* right_region = m_registry.try_get<const Region>(right);
+                const auto left_id = left_region ? left_region->persistent_id : std::uint64_t{0};
+                const auto right_id = right_region ? right_region->persistent_id : std::uint64_t{0};
+                return left_id == right_id ? left < right : left_id < right_id;
+            });
+        }
         m_births.clear();
         m_births.reserve(m_newPlants.size());
         {
@@ -333,10 +397,13 @@ private:
     }
     entt::registry m_registry;
     std::vector<entt::entity> m_retained, m_births, m_newPlants;
+    std::vector<entt::entity> m_identified, m_identityScratch;
+    ::Luminumbra::world::ActiveRegionLedger m_identityAllocator;
     std::uint64_t m_initialId = 1, m_nextId = 1;
     std::uint64_t m_visits = 0, m_entityVisits = 0, m_publications = 0;
     std::uint64_t m_publicationEntityVisits = 0;
     bool m_prepared = false, m_committed = false;
+    bool m_simulationIdentity = false;
     template<typename T>
     void Collect(const entt::registry& original) {
         const auto view = original.view<const T>();
