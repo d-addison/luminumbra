@@ -62,7 +62,8 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
         collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
-        self.assertIn("impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree", collect)
+        self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {", collect)
+        self.assertIn("impostor_candidate = true;", collect)
         self.assertIn("input.submitted_live_terrain->covers(cp.position)", collect)
         self.assertNotIn("kFarClipInnerRadiusMeters", collect)
         self.assertNotIn("live_terrain_owns_at", collect)

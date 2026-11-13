@@ -364,7 +364,8 @@ bool RenderPipeline::startup(u32 screen_width,
             g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
-            if (ia.ok) {
+            m_treeImpostorCoverage = ia.alpha_coverage;
+            if (ia.drawable()) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
@@ -378,7 +379,7 @@ bool RenderPipeline::startup(u32 screen_width,
                     ia.grid,
                     g.tileResolution,
                     ia.radius);
-            } else {
+            } else if (!ia.alpha_coverage.refused()) {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
         }
@@ -4385,6 +4386,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_staticModelTextures.clear();
     m_staticModelNextLayer = 0;
     m_treeImpostorsEnabled = false;
+    m_treeImpostorCoverage = {};
     m_treeImpostorGrid = 0;
     m_treeImpostorAtlasSize = 0;
     m_treeImpostorRadius = 0.0f;

@@ -3,6 +3,7 @@
 from pathlib import Path
 import ast
 import json
+import math
 import re
 import unittest
 
@@ -1994,6 +1995,286 @@ class FrameAttributionWiring(unittest.TestCase):
                                          requested in (2, 4, 8, 16) and resolution == requested)
 
 
+class StormLightningWiring(unittest.TestCase):
+    def test_every_scenario_projects_world_geometry_without_screen_remapping(self):
+        sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        drive = read(CLIENT / "core/ScenarioRunnerDrive.cpp")
+        callers = (sweep, block(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()"),
+                   block(drive, "bool ScenarioRunnerImpl::drivePrecipitation()"))
+        for caller in callers:
+            with self.subTest(caller=caller[:80]):
+                self.assertIn("ProjectLightningBolt(", caller)
+                self.assertIn("ComposeLiveStrikes(", caller)
+                self.assertIn("kMaxBoltSegmentPoints", caller)
+                self.assertIn("LiveBoltViewMargin(", caller)
+                self.assertNotIn("map_point", caller)
+                self.assertNotIn("cloud_darkness", caller)
+                self.assertNotIn("cloud_anchor_ndc", caller)
+        weather = block(sweep, "const auto apply_weather")
+        self.assertIn("glm::vec3(anchor) + glm::vec3(150.0f, 0.0f, 0.0f)", weather)
+        self.assertNotIn("camera->Front", weather)
+        self.assertNotIn("camera->Position) +", weather)
+        self.assertIn("cstate.coverage_amount = 0.85f", weather)
+        for caller in callers[1:]:
+            self.assertIn("gameSession->GetMetadata().spawnPoint", caller)
+            self.assertIn("TowardSunDirection(0.04f)", caller)
+            self.assertIn("GetProjectionMatrix(std::max(1, width), std::max(1, height))", caller)
+        self.assertIn("world ? world->GetTerrainHeightAt(strike_xz.x, strike_xz.z) : spawn.y",
+                      compact(callers[1]))
+        for caller in (weather, callers[2]):
+            self.assertIn("std::abs(projected.strike_ndc.x) <= 1.0f", caller)
+            self.assertIn("std::abs(projected.strike_ndc.y) <= 1.0f", caller)
+            self.assertIn("ground_on_screen ?", caller)
+            guard = re.search(r"const bool ground_on_screen =\s*(.*?);", caller, re.S)[1]
+            guard = guard.replace("Luminumbra::Rendering::", "").replace("1.0f", "1.0")
+            for x in (-1.1, -1.0, 0.0, 1.0, 1.1):
+                for y in (-1.1, -1.0, 0.0, 1.0, 1.1):
+                    with self.subTest(x=x, y=y):
+                        visible = cpp_expression(guard, **{
+                            "IsLiveBoltPenUp(projected.strike_ndc)": False,
+                            "std::abs(projected.strike_ndc.x)": abs(x),
+                            "std::abs(projected.strike_ndc.y)": abs(y)})
+                        self.assertEqual(visible, abs(x) <= 1.0 and abs(y) <= 1.0)
+            self.assertFalse(cpp_expression(guard, **{
+                "IsLiveBoltPenUp(projected.strike_ndc)": True,
+                "std::abs(projected.strike_ndc.x)": 3.0,
+                "std::abs(projected.strike_ndc.y)": 3.0}))
+
+    def test_projection_preserves_offscreen_coordinates_and_breaks_invalid_strokes(self):
+        source = read(CLIENT / "rendering/LightningBolt.h")
+        self.assertIn("inline ProjectedLiveStrike ProjectLightningBolt(", source)
+        project = block(source, "inline ProjectedLiveStrike ProjectLightningBolt(")
+        self.assertIn("view_projection * glm::vec4(point, 1.0f)", project)
+        self.assertIn("const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);", project)
+        self.assertNotIn("clamp", project)
+        live = block(read(CLIENT / "main_client.cpp"), "const auto project =")
+        for projection, sentinel_return in (
+                (project, "return kLiveBoltPenUp;"),
+                (live, "return Luminumbra::Rendering::kLiveBoltPenUp;")):
+            predicate = re.search(r"if \(([^\n]+)\) \{", projection)
+            self.assertIsNotNone(predicate)
+            self.assertIn("!std::isfinite(clip.w)", predicate[1])
+            for w, accepted in ((-1, False), (0, False), (float("nan"), False),
+                                (float("inf"), False), (-float("inf"), False),
+                                (0.001, True), (10, True)):
+                with self.subTest(w=w):
+                    expression = predicate[1].replace("0.0f", "0.0").replace(
+                        "std::isfinite(clip.w)", "true" if math.isfinite(w) else "false")
+                    self.assertEqual(not cpp_expression(expression, true=True, false=False,
+                                                        **{"clip.w": w}), accepted)
+            invalid = block(projection, "if (!std::isfinite(ndc.x)")
+            self.assertIn(sentinel_return, invalid)
+            predicate = re.search(r"if \((!std::isfinite\(ndc.x\)[^\n]+)\) \{", projection)[1]
+            for x in (0.0, 2.0, float("nan"), float("inf")):
+                for y in (0.0, -2.0, float("nan"), -float("inf")):
+                    with self.subTest(x=x, y=y):
+                        expression = predicate.replace(
+                            "std::isfinite(ndc.x)", "true" if math.isfinite(x) else "false").replace(
+                            "std::isfinite(ndc.y)", "true" if math.isfinite(y) else "false")
+                        self.assertEqual(cpp_expression(expression, true=True, false=False),
+                                         not (math.isfinite(x) and math.isfinite(y)))
+        self.assertIn("project_stroke(bolt.main_channel)", project)
+        self.assertIn("project_stroke(branch)", project)
+        self.assertIn("project(bolt.ground_point)", project)
+
+    def test_flash_has_finite_support_and_scales_with_scene_luminance(self):
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("float flashResponse(", shader)
+        response = block(shader, "float flashResponse(")
+        expression = re.search(r"return\s+([^;]+);", response)[1]
+
+        def clamp(value, low, high):
+            return max(low, min(high, value))
+
+        def smoothstep(low, high, value):
+            fraction = clamp((value - low) / (high - low), 0.0, 1.0)
+            return fraction * fraction * (3.0 - 2.0 * fraction)
+
+        tree = ast.parse(expression, mode="eval")
+        allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Call,
+                   ast.Name, ast.Load, ast.Constant)
+        self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+        self.assertTrue(all(node.func.id in ("smoothstep", "clamp")
+                            for node in ast.walk(tree) if isinstance(node, ast.Call)))
+        code = compile(tree, "<shader flash response>", "eval")
+
+        def evaluate(distance, luma):
+            return eval(code, {"__builtins__": {}}, dict(
+                smoothstep=smoothstep, clamp=clamp,
+                distanceToStrike=distance, sceneLuma=luma))
+
+        for distance in (0.0, 0.8, 1.6, 4.0):
+            for luma in (0.0, 0.001, 0.01, 0.1, 1.0):
+                with self.subTest(distance=distance, luma=luma):
+                    value = evaluate(distance, luma)
+                    self.assertTrue(math.isfinite(value))
+                    self.assertGreaterEqual(value, 0.0)
+                    self.assertLessEqual(value, 1.0)
+                    if distance >= 1.6 or luma == 0.0:
+                        self.assertEqual(value, 0.0)
+        self.assertAlmostEqual(evaluate(0.8, 0.01), 10 * evaluate(0.8, 0.001))
+        self.assertGreater(evaluate(0.0, 0.1), evaluate(0.8, 0.1))
+        main = block(shader, "void main()")
+        self.assertIn("length((ndc - centre) * vec2(u_aspect, 1.0))", main)
+        self.assertIn("dot(color, vec3(0.2126, 0.7152, 0.0722))", main)
+        self.assertIn("flashResponse(distanceToStrike, sceneLuma)", main)
+        self.assertIn("flash = max(flash, u_flashPulse[i] * response);", main)
+        self.assertIn("color += u_color * flash;", main)
+        self.assertIn("if (u_active == 1 && u_pulse > 0.0)", main)
+        self.assertNotIn("u_cloud", shader)
+        self.assertNotIn("fbm(", shader)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertNotIn('setVec2("u_cloudNdc"', lighting)
+        self.assertNotIn('setFloat("u_cloudDark"', lighting)
+
+    def test_offscreen_strongest_strike_keeps_a_bounded_scene_flash(self):
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("float offscreenFlashFloor(", shader)
+
+        def clamp(value, low, high):
+            return max(low, min(high, value))
+
+        def smoothstep(low, high, value):
+            fraction = clamp((value - low) / (high - low), 0.0, 1.0)
+            return fraction * fraction * (3.0 - 2.0 * fraction)
+
+        def compiled(signature):
+            expression = re.search(r"return\s+([^;]+);", block(shader, signature))[1]
+            tree = ast.parse(expression, mode="eval")
+            allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Call,
+                       ast.Name, ast.Load, ast.Constant)
+            self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+            return compile(tree, "<shader " + signature + ">", "eval")
+
+        response = compiled("float flashResponse(")
+        floor = compiled("float offscreenFlashFloor(")
+        names = dict(smoothstep=smoothstep, clamp=clamp)
+
+        def flash(strike_ndc, pixel_ndc, luma, aspect=1.777):
+            distance = math.hypot((pixel_ndc[0] - strike_ndc[0]) * aspect,
+                                  pixel_ndc[1] - strike_ndc[1])
+            extent = max(abs(strike_ndc[0]), abs(strike_ndc[1]))
+            local = eval(response, {"__builtins__": {}},
+                         dict(names, distanceToStrike=distance, sceneLuma=luma))
+            ambient = eval(floor, {"__builtins__": {}},
+                           dict(names, strikeExtent=extent, sceneLuma=luma))
+            if strike_ndc == (-3.0, -3.0):
+                local = 0.0
+            if extent <= 1.0:
+                ambient = 0.0
+            return max(local, ambient)
+
+        pen_up = (-3.0, -3.0)
+        visible_bolt = (0.6, 0.2)
+        for luma in (0.001, 0.05, 0.5):
+            with self.subTest(luma=luma):
+                self.assertGreater(flash(pen_up, visible_bolt, luma), 0.0)
+                self.assertGreater(flash(pen_up, (-0.9, 0.9), luma), 0.0)
+                self.assertLessEqual(flash(pen_up, visible_bolt, luma), 0.35)
+                self.assertGreater(flash((5.0, 0.0), (-1.0, 0.0), luma), 0.0)
+        for extent in (0.0, 0.5, 1.0):
+            with self.subTest(extent=extent):
+                self.assertEqual(eval(floor, {"__builtins__": {}},
+                                      dict(names, strikeExtent=extent, sceneLuma=1.0)), 0.0)
+        self.assertEqual(flash(pen_up, visible_bolt, 0.0), 0.0)
+        previous = 0.0
+        for step in range(0, 41):
+            extent = 0.9 + step * 0.01
+            value = eval(floor, {"__builtins__": {}},
+                         dict(names, strikeExtent=extent, sceneLuma=1.0))
+            self.assertGreaterEqual(value, previous)
+            self.assertLessEqual(value - previous, 0.05)
+            previous = value
+        main = block(shader, "void main()")
+        self.assertIn("max(abs(centre.x), abs(centre.y))", main)
+        offscreen = block(main, "if (u_flashOnscreen[i] == 0)")
+        self.assertIn("offscreenFlashFloor(strikeExtent, sceneLuma)", offscreen)
+        local = block(main, "if (!all(equal(centre, kLiveBoltPenUp)))")
+        self.assertIn("response = flashResponse(distanceToStrike, sceneLuma);", local)
+        self.assertNotIn("flashResponse(", offscreen)
+        self.assertNotIn("offscreenFlashFloor(", local)
+        self.assertEqual(main.count("offscreenFlashFloor("), 1)
+        self.assertIn("if (i >= u_flashCount) break;", main)
+        self.assertIn("for (int i = 0; i < MAX_STRIKE_FLASHES; ++i)", main)
+        update = re.search(r"flash = (max\(flash, u_flashPulse\[i\] \* response\));", main)[1]
+        update = update.replace("u_flashPulse[i]", "pulse")
+        code = compile(ast.parse(update, mode="eval"), "<shader flash max>", "eval")
+
+        def combined(strikes, pixel, luma, aspect=1.777):
+            value = 0.0
+            for centre, pulse in strikes:
+                value = eval(code, {"__builtins__": {}}, dict(
+                    max=max, flash=value, pulse=pulse,
+                    response=flash(centre, pixel, luma, aspect)))
+            return value
+
+        # A visible weaker strike retains its full localized response, even when
+        # a stronger behind-camera strike contributes the offscreen floor.
+        strikes = ((pen_up, 0.9), (visible_bolt, 0.4))
+        self.assertEqual(combined(strikes, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined(tuple(reversed(strikes)), visible_bolt, 0.5), 0.4)
+        self.assertAlmostEqual(combined(strikes, (-0.9, 0.9), 0.5), 0.9 * 0.35)
+        # A behind-camera sentinel receives only the bounded floor.
+        self.assertEqual(flash(pen_up, (-1.0, -1.0), 1.0, 0.01), 0.35)
+        # Two onscreen centres each win at their own pixel; overlapping flashes use
+        # a max rather than a sum. The old strongest-only result is zero on the left.
+        pair = (((-0.8, 0.0), 0.2), ((0.8, 0.0), 0.4))
+        self.assertEqual(combined(pair, (-0.8, 0.0), 0.5), 0.2)
+        self.assertEqual(combined(pair, (0.8, 0.0), 0.5), 0.4)
+        self.assertEqual(combined(((visible_bolt, 0.4),) * 2, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined((), visible_bolt, 0.5), 0.0)
+        self.assertEqual(combined(strikes, visible_bolt, 0.0), 0.0)
+        for centre in ((0.0, 0.0), (-1.0, 1.0), (1.0, -1.0)):
+            for pixel in ((0.0, 0.0), (-0.9, 0.9), (0.7, -0.4)):
+                for luma in (0.0, 0.001, 0.1, 1.0):
+                    for pulse in (0.0, 0.42, 3.0):
+                        with self.subTest(centre=centre, pixel=pixel, luma=luma, pulse=pulse):
+                            distance = math.hypot((pixel[0] - centre[0]) * 1.777,
+                                                  pixel[1] - centre[1])
+                            previous = pulse * eval(response, {"__builtins__": {}},
+                                                    dict(names, distanceToStrike=distance,
+                                                         sceneLuma=luma))
+                            self.assertEqual(combined(((centre, pulse),), pixel, luma), previous)
+
+    def test_flash_list_is_carried_by_every_producer_and_uniform_upload(self):
+        header = read(CLIENT / "rendering/LiveStrikeFlash.h")
+        cap = re.search(r"kMaxLiveStrikeFlashes = (\d+);", header)[1]
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("#define MAX_STRIKE_FLASHES " + cap, shader)
+        for uniform in ("u_flashNdc", "u_flashPulse", "u_flashOnscreen"):
+            self.assertIn(uniform + "[MAX_STRIKE_FLASHES]", shader)
+        frame = read(CLIENT / "rendering/RenderFrameTypes.h")
+        self.assertIn("LiveStrikeFlashList flashes;", frame)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertIn("std::min(lit.flashes.count, kMaxLiveStrikeFlashes)", lighting)
+        self.assertIn('setInt("u_flashCount", static_cast<int>(flash_count))', lighting)
+        self.assertIn("for (std::size_t i = 0; i < flash_count; ++i)", lighting)
+        self.assertIn("const auto& flash = lit.flashes.entries[i];", lighting)
+        for uniform, value in (("u_flashNdc", "flash.strike_ndc"),
+                               ("u_flashPulse", "flash.pulse"),
+                               ("u_flashOnscreen", "flash.onscreen ? 1 : 0")):
+            self.assertIn('("' + uniform + '" + suffix, ' + value + ')', lighting)
+        for path in ("core/ScenarioRunnerDrive.cpp", "core/scenarios/WorldVisualSweep.cpp"):
+            source = read(CLIENT / path)
+            self.assertEqual(source.count("lstate.flashes = composed.flashes;"),
+                             source.count("ComposeLiveStrikes("))
+        live = read(CLIENT / "main_client.cpp")
+        self.assertIn("g_app.weather.liveBolt.flashes = composed.flashes;", live)
+        self.assertIn("Luminumbra::Rendering::SelectLiveStrikeFlashCandidates( pulses)", compact(live))
+        self.assertIn("for (const std::size_t index : flash_selected)", live)
+        self.assertIn("std::sort(frame_indices.begin(), frame_indices.end());", live)
+        self.assertIn("for (const std::size_t index : frame_indices)", live)
+        self.assertNotIn("pulses[strongest]", live)
+
+    def test_storm_does_not_add_a_night_visibility_floor(self):
+        weather = read(ROOT / "res/shaders/weather_system.frag")
+        sky = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        self.assertNotIn("floorLift", weather)
+        self.assertNotIn("stormMurk", sky)
+        self.assertNotIn("nightStormFloor", sky)
+        self.assertIn("finalColor *= dim;", weather)
+        self.assertIn("u_stormSkyFloor", sky)  # still gates stars under overcast
+
 class TerrainMaterialWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2041,7 +2322,10 @@ class TerrainMaterialWiring(unittest.TestCase):
         self.assertIn("worldN = normalize(worldN);", blend)
         surface = block(self.fragment, "void terrainSurface(")
         self.assertIn("float matIndex = float(materialId) / 255.0;", surface)
-        self.assertIn("albedo = baseAlbedo * albedoScale * albedoTint;", surface)
+        self.assertIn("baseAlbedo *= albedoScale * albedoTint;", surface)
+        self.assertLess(surface.index("baseAlbedo *= albedoScale * albedoTint;"),
+                        surface.index("baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);"))
+        self.assertIn("albedo = baseAlbedo;", surface)
         # No new coverage path can change the material-ID attachment or water ownership.
         self.assertIn("float material_id_normalized = float(fs_in.MaterialID) / 255.0;", main)
         self.assertIn("farLiveOwns(local, fs_in.MaterialID)", main)
@@ -2264,6 +2548,90 @@ class WorldVisualSweepWiring(unittest.TestCase):
                                       (2**31-1, 2**31-1, 2**64-1, False),
                                       (2**31-1, 2**31-1, 2**63-1, True)):
                 self.assertEqual(cpp_expression(guard, **{width: w, height: h, size: n}), refused)
+
+
+class TreeImpostorCoverageWiringTest(unittest.TestCase):
+    def test_both_bake_consumers_validate_before_publishing(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        render = block(source, "RenderAtlas(const std::string&")
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", render)), 1)
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", source)), 1)
+        self.assertIn("MeasureImpostorCoverage(out.rgba, atlas, atlas, n)", compact(render))
+        self.assertIn("out.ok = out.alpha_coverage.usable();", render)
+        refusal = block(render, "if (!out.ok)")
+        for required in ("LUMINUMBRA_CORE_ERROR", "kTreeImpostorAtlasName",
+                         "out.alpha_coverage.coverage", "glDeleteTextures(1, &out.albedo)",
+                         "glDeleteTextures(1, &out.normal)", "out.albedo = out.normal = 0;"):
+            self.assertIn(required, refusal)
+        for marker in ("ImpostorBakeResult BakeTreeImpostorAtlas(",
+                       "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures("):
+            consumer = block(source, marker)
+            self.assertIn("RenderAtlas(rootDir, rp, grid)", consumer)
+            self.assertIn("if (!ra.ok)", consumer)
+            self.assertNotIn("glGetTexImage", consumer)
+        runtime = block(source, "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(")
+        self.assertLess(runtime.index("out.alpha_coverage = ra.alpha_coverage;"),
+                        runtime.index("if (!ra.ok)"))
+        export = block(source, "ImpostorBakeResult BakeTreeImpostorAtlas(")
+        self.assertLess(export.index("if (!ra.ok)"), export.index("WritePpm("))
+        self.assertIn("ra.alpha_coverage.cells[k]", export)
+
+    def test_refusal_reaches_draw_and_mesh_fallback_without_blocking_entry(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        self.assertIn("m_treeImpostorCoverage = ia.alpha_coverage;", pipeline)
+        enable = block(pipeline, "if (ia.drawable())")
+        self.assertIn("m_treeImpostorsEnabled = true;", enable)
+        enabled = block(header, "bool tree_impostor_enabled() const")
+        self.assertIn("m_treeImpostorsEnabled && m_treeImpostorCoverage.usable()", enabled)
+        self.assertIn("gbuffer_input.tree_impostor_enabled = tree_impostor_enabled();", pipeline)
+        gate = block(read(CLIENT / "main_client.cpp"), "auto game_content_error =")
+        self.assertIn("!renderPipeline.tree_impostor_coverage().refused()", gate)
+        draw = compact(read(CLIENT / "rendering/passes/GBufferPass.cpp"))
+        self.assertIn("const bool impostorsOn = input.tree_impostor_enabled;", draw)
+        self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree)", draw)
+        self.assertIn("if (cp.impostorTree && !authoredTree) { lod = std::min(lod, 2); }", draw)
+        self.assertIn("AuthoredTreeLodConfig(impostorsOn)", draw)
+        self.assertIn("if (impostorsOn && !impostorInstances.empty())", draw)
+        lod = read(CLIENT / "rendering/TreeLod.h")
+        self.assertIn("impostors ? 65.0f : std::numeric_limits<float>::infinity()", lod)
+        self.assertIn('TreeImpostorsRequested(Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS"))',
+                      compact(pipeline))
+
+    def test_live_capture_serializes_measured_coverage_and_refusal(self):
+        live = compact(read(CLIENT / "rendering/CaptureManifestLive.cpp"))
+        self.assertIn("const auto& atlas = pipeline.tree_impostor_coverage();", live)
+        for key, value in (("atlas", "std::string(kTreeImpostorAtlasName)"),
+                           ("alpha_coverage", "atlas.coverage"),
+                           ("alpha_refused", "atlas.refused()"),
+                           ("alpha_status", "std::string(atlas.status())"),
+                           ("alpha_min_cell", "atlas.min_cell"),
+                           ("alpha_max_cell", "atlas.max_cell"),
+                           ("alpha_cell_count", "std::uint64_t(atlas.cell_count)")):
+            self.assertIn('input.render_settings.emplace("tree_impostor_' + key + '", ' +
+                          value + ');', live)
+        # The manifest has a fixed 128-setting budget; full cell values stay in bake JSON.
+        settings = re.findall(r'\{"[a-z0-9_]+",|render_settings\.emplace\("', live)
+        self.assertLessEqual(len(settings), 128)
+        manifest = read(CLIENT / "rendering/CaptureManifest.cpp")
+        self.assertIn("input.render_settings", manifest)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertRegex(cmake, r"add_executable\(octa_impostor_test\s+rendering/octa_impostor_test.cpp")
+
+    def test_readback_restores_transfer_state_and_uses_bounded_dsa(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        guard = block(source, "struct BakeGlState")
+        for name in ("GL_PACK_ALIGNMENT", "GL_PACK_ROW_LENGTH", "GL_PACK_SKIP_ROWS",
+                     "GL_PACK_SKIP_PIXELS", "GL_PACK_IMAGE_HEIGHT", "GL_PACK_SKIP_IMAGES",
+                     "GL_PACK_SWAP_BYTES", "GL_PACK_LSB_FIRST"):
+            self.assertIn(name, guard)
+        self.assertIn("glPixelStorei(pack_names[i], pack_values[i]);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));", guard)
+        render = compact(block(source, "RenderAtlas(const std::string&"))
+        self.assertLess(render.index("kImpostorMaxAtlasSide / n"), render.index("const int atlas = n * tile"))
+        self.assertIn("const BakeGlState gl_state;", render)
+        self.assertIn("static_cast<GLsizei>(bytes), out.rgba.data()", render)
 
 
 if __name__ == "__main__":

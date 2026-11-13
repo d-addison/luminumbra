@@ -668,11 +668,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
-    if (impostorsOn) {
-        // The octa impostor is a single cheap quad (unlike the wide cross-billboard, which added
-        // overdraw at 620 m), so kick LOD3 in much earlier to actually replace the far-field stand.
-        kTreeLodCfg.lod3Distance = 200.0f;
-    }
     // Resolves (loading + caching) the mesh for a candidate path, falling back to
     // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
     // actually resolved so the group is keyed by what is really drawn.
@@ -724,9 +719,17 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const float dist = glm::length(cp.position - cameraPos);
         const bool authoredTree =
             m_propMeshPaths[cp.pathIndex].starts_with("game-assets/tree-small-02/");
-        const int lod =
+        int lod =
             SelectTreeLod(dist, authoredTree ? AuthoredTreeLodConfig(impostorsOn) : kTreeLodCfg);
-        const bool impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree;
+        // This atlas covers only the authored species. All other trees retain mesh LOD2;
+        // never fall back to the old LOD3 cross-card when no usable atlas covers them.
+        if (cp.impostorTree && !authoredTree) {
+            lod = std::min(lod, 2);
+        }
+        bool impostor_candidate = false;
+        if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {
+            impostor_candidate = true; // a tree part -> impostor replaces it at LOD3
+        }
         // Submitted chunks are resident too; culling the ground must not remove
         // support while its canopy is still visible (including the authored LOD3 band).
         const bool live_terrain_owned =

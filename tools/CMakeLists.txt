@@ -118,6 +118,12 @@ if(BUILD_TESTING)
     get_property(_tools_existing_tests DIRECTORY PROPERTY TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
+        NAME TerrainShaderContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_terrain_shader_contract.py")
+    set_tests_properties(TerrainShaderContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME ContainmentLinkClosureContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_containment_link_closure.py")
