@@ -727,10 +727,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const int lod =
             SelectTreeLod(dist, authoredTree ? AuthoredTreeLodConfig(impostorsOn) : kTreeLodCfg);
         const bool impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree;
-        const bool live_terrain_owned =
-            impostor_candidate &&
-            (input.legacy_far ? input.legacy_far->live_terrain_owns_at(cp.position, cameraPos)
-                              : dist < FarLodSystem::kFarClipInnerRadiusMeters);
+        const bool live_terrain_owned = impostor_candidate && input.submitted_live_terrain &&
+                                        input.submitted_live_terrain->covers(cp.position);
         const bool far_terrain_resident = impostor_candidate && !live_terrain_owned &&
                                           input.far_selection.submit && input.legacy_far &&
                                           input.legacy_far->terrain_resident_at(cp.position);

@@ -2983,6 +2983,11 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
         gbuffer_ctx.frozen_replay = m_far_world_paired;
         GBufferPassInput gbuffer_input;
+        if (m_farlod) {
+            auto& live = m_farlod->submitted_live_terrain();
+            live.clear();
+            gbuffer_input.submitted_live_terrain = &live;
+        }
         m_authored_view.reset();
         if (m_authored_draws && !m_authored_draws->draws.empty()) {
             if (m_taau_enabled || m_render_scale != 1.0f)
@@ -3008,9 +3013,33 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             gbuffer_input.authored_draws = m_authored_draws;
             gbuffer_input.authored_view = m_authored_view.get();
         }
-        // Live-terrain submit: the shared callback (CullHierarchical +
-        // draw_chunks_mdi, byte-identical), shared with ShadowPass.
-        gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
+        // G-buffer submission also records the successful live draws supporting props.
+        // Shadow submission keeps the same cull/draw sequence without publishing support.
+        gbuffer_input.submit_terrain_chunks =
+            [this](const glm::vec4(&planes)[6]) -> TerrainSubmitStats {
+            std::vector<const ChunkCullEntry*> visible_chunks;
+            m_hierarchicalCuller.CullHierarchical(planes, visible_chunks);
+            if (m_terrain_coverage_enabled && !m_far_world_paired) {
+                m_terrain_coverage_live_submit_observed = true;
+                m_terrain_coverage_visible.clear();
+                for (const auto* chunk : visible_chunks) {
+                    m_terrain_coverage_visible.insert(chunk->id);
+                }
+            }
+            std::size_t draws = 0;
+            std::size_t indices = 0;
+            draw_chunks_mdi(visible_chunks, draws, indices);
+            if (m_farlod) {
+                auto& live = m_farlod->submitted_live_terrain();
+                live.clear();
+                // Only successful MDI commands have origins; ignore stale scratch on zero
+                // draws.
+                for (std::size_t i = 0; i < draws; ++i) {
+                    live.add_origin(glm::vec3(m_mdi_origin_scratch[i]));
+                }
+            }
+            return TerrainSubmitStats{visible_chunks.size(), draws, indices};
+        };
         gbuffer_input.far_selection = m_frame_far_selection;
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)

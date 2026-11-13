@@ -63,8 +63,9 @@ class UploadBudgetWiring(unittest.TestCase):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
         collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
         self.assertIn("impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree", collect)
-        self.assertIn("input.legacy_far->live_terrain_owns_at(cp.position, cameraPos)", collect)
-        self.assertIn("dist < FarLodSystem::kFarClipInnerRadiusMeters", collect)
+        self.assertIn("input.submitted_live_terrain->covers(cp.position)", collect)
+        self.assertNotIn("kFarClipInnerRadiusMeters", collect)
+        self.assertNotIn("live_terrain_owns_at", collect)
         self.assertIn("impostor_candidate && !live_terrain_owned &&", collect)
         self.assertIn("input.legacy_far->terrain_resident_at(cp.position)", collect)
         decision = ("SelectStaticPropSubmission( input.far_selection, impostor_candidate, "
@@ -83,17 +84,79 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
         self.assertLess(policy.index("if (live_terrain_owned)"), policy.index("if (!selection.submit"))
         self.assertIn("selection.effective == FarWorldMode::Legacy && !far_terrain_resident", policy)
-        ownership = body(legacy, "bool FarLodSystem::live_terrain_owns_at(")
-        for retained in ("m_preview_mode", "m_preview_anchor", "m_preview_inner_radius",
-                         "kFarClipInnerRadiusMeters", "camera_position", "std::isfinite"):
-            self.assertIn(retained, ownership)
         query = body(legacy, "bool FarLodSystem::terrain_resident_at(")
         self.assertEqual(query.count("m_residents.find("), 1)
         self.assertNotIn("for (", query)
         for retained in ("!m_enabled", "std::isfinite", "m_outer_clip_m",
-                         "live_terrain_owns_at(position, m_last_camera_position)",
+                         "inner_clipped", "m_preview_mode", "m_preview_inner_radius",
                          "found->second.element_count != 0"):
             self.assertIn(retained, query)
+
+    def assert_live_submission_wiring(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        self.assertTrue("bool SubmittedLiveTerrain::covers(" in source,
+                        "live support must be derived from this frame's submitted chunks")
+        query = body(source, "bool SubmittedLiveTerrain::covers(")
+        self.assertIn("if (live_chunk_key(position, key) && m_chunks.contains(key))", query)
+        self.assertIn("std::nextafter", query)
+        self.assertIn("live_chunk_key(below, key) && m_chunks.contains(key)", query)
+        self.assertNotIn("for (", query)
+        self.assertNotIn("while (", query)
+        key = body(source, "bool live_chunk_key(")
+        for axis in ("x", "y", "z"):
+            self.assertIn("std::isfinite(position." + axis + ")", key)
+        self.assertIn("Chunk::calculate_id", key)
+        for bound in ("kPackedMinXz", "kPackedMaxXz", "kPackedMinY", "kPackedMaxY"):
+            self.assertIn(bound, key)
+        add = body(source, "void SubmittedLiveTerrain::add_origin(")
+        self.assertIn("if (live_chunk_key(origin, key))", add)
+        self.assertIn("m_chunks.insert(key)", add)
+        self.assertEqual(compact(body(source, "void SubmittedLiveTerrain::clear(")), "m_chunks.clear();")
+        submit = body(self.pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(")
+        self.assertNotIn("m_farlod", submit)
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        for branch in (submit, frame):
+            self.assertIn("m_hierarchicalCuller.CullHierarchical(", branch)
+            self.assertIn("draw_chunks_mdi(visible_chunks, draws, indices)", branch)
+            self.assertIn("m_terrain_coverage_visible.insert(chunk->id)", branch)
+            self.assertIn("TerrainSubmitStats{visible_chunks.size(), draws, indices}", branch)
+        self.assertLess(frame.index("draw_chunks_mdi(visible_chunks, draws, indices)"), frame.index("live.add_origin("))
+        self.assertIn("i < draws", frame)
+        self.assertIn("live.add_origin(glm::vec3(m_mdi_origin_scratch[i]))", frame)
+        self.assertLess(frame.index("live.clear();"), frame.index("live.add_origin("))
+        self.assertLess(frame.index("live.clear();"), frame.index("m_gbuffer_pass->execute("))
+        self.assertIn("gbuffer_input.submitted_live_terrain = &live", frame)
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        self.assertIn("input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)", compact(collect))
+        self.assertNotIn("kFarClipInnerRadiusMeters", collect)
+        return source
+
+    def test_live_submitted_tree_at_200_metres_survives_cold_far_streaming(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        self.assertIn("200.0f", body(tests, "TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod)"))
+
+    def test_tree_without_live_or_far_support_is_refused_even_inside_old_ring(self):
+        source = self.assert_live_submission_wiring()
+        policy = body(source, "StaticPropSubmission SelectStaticPropSubmission(")
+        self.assertIn("!far_terrain_resident", policy)
+        self.assertIn("return StaticPropSubmission::Refused;", policy)
+
+    def test_far_only_support_survives_live_submission_loss(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        transition = body(tests, "TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisappears)")
+        for retained in ("live.clear()", "live.covers(position), true", "StaticPropSubmission::Impostor",
+                         "live.covers(position), false", "StaticPropSubmission::Refused"):
+            self.assertIn(retained, transition)
+
+    def test_submitted_live_coverage_includes_192_384_640_lod_bands(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        bands = body(tests, "TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod)")
+        for boundary in ("191.99f", "192.0f", "192.01f", "383.99f", "384.0f", "384.01f", "639.99f", "640.0f"):
+            self.assertIn(boundary, bands)
 
     def test_player_view_eye_is_above_the_surface_water_at_the_spawn(self):
         source = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")

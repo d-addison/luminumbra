@@ -9,6 +9,7 @@
 #include "luminumbra_common/core/Crc32.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/MarchingCubes.h"
 #include "passes/PassGlHelpers.h"
@@ -1005,6 +1006,7 @@ void FarLodSystem::wait_for_builds() {
 void FarLodSystem::prepare_world_swap() {
     wait_for_builds();
     m_world = nullptr;
+    m_submitted_live_terrain.clear();
     ++m_epoch;
 }
 
@@ -1651,16 +1653,49 @@ StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selecti
     return StaticPropSubmission::Impostor;
 }
 
-bool FarLodSystem::live_terrain_owns_at(const glm::vec3& position,
-                                        const glm::vec3& camera_position) const {
+namespace {
+bool live_chunk_key(const glm::vec3& position, u64& key) {
     if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) {
         return false;
     }
-    if (m_preview_mode) {
-        return glm::length(glm::vec2(position.x - m_preview_anchor.x,
-                                     position.z - m_preview_anchor.z)) < m_preview_inner_radius;
+    const double chunk_x = std::floor(static_cast<double>(position.x) / CHUNK_SIZE_X);
+    const double chunk_y = std::floor(static_cast<double>(position.y) / CHUNK_SIZE_Y);
+    const double chunk_z = std::floor(static_cast<double>(position.z) / CHUNK_SIZE_Z);
+    if (chunk_x < Chunk::kPackedMinXz || chunk_x > Chunk::kPackedMaxXz ||
+        chunk_y < Chunk::kPackedMinY || chunk_y > Chunk::kPackedMaxY ||
+        chunk_z < Chunk::kPackedMinXz || chunk_z > Chunk::kPackedMaxXz) {
+        return false;
     }
-    return glm::length(position - camera_position) < kFarClipInnerRadiusMeters;
+    key = Chunk::calculate_id(
+        {static_cast<int>(chunk_x), static_cast<int>(chunk_y), static_cast<int>(chunk_z)});
+    return true;
+}
+} // namespace
+
+void SubmittedLiveTerrain::clear() {
+    m_chunks.clear();
+}
+
+void SubmittedLiveTerrain::add_origin(const glm::vec3& origin) {
+    u64 key = 0;
+    if (live_chunk_key(origin, key)) {
+        m_chunks.insert(key);
+    }
+}
+
+bool SubmittedLiveTerrain::covers(const glm::vec3& position) const {
+    u64 key = 0;
+    if (live_chunk_key(position, key) && m_chunks.contains(key)) {
+        return true;
+    }
+    // A root exactly on a chunk's top face is supported by the chunk below it.
+    if (std::fmod(position.y, static_cast<float>(CHUNK_SIZE_Y)) != 0.0f) {
+        return false;
+    }
+    const glm::vec3 below(position.x,
+                          std::nextafter(position.y, -std::numeric_limits<float>::infinity()),
+                          position.z);
+    return live_chunk_key(below, key) && m_chunks.contains(key);
 }
 
 bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
@@ -1669,8 +1704,12 @@ bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
         return false;
     }
     const float distance = glm::length(position - m_last_camera_position);
-    if (!std::isfinite(distance) || distance > m_outer_clip_m ||
-        live_terrain_owns_at(position, m_last_camera_position)) {
+    const bool inner_clipped =
+        m_preview_mode
+            ? glm::length(glm::vec2(position.x - m_preview_anchor.x,
+                                    position.z - m_preview_anchor.z)) < m_preview_inner_radius
+            : distance < kFarClipInnerRadiusMeters;
+    if (!std::isfinite(distance) || distance > m_outer_clip_m || inner_clipped) {
         return false;
     }
     const double region_x = std::floor(static_cast<double>(position.x) / kRegionSize);

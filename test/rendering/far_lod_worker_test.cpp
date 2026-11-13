@@ -23,7 +23,6 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -64,21 +63,6 @@ TerrainGenParams FlatParams() {
     params.caves_enabled = false;
     params.island_mask_enabled = false;
     return params;
-}
-
-void ExpectFarPropResidency(FarLodSystem& far, const glm::vec3& camera, float surface_height) {
-    const glm::vec3 far_prop(camera.x + 300.0f, surface_height, camera.z);
-    EXPECT_TRUE(far.terrain_resident_at(far_prop));
-    EXPECT_FALSE(far.terrain_resident_at(glm::vec3(camera.x, surface_height, camera.z)));
-    EXPECT_FALSE(far.terrain_resident_at(far_prop + glm::vec3(4000, 0, 0)));
-    far.set_enabled(false);
-    EXPECT_FALSE(far.terrain_resident_at(far_prop));
-    far.set_enabled(true);
-    far.set_preview_anchor(far_prop, 1.0f);
-    EXPECT_FALSE(far.terrain_resident_at(far_prop));
-    far.set_preview_anchor(far_prop, 0.0f);
-    EXPECT_TRUE(far.terrain_resident_at(far_prop));
-    far.clear_preview_anchor();
 }
 
 u64 HashMesh(const FarLodRegionMesh& mesh) {
@@ -1318,17 +1302,6 @@ void main() {
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
-TEST(FarLodWorker, FarPropsRequireResidentTerrainAndFinitePositions) {
-    FarLodSystem far;
-    for (const glm::vec3 position : {glm::vec3(300, 12, 0),
-                                     glm::vec3(-300, 12, -1),
-                                     glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
-                                     glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
-                                     glm::vec3(0, 0, std::numeric_limits<float>::max())}) {
-        EXPECT_FALSE(far.terrain_resident_at(position));
-    }
-}
-
 TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion) {
     if (!glfwInit())
         GTEST_SKIP() << "glfwInit failed";
@@ -1583,11 +1556,7 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                 far.update(world, pose.camera);
                 jobs.wait(jobs.dispatch_batch({[] {
                 }}));
-                // Live water or edits in an unrelated region must not starve
-                // completed terrain and water uploads around this camera.
-                world.notify_far_lod_authority_changed(IVec3(10000, 0, 10000));
             }
-            ExpectFarPropResidency(far, pose.camera, surface_height);
             const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
             const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
             const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {

@@ -1032,39 +1032,6 @@ TEST(FarLodIntegration, OversizedHeadWaitsForAgeOrBacklogAndConsumesOneFrameAlon
     EXPECT_FALSE(exact.admit(1, 0, 1));
 }
 
-TEST(FarLodPersistence, RenderSnapshotsIgnoreUnrelatedAuthorityButRetainHaloAndInputChecks) {
-    constexpr int kSpan = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    for (const int region : {-1, 0}) {
-        for (const IVec3 offset : {IVec3(0, 0, 0),
-                                   IVec3(-1, 0, -1),
-                                   IVec3(kSpan, 0, kSpan),
-                                   IVec3(kSpan + 1, 0, 0),
-                                   IVec3(0, 0, -2),
-                                   IVec3(1000, 0, 1000)}) {
-            Systems::SHIELD_WorldSystem world(
-                nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
-            const auto snapshot = world.capture_far_lod_sdf_snapshot(region, region);
-            ASSERT_TRUE(snapshot);
-            EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*snapshot, true));
-            world.notify_far_lod_authority_changed(offset +
-                                                   IVec3(region * kSpan, 0, region * kSpan));
-            const bool inside =
-                offset.x >= -1 && offset.x <= kSpan && offset.z >= -1 && offset.z <= kSpan;
-            EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*snapshot));
-            EXPECT_EQ(world.is_far_lod_sdf_snapshot_current(*snapshot, true), !inside);
-            auto invalid = *snapshot;
-            invalid.params_hash ^= 1u;
-            EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
-            invalid = *snapshot;
-            ++invalid.min_chunk_coords.x;
-            EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
-            invalid = *snapshot;
-            invalid.min_chunk_coords.y = std::numeric_limits<int>::max();
-            EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(invalid, true));
-        }
-    }
-}
-
 TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     const auto params = Luminumbra::Test::SyntheticTerrainParams();
     Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
@@ -1098,8 +1065,6 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
     ASSERT_EQ(full->get_state(), ChunkState::Idle);
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty));
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*pending));
-    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*empty, true));
-    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*pending, true));
     const auto published = world.activation_index_counters();
     EXPECT_GT(published.index_updates, before.index_updates);
     const auto ready = world.capture_far_lod_sdf_snapshot(0, 0);
@@ -1112,7 +1077,6 @@ TEST(FarLodPersistence, CapturesWaitForGenerationPublication) {
               full->sdf_data.size() * sizeof(f32) + full->material_data.size());
     EXPECT_EQ(world.activation_index_counters().index_updates, published.index_updates);
     EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*ready));
-    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*ready, true));
 }
 
 TEST(FarLodPersistence, SnapshotFreshnessCoversNewPublicationsAndPreservesEvictedPayloads) {

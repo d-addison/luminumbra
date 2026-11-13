@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra::Systems {
@@ -37,6 +38,18 @@ namespace Luminumbra::Rendering {
 
 class Shader;
 struct FarWorldSelection;
+
+// Coverage of nonempty live chunk draws in the current G-buffer pass.
+// Storage is bounded by the submitted live chunks, independent of world residency.
+class SubmittedLiveTerrain {
+public:
+    void clear();
+    void add_origin(const glm::vec3& origin);
+    bool covers(const glm::vec3& position) const;
+
+private:
+    std::unordered_set<u64> m_chunks;
+};
 
 enum class StaticPropSubmission {
     Mesh,
@@ -263,9 +276,9 @@ public:
     // once per rendered frame from RenderPipeline::render_frame.
     void update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position);
 
-    // Const ownership diagnostic matching the live ring or anchored preview slice.
-    // Independent of far enablement and residency; uses the current render camera.
-    bool live_terrain_owns_at(const glm::vec3& position, const glm::vec3& camera_position) const;
+    SubmittedLiveTerrain& submitted_live_terrain() {
+        return m_submitted_live_terrain;
+    }
 
     // Render-thread residency query for far props. One region lookup; excludes
     // the clipped live slice, empty terrain and positions outside the draw band.
@@ -292,6 +305,7 @@ public:
     }
 
 private:
+    SubmittedLiveTerrain m_submitted_live_terrain;
     struct ResidentRegion {
         World::FarLodTier tier = World::FarLodTier::F1;
         int rx = 0;
