@@ -1,10 +1,14 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <iosfwd>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace Luminumbra::Rendering {
 
@@ -76,5 +80,75 @@ std::string BuildDiagnosticProbe(const DiagnosticExtent& extent,
                                  std::uint32_t x,
                                  std::uint32_t y,
                                  const DiagnosticSample& sample);
+
+struct DiagnosticCaptureOptions {
+    bool enabled = false;
+    std::optional<std::array<std::uint32_t, 2>> probe;
+};
+
+// Arguments exclude argv[0]. Resolve once at setup; throws invalid_argument on
+// malformed options. An explicit --capture-diagnostics overrides the environment.
+DiagnosticCaptureOptions
+ResolveDiagnosticCaptureOptions(std::span<const std::string_view> arguments,
+                                std::optional<std::string_view> environment);
+DiagnosticCaptureOptions
+ResolveDiagnosticCaptureOptions(std::span<char* const> arguments,
+                                std::optional<std::string_view> environment);
+
+class DiagnosticDrawTable;
+
+struct DiagnosticBundleFrame {
+    DiagnosticExtent extent;
+    std::uint64_t frame = 0;
+    std::array<float, 16> view{};
+    std::array<float, 16> projection{};
+    bool reversed_z = true;
+    bool identity_complete = false;
+    // Includes all retained GPU storage, draw registry and source/output staging.
+    std::size_t staging_bytes = 0;
+    std::string capture_filename;
+    std::string manifest_filename;
+};
+
+// Synchronous completed-frame transport. The frame and draw table must remain
+// immutable throughout publication. Reads fill exact spans in GL bottom-first
+// order; normal/material values must already be decoded without filtering.
+// No calls occur when disabled. At most two reads per plane, one plane at a time.
+class DiagnosticBundleSource {
+public:
+    virtual ~DiagnosticBundleSource() = default;
+    virtual bool read_aov(DiagnosticAov aov, std::span<float> samples) = 0;
+    virtual bool read_ids(std::span<DiagnosticId> pixels) = 0;
+};
+
+// Per-file transport, also usable for archive/stream destinations. reserve must
+// refuse occupied names without replacing anything. close checks stream, flush
+// and close errors; commit makes only the last file (completion metadata) visible
+// atomically. rollback removes only identities owned by this reservation.
+class DiagnosticBundleOutput {
+public:
+    virtual ~DiagnosticBundleOutput() = default;
+    virtual bool reserve(std::span<const std::string> filenames) = 0;
+    virtual std::ostream* open(std::size_t index) = 0;
+    virtual bool close() = 0;
+    virtual bool commit() = 0;
+    virtual void rollback() noexcept = 0;
+};
+
+// Disabled is a successful no-op, including invalid frame/path/source inputs.
+// Enabled checks shape, camera, probe, table and the aggregate 512 MiB staging
+// budget before allocating image storage or reserving output. Validates all
+// source planes before reservation; then streams payloads, metadata last.
+bool WriteDiagnosticBundle(const DiagnosticCaptureOptions& options,
+                           const DiagnosticBundleFrame& frame,
+                           const DiagnosticDrawTable& draws,
+                           DiagnosticBundleSource& source,
+                           DiagnosticBundleOutput& output);
+// Filesystem destination: existing parent required; no directory creation.
+bool WriteDiagnosticBundle(const std::filesystem::path& capture,
+                           const DiagnosticCaptureOptions& options,
+                           const DiagnosticBundleFrame& frame,
+                           const DiagnosticDrawTable& draws,
+                           DiagnosticBundleSource& source);
 
 } // namespace Luminumbra::Rendering

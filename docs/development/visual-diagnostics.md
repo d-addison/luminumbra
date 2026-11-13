@@ -14,15 +14,20 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Lazy integer target and capture-local draw registry | Implemented as standalone helpers | `DiagnosticTargets.h`; `DiagnosticDrawTable.h`; registered `DiagnosticTargetDriver.*` and `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
 | Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
 | Exact producer coverage | Partial | File-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
-| Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
+| Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
-The codecs and standalone helpers do not create scenario bundles or enable a runtime
-flag. The capture test target uses modeled GL entry points for target lifecycle tests;
+The GL-free bundle writer can publish supplied immutable completed-frame planes.
+Runtime scenario capture does not yet supply those planes or enable diagnostics.
+The capture test target uses modeled GL entry points for target lifecycle tests;
 rendering calls these helpers only inside an explicitly constructed
-`GBufferDiagnosticCapture`. No runtime option constructs that scope yet. The client
+`GBufferDiagnosticCapture`. No runtime option constructs that scope yet.
+Diagnostic options are admitted once
+in `ParseRuntimePathOptions`, before save-root creation: malformed input is refused,
+and enabled diagnostics receive an explicit unavailable-adapter error. The pure
+resolver accepts valid CLI/environment options for the pending adapter. The client
 source manifest includes the codecs.
 The helpers are header-only to keep the stacked change within ten files.
 The acceptance matrix records this partial state. No new runtime asset is added.
@@ -122,9 +127,15 @@ Both codecs cap dimensions at 16,384 and total pixels at 16,777,216, validate ex
 span sizes before writing and use only 4 KiB scratch storage. Material/ID refusal
 validates the entire bounded plane before writing. Work is O(pixels), at most two
 plane traversals; probes are O(1). The caller owns stable completed-frame buffers
-until serialization finishes. The future adapter should stream one plane at a time
-and cap aggregate CPU/GPU staging at 512 MiB before allocation; refuse a bundle
-that cannot fit. Do not allocate all full-resolution planes speculatively.
+until serialization finishes. The bundle core streams one plane at a time and
+caps aggregate CPU/GPU staging
+at 512 MiB before image allocation. Callers must account for all retained GPU and
+source/output CPU staging, including the draw registry; the core additionally
+reserves one largest plane, 4 KiB codec scratch and 64 MiB bounded serialization
+workspace. It preflights each source plane before reservation, then reads each
+again during serialization; the completed-frame source must remain immutable.
+No full multi-plane frame is allocated. The GL adapter must check capabilities
+and this budget before allocating diagnostic GPU storage.
 
 `BuildDiagnosticProbe` emits the following schema (numeric enums match the ID):
 
@@ -140,7 +151,7 @@ coordinates, material IDs or encoded identities return an empty string. The call
 must join draw/mesh IDs to the bundle's tables; unresolved entries are errors.
 Probe values must come from the exact same pixel and frame as the serialized AOVs.
 
-Publishing is planned as a complete new bundle transaction: validate all inputs and
+The GL-free writer implements a complete new bundle transaction: validate inputs and
 budgets first, reserve a fresh destination without replacing an existing bundle,
 write payloads, check stream/flush/close failures, and publish completion metadata
 last. Partial bytes after I/O failure are unpublished; clean up only artifacts this
@@ -148,6 +159,14 @@ transaction owns, verifying identity on removal. Codecs take streams and perform
 no path checks, opens, deletes or publication themselves. No asynchronous worker
 may sample live mutable draw tables. PNG success alone cannot mark diagnostics
 complete. Unsupported contributors must be declared in metadata.
+
+The remaining scenario integration must keep one capture scope around the exact
+completed frame, account for later deferred writes and forward contributors,
+restore GL readback/pack state, decode the actual G-buffer attachments and link
+the existing completed capture manifest. All sweep callbacks, standalone benchmark,
+headless, timed-scenario and motion captures must use that adapter. No producer
+coverage is inferred by the transaction core. This split keeps the GL-free changes
+within the delivery file budget; no runtime capture success is claimed yet.
 
 ## B: views and inspector
 

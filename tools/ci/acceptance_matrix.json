@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. GPU attribution, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. Completed-frame GL readback and scenario integration remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
       "status": "partial",
       "evidence": [
         {
@@ -24,6 +24,32 @@
           "kind": "ctest",
           "ref": "DiagnosticCaptureIntegration.*",
           "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.visual-diagnostic-bundles",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "The GL-free diagnostic bundle core resolves CLI and environment opt-in, rejects malformed probes, normalizes bottom-first source planes to top-first codec inputs, joins identities to capture-local draw records and streams one plane at a time under an aggregate 512 MiB staging budget checked before image allocation. Filesystem publication refuses occupied bundle members, checks stream, flush and close, publishes completion metadata last and uses identity-checked cleanup for owned artifacts. Metadata links the capture manifest, records frame and camera, labels the deferred surface and serializes explicit unsupported submission records. Registered regressions cover parsing, admission before save-root output, orientation, probe consistency, exact budget boundaries, input and transport failures, existing destinations, rollback and disabled no-op. Native execution remains pending. Runtime admission refuses enabled diagnostics before output until completed-frame GL readback and all scenario paths are integrated; production play cannot enable diagnostics.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticBundleOptions.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticBundleTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticCaptureIntegration.*",
+          "planned": "Complete GL readback, scope lifetime, capability and aggregate GPU budget checks, and integration across all scenario capture paths; owner: maintainers"
         },
         {
           "kind": "doc",
@@ -509,7 +535,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72–75, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72\u201375, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -3954,7 +3980,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -4056,7 +4082,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -4448,7 +4474,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -4469,7 +4495,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -4719,7 +4745,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
