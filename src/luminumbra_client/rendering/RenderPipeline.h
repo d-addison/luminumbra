@@ -1052,6 +1052,7 @@ private:
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
         bool water_metadata_valid = true;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -1065,6 +1066,7 @@ private:
         u32 mesh_version = 0;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_mesh() const {
             return !vertices.empty() && !indices.empty();
