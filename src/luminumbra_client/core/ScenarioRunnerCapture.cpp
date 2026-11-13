@@ -193,6 +193,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 }
 
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
+    // Live weather and clouds have supplied defaults. Apply each atmosphere
+    // scenario's final weather, cloud, lightning and particle wind pins once here.
+    (void)driveWeatherVisual();
+    (void)driveCloudShadow();
+    (void)drivePrecipitation();
     if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() ||
         scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() ||
         scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() ||
@@ -1498,6 +1503,10 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
                 capture.station = player_view_stations[station_index];
                 capture.station.yaw_degrees = g_camera->Yaw;
                 capture.station.pitch_degrees = g_camera->Pitch;
+                if (capture.station.name == "peak") {
+                    capture.terrain_peak =
+                        renderPipeline.terrain_peak_diagnostics(capture.station.target);
+                }
                 capture.sky = AnalyzePlayerViewPixels(
                     frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                 capture.holes =
