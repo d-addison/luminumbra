@@ -2352,6 +2352,113 @@ protected:
 };
 } // namespace
 
+TEST(FarWorldRenderer, IdleRetirementWithoutSessionIsAnIdempotentNoOp) {
+    for (const auto mode : {FarWorldMode::Ladder, FarWorldMode::Legacy}) {
+        FarWorldRenderer renderer(mode);
+        const auto before = renderer.Selection(FarWorldPurpose::World);
+        EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+        EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+        EXPECT_EQ(renderer.SessionDiagnostic(), nullptr);
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, before.refusal);
+    }
+}
+
+TEST(FarWorldRenderer, IdleRetirementRequiresTheOwnerThreadEvenWhenUnbound) {
+    FarWorldRenderer renderer;
+    bool refused = false;
+    std::thread worker([&] {
+        try {
+            renderer.RetireIdleHistory();
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+    });
+    worker.join();
+    EXPECT_TRUE(refused);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+}
+
+TEST_F(SessionRendererTest, IdleRetirementMatchesHandoffCountAndAdmitsFreshReturns) {
+    DriverState direct_state;
+    direct_state.fixture_released = true;
+    FarWorldHandoffRenderer direct;
+    direct.InstallBackend(std::make_unique<Driver>(direct_state));
+    ASSERT_TRUE(
+        direct.Bind(jobs, 1, policy.caves, policy.numeric, limits.budgets, limits.residency));
+    const auto stage = [&](std::span<const FarSessionHandoffTile> tiles) {
+        const bool accepted =
+            renderer.StageSessionTarget(producer, *world, tiles, policy, capture_limits, samples);
+        EXPECT_EQ(
+            accepted,
+            direct.StageSessionTarget(producer, *world, tiles, policy, capture_limits, samples));
+        return accepted;
+    };
+    const auto tiles = Tiles();
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    ASSERT_TRUE(stage(tiles));
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u); // Target descriptors remain protected.
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    ASSERT_TRUE(stage(std::span(tiles).subspan(1)));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    auto returned = tiles;
+    returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-128, 0};
+    EXPECT_FALSE(stage(returned));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    const auto* diagnostic = renderer.SessionDiagnostic();
+    ASSERT_NE(diagnostic, nullptr);
+    ASSERT_TRUE(diagnostic->captured);
+    ASSERT_TRUE(diagnostic->complete);
+    ASSERT_EQ(diagnostic->tile_count, 1u);
+    EXPECT_EQ(diagnostic->tiles[0].key, tiles[1].wanted.identity.key);
+    const auto retired = direct.RetireIdleHistory();
+    ASSERT_EQ(retired, 1u);
+    EXPECT_EQ(renderer.RetireIdleHistory(), retired);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_EQ(direct.RetireIdleHistory(), 0u);
+    ASSERT_TRUE(stage(returned));
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+}
+
+TEST_F(SessionRendererTest, LegacyIdleRetirementPreservesBoundSessionHistory) {
+    renderer.SetRequested(FarWorldMode::Legacy);
+    ASSERT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, limits),
+              FarWorldRefusal::None);
+    const auto tiles = Tiles();
+    ASSERT_TRUE(
+        renderer.StageSessionTarget(producer, *world, tiles, policy, capture_limits, samples));
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    ASSERT_TRUE(renderer.StageSessionTarget(
+        producer, *world, std::span(tiles).subspan(1), policy, capture_limits, samples));
+    const auto* diagnostic = renderer.SessionDiagnostic();
+    ASSERT_NE(diagnostic, nullptr);
+    const auto target = diagnostic->state.target_serial;
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_EQ(diagnostic->state.target_serial, target);
+    ASSERT_TRUE(producer.request_capture(windows));
+    producer.pump_capture();
+    producer.pump_capture();
+    ASSERT_TRUE(producer.capture_status().latest_ready);
+    auto returned = tiles;
+    returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-128, 0};
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, returned, policy, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+}
+
 TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileFingerprints) {
     EXPECT_EQ(renderer.Residency(), nullptr);
     ASSERT_TRUE(Stage()) << FarWorldRefusalName(renderer.Selection(FarWorldPurpose::World).refusal);

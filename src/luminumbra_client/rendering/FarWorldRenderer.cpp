@@ -287,6 +287,10 @@ bool FarWorldRenderer::StageSessionTarget(const FarWorldAuthorityProducer& produ
     refusal_ = session_->AdmissionRefusal();
     return accepted;
 }
+std::size_t FarWorldRenderer::RetireIdleHistory() {
+    CheckOwner();
+    return requested_ == FarWorldMode::Ladder && session_ ? session_->RetireIdleHistory() : 0;
+}
 const FarWorldHandoffDiagnosticSnapshot* FarWorldRenderer::SessionDiagnostic() const {
     CheckOwner();
     return session_ ? &session_->Diagnostic() : nullptr;
