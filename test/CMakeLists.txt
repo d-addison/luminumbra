@@ -260,6 +260,7 @@ add_executable(common_tests
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
     common/GameSessionPlantPersistence_test.cpp
+    common/RegionFixtureCapture_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
@@ -383,6 +384,13 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
     luminumbra_save_fixture_support
 )
+
+# Explicit capture tool: built by default, never registered with CTest discovery.
+add_executable(region_fixture_capture tools/RegionFixtureCapture.cpp)
+target_include_directories(region_fixture_capture PRIVATE ../src)
+target_compile_definitions(region_fixture_capture PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(region_fixture_capture PRIVATE gtest luminumbra_common)
+luminumbra_configure_first_party_target(region_fixture_capture)
 
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
@@ -2304,6 +2312,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionFixtureCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_region_fixture_capture_contract.py")
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
 set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)

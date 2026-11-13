@@ -33,6 +33,7 @@ PYTHON_TESTS = (
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
+    "test/tools/test_region_fixture_capture_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_check_docs.py",
