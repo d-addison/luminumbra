@@ -6,7 +6,9 @@
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -19,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -191,6 +194,7 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
+    RefuseUnsupportedTemporalAuditExecution(argc, argv);
     // Admission precedes --save-root directory creation.
     int surface_radius = 0;
     int collision_radius = 0;
@@ -234,6 +238,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
+    RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
@@ -410,4 +415,93 @@ nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value) {
     return {{"x", value.x}, {"y", value.y}, {"z", value.z}};
 }
 
+} // namespace Luminumbra::Client::ScenarioHarness
+
+// Temporal plan admission: shared by both startup paths and planning callers.
+namespace Luminumbra::Client::ScenarioHarness {
+std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]) {
+    constexpr std::array<std::string_view, 10> flags = {"--temporal-audit-plan",
+                                                        "--temporal-start-tick",
+                                                        "--temporal-tick-rate",
+                                                        "--temporal-day-ticks",
+                                                        "--temporal-dawn-tick",
+                                                        "--temporal-dusk-tick",
+                                                        "--temporal-strike-tick",
+                                                        "--temporal-frame-limit",
+                                                        "--temporal-tick-limit",
+                                                        "--temporal-moon-phase-milli"};
+    std::array<bool, flags.size()> seen{};
+    std::array<std::uint64_t, flags.size()> values = {
+        0, 0, 0, 0, 0, 0, 0, Rendering::kTemporalMaxFrames, Rendering::kTemporalMaxTicks, 1000};
+    Rendering::TemporalAuditSpan span = Rendering::TemporalAuditSpan::DayNight;
+    bool any = false;
+    // O(argc * 10), with fixed storage. Check every occurrence and both forms.
+    for (int argument_index = 1; argument_index < argc; ++argument_index) {
+        const std::string_view argument(argv[argument_index]);
+        if (!argument.starts_with("--temporal-"))
+            continue;
+        any = true;
+        const auto equals = argument.find('=');
+        const auto name = argument.substr(0, equals);
+        const auto found = std::ranges::find(flags, name);
+        if (found == flags.end())
+            throw std::invalid_argument("unknown temporal plan option");
+        const auto index = static_cast<std::size_t>(found - flags.begin());
+        if (seen[index])
+            throw std::invalid_argument(std::string(name) + " may only be supplied once");
+        seen[index] = true;
+        std::string_view value;
+        if (equals != std::string_view::npos)
+            value = argument.substr(equals + 1);
+        else if (argument_index + 1 < argc)
+            value = argv[++argument_index];
+        if (value.empty())
+            throw std::invalid_argument(std::string(name) + " requires a nonempty value");
+        if (index == 0) {
+            if (value == "day-night")
+                span = Rendering::TemporalAuditSpan::DayNight;
+            else if (value == "weather-cycle")
+                span = Rendering::TemporalAuditSpan::WeatherCycle;
+            else if (value == "multi-day")
+                span = Rendering::TemporalAuditSpan::MultiDay;
+            else
+                throw std::invalid_argument("unknown temporal span");
+        } else {
+            const auto parsed =
+                std::from_chars(value.data(), value.data() + value.size(), values[index]);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
+                throw std::invalid_argument(std::string(name) + " requires an unsigned integer");
+        }
+    }
+    if (!any)
+        return std::nullopt;
+    for (std::size_t index = 0; index <= 5; ++index) {
+        if (!seen[index])
+            throw std::invalid_argument(std::string(flags[index]) +
+                                        " is required for plan admission");
+    }
+    if (values[2] > 1000 || values[7] > Rendering::kTemporalMaxFrames || values[9] > 1000)
+        throw std::invalid_argument("temporal rate, frame limit or moon phase exceeds range");
+    const Rendering::TemporalAuditRequest request{
+        .span = span,
+        .start_tick = values[1],
+        .ticks_per_day = values[3],
+        .ticks_per_second = static_cast<std::uint32_t>(values[2]),
+        .dawn_tick = values[4],
+        .dusk_tick = values[5],
+        .strike_tick = values[6],
+        .night_moon_phase_milli = static_cast<std::uint32_t>(values[9]),
+        .tick_limit = values[8],
+        .frame_limit = static_cast<std::size_t>(values[7])};
+    auto admission = Rendering::BuildTemporalAuditPlan(request);
+    if (!admission.plan)
+        throw std::invalid_argument("temporal plan refused: " + admission.reason);
+    return std::move(admission.plan);
+}
+
+void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]) {
+    const auto plan = ParseTemporalAuditPlanOptions(argc, argv);
+    if (plan || GetCommandLineOption(argc, argv, "--scenario", "") == "temporal_audit")
+        throw std::invalid_argument("temporal audit execution unsupported: plan admission only");
+}
 } // namespace Luminumbra::Client::ScenarioHarness

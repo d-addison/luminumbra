@@ -15,7 +15,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
-| Temporal audits and all-features profile (E1–E3) | Planned; gap inventory below describes current code | Exact-tick site sequences, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
+| Temporal sequences and all-features profile (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 The codecs alone do not create scenario bundles or enable a runtime flag. They are
 compiled in the existing GL-free capture test target; rendering does not call them yet.
@@ -208,8 +209,8 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-E1–E3 are planned. This documentation adds no runtime flag, capture guarantee,
-metric enforcement or CI job. The inventory below distinguishes current behavior
+Temporal plan admission is implemented; sequence execution and E2–E3 remain planned.
+Admission adds no capture guarantee, metric enforcement or CI job. The inventory below distinguishes current capture behavior
 from the proposed all-features contract. Existing specialized gates remain useful
 and retain their baselines; passing them does not establish an all-features audit.
 
@@ -273,6 +274,48 @@ and optionally ffmpeg for MP4 (`tools/timelapse.py:35`, `:43`, `:75`); it does n
 validate a sequence manifest or produce a temporal contact sheet.
 
 ### E1: fixed-camera time-lapse audit runs
+
+`BuildTemporalAuditPlan` implements the three span schedules below without driving
+simulation or rendering. It records integer target ticks, rational sub-tick phases
+with denominator 60, exact calendar/elapsed-day or weather boundaries, deduplicated
+burst samples, and separately labelled 120-frame steady-lighting and weather night
+holds. Burst windows center on crossings where possible and shift inside span
+endpoints; a span too short for a complete burst refuses. Holds freeze the final
+simulation tick while presentation advances at 60 Hz. The weather primary/steady
+samples declare noon; night presence declares TOD 0.5 and a moon phase (full by
+default). Other span samples follow the live calendar. No weather values are driven.
+
+`ParseTemporalAuditPlanOptions` admits `--temporal-audit-plan` with `day-night`,
+`weather-cycle` or `multi-day`. Require `--temporal-start-tick`,
+`--temporal-tick-rate`, `--temporal-day-ticks`, `--temporal-dawn-tick` and
+`--temporal-dusk-tick`; these describe the resolved simulation calendar, with dawn
+and dusk as midnight-origin day offsets. Weather plans also require
+`--temporal-strike-tick`, an offset in the storm interval [50T,90T).
+Optional `--temporal-frame-limit` and `--temporal-tick-limit` can lower the hard
+4,096-frame and 10-million-tick ceilings; `--temporal-moon-phase-milli` declares
+0..1000. Accept both `--option=value` and `--option value`. Missing, duplicate,
+unknown, partial, signed, overflowing or out-of-range options refuse with a reason.
+Tick rate is bounded to 1..1000 Hz; start/end must fit `WorldClock::kTickLimit`.
+Calendar crossings require 0 < dawn < dusk < D; non-weather strike inputs refuse.
+
+Planning traverses at most 721 sparse candidates, eight boundaries and eight
+121-candidate burst windows plus 240 hold frames, before sorting/deduplication.
+The O(1) advancement query refuses clock overshoot, a clock before initialization
+or a missing frame index. Warmup/readiness/sample-settling bounds below are recorded
+in the plan, along with conservative total presentation/render-attempt bounds
+including unsaved substeps (at most 600 million span presentation steps before
+holds/readiness). No frame-delta or wall-clock input enters scheduling.
+Registered `TemporalAudit.*` regressions cover admission, exact scheduling,
+deduplication, limits and both startup refusal paths; native execution is pending.
+
+The planning parser is callable independently. Both shipping startup parsers reject
+even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
+unsupported-execution reason before world/output creation, including save-root
+creation. Weather input, the site/sequence driver, site/ROI/feature capability
+admission, output-byte/run budgets and assembly remain later work. Admission alone
+does not certify a temporal or all-features capture, or change simulation identity,
+save/replay formats or authority state. The rest of this section specifies that
+future execution contract.
 
 Use the audit site's recorded seed, content/settings identity, camera position,
 orientation, projection, resolution and D2 ROIs. Run each site/camera from the same
