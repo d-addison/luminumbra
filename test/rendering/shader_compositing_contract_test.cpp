@@ -1,16 +1,21 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/app/GroundCoverHull.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 #include "luminumbra_client/rendering/WeatherRenderBridge.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -116,6 +121,137 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     ExpectContains(source, "background_has_opaque_depth ? u_sky_color : resolved_background_color");
     ExpectContains(source, "if (!has_opaque_depth(mid_depth))");
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
+}
+
+TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
+    const auto source = ReadShader("src/luminumbra_client/app/ProcgenPalettes.cpp");
+    for (const char* kind : {"Rock", "Bush"}) {
+        const auto palette =
+            ExtractBlock(source, std::string("void BuildProcgen") + kind + "Palette(");
+        ASSERT_FALSE(palette.empty());
+        for (int lod = 1; lod <= 3; ++lod) {
+            ExpectContains(palette,
+                           "rp.register_procgen_mesh(base + \".lod" + std::to_string(lod) +
+                               "\", BuildGroundCoverMesh(lo, hi, " + (lod == 3 ? "true" : "false") +
+                               "));");
+        }
+        EXPECT_EQ(palette.find("Billboard"), std::string::npos);
+    }
+    const auto upload = ExtractBlock(source, "BuildGroundCoverMesh(");
+    ExpectContains(upload, "BuildGroundCoverHull(lo, hi, farthest)");
+    ExpectContains(upload, "f < hull.faceCount");
+    ExpectContains(upload, "face.positions[0], face.normal");
+    ExpectContains(upload, "face.positions[1], face.normal");
+    ExpectContains(upload, "face.positions[2], face.normal");
+    ExpectContains(upload, "MeshLoader::CreateFromArrays(vertices, indices)");
+}
+
+void ExpectClosedGroundCoverHull(const Luminumbra::Client::App::GroundCoverHull& hull,
+                                 const glm::vec3& lo,
+                                 const glm::vec3& hi) {
+    ASSERT_GT(hull.faceCount, 0u);
+    ASSERT_LE(hull.faceCount, hull.faces.size());
+    std::vector<glm::vec3> positions;
+    std::map<std::pair<std::size_t, std::size_t>, std::pair<int, int>> edges;
+    for (std::size_t f = 0; f < hull.faceCount; ++f) {
+        std::array<std::size_t, 3> welded{};
+        for (std::size_t v = 0; v < welded.size(); ++v) {
+            const auto& position = hull.faces[f].positions[v];
+            auto found = std::find(positions.begin(), positions.end(), position);
+            welded[v] = static_cast<std::size_t>(found - positions.begin());
+            if (found == positions.end()) {
+                positions.push_back(position);
+            }
+        }
+        for (std::size_t v = 0; v < welded.size(); ++v) {
+            const auto a = welded[v];
+            const auto b = welded[(v + 1) % welded.size()];
+            ASSERT_NE(a, b);
+            auto& edge = edges[std::minmax(a, b)];
+            ++edge.first;
+            edge.second += a < b ? 1 : -1;
+        }
+    }
+    for (const auto& [edge, uses] : edges) {
+        SCOPED_TRACE(::testing::Message() << "edge " << edge.first << "-" << edge.second);
+        EXPECT_EQ(uses.first, 2);
+        EXPECT_EQ(uses.second, 0);
+    }
+    glm::vec3 center(0.0f);
+    glm::vec3 actualLo = positions.front(), actualHi = positions.front();
+    for (const auto& position : positions) {
+        center += position;
+        actualLo = glm::min(actualLo, position);
+        actualHi = glm::max(actualHi, position);
+    }
+    center /= static_cast<float>(positions.size());
+    EXPECT_EQ(actualLo, lo);
+    EXPECT_EQ(actualHi, hi);
+    for (std::size_t f = 0; f < hull.faceCount; ++f) {
+        const auto& face = hull.faces[f];
+        const glm::vec3 cross = glm::cross(face.positions[1] - face.positions[0],
+                                           face.positions[2] - face.positions[0]);
+        ASSERT_GT(glm::length(cross), 0.0f);
+        EXPECT_GT(glm::dot(cross, face.positions[0] - center), 0.0f);
+        EXPECT_NEAR(glm::length(face.normal), 1.0f, 1e-5f);
+        EXPECT_GT(glm::dot(glm::normalize(cross), face.normal), 0.99999f);
+        EXPECT_TRUE(std::isfinite(face.normal.x));
+        EXPECT_TRUE(std::isfinite(face.normal.y));
+        EXPECT_TRUE(std::isfinite(face.normal.z));
+    }
+}
+
+TEST(GroundCoverContract, CoarseHullGeometryIsClosedOutwardAndReducesTheFarthestBudget) {
+    using Luminumbra::Client::App::BuildGroundCoverHull;
+    // Rock-like tall bounds and bush-like wide bounds, including translated and small props.
+    const std::array<std::pair<glm::vec3, glm::vec3>, 4> bounds = {
+        {{{-1, -2, -1}, {1, 2, 1}},
+         {{-2, -0.2f, -3}, {2, 0.8f, 3}},
+         {{3, 1, -5}, {5, 2, -2}},
+         {{-0.01f, -0.01f, -0.01f}, {0.01f, 0.01f, 0.01f}}}};
+    for (const auto& [lo, hi] : bounds) {
+        SCOPED_TRACE(::testing::Message() << "bounds " << lo.x << "," << lo.y << "," << lo.z);
+        const auto lod2 = BuildGroundCoverHull(lo, hi, false);
+        const auto lod3 = BuildGroundCoverHull(lo, hi, true);
+        EXPECT_EQ(lod2.faceCount, 8u);
+        EXPECT_LE(lod3.faceCount, 4u);
+        EXPECT_LT(lod3.faceCount, lod2.faceCount);
+        ExpectClosedGroundCoverHull(lod2, lo, hi);
+        ExpectClosedGroundCoverHull(lod3, lo, hi);
+    }
+}
+
+TEST(GroundCoverContract, DegenerateCoarseHullFacesKeepFiniteFallbackNormals) {
+    using Luminumbra::Client::App::BuildGroundCoverHull;
+    for (bool farthest : {false, true}) {
+        const auto hull = BuildGroundCoverHull(glm::vec3(0), glm::vec3(0), farthest);
+        for (std::size_t f = 0; f < hull.faceCount; ++f) {
+            EXPECT_EQ(hull.faces[f].normal, glm::vec3(0, 1, 0));
+        }
+    }
+}
+
+TEST(GroundCoverContract, GrassHasSeparatedCurvedBladesAndClutterHasCutoutCorners) {
+    const auto source = ReadShader("res/shaders/foliage.frag");
+    const auto blade = ExtractBlock(source, "float bladeDistance(");
+    ExpectContains(blade, "float t = clamp(p.y / height, 0.0, 1.0);");
+    ExpectContains(blade, "float center = root + lean * t * t;");
+    ExpectContains(blade, "float halfWidth = 0.11 * (1.0 - t * t);");
+    ExpectContains(blade, "return max(abs(p.x - center) - halfWidth, p.y - height);");
+    const auto main = ExtractBlock(source, "void main()");
+    EXPECT_EQ(CountOccurrences(main, "bladeDistance("), 3u);
+    ExpectContains(main, "bladeDistance(p, -0.55, -0.20, 0.78)");
+    ExpectContains(main, "bladeDistance(p, 0.0, 0.16, 1.0)");
+    ExpectContains(main, "bladeDistance(p, 0.55, 0.20, 0.88)");
+    ExpectContains(main, "length(vec2(p.x, p.y * 2.0 - 1.0)) - 1.0");
+    ExpectContains(main, "fs_in.color.a > 0.5 ? grassDistance : clutterDistance");
+    ExpectContains(main, "max(fwidth(silhouette), 0.015)");
+    ExpectContains(main, "smoothstep(-edgeAA, edgeAA, silhouette)) * fs_in.fade");
+    ExpectContains(ExtractBlock(main, "if (alpha < 0.02)"), "discard;");
+    // CPU, compute and frozen replay draw the same vertex/fragment pair.
+    const auto pass = ReadShader("src/luminumbra_client/rendering/passes/FoliagePass.cpp");
+    ExpectContains(pass, "res/shaders/foliage.vert");
+    ExpectContains(pass, "res/shaders/foliage.frag");
 }
 
 TEST(WeatherFrameContract, LiveRainReachesSkyAndOverlayWithoutANearbyStorm) {
