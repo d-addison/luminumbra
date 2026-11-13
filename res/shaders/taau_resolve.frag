@@ -23,7 +23,19 @@ void main() {
     // The sky is drawn after the G-buffer and has no motion vectors. Reusing
     // zero-motion history smears moving clouds/camera turns; sharpening that
     // stale color independently per channel creates cyan cloud fringes.
-    if (u_history_valid == 0 || texture(u_sceneDepth, TexCoords).r <= 0.0) {
+    // Keep temporal edge coverage when jitter puts a silhouette pixel on sky.
+    float skyDepth = texture(u_sceneDepth, TexCoords).r;
+    if (skyDepth <= 0.0) {
+        // Clamp the fixed 3x3 scan at image borders instead of wrapping.
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                vec2 depthUV = clamp(TexCoords + vec2(float(dx), float(dy)) * u_texel,
+                                     vec2(0.0), vec2(1.0));
+                skyDepth = max(skyDepth, texture(u_sceneDepth, depthUV).r);
+            }
+        }
+    }
+    if (u_history_valid == 0 || skyDepth <= 0.0) {
         FragColor = vec4(curr, 1.0);
         return;
     }

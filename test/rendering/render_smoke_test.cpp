@@ -2408,20 +2408,24 @@ TEST(RenderSmokeTest, TaauSkyKeepsCurrentColorWhileDistantGeometryAccumulates) {
     // Include sharpening in the test: bypass must precede both temporal operations.
     glUniform1f(glGetUniformLocation(program, "u_sharpness"), 0.4f);
     std::vector<glm::vec4> current;
+    std::vector<glm::vec4> depth;
     // Fixed 32-texel probe; adjacent colors admit the stale history through its AABB.
     current.reserve(32);
+    depth.reserve(32);
     for (int x = 0; x < 32; ++x) {
         current.emplace_back(x % 2 == 0 ? 0.25f : 0.75f);
+        depth.emplace_back(x < 16 ? 0.0f : 1e-9f);
     }
     probe.texture(0, current);
     probe.texture(1, {glm::vec4(0.5f)});
     probe.texture(2, {glm::vec4(0.0f)});
-    probe.texture(3, {glm::vec4(0.0f), glm::vec4(1e-9f)});
+    probe.texture(3, depth);
     for (const int valid : {0, 1}) {
         glUniform1i(glGetUniformLocation(program, "u_history_valid"), valid);
         const auto pixels = probe.draw();
         for (std::size_t x = 0; x < pixels.size(); ++x) {
-            if (valid == 0 || x < 16) {
+            // Texel 15 is cleared sky beside geometry and must retain edge coverage.
+            if (valid == 0 || x < 15) {
                 EXPECT_FLOAT_EQ(pixels[x].r, current[x].r);
                 EXPECT_FLOAT_EQ(pixels[x].g, current[x].g);
                 EXPECT_FLOAT_EQ(pixels[x].b, current[x].b);

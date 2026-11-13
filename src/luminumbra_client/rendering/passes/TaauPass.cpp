@@ -170,8 +170,8 @@ void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen)
                       ctx.screen_height,
                       0,
                       0,
-                      ctx.screen_width,
-                      ctx.screen_height,
+                      ctx.internal_w(),
+                      ctx.internal_h(),
                       GL_COLOR_BUFFER_BIT,
                       GL_NEAREST);
 

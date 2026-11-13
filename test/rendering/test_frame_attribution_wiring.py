@@ -2078,7 +2078,7 @@ class CloudRenderingWiring(unittest.TestCase):
     def test_taau_sky_bypass_precedes_history_and_sharpen_in_live_and_replay(self):
         shader = read(ROOT / "res/shaders/taau_resolve.frag")
         main = block(shader, "void main()")
-        early = block(main, "if (u_history_valid == 0 || texture(u_sceneDepth, TexCoords).r <= 0.0)")
+        early = block(main, "if (u_history_valid == 0 || skyDepth <= 0.0)")
         self.assertIn("FragColor = vec4(curr, 1.0)", early)
         self.assertIn("return;", early)
         self.assertLess(main.index("texture(u_sceneDepth"), main.index("texture(u_history"))
@@ -2093,6 +2093,78 @@ class CloudRenderingWiring(unittest.TestCase):
         execute = compact(block(read(CLIENT / "rendering/passes/TaauPass.cpp"), "void TaauPass::execute("))
         self.assertIn("glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id)", execute)
         self.assertIn('m_shader->setInt("u_sceneDepth", 3)', execute)
+
+    def test_taau_only_interior_sky_bypasses_accumulation(self):
+        main = block(read(ROOT / "res/shaders/taau_resolve.frag"), "void main()")
+        self.assertIn("if (skyDepth <= 0.0)", main)
+        scan = block(main, "if (skyDepth <= 0.0)")
+        self.assertIn("float skyDepth = texture(u_sceneDepth, TexCoords).r;", main)
+        rows = block(scan, "for (int dy = -1; dy <= 1; ++dy)")
+        samples = compact(block(rows, "for (int dx = -1; dx <= 1; ++dx)"))
+        self.assertEqual(samples,
+                         "vec2 depthUV = clamp(TexCoords + vec2(float(dx), float(dy)) * u_texel, "
+                         "vec2(0.0), vec2(1.0)); "
+                         "skyDepth = max(skyDepth, texture(u_sceneDepth, depthUV).r);")
+        bypass = re.search(r"if \((u_history_valid == 0 \|\| [^\n]+)\)", main).group(1)
+        early = block(main, "if (" + bypass + ")")
+        self.assertEqual(compact(early), "FragColor = vec4(curr, 1.0); return;")
+        self.assertLess(main.index(scan), main.index(early))
+        # Evaluate the production bypass after the pinned max-depth reduction.
+        # Cover every neighbour (including diagonals), tiny positive depths, and
+        # border replication for a one-texel image and all four image corners.
+        grids = [("interior", [[0.0] * 3 for _ in range(3)], 1, 1, True),
+                 ("one sky texel", [[0.0]], 0, 0, True),
+                 ("one geometry texel", [[1.0]], 0, 0, False)]
+        for y in range(3):
+            for x in range(3):
+                for depth in (1e-7, 1.0):
+                    grid = [[0.0] * 3 for _ in range(3)]
+                    grid[y][x] = depth
+                    grids.append((f"geometry {x},{y} depth {depth}", grid, 1, 1, False))
+        for x, y in ((0, 0), (2, 0), (0, 2), (2, 2)):
+            clear = [[0.0] * 3 for _ in range(3)]
+            edge = [[0.0] * 3 for _ in range(3)]
+            edge[1][1] = 0.5
+            grids.extend((("clear corner", clear, x, y, True),
+                          ("edge corner", edge, x, y, False)))
+        for name, grid, x, y, interior in grids:
+            for valid in (0, 1):
+                with self.subTest(case=name, history_valid=valid):
+                    depths = [grid[max(0, min(len(grid) - 1, y + dy))]
+                                  [max(0, min(len(grid[0]) - 1, x + dx))]
+                              for dy in range(-1, 2) for dx in range(-1, 2)]
+                    skipped = cpp_expression(bypass, u_history_valid=valid, skyDepth=max(depths))
+                    self.assertEqual(skipped, not valid or interior)
+        # Once the bypass falls through, in-bounds edge history must reach both
+        # the existing clamp and blend without another unconditional early exit.
+        accumulation = main[main.index(early) + len(early) + 1:]
+        offscreen = re.search(r"if \((histUV.x < .*?)\)\s*\{", accumulation).group(1)
+        self.assertFalse(cpp_expression(offscreen, **{"histUV.x": 0.5, "histUV.y": 0.5}))
+        for x, y in ((-0.01, 0.5), (1.01, 0.5), (0.5, -0.01), (0.5, 1.01)):
+            self.assertTrue(cpp_expression(offscreen, **{"histUV.x": x, "histUV.y": y}))
+        offscreen_body = block(accumulation, "if (" + offscreen + ")")
+        self.assertEqual(accumulation.count("return;"), offscreen_body.count("return;"))
+        self.assertLess(accumulation.index("hist = clamp(hist, nmin, nmax);"),
+                        accumulation.index("vec3 resolved = mix(curr, hist, blend);"))
+
+    def test_taau_copy_uses_screen_source_and_internal_destination(self):
+        execute = block(read(CLIENT / "rendering/passes/TaauPass.cpp"), "void TaauPass::execute(")
+        copies = re.findall(r"glBlitFramebuffer\((.*?)\);", execute, re.S)
+        self.assertEqual(len(copies), 1)
+        arguments = [compact(arg) for arg in copies[0].split(",")]
+        self.assertEqual(arguments[8:], ["GL_COLOR_BUFFER_BIT", "GL_NEAREST"])
+        self.assertIn("glViewport(0, 0, ctx.screen_width, ctx.screen_height);", execute)
+        self.assertIn("glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);", execute)
+        self.assertIn("glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);", execute)
+        for width, height, internal_w, internal_h in (
+                (1920, 1080, 960, 540), (1919, 1079, 960, 540),
+                (1920, 1080, 1920, 1080), (1, 1, 1, 1), (1920, 1080, 0, 0)):
+            with self.subTest(screen=(width, height), internal=(internal_w, internal_h)):
+                dest_w, dest_h = internal_w or width, internal_h or height
+                values = {"ctx.screen_width": width, "ctx.screen_height": height,
+                          "ctx.internal_w()": dest_w, "ctx.internal_h()": dest_h}
+                rectangle = [cpp_expression(arg, **values) for arg in arguments[:8]]
+                self.assertEqual(rectangle, [0, 0, width, height, 0, 0, dest_w, dest_h])
 
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod
