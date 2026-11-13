@@ -188,15 +188,20 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
         }
         Comp::PlantRegionComponent identity;
         const bool owned = reg.all_of<Comp::PlantRegionComponent>(e);
+        if (owned) {
+            // A disabled regional gate admits every position. Resolve ownership before
+            // either allocator can consume an ID or the birth factory can create a child.
+            if (!::Luminumbra::world::ActiveRegionLedger::valid_anchor(childPos)) {
+                continue;
+            }
+            const auto owner = ::Luminumbra::world::ActiveRegionLedger::region_at(childPos);
+            identity.owner_x = owner.x;
+            identity.owner_z = owner.z;
+            identity.region_stamp = tick;
+        }
         if (owned && !allocator) {
             if (!allocate_identity(identity.persistent_id)) {
                 continue;
-            }
-            if (identity.persistent_id != 0) {
-                const auto owner = ::Luminumbra::world::ActiveRegionLedger::region_at(childPos);
-                identity.owner_x = owner.x;
-                identity.owner_z = owner.z;
-                identity.region_stamp = tick;
             }
         }
         births.push_back({e,
@@ -223,11 +228,9 @@ inline CropLifecycleStats RunCropLifecycle(entt::registry& reg,
         if (child == entt::null)
             continue;
         if (allocator && b.owned) {
-            const auto owner = ::Luminumbra::world::ActiveRegionLedger::region_at(b.pos);
-            reg.emplace<Comp::PlantRegionComponent>(
-                child,
-                Comp::PlantRegionComponent{
-                    RequirePlantSimulationId(reg, child), owner.x, owner.z, tick});
+            auto identity = b.identity;
+            identity.persistent_id = RequirePlantSimulationId(reg, child);
+            reg.emplace<Comp::PlantRegionComponent>(child, identity);
         } else if (b.identity.persistent_id != 0) {
             reg.emplace<Comp::PlantRegionComponent>(child, b.identity);
         }

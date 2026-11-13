@@ -348,6 +348,112 @@ TEST(CropLifecycle, SimulationExhaustionPreservesAnnualAndPerennialParents) {
     }
 }
 
+void ExpectInvalidOwnedDestinationUnchanged(const Luminumbra::Vec3& position,
+                                            std::uint64_t outward_tick,
+                                            bool simulation,
+                                            bool regional,
+                                            bool perennial) {
+    using Ledger = Luminumbra::world::ActiveRegionLedger;
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    SCOPED_TRACE(simulation);
+    SCOPED_TRACE(regional);
+    SCOPED_TRACE(perennial);
+    SCOPED_TRACE(position.x);
+    SCOPED_TRACE(position.z);
+    entt::registry registry;
+    Ledger ledger;
+    (void)registry.create(); // Keep the parent's runtime handle equal to ID 1.
+    const auto parent = spawnRipe(registry, perennial, 1, position, RandomGenome(1));
+    ASSERT_EQ(entt::to_integral(parent), 1u);
+    registry.emplace<C::SimulationIdentityComponent>(parent, 1u);
+    const auto owner = Ledger::valid_anchor(position) ? Ledger::region_at(position)
+                                                      : Luminumbra::world::RegionKey{0, 0};
+    registry.emplace<C::PlantRegionComponent>(parent,
+                                              C::PlantRegionComponent{1u, owner.x, owner.z, 0u});
+    registry.emplace<C::GrazeableComponent>(parent, C::GrazeableComponent{0.25f, 6u});
+    registry.get<C::PlantGrowthComponent>(parent).stress_points = 81;
+    ASSERT_TRUE(ledger.reserve_persistent_ids(2));
+    const auto before_ledger = ledger.encode();
+    const auto before_entities = registry.storage<entt::entity>().free_list();
+    const auto before_plants = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+        F::BuildPlantEntitySnapshot(registry, true));
+    const auto identity =
+        simulation ? Gate::PlantIdentity::Simulation : Gate::PlantIdentity::Legacy;
+    const std::array due{owner};
+    std::vector<std::uint64_t> owners;
+    const auto gate = regional ? Gate(registry, due, owners, identity) : Gate(identity);
+    std::uint32_t allocations = 0;
+    const auto allocate = [&ledger, &allocations](std::uint64_t& id) {
+        ++allocations;
+        return ledger.allocate_persistent_id(id);
+    };
+    F::CropLifecycleStats stats;
+    ASSERT_NO_THROW(
+        stats = simulation ? F::RunCropLifecycleOnTick(registry, outward_tick, 99, gate, ledger)
+                           : F::RunCropLifecycleOnTick(registry, outward_tick, 99, gate, allocate));
+    EXPECT_EQ(stats.reseeded, 0);
+    EXPECT_EQ(stats.ripening, 0);
+    EXPECT_EQ(stats.reset, 0);
+    EXPECT_EQ(stats.died, 0);
+    EXPECT_EQ(allocations, 0u);
+    EXPECT_EQ(ledger.next_persistent_id(), 2u);
+    EXPECT_EQ(ledger.encode(), before_ledger);
+    EXPECT_EQ(registry.storage<entt::entity>().free_list(), before_entities);
+    ASSERT_TRUE(registry.valid(parent));
+    EXPECT_EQ(plantCount(registry), 1u);
+    EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                  F::BuildPlantEntitySnapshot(registry, true)),
+              before_plants);
+    EXPECT_EQ(F::RequirePlantSimulationId(registry, parent), 1u);
+    EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).ripe_ticks, 0u);
+    EXPECT_EQ(registry.get<C::CropLifecycleComponent>(parent).generations, 0u);
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(parent).stage,
+              static_cast<std::uint8_t>(C::PlantStage::Fruiting));
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(parent).stress_points, 81u);
+    EXPECT_FLOAT_EQ(registry.get<C::GrazeableComponent>(parent).biomass, 0.25f);
+    EXPECT_EQ(registry.get<C::GrazeableComponent>(parent).last_grazed_tick, 6u);
+}
+
+TEST(CropLifecycle, InvalidOwnedDestinationsLeaveParentsEntitiesAndLedgerUnchanged) {
+    using Ledger = Luminumbra::world::ActiveRegionLedger;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::array positions{Luminumbra::Vec3(16777215.0f, 0, 100),
+                               Luminumbra::Vec3(-16777216.0f, 0, 100),
+                               Luminumbra::Vec3(100, 0, 16777215.0f),
+                               Luminumbra::Vec3(100, 0, -16777216.0f),
+                               Luminumbra::Vec3(nan, 0, 100),
+                               Luminumbra::Vec3(100, inf, 100),
+                               Luminumbra::Vec3(100, 0, inf)};
+    for (const auto& position : positions) {
+        // Find outward dispersal using the same full ID in both identity lanes.
+        // At most 100 probes, independent of the world and registry sizes.
+        std::uint64_t outward_tick = 0;
+        for (std::uint64_t tick = 1; tick <= 100; ++tick) {
+            auto rng = DeterministicRng::seeded(F::kGerminationSeedOffset ^ 99u, 1u, tick);
+            const float angle = rng.next_unit() * 6.2831853f;
+            const float radius = 1.0f + rng.next_unit() * 2.0f;
+            const Luminumbra::Vec3 destination(
+                position.x + radius * Luminumbra::DeterministicMath::Cos(angle),
+                position.y,
+                position.z + radius * Luminumbra::DeterministicMath::Sin(angle));
+            if (!Ledger::valid_anchor(destination)) {
+                outward_tick = tick;
+                break;
+            }
+        }
+        ASSERT_NE(outward_tick, 0u);
+        for (const bool simulation : {true, false}) {
+            for (const bool regional : {false, true}) {
+                for (const bool perennial : {false, true}) {
+                    ExpectInvalidOwnedDestinationUnchanged(
+                        position, outward_tick, simulation, regional, perennial);
+                }
+            }
+        }
+    }
+}
+
 TEST(CropLifecycle, SimulationAdmissionRefusesBeforeParentOrCursorMutation) {
     using Gate = Luminumbra::world::RegionConsumerGate;
     for (const int failure : {0, 1, 2, 3, 4}) {

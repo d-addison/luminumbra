@@ -313,21 +313,36 @@ TEST(Pollination, SimulationDonorTiesUseAllIdentityBitsInBothRegionModes) {
 
 TEST(Pollination, SimulationCrossPreservesCanonicalParentArgumentOrder) {
     using Gate = Luminumbra::world::RegionConsumerGate;
-    entt::registry registry;
-    const auto high = spawnPlant(registry, 0, 0, uniformGenome(0.8f), Comp::PlantStage::Flowering);
-    const auto low = spawnPlant(registry, 1, 0, uniformGenome(0.2f), Comp::PlantStage::Flowering);
-    constexpr auto high_id = std::uint64_t{1} << 50;
-    registry.emplace<Comp::SimulationIdentityComponent>(high, high_id);
-    registry.emplace<Comp::SimulationIdentityComponent>(low, 17u);
-    const auto gate = Gate(Gate::PlantIdentity::Simulation);
-    // Independent oracle: both the seed and genome argument order use stable IDs.
-    auto rng = luminumbra::core::DeterministicRng::seeded(
-        luminumbra::foliage::kPollinationSeedOffset ^ 99u ^ 7u, 17u, high_id);
-    const auto expected =
-        luminumbra::foliage::BreedPlants(uniformGenome(0.2f), uniformGenome(0.8f), rng);
-    ASSERT_EQ(RunPollinationOnTick(registry, 7, {}, 99, 0.05f, gate).crossed, 2);
-    EXPECT_EQ(registry.get<Comp::PollinationComponent>(high).next_genome.genes, expected.genes);
-    EXPECT_EQ(registry.get<Comp::PollinationComponent>(low).next_genome.genes, expected.genes);
+    for (const bool regional : {false, true}) {
+        for (const float mutation_frac : {0.0f, 0.05f, 0.25f}) {
+            SCOPED_TRACE(regional);
+            SCOPED_TRACE(mutation_frac);
+            entt::registry registry;
+            const auto high =
+                spawnPlant(registry, 100, 100, uniformGenome(0.8f), Comp::PlantStage::Flowering);
+            const auto low =
+                spawnPlant(registry, 101, 100, uniformGenome(0.2f), Comp::PlantStage::Flowering);
+            constexpr auto high_id = std::uint64_t{1} << 50;
+            registry.emplace<Comp::SimulationIdentityComponent>(high, high_id);
+            registry.emplace<Comp::SimulationIdentityComponent>(low, 17u);
+            const std::array due{Luminumbra::world::RegionKey{0, 0}};
+            std::vector<std::uint64_t> owners;
+            const auto gate = regional
+                                  ? Gate(registry, due, owners, Gate::PlantIdentity::Simulation)
+                                  : Gate(Gate::PlantIdentity::Simulation);
+            // Independent oracle: ascending stable IDs order both seed inputs and genomes.
+            // Breeding must use the caller's mutation fraction, not BreedPlants' default.
+            auto rng = luminumbra::core::DeterministicRng::seeded(
+                luminumbra::foliage::kPollinationSeedOffset ^ 99u ^ 7u, 17u, high_id);
+            const auto expected = luminumbra::foliage::BreedPlants(
+                uniformGenome(0.2f), uniformGenome(0.8f), rng, mutation_frac);
+            ASSERT_EQ(RunPollinationOnTick(registry, 7, {}, 99, mutation_frac, gate).crossed, 2);
+            EXPECT_EQ(registry.get<Comp::PollinationComponent>(high).next_genome.genes,
+                      expected.genes);
+            EXPECT_EQ(registry.get<Comp::PollinationComponent>(low).next_genome.genes,
+                      expected.genes);
+        }
+    }
 }
 
 TEST(Pollination, SimulationAdmissionRefusesInvalidIdentitiesBeforeAnyCross) {
