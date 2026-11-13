@@ -193,6 +193,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 }
 
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
+    // Live weather and clouds have supplied defaults. Apply each atmosphere
+    // scenario's final weather, cloud, lightning and particle wind pins once here.
+    (void)driveWeatherVisual();
+    (void)driveCloudShadow();
+    (void)drivePrecipitation();
     if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() ||
         scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() ||
         scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() ||
