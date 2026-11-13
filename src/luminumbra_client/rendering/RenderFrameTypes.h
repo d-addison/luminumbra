@@ -80,22 +80,22 @@ struct CloudRenderState {
 // lightning state for a single captured frame. A strike
 // is a deterministic SIM world event (Systems::StrikeEvent, in the `weather`
 // world_hash sub-hash); this is the ONE-WAY (regression review) render response the
-// client pushes for the frame(s) the bolt is visible: a full-scene LIGHT PULSE
+// client pushes for the frame(s) the bolt is visible: a localized light pulse
 // injected through the lighting pass + a screen-space BOLT polyline rasterized in
 // the same pass (no new GL objects). Nothing here is hashed or written back to sim.
 //
-//  - pulse_intensity  scales a full-scene additive luminance spike (the 1-to-few-
+//  - pulse_intensity  scales a localized, scene-relative luminance pulse (the 1-to-few-
 //    frame flash); 0 == the zero-cost OFF path (no added lighting work).
 //  - pulse_color      the flash tint (cool white-blue by default).
-//  - strike_ndc       the strike ground point projected to NDC [-1,1] (for a mild
-//    radial brightening centred on the strike).
+//  - strike_ndc       the projected strike ground point (possibly outside the
+//    viewport), centring the bounded, scene-relative flash.
 //  - bolt_points_ndc  the bolt polyline (main channel + branches, flattened with
 //    kLiveBoltPenUp separators) in NDC; the lighting frag adds bright pixels near any
 //    segment so the capture shows a thin high-gradient structure.
 inline constexpr int kMaxBoltSegmentPoints = 96; // GLSL uniform array cap
 struct LightningRenderState {
     bool active = false;          // master toggle (false == zero added cost)
-    float pulse_intensity = 0.0f; // [0,~3] full-scene additive flash strength
+    float pulse_intensity = 0.0f; // [0,~3] localized flash strength
     glm::vec3 pulse_color = glm::vec3(0.72f, 0.82f, 1.0f); // cool flash tint
     glm::vec2 strike_ndc = glm::vec2(0.0f);                // strike point in NDC (radial centre)
     float bolt_width_ndc = 0.004f;                         // bolt core half-width in NDC units
@@ -105,19 +105,10 @@ struct LightningRenderState {
     // ground_flash scales the radial impact glow (0 = off, keeps gates byte-stable).
     glm::vec2 ground_ndc = glm::vec2(0.0f, -1.0f);
     float ground_flash = 0.0f;
-    //  DARK STORM CLOUD anchor. The owner saw the bolt
-    // "appear from thin air". cloud_anchor_ndc is the screen point at the TOP of the
-    // bolt (where it should emerge from the cloud base); cloud_darkness scales a
-    // dark, billowing cloud mass the overlay paints around that anchor so the bolt
-    // visibly STEMS FROM a cloud and the flash lights that cloud from within.
-    // 0 == no cloud overlay (keeps the WeatherVisual strike gate byte-stable).
-    glm::vec2 cloud_anchor_ndc = glm::vec2(0.0f, 0.85f);
-    float cloud_darkness = 0.0f;
     // Flattened NDC polyline points. kLiveBoltPenUp (-3, -3), declared in
     // LiveStrikeComposer.h, is the exact PEN-UP separator between disjoint polylines
-    // (main channel / each branch). Real live points are clipped to [-1, 1]; capture
-    // projections also keep real points outside the marker range. Drawn as connected
-    // segments between consecutive non-separator points.
+    // (main channel / each branch). Points are clipped to the view with a glow margin.
+    // Drawn as connected segments between consecutive non-separator points.
     std::vector<glm::vec2> bolt_points_ndc;
 };
 
