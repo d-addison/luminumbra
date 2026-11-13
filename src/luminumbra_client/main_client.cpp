@@ -6042,6 +6042,15 @@ int main(int argc, char* argv[]) {
                                            std::chrono::steady_clock::now() - _fb0)
                                            .count();
                     }
+                    if (g_app.capture.frame_scan_active && g_camera) {
+                        // Apply scan pins after live clock updates and before rendering,
+                        // including zero-settle captures and upload-wait retries.
+                        g_camera->Position = glm::vec3(8.0f, 24.0f, 8.0f);
+                        g_camera->Yaw = 35.0f;
+                        g_camera->Pitch = -14.0f;
+                        g_camera->updateCameraVectors();
+                        renderPipeline.set_time_of_day(0.04f);
+                    }
                     const double render_phases_before = Attribution::phase_total_ms();
                     const double render_foliage_before = foliage_scope.snapshot().rebuild_ms;
                     const auto _rb_rcall_t0 =
@@ -6198,9 +6207,8 @@ int main(int argc, char* argv[]) {
                         Luminumbra::Rendering::CaptureManifestInput frame_scan_manifest;
                         if (g_app.capture.frame_scan_settle >=
                             g_app.capture.frame_scan_settle_target) {
-                            // Observe this rendered frame before the setters below prepare
-                            // the next one. In particular, zero settle must retain the
-                            // time of day and camera that actually produced the pixels.
+                            // Observe the rendered frame after its scan pins were applied,
+                            // including when no settling frames were requested.
                             glfwGetFramebufferSize(window, &vw, &vh);
                             frame_scan_manifest = Luminumbra::Rendering::ObserveCaptureManifest(
                                 *gameSession,
@@ -6211,17 +6219,6 @@ int main(int argc, char* argv[]) {
                                 g_app.overlay.wireframe_mode,
                                 false);
                         }
-                        if (g_camera) {
-                            // Eye-level ground-inspection pose: low + a gentle down-pitch so
-                            // the near-field grass/rock/terrain fill the lower frame (card
-                            // shape + specks are visible), with terrain to the horizon above.
-                            // Deterministic fixed pose.
-                            g_camera->Position = glm::vec3(8.0f, 24.0f, 8.0f);
-                            g_camera->Yaw = 35.0f;
-                            g_camera->Pitch = -14.0f;
-                            g_camera->updateCameraVectors();
-                        }
-                        renderPipeline.set_time_of_day(0.04f); // fixed near-noon (lit terrain)
                         if (g_app.capture.frame_scan_settle <
                             g_app.capture.frame_scan_settle_target) {
                             ++g_app.capture.frame_scan_settle;

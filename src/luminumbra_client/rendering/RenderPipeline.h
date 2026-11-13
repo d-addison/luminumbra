@@ -637,6 +637,9 @@ public:
     void set_terrain_coverage_diagnostics_enabled(bool enabled,
                                                   bool bypass_camera_region_guard = false);
     nlohmann::json terrain_coverage_diagnostics(bool include_live_chunks = false) const;
+    // Owner-thread, after rendering and before present. Reads one depth pixel;
+    // reports terrain ownership policy, not the identity of a prop at that pixel.
+    nlohmann::json terrain_peak_diagnostics(const glm::vec3& target) const;
     bool capture_terrain_coverage(const std::filesystem::path& out_dir) const;
 
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
