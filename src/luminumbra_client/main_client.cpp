@@ -263,6 +263,7 @@ struct WorldDressingPending {
     // Amortized consume cursors — each lane replays its vector strictly in order.
     std::size_t trees_done = 0, rocks_done = 0, bushes_done = 0, wildlife_done = 0;
     bool trees_logged = false, rocks_logged = false, bushes_logged = false;
+    bool simulation_done = false;
     int creatures_spawned = 0; // Kind::Creature consumed (the legacy wlSpawned log)
     bool synchronous = false;  // capture/scenario: consume everything on one frame
     bool wildlife_ok = false;  // interactive play + roster + rig loaded (gates spawn/colony/log)
@@ -289,6 +290,29 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
                                  int maxPerFrame = 4) {
     if (!phys)
         return;
+    using Session = Luminumbra::world::GameSession;
+    if (Session::UsesSimulationSpawns(reg)) {
+        auto& spawns = reg.ctx().get<Session::SimulationSpawns>();
+        spawns.AvatarScratch().clear();
+        for (const auto entity :
+             reg.view<const Luminumbra::Components::CreatureComponent,
+                      const Luminumbra::Components::TransformComponent,
+                      const Luminumbra::Components::SimulationIdentityComponent>()) {
+            if (reg.get<Luminumbra::Components::SimulationIdentityComponent>(entity).id != 0 &&
+                !reg.any_of<Luminumbra::Components::CreaturePhysicsComponent,
+                            Session::PendingCreatureAvatar>(entity))
+                spawns.AvatarScratch().push_back(entity);
+        }
+        Session::OrderSimulationAvatars(reg, spawns.AvatarScratch());
+        int requested = 0;
+        for (const auto entity : spawns.AvatarScratch()) {
+            if (requested >= maxPerFrame)
+                break;
+            reg.emplace<Session::PendingCreatureAvatar>(entity);
+            ++requested;
+        }
+        return;
+    }
     int made = 0;
     auto view = reg.view<const Luminumbra::Components::CreatureComponent,
                          const Luminumbra::Components::TransformComponent>();
@@ -454,7 +478,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 if (c.kind == Luminumbra::Client::CreaturePlacement::Kind::WaterHole) {
                     // A DRINKING SPOT at the water so the wired thirst
                     // system has somewhere to steer creatures.
-                    const auto he = reg.create();
+                    const auto he = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                        reg, Luminumbra::world::GameSession::SpawnSource::Wildlife);
                     auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
                     htf.position = c.position;
                     reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
@@ -465,7 +490,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     static_cast<std::size_t>(c.species_index) >= roster.size())
                     continue; // defensive: the roster never changes mid-session
                 const auto& sp = roster[static_cast<std::size_t>(c.species_index)];
-                const auto e = reg.create();
+                const auto e = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                    reg, Luminumbra::world::GameSession::SpawnSource::Wildlife);
                 auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                 tf.position = c.position; // settle onto ground (gy + 1.2)
                 tf.scale = Luminumbra::Vec3(c.build_scale.x, c.build_scale.y, c.build_scale.z);
@@ -523,7 +549,12 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     reg.emplace<Luminumbra::Components::MigratoryComponent>(e);
                     auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
                     const std::uint32_t jit =
-                        static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 36000u;
+                        static_cast<std::uint32_t>(
+                            (Luminumbra::world::GameSession::UsesSimulationSpawns(reg)
+                                 ? pend.wildlife_done - 1
+                                 : entt::to_integral(e)) *
+                            2654435761u) %
+                        36000u;
                     mort.lifespan_ticks = 108000u + jit; // ~60-80 min @30Hz ambient turnover
                     reg.emplace<Luminumbra::Components::DecayComponent>(e).decay_duration = 900u;
                 }
@@ -532,10 +563,12 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 pl.clip = &g_app.worldDressing.wildlifeIdle;
                 pl.time = c.anim_phase * 2.0; // staggered phase
                 pl.looping = true;
-                if (phys) {
+                if (phys && !Luminumbra::world::GameSession::UsesSimulationSpawns(reg)) {
                     const std::size_t idx = phys->create_avatar_character(
                         glm::vec3(c.position.x, c.position.y, c.position.z));
                     reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                } else if (phys) {
+                    reg.emplace<Luminumbra::world::GameSession::PendingCreatureAvatar>(e);
                 }
                 ++pend.creatures_spawned;
             }
@@ -547,7 +580,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                                        pend.rocks_done == pend.result.rocks.size() &&
                                        pend.bushes_done == pend.result.bushes.size() &&
                                        pend.wildlife_done == pend.result.wildlife.size();
-        if (dressing_complete) {
+        if (!pend.simulation_done &&
+            (dressing_complete || (Luminumbra::world::GameSession::UsesSimulationSpawns(reg) &&
+                                   pend.wildlife_done == pend.result.wildlife.size()))) {
             if (pend.wildlife_ok) {
                 LUMINUMBRA_CORE_INFO("Living world: spawned {} skinned, species-varied ambient "
                                      "creatures around spawn",
@@ -587,7 +622,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                                      luminumbra::core::SysParam::ColonyFoodAmount, 1000000.0f))
                                : 1000000;
                     auto placeFood = [&](int cx, int cz) {
-                        const auto fe = reg.create();
+                        const auto fe = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                            reg, Luminumbra::world::GameSession::SpawnSource::Foraging);
                         auto& fs = reg.emplace<Luminumbra::Components::FoodSourceComponent>(fe);
                         fs.cell_x = clampCell(cx);
                         fs.cell_z = clampCell(cz);
@@ -596,7 +632,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     placeFood(nestCx + 14, nestCz);    // far food (long path)
                     placeFood(nestCx - 9, nestCz + 4); // near food (short path)
                     for (int ai = 0; ai < antCount; ++ai) {
-                        const auto ae = reg.create();
+                        const auto ae = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                            reg, Luminumbra::world::GameSession::SpawnSource::Foraging);
                         auto& fg = reg.emplace<Luminumbra::Components::ForagerComponent>(ae);
                         fg.cell_x = nestCx;
                         fg.cell_z = nestCz;
@@ -668,8 +705,11 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     if (!tmpl)
                         continue;
                     const float hx = anchor.x + simOffsets[i].x, hz = anchor.z + simOffsets[i].z;
-                    luminumbra::foliage::MakePlantFromSpecies(
-                        reg, Luminumbra::Vec3(hx, terr(hx, hz), hz), *tmpl, sgen, 0);
+                    Luminumbra::world::GameSession::QueueSimulationParticipant(
+                        reg,
+                        luminumbra::foliage::MakePlantFromSpecies(
+                            reg, Luminumbra::Vec3(hx, terr(hx, hz), hz), *tmpl, sgen, 0),
+                        Luminumbra::world::GameSession::SpawnSource::Plants);
                     ++seeded;
                 }
                 LUMINUMBRA_CORE_INFO(" : seeded {} SIM plants (real growth tick)", seeded);
@@ -714,10 +754,13 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 // slopes).
                 auto* phys = gameSession->GetPhysicsSystem();
                 int preyIdx = 0; // alternate founder sexes so a herd can pair up
+                std::uint32_t founder_ordinal = 0;
                 auto mkCreature = [&](float ox, float oz, bool predator, float hunger) {
+                    const auto ordinal = founder_ordinal++;
                     const float cx = anchor.x + ox, cz = anchor.z + oz;
                     const float cy = terr(cx, cz) + 1.5f; // capsule centre above ground
-                    const auto e = reg.create();
+                    const auto e = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                        reg, Luminumbra::world::GameSession::SpawnSource::Creatures);
                     auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                     tf.position = Luminumbra::Vec3(cx, cy, cz);
                     auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
@@ -762,15 +805,22 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     if (g_app.capture.timelapse_calm) {
                         auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
                         const std::uint32_t jit =
-                            static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 240u;
+                            static_cast<std::uint32_t>(
+                                (Luminumbra::world::GameSession::UsesSimulationSpawns(reg)
+                                     ? ordinal
+                                     : entt::to_integral(e)) *
+                                2654435761u) %
+                            240u;
                         mort.lifespan_ticks = 420u + jit; // ~14-22s @30Hz
                         auto& dec = reg.emplace<Luminumbra::Components::DecayComponent>(e);
                         dec.decay_duration = 120u; // carcass fades over ~4s after death
                     }
-                    if (phys) {
+                    if (phys && !Luminumbra::world::GameSession::UsesSimulationSpawns(reg)) {
                         const std::size_t idx =
                             phys->create_avatar_character(glm::vec3(cx, cy, cz));
                         reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    } else if (phys) {
+                        reg.emplace<Luminumbra::world::GameSession::PendingCreatureAvatar>(e);
                     }
                 };
                 if (g_app.capture.timelapse_calm) {
@@ -813,7 +863,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     for (int ix = 0; ix < N; ++ix) {
                         const float cx = x0 + static_cast<float>(ix) * sp,
                                     cz = z0 + static_cast<float>(iz) * sp;
-                        const auto e = reg.create();
+                        const auto e = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                            reg, Luminumbra::world::GameSession::SpawnSource::Fire);
                         auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                         tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
                         auto& cb = reg.emplace<Luminumbra::Components::CombustibleComponent>(e);
@@ -828,7 +879,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 LUMINUMBRA_CORE_INFO(
                     "sim.fire: spawned {}x{} combustible patch, centre alight", N, N);
             }
-            // Fully consumed: release the pending result (idle again).
+            pend.simulation_done = true;
+        }
+        if (dressing_complete && pend.simulation_done) {
             worldDressing.reset();
             worldDressingHandle = {};
         }
@@ -1279,7 +1332,10 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                     luminumbra::foliage::kPlantSeedOffset,
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.x * 8.0f)),
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^ ftick);
-                if (g_app.hud.farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null) {
+                const auto planted = g_app.hud.farming.Seed(freg, aim, tmpl, frng, ftick);
+                if (planted != entt::null) {
+                    Luminumbra::world::GameSession::QueueSimulationParticipant(
+                        freg, planted, Luminumbra::world::GameSession::SpawnSource::Plants);
                     if (audioManager)
                         audioManager->PlayOneShot("farm_plant", glm::vec3(aim.x, aim.y, aim.z));
                     LUMINUMBRA_CORE_INFO(

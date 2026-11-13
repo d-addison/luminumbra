@@ -217,16 +217,37 @@ void StepCreatureAvatars(entt::registry& registry,
                          const luminumbra::ai::CreatureTickAdmission* admission,
                          float dt) {
     namespace Comp = Luminumbra::Components;
+    using Session = Luminumbra::world::GameSession;
+    if (Session::UsesSimulationSpawns(registry)) {
+        auto& spawns = registry.ctx().get<Session::SimulationSpawns>();
+        spawns.AvatarScratch().clear();
+        for (const auto entity : registry.view<const Session::PendingCreatureAvatar,
+                                               const Comp::CreatureComponent,
+                                               const Comp::TransformComponent>()) {
+            spawns.AvatarScratch().push_back(entity);
+        }
+        Session::OrderSimulationAvatars(registry, spawns.AvatarScratch());
+        for (const auto entity : spawns.AvatarScratch()) {
+            if (!registry.all_of<Comp::CreaturePhysicsComponent>(entity)) {
+                const auto index = physics.create_avatar_character(
+                    registry.get<Comp::TransformComponent>(entity).position);
+                registry.emplace<Comp::CreaturePhysicsComponent>(entity, index);
+            }
+            registry.remove<Session::PendingCreatureAvatar>(entity);
+        }
+    }
     auto view = registry.view<Comp::CreaturePhysicsComponent,
                               Comp::CreatureComponent,
                               Comp::TransformComponent>();
     if (view.begin() == view.end()) {
         return;
     }
-    std::vector<entt::entity> entities(view.begin(), view.end());
-    std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    std::vector<entt::entity> legacy_entities;
+    auto& entities = Session::UsesSimulationSpawns(registry)
+                         ? registry.ctx().get<Session::SimulationSpawns>().AvatarScratch()
+                         : legacy_entities;
+    entities.assign(view.begin(), view.end());
+    Session::OrderSimulationAvatars(registry, entities);
     // Release all resuming capsules before any new freeze can consume their
     // slots. Both passes visit only the participating physics creatures.
     for (auto entity : entities) {
@@ -301,7 +322,11 @@ struct GameSession::FoliageStep {
         return step.get();
     }
     void Begin(GameSession& session) {
-        registry.Begin(session.m_registry, session.m_activeRegionLedger.next_persistent_id());
+        if (UsesSimulationSpawns(session.m_registry)) {
+            registry.Begin(session.m_registry, session.m_activeRegionLedger);
+        } else {
+            registry.Begin(session.m_registry, session.m_activeRegionLedger.next_persistent_id());
+        }
         soil_staged = !registry.registry().view<const Components::SoilFeederComponent>().empty();
         irrigation_staged =
             !registry.registry().view<const Components::WaterSourceComponent>().empty();
@@ -355,6 +380,36 @@ struct GameSession::FoliageStep {
         }
         return true;
     }
+    static void ReproducePlants(GameSession& session,
+                                entt::registry& plants,
+                                std::uint64_t tick,
+                                const RegionConsumerGate& gate,
+                                FoliageStep* step) {
+        if (gate.UsesSimulationPlantIdentity()) {
+            auto& allocator =
+                step ? step->registry.identity_allocator() : session.m_activeRegionLedger;
+            luminumbra::foliage::RunCropLifecycleOnTick(plants, tick, 0, gate, allocator);
+        } else {
+            const auto allocate_identity = [&session, tick, step](std::uint64_t& id) {
+                return AllocateIdentity(session, tick, step, id);
+            };
+            luminumbra::foliage::RunCropLifecycleOnTick(plants, tick, 0, gate, allocate_identity);
+        }
+    }
+    struct IdentityScratch {
+        const RegionConsumerGate& gate;
+        SimulationSpawns* spawns;
+        IdentityScratch(const RegionConsumerGate& consumer_gate, entt::registry& original)
+            : gate(consumer_gate)
+            , spawns(original.ctx().find<SimulationSpawns>()) {
+            if (spawns)
+                gate.PlantIdentityScratch().swap(spawns->IdentityScratch());
+        }
+        ~IdentityScratch() {
+            if (spawns)
+                gate.PlantIdentityScratch().swap(spawns->IdentityScratch());
+        }
+    };
     void Commit(GameSession& session) noexcept {
         registry.Commit(session.m_registry);
         published_tick = session.m_worldClock.tick();
@@ -486,6 +541,150 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
+bool GameSession::UsesSimulationSpawns(const entt::registry& registry) {
+    return registry.ctx().contains<SimulationSpawns>();
+}
+
+void GameSession::PrepareSimulationCreation() {
+    if (UsesSimulationSpawns(m_registry))
+        throw std::logic_error("Simulation creation is already prepared");
+    m_registry.ctx().emplace<SimulationSpawns>(m_activeRegionLedger);
+}
+
+entt::entity GameSession::CreateSimulationParticipant(entt::registry& registry,
+                                                      SpawnSource source) {
+    if (UsesSimulationSpawns(registry) && source >= SpawnSource::Count)
+        throw std::invalid_argument("Invalid simulation spawn source");
+    const auto entity = registry.create();
+    try {
+        return QueueSimulationParticipant(registry, entity, source);
+    } catch (...) {
+        if (registry.valid(entity))
+            registry.destroy(entity);
+        throw;
+    }
+}
+
+entt::entity GameSession::QueueSimulationParticipant(entt::registry& registry,
+                                                     entt::entity entity,
+                                                     SpawnSource source) {
+    if (auto* spawns = registry.ctx().find<SimulationSpawns>())
+        return spawns->Queue(registry, entity, source);
+    return entity;
+}
+
+entt::entity GameSession::SimulationSpawns::Queue(entt::registry& registry,
+                                                  entt::entity entity,
+                                                  SpawnSource source) {
+    using Identity = Components::SimulationIdentityComponent;
+    const auto index = static_cast<std::size_t>(source);
+    if (index >= m_pending.size() || !registry.valid(entity) ||
+        registry.any_of<Identity, PendingRequest>(entity))
+        throw std::invalid_argument("Invalid simulation spawn request");
+    auto& pending = m_pending[index];
+    if (pending.size() >= entt::entt_traits<entt::entity>::entity_mask)
+        throw std::length_error("Simulation spawn queue full");
+    try {
+        // Zero is an unpublished placeholder, never an admitted identity. Preparing
+        // storage here makes tick-boundary publication an allocation-free assignment.
+        registry.emplace<Identity>(entity, 0u);
+        registry.emplace<PendingRequest>(entity, m_nextToken);
+        pending.push_back({.entity = entity, .token = m_nextToken});
+        ++m_nextToken;
+    } catch (...) {
+        registry.destroy(entity);
+        throw;
+    }
+    return entity;
+}
+
+void GameSession::PublishSimulationSpawns(entt::registry& registry) {
+    if (auto* spawns = registry.ctx().find<SimulationSpawns>())
+        spawns->Publish(registry);
+}
+
+bool GameSession::SimulationSpawns::IsCurrent(const entt::registry& registry,
+                                              const Request& request) {
+    if (!registry.valid(request.entity))
+        return false;
+    const auto* pending = registry.try_get<PendingRequest>(request.entity);
+    return pending && pending->token == request.token;
+}
+
+void GameSession::SimulationSpawns::Publish(entt::registry& registry) {
+    using Identity = Components::SimulationIdentityComponent;
+    std::uint64_t count = 0;
+    // Fixed source rank, then producer ordinal. No component-discovery allocation
+    // and no traversal of residents, chunks or mesh entities at a tick boundary.
+    for (const auto& pending : m_pending) {
+        for (const auto& request : pending) {
+            ++m_publicationVisits;
+            if (!IsCurrent(registry, request))
+                continue;
+            const auto* identity = registry.try_get<Identity>(request.entity);
+            if (!identity || identity->id != 0)
+                throw std::runtime_error("Changed unpublished simulation identity");
+            ++count;
+        }
+    }
+    if (count == 0) {
+        for (auto& pending : m_pending)
+            pending.clear();
+        m_nextToken = 0;
+        return;
+    }
+    auto next = m_allocator.next_persistent_id();
+    if (count > ActiveRegionLedger::kPersistentIdLimit - next ||
+        !m_allocator.reserve_persistent_ids(next + count))
+        throw std::length_error("Simulation spawn identity allocation refused");
+    for (auto& pending : m_pending) {
+        for (const auto& request : pending) {
+            ++m_publicationVisits;
+            if (IsCurrent(registry, request)) {
+                registry.get<Identity>(request.entity).id = next++;
+                registry.remove<PendingRequest>(request.entity);
+            }
+        }
+        pending.clear();
+    }
+    m_nextToken = 0;
+}
+
+void GameSession::OrderSimulationAvatars(entt::registry& registry,
+                                         std::vector<entt::entity>& entities) {
+    if (auto* spawns = registry.ctx().find<SimulationSpawns>()) {
+        spawns->OrderAvatars(registry, entities);
+    } else {
+        std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
+}
+
+void GameSession::SimulationSpawns::OrderAvatars(entt::registry& registry,
+                                                 std::vector<entt::entity>& entities) {
+    luminumbra::foliage::OrderPlantsBySimulationIdentity(
+        registry, entities, m_scratch, &m_avatarVisits);
+    for (const auto entity : entities) {
+        if (registry.get<Components::SimulationIdentityComponent>(entity).id >=
+            m_allocator.next_persistent_id())
+            throw std::runtime_error("Unissued simulation avatar identity");
+    }
+}
+
+bool GameSession::SimulationSpawns::HasPending() const {
+    return std::any_of(
+        m_pending.begin(), m_pending.end(), [](const auto& pending) { return !pending.empty(); });
+}
+
+void GameSession::SimulationSpawns::Clear() {
+    for (auto& pending : m_pending)
+        pending.clear();
+    m_nextToken = 0;
+    m_avatars.clear();
+    m_scratch.clear();
+}
+
 GameSession::GameSession() {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
@@ -519,6 +718,8 @@ void GameSession::ResetWorldSystems() {
     m_physicsSystem.reset();
     m_waterSystem.reset();
     m_registry.clear();
+    if (auto* spawns = m_registry.ctx().find<SimulationSpawns>())
+        spawns->Clear();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();
@@ -783,7 +984,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
-    if (m_activeRegionsEnabled && m_simulationBatchInProgress)
+    if ((m_activeRegionsEnabled || UsesSimulationSpawns(m_registry)) && m_simulationBatchInProgress)
         return 0;
     class BatchGuard {
     public:
@@ -800,17 +1001,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
         bool& m_active;
         bool m_previous;
     };
-    const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
-    std::uint32_t ticks_executed;
-    if (m_activeRegionsEnabled) {
-        auto advanced_clock = m_simulationClock;
-        ticks_executed = advanced_clock.advance(frame_dt);
-        if (!m_worldClock.can_advance(ticks_executed))
-            throw std::overflow_error("World clock tick limit reached");
-        m_simulationClock = advanced_clock;
-    } else {
-        ticks_executed = m_simulationClock.advance(frame_dt);
-    }
+    const BatchGuard guard(m_simulationBatchInProgress,
+                           m_activeRegionsEnabled || UsesSimulationSpawns(m_registry));
+    auto advanced_clock = m_simulationClock;
+    const auto ticks_executed = advanced_clock.advance(frame_dt);
+    if (m_activeRegionsEnabled && !m_worldClock.can_advance(ticks_executed))
+        throw std::overflow_error("World clock tick limit reached");
+    if (ticks_executed != 0)
+        PublishSimulationSpawns(m_registry);
+    m_simulationClock = advanced_clock;
     if (ticks_executed == 0) {
         return 0;
     }
@@ -828,6 +1027,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             m_worldClock.set_tick(current_tick);
 
         try {
+            PublishSimulationSpawns(m_registry);
             if (m_activeRegionsEnabled)
                 m_regionCompletedWork.clear();
             RunRegionScheduler(current_tick);
@@ -981,15 +1181,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         kScentCellSize,
                         true,
                         m_speciesTable.get(),
-                        creature_admission);
+                        creature_admission,
+                        UsesSimulationSpawns(m_registry));
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(
-                        m_registry, m_reproductionTuning, creature_admission);
+                    luminumbra::ai::RunMateSeekingOnTick(m_registry,
+                                                         m_reproductionTuning,
+                                                         creature_admission,
+                                                         UsesSimulationSpawns(m_registry));
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
@@ -1045,7 +1248,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         static_cast<std::uint64_t>(m_numericSeed),
                         m_reproductionTuning,
                         m_speciesTable.get(),
-                        creature_admission);
+                        creature_admission,
+                        UsesSimulationSpawns(m_registry) ? &m_activeRegionLedger : nullptr);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -1153,11 +1357,16 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
             const float foliageOriginZ =
                 m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            const auto plant_identity = UsesSimulationSpawns(m_registry)
+                                            ? RegionConsumerGate::PlantIdentity::Simulation
+                                            : RegionConsumerGate::PlantIdentity::Legacy;
             const auto foliage_gate = m_activeRegionsEnabled
                                           ? RegionConsumerGate(foliage_registry,
                                                                m_regionSchedule.due,
-                                                               m_consumerGateScratch)
-                                          : RegionConsumerGate{};
+                                                               m_consumerGateScratch,
+                                                               plant_identity)
+                                          : RegionConsumerGate{plant_identity};
+            const FoliageStep::IdentityScratch identity_scratch{foliage_gate, m_registry};
             {
                 namespace Comp = Luminumbra::Components;
                 namespace fol = luminumbra::foliage;
@@ -1376,12 +1585,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                                                TelemetryComp::TransformComponent>(foliage_registry);
                 });
                 if (!foliage_registry.view<Comp::CropLifecycleComponent>().empty()) {
-                    const auto allocate_identity = [this, current_tick, foliage_step](
-                                                       std::uint64_t& id) {
-                        return FoliageStep::AllocateIdentity(*this, current_tick, foliage_step, id);
-                    };
-                    fol::RunCropLifecycleOnTick(
-                        foliage_registry, current_tick, 0, foliage_gate, allocate_identity);
+                    FoliageStep::ReproducePlants(
+                        *this, foliage_registry, current_tick, foliage_gate, foliage_step);
                     if (m_regionFault) {
                         return i + 1;
                     }

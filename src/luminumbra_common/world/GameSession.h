@@ -20,6 +20,7 @@
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entity/registry.hpp"
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -384,6 +385,76 @@ public:
         return m_registry;
     }
 
+    // Candidate publication context. Shipping registries do not install this until
+    // authority activation. Producers enqueue on the owning thread, in source order;
+    // identities become visible together at the next authoritative tick boundary.
+    enum class SpawnSource : std::size_t {
+        Boot,
+        Wildlife,
+        Foraging,
+        Plants,
+        Creatures,
+        Fire,
+        Promotion,
+        Replication,
+        Scenario,
+        Count
+    };
+    class SimulationSpawns {
+    public:
+        explicit SimulationSpawns(ActiveRegionLedger& shared_allocator)
+            : m_allocator(shared_allocator) {}
+        entt::entity Queue(entt::registry& registry, entt::entity entity, SpawnSource source);
+        void Publish(entt::registry& registry);
+        void OrderAvatars(entt::registry& registry, std::vector<entt::entity>& entities);
+        void Clear();
+        [[nodiscard]] bool HasPending() const;
+        std::vector<entt::entity>& AvatarScratch() {
+            return m_avatars;
+        }
+        std::vector<entt::entity>& IdentityScratch() {
+            return m_scratch;
+        }
+        // Const work diagnostics exclude unrelated residents and never enter saved state.
+        [[nodiscard]] std::uint64_t publication_visits() const {
+            return m_publicationVisits;
+        }
+        [[nodiscard]] std::uint64_t avatar_visits() const {
+            return m_avatarVisits;
+        }
+
+    private:
+        struct Request {
+            entt::entity entity;
+            std::uint64_t token;
+        };
+        struct PendingRequest {
+            std::uint64_t token;
+        };
+        [[nodiscard]] static bool IsCurrent(const entt::registry& registry, const Request& request);
+        ActiveRegionLedger& m_allocator;
+        // Each queue is bounded by EnTT's entity mask; tokens distinguish wrapped handles.
+        std::array<std::vector<Request>, static_cast<std::size_t>(SpawnSource::Count)> m_pending;
+        // Reset with the queues; at most Count * entity_mask tokens can be pending.
+        std::uint64_t m_nextToken = 0;
+        std::vector<entt::entity> m_avatars;
+        std::vector<entt::entity> m_scratch;
+        std::uint64_t m_publicationVisits = 0;
+        std::uint64_t m_avatarVisits = 0;
+    };
+    // An explicit capsule request preserves the kinematic opt-out of other creatures.
+    struct PendingCreatureAvatar {};
+    [[nodiscard]] static bool UsesSimulationSpawns(const entt::registry& registry);
+    void PrepareSimulationCreation();
+    [[nodiscard]] static entt::entity CreateSimulationParticipant(entt::registry& registry,
+                                                                  SpawnSource source);
+    static entt::entity
+    QueueSimulationParticipant(entt::registry& registry, entt::entity entity, SpawnSource source);
+    static void PublishSimulationSpawns(entt::registry& registry);
+    // Orders only the supplied physics participants; also used when creating capsules.
+    static void OrderSimulationAvatars(entt::registry& registry,
+                                       std::vector<entt::entity>& entities);
+
     // Data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
@@ -619,6 +690,9 @@ public:
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
+        if (const auto* spawns = m_registry.ctx().find<SimulationSpawns>()) {
+            return !spawns->HasPending() && !m_simulationBatchInProgress && m_regionWork.empty();
+        }
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
 

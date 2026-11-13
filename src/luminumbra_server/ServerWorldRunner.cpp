@@ -142,7 +142,8 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     const float oy = anchor.y;
 
     auto pred = [&](float x, float z) {
-        auto e = r.create();
+        auto e = world::GameSession::CreateSimulationParticipant(
+            r, world::GameSession::SpawnSource::Boot);
         auto& tf = r.emplace<Comp::TransformComponent>(e);
         tf.position = Vec3(ox + x, oy, oz + z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
@@ -155,7 +156,8 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
     };
     int idx = 0;
     auto prey = [&](float x, float z) {
-        auto e = r.create();
+        auto e = world::GameSession::CreateSimulationParticipant(
+            r, world::GameSession::SpawnSource::Boot);
         auto& tf = r.emplace<Comp::TransformComponent>(e);
         tf.position = Vec3(ox + x, oy, oz + z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
@@ -204,7 +206,10 @@ void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
     auto rng = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 9001u, 7u);
     for (int i = 0; i < 6; ++i) {
         const Vec3 pos(anchor.x - 6.0f + static_cast<float>(i) * 2.0f, anchor.y, anchor.z + 4.0f);
-        fol::MakePlantFromSpecies(r, pos, tmpl, rng, 0u);
+        world::GameSession::QueueSimulationParticipant(
+            r,
+            fol::MakePlantFromSpecies(r, pos, tmpl, rng, 0u),
+            world::GameSession::SpawnSource::Plants);
     }
 }
 
@@ -450,6 +455,7 @@ bool ServerWorldRunner::Boot() {
         SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor);
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
+    world::GameSession::PublishSimulationSpawns(m_session->GetRegistry());
 
     // --- Water determinism warm-up: settle water to a steady state BEFORE the counted sim ---
     // The water sim only sleeps after 120 consecutive calm ticks, but a short run (e.g. the

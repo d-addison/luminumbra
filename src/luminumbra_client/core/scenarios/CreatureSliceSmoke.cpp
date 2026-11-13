@@ -340,7 +340,8 @@ CreatureSliceScene SpawnCreatureSliceScene(Luminumbra::world::GameSession* game_
 
     // The creature: rigged mesh + animation player + planner agent, all from
     // archetype data.
-    const auto creature = registry.create();
+    const auto creature = Luminumbra::world::GameSession::CreateSimulationParticipant(
+        registry, Luminumbra::world::GameSession::SpawnSource::Scenario);
     {
         auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(creature);
         transform.position = scene.creature_position;
@@ -417,7 +418,8 @@ CreatureSliceScene SpawnCreatureSliceScene(Luminumbra::world::GameSession* game_
     scene.creature = creature;
 
     // The ambient graze opportunity (pre-stimulus behavior).
-    const auto graze = registry.create();
+    const auto graze = Luminumbra::world::GameSession::CreateSimulationParticipant(
+        registry, Luminumbra::world::GameSession::SpawnSource::Scenario);
     {
         auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(graze);
         transform.position = scene.graze_position;
@@ -457,7 +459,8 @@ bool SpawnCreatureSliceStimulus(Luminumbra::world::GameSession* game_session,
     const nlohmann::json& stimulus_data = scene.archetype.at("slice").at("light_stimulus");
 
     entt::registry& registry = game_session->GetRegistry();
-    const auto stimulus = registry.create();
+    const auto stimulus = Luminumbra::world::GameSession::CreateSimulationParticipant(
+        registry, Luminumbra::world::GameSession::SpawnSource::Scenario);
     auto& transform = registry.emplace<Luminumbra::Components::TransformComponent>(stimulus);
     transform.position = scene.stimulus_position;
     // The visible light source: a prop drawn through the instanced static

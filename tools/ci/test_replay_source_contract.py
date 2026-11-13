@@ -1207,5 +1207,72 @@ def load_tests(loader, tests, pattern):
     return tests
 
 
+class SimulationCreationSourceContract(unittest.TestCase):
+    def assert_factory_routes(self):
+        sites = {
+            "src/luminumbra_server/ServerWorldRunner.cpp": (0, 2, 1),
+            "src/luminumbra_server/modes/Replicate.cpp": (0, 3, 0),
+            "src/luminumbra_client/app/ProcgenPalettes.cpp": (0, 1, 0),
+            "src/luminumbra_client/core/scenarios/CreatureSliceSmoke.cpp": (0, 3, 0),
+            "src/luminumbra_client/main_client.cpp": (3, 6, 2),
+        }
+        for path, (render_factories, factories, queued_plants) in sites.items():
+            with self.subTest(path=path):
+                source = read_source(path)
+                self.assertEqual(len(re.findall(r"\b(?:reg|registry|r)\.create\(\)", source)),
+                                 render_factories)
+                self.assertEqual(source.count("::CreateSimulationParticipant("), factories)
+                self.assertEqual(source.count("::QueueSimulationParticipant("), queued_plants)
+                self.assertNotIn("PrepareSimulationCreation(", source)
+
+    def test_every_shipping_factory_routes_authoritative_creation_and_keeps_selection_dormant(self):
+        self.assert_factory_routes()
+
+    def test_tick_publication_precedes_clock_and_consumer_advancement(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        function = SessionUsabilitySourceContract.function
+        tick = function(source, "TickSimulation")
+        self.assertLess(tick.index("PublishSimulationSpawns(m_registry)"),
+                        tick.index("m_simulationClock = advanced_clock"))
+        self.assertLess(tick.index("PublishSimulationSpawns(m_registry)"),
+                        tick.index("RunRegionScheduler(current_tick)"))
+        publish = function(source, "Publish", "void GameSession::SimulationSpawns::")
+        self.assertIn("reserve_persistent_ids(next + count)", publish)
+        self.assertNotIn("registry.view<", publish)
+        self.assertLess(publish.index("reserve_persistent_ids(next + count)"),
+                        publish.index("registry.get<Identity>(request.entity).id = next++"))
+        self.assertEqual(publish.count("IsCurrent(registry, request)"), 2)
+        current = function(source, "IsCurrent", "bool GameSession::SimulationSpawns::")
+        self.assertIn("pending->token == request.token", current)
+        avatars = function(source, "StepCreatureAvatars", "void ")
+        self.assertLess(avatars.index("OrderSimulationAvatars(registry, spawns.AvatarScratch())"),
+                        avatars.index("physics.create_avatar_character("))
+        self.assertIn("Session::OrderSimulationAvatars(registry, entities)", avatars)
+        server = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        self.assertLess(server.index("SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor)"),
+                        server.index("world::GameSession::PublishSimulationSpawns("))
+        self.assertLess(server.index("world::GameSession::PublishSimulationSpawns("),
+                        server.index("auto stream_once = [&]()"))
+        replicate = read_source("src/luminumbra_server/modes/Replicate.cpp")
+        publications = [match.start() for match in re.finditer(
+            r"GameSession::PublishSimulationSpawns\(registry\)", replicate)]
+        self.assertEqual(len(publications), 2)
+        self.assertLess(publications[0], replicate.index("while (executed < options.ticks)"))
+        self.assertGreater(publications[1], replicate.index("arrow_active = true"))
+        self.assertLess(publications[1], replicate.index(
+            "if (arrow_active && physics && registry.valid(arrow_entity))"))
+
+    def test_candidate_ecology_publication_does_not_wait_for_mesh_consumption(self):
+        source = read_source("src/luminumbra_client/main_client.cpp")
+        self.assertRegex(source, r"dressing_complete\s*\|\|\s*"
+                         r"\(Luminumbra::world::GameSession::UsesSimulationSpawns\(reg\)\s*&&\s*"
+                         r"pend.wildlife_done == pend.result.wildlife.size\(\)\)")
+        self.assertIn("if (dressing_complete && pend.simulation_done)", source)
+        self.assertIn("Session::OrderSimulationAvatars(reg, spawns.AvatarScratch())", source)
+        self.assertIn("reg.emplace<Session::PendingCreatureAvatar>(entity)", source)
+        self.assertEqual(source.count("if (phys && !Luminumbra::world::GameSession::"
+                                      "UsesSimulationSpawns(reg))"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
