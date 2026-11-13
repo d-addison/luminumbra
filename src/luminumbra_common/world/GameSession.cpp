@@ -591,6 +591,134 @@ struct GameSession::FoliageStep {
         return step && (step->blocked || step->prepared || !step->stale_inputs.empty());
     }
 
+    static bool Edit(GameSession& session, ScentCellKey cell, std::int32_t value, bool soil) {
+        namespace fol = luminumbra::foliage;
+        if (!session.m_worldUsable || !session.m_activeRegionsEnabled || session.m_regionFault ||
+            session.m_simulationBatchInProgress || !FoliageFieldPages::valid_cell(cell) ||
+            value < 0 ||
+            value > (soil ? FieldPageState::kSoilBaseline : FieldPageState::kIrrigationLimit) ||
+            PersistencePending(session)) {
+            return false;
+        }
+        const auto owner = FieldPageState::region_of_scent_cell(cell);
+        auto& ledger = session.m_activeRegionLedger;
+        if (!ledger.can_activate(owner)) {
+            return false;
+        }
+        const auto found = ledger.records().find(owner);
+        const auto tick = session.m_worldClock.tick();
+        const bool frozen =
+            found != ledger.records().end() && found->second.state == RegionState::Frozen;
+        Initialize(session);
+        if (PersistencePending(session)) {
+            return false;
+        }
+        auto& step = *session.m_foliageStep;
+        const auto previous = step.last_ticks.find(owner);
+        const auto completed = previous != step.last_ticks.end() ? previous->second : tick;
+        const auto prior =
+            frozen ? std::max(completed, fol::FoliagePriorTick(found->second)) : completed;
+        if (prior > tick ||
+            (frozen ? tick - prior > fol::FoliageWindowReplay::kStepBudget : prior != tick)) {
+            return false;
+        }
+
+        FieldPageState candidate;
+        entt::registry selected;
+        if (frozen) {
+            // One owner: at most 1024 pages/channel, 256 cells/page and 32 steps.
+            // The edited cell is admitted only AFTER history, never retroactively.
+            for (const bool channel_soil : {true, false}) {
+                const auto& channel =
+                    channel_soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
+                const fol::FlatFoliageCells cells(channel, owner);
+                for (const auto& [key, old_value] : cells) {
+                    if (!(channel_soil ? candidate.set_soil(key, old_value)
+                                       : candidate.set_irrigation(key, old_value))) {
+                        return false;
+                    }
+                }
+            }
+            fol::RegionalFoliageWindows windows;
+            windows.elapsed.emplace(owner, 1);
+            selected = step.participants.Select(windows);
+            if (!fol::MaterializeFoliageEdit(selected, candidate, owner, prior, tick)) {
+                return false;
+            }
+        }
+        if (!(soil ? candidate.set_soil(cell, value) : candidate.set_irrigation(cell, value)) ||
+            !session.m_fieldPages.can_adopt_foliage(candidate)) {
+            return false;
+        }
+
+        // Prepare only this owner's runtime nodes. Node transfer and assignments
+        // after ledger admission cannot allocate. No whole-world/index copy.
+        std::map<RegionKey, std::uint64_t> last{{owner, tick}}, committed{{owner, tick}};
+        std::set<RegionKey> fields{owner}, pending;
+        const auto shift = frozen || found == ledger.records().end() ? std::uint8_t{0}
+                                                                     : found->second.cadence_shift;
+        const auto phase = ActiveRegionLedger::phase(owner, shift);
+        std::map<RegionKey, std::pair<std::uint8_t, std::uint32_t>> cadences{
+            {owner, {shift, phase}}};
+        std::map<std::uint8_t, std::map<std::uint32_t, std::set<RegionKey>>> cadence_owners;
+        cadence_owners[shift][phase].insert(owner);
+        std::map<std::uint8_t, std::set<RegionKey>> borders;
+        if (!candidate.irrigation().empty() ||
+            FoliageOwnsRegion(session.m_fieldPages.irrigation(), owner)) {
+            borders[shift].insert(owner);
+        }
+        if (found != ledger.records().end() && found->second.frozen_at != 0) {
+            pending.insert(owner);
+        }
+        const auto deadline = tick + fol::FoliageWindowReplay::kStepBudget;
+        std::map<std::uint64_t, std::set<RegionKey>> deadlines{{deadline, {owner}}};
+        std::map<RegionKey, std::uint64_t> owner_deadlines{{owner, deadline}};
+
+        // activate() allocates a missing record before changing any ledger data;
+        // existing records need no allocation. Every other failure precedes it.
+        if (frozen || found == ledger.records().end()) {
+            ledger.mark_materialized_edit(owner, session.m_worldClock);
+        } else {
+            ledger.mark_edited(owner, session.m_worldClock);
+        }
+        for (const auto entity : selected.view<const Components::SoilFeederComponent>()) {
+            session.m_registry.get<Components::SoilFeederComponent>(entity) =
+                selected.get<const Components::SoilFeederComponent>(entity);
+        }
+        session.m_fieldPages.adopt_foliage(std::move(candidate));
+        step.last_ticks.merge(last);
+        step.last_ticks.at(owner) = tick;
+        step.committed_ticks.merge(committed);
+        step.committed_ticks.at(owner) = ledger.records().at(owner).last_ticked;
+        step.field_owners.merge(fields);
+        step.pending.merge(pending);
+        step.RemoveCadence(owner);
+        step.cadences.merge(cadences);
+        if (const auto bucket = step.cadence_owners.find(shift);
+            bucket != step.cadence_owners.end()) {
+            if (const auto entries = bucket->second.find(phase); entries != bucket->second.end()) {
+                entries->second.merge(cadence_owners.at(shift).at(phase));
+            }
+            bucket->second.merge(cadence_owners.at(shift));
+        }
+        step.cadence_owners.merge(cadence_owners);
+        if (!borders.empty()) {
+            if (const auto bucket = step.border_owners.find(shift);
+                bucket != step.border_owners.end()) {
+                bucket->second.merge(borders.at(shift));
+            }
+            step.border_owners.merge(borders);
+        }
+        step.RemoveDeadline(owner);
+        if (const auto bucket = step.input_deadlines.find(deadline);
+            bucket != step.input_deadlines.end()) {
+            bucket->second.merge(deadlines.at(deadline));
+        }
+        step.input_deadlines.merge(deadlines);
+        step.owner_deadlines.merge(owner_deadlines);
+        return true;
+    }
+
     void IndexOwner(RegionKey key, const ActiveRegionRecord& record) {
         if (record.state != RegionState::Frozen) {
             cadence_owners[record.cadence_shift][record.cadence_phase].insert(key);
@@ -1272,6 +1400,13 @@ struct GameSession::FoliageStep {
 
 std::uint64_t GameSession::GetFoliageSelectionVisits() const {
     return m_foliageStep ? m_foliageStep->participants.visits() : 0;
+}
+bool GameSession::SetFoliageCell(ScentCellKey cell, std::int32_t value, bool soil) {
+    try {
+        return FoliageStep::Edit(*this, cell, value, soil);
+    } catch (...) {
+        return false;
+    }
 }
 std::uint64_t GameSession::GetFoliageRegistryStageVisits() const {
     return m_foliageStep ? m_foliageStep->registry.visits() : 0;

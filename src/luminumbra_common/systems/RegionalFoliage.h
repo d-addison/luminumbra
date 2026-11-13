@@ -707,6 +707,22 @@ private:
     bool m_liveTick = false, m_liveFinished = false;
     std::uint32_t m_maximum = 0, m_step = 0;
 };
+// Explicit edits must finish in one bounded pass. Both arguments are isolated
+// candidates: callers publish them only after replay and edit admission succeed.
+inline bool MaterializeFoliageEdit(entt::registry& registry,
+                                   FieldPageState& pages,
+                                   RegionKey owner,
+                                   std::uint64_t prior,
+                                   std::uint64_t tick) {
+    if (prior > tick || tick - prior > FoliageWindowReplay::kStepBudget) {
+        return false;
+    }
+    const std::map<RegionKey, std::uint32_t> windows{
+        {owner, static_cast<std::uint32_t>(tick - prior)}};
+    FoliageWindowReplay replay(pages, windows, tick);
+    replay.Advance(registry, pages);
+    return replay.remaining_steps() == 0;
+}
 using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
 inline FoliageEdges
 FoliageBorderEdges(const FieldPageState& pages,

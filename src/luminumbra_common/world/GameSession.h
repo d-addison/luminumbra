@@ -540,6 +540,11 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Regional one-metre cell edit (soil=true selects nutrients). Frozen owners
+    // materialize at most 32 ticks before the edit. Invalid input, pending replay,
+    // longer history, capacity/allocation failure or an in-tick call refuses
+    // without changing entities, fields, ledger, RNG or persistent identities.
+    [[nodiscard]] bool SetFoliageCell(ScentCellKey cell, std::int32_t value, bool soil);
     // Observational foliage preparation/publication counts; excluded from identity and saves.
     [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
