@@ -173,6 +173,8 @@ public:
         bool aether_state = false;
         bool job_system_available = false;
         bool transient_creation = false;
+        // Explicit candidate choice travels with detached worker preparation.
+        bool simulation_v2 = false;
     };
     struct WorldPreparation;
     WorldPreparationOptions CaptureWorldPreparationOptions() const;
@@ -198,6 +200,12 @@ public:
     static std::string WorldPreparationError(const WorldPreparation& prepared);
     bool AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
                             Persistence::CreatedWorldArtifacts* artifacts = nullptr);
+
+    // Dormant v2 participant adoption into an initialized, paused session. Prepare with
+    // simulation_v2 selected; replace plants, ground objects and the shared
+    // ledger together, retaining other residents and state (including creature IDs).
+    // Terrain/system replacement remains the responsibility of world opening.
+    bool AdoptPreparedSimulationState(const std::shared_ptr<WorldPreparation>& prepared);
 
     // Changes when create/load invalidates or releases the previous world, including a
     // replacement that subsequently fails. Preflight refusal preserves it.

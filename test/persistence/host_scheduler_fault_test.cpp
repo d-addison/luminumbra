@@ -660,6 +660,14 @@ TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement
             ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(
                 metadata.dump(4) + "\n", directory));
             const auto replacement = ReadHostFile(metadata_path);
+            auto options = session.CaptureWorldPreparationOptions();
+            options.save_root = snapshot.root();
+            const auto prepared = GameSession::PrepareWorldLoad(options, id);
+            ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+            const auto revision = session.WorldRevision();
+            EXPECT_FALSE(session.AdoptPreparedSimulationState(prepared));
+            EXPECT_EQ(session.WorldRevision(), revision);
+            EXPECT_EQ(ReadHostFile(metadata_path), replacement);
             ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
             EXPECT_EQ(session.GetMetadata().name, "Snapshot original");
             EXPECT_EQ(session.GetWorldSaveDir(), directory);

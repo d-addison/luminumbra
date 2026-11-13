@@ -4,6 +4,7 @@
 #include "../components/CropLifecycleComponents.h"
 #include "../components/ForagingComponents.h"
 #include "../components/ScavengerComponent.h"
+#include "../components/SimulationIdentityComponent.h"
 #include "../components/ThirstComponents.h"
 #include "../core/SystemConfig.h"
 #include "../persistence/WorkerBoundary.h"
@@ -48,6 +49,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/FieldEmitterComponents.h"
 #include "../components/GrazeableComponent.h"
 #include "../components/InstinctComponents.h"
 #include "../components/IrrigationComponents.h"
@@ -65,6 +67,7 @@
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
+#include "../persistence/PlantSnapshot.h"
 #include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedEnergyInput.h"
 #include "../persistence/SavedJsonAdmission.h"
@@ -73,6 +76,7 @@
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
 #include "../simulation/SimWorkCounters.h"
+#include "../simulation/SimulationIdentity.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -108,6 +112,7 @@
 #include <span>
 #include <string>
 #include <system_error>
+#include <type_traits>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <bit>
@@ -276,6 +281,7 @@ struct GameSession::LoadedWorldState {
     bool snapshot_present = false;
     bool requires_index = false;
     Ecs::EntityRegistrySnapshot plants;
+    std::optional<Persistence::PlantSnapshot> simulation_plants;
     bool input_refused = false;
     std::optional<luminumbra::fields::EnergyFieldState> energy;
 };
@@ -420,6 +426,220 @@ struct GameSession::WorldPreparation {
     bool ready = false;
 };
 
+namespace {
+namespace C = Luminumbra::Components;
+
+template<typename Function>
+void SimulationPlantPools(const Function& function) {
+    function.template operator()<C::TransformComponent>();
+    function.template operator()<C::PlantTag>();
+    function.template operator()<C::SimulationIdentityComponent>();
+    function.template operator()<C::PlantRegionComponent>();
+    function.template operator()<C::PlantGenomeComponent>();
+    function.template operator()<C::PlantGrowthComponent>();
+    function.template operator()<C::SoilFeederComponent>();
+    function.template operator()<C::PlantHealthComponent>();
+    function.template operator()<C::PollinationComponent>();
+    function.template operator()<C::PollinationTag>();
+    function.template operator()<C::CropLifecycleComponent>();
+    function.template operator()<C::CombustibleComponent>();
+    function.template operator()<C::MortalComponent>();
+    function.template operator()<C::GrazeableComponent>();
+    function.template operator()<C::WaterSourceComponent>();
+    function.template operator()<C::IgnitionSourceComponent>();
+    function.template operator()<C::FlowingWaterSourceComponent>();
+    function.template operator()<C::DecayComponent>();
+    function.template operator()<C::FieldEmitterComponent>();
+}
+
+void RestoreSimulationPlant(entt::registry& registry, const Ecs::EntitySnapshotRecord& record) {
+    // Reuse the admitted core decoder, without v1's ownership requirement or
+    // inferred pollination tag. Only this one record (at most 17 components) is copied.
+    Ecs::EntityRegistrySnapshot core;
+    core.entities.push_back(record);
+    std::erase_if(core.entities.front().components, [](const auto& component) {
+        return component.type != "Transform" && component.type != "PlantGenome" &&
+               component.type != "PlantGrowth" && component.type != "SoilFeeder" &&
+               component.type != "PlantHealth" && component.type != "Pollination" &&
+               component.type != "CropLifecycle";
+    });
+    if (!luminumbra::foliage::ApplyPlantEntitySnapshot(registry, core))
+        throw std::runtime_error("Invalid admitted plant core.");
+    const auto& tags = registry.storage<C::PlantTag>();
+    const auto entity = tags.data()[tags.size() - 1];
+    registry.remove<C::PollinationTag>(entity);
+    registry.emplace<C::SimulationIdentityComponent>(entity, record.entity_id);
+    for (const auto& component : record.components) {
+        const auto& data = component.data;
+        luminumbra::foliage::pp_detail::ApplyEnabledComponent(
+            registry, entity, component, record.entity_id);
+        if (component.type == "FlowingWaterSource")
+            registry.emplace<C::FlowingWaterSourceComponent>(entity,
+                                                             data.at("flow_rate").get<float>());
+        else if (component.type == "Decay")
+            registry.emplace<C::DecayComponent>(
+                entity,
+                data.at("decay_ticks").get<std::uint32_t>(),
+                data.at("decay_duration").get<std::uint32_t>(),
+                data.at("nutrient_released_milli").get<std::uint16_t>(),
+                data.at("fully_decomposed").get<std::uint8_t>());
+        else if (component.type == "FieldEmitter")
+            registry.emplace<C::FieldEmitterComponent>(
+                entity,
+                data.at("channel").get<int>(),
+                data.at("rate_raw_per_tick").get<std::uint32_t>(),
+                data.at("radius_cells").get<int>());
+    }
+}
+
+// Cold adoption only: at most EnTT's entity-mask entries per pool and 2^20 incoming
+// plants. Stage complete affected pools so neither payload nor sparse-page allocation
+// can fail after publication starts. Other component pools and registry context stay live.
+class SimulationPlantReplacement {
+public:
+    void Prepare(entt::registry& original, const Persistence::PlantSnapshot& plants) {
+        const auto old_plants = original.view<const C::PlantTag>();
+        m_stale.assign(old_plants.begin(), old_plants.end());
+        const auto& source = original.storage<entt::entity>();
+        auto& target = m_registry.storage<entt::entity>();
+        constexpr auto maximum = entt::entt_traits<entt::entity>::entity_mask;
+        if (plants.entities.size() > maximum - (source.free_list() - m_stale.size()))
+            throw std::length_error("Plant replacement entity capacity exceeded.");
+        target.reserve(source.size());
+        entt::entity highest{};
+        // Clone the runtime allocator only in memory, never compare it with a save.
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            const auto entity = source.data()[index];
+            target.generate(entity);
+            if (entt::to_entity(entity) > entt::to_entity(highest))
+                highest = entity;
+        }
+        target.start_from(entt::entt_traits<entt::entity>::next(highest));
+        target.free_list(source.free_list());
+        m_registry.destroy(m_stale.begin(), m_stale.end());
+        SimulationPlantPools([&]<typename T> {
+            const auto view = std::as_const(original).view<const T>();
+            for (const auto entity : view) {
+                if (!original.all_of<C::PlantTag>(entity))
+                    luminumbra::foliage::stage_detail::Copy<T>(
+                        original, entity, m_registry, entity);
+            }
+        });
+        for (const auto& record : plants.entities)
+            RestoreSimulationPlant(m_registry, record);
+        // Installing empty pools may allocate, so do it before the commit too.
+        SimulationPlantPools([&]<typename T> {
+            original.storage<T>();
+            m_registry.storage<T>();
+        });
+    }
+    void Commit(entt::registry& original) noexcept {
+        // Existing destroy listeners run while the old components are still present.
+        original.destroy(m_stale.begin(), m_stale.end());
+        SimulationPlantPools([&]<typename T> {
+            // Swap payload/index only: listener bindings belong to the live registry.
+            static_cast<entt::storage<T>&>(original.storage<T>())
+                .swap(static_cast<entt::storage<T>&>(m_registry.storage<T>()));
+        });
+        static_cast<entt::storage<entt::entity>&>(original.storage<entt::entity>()) = std::move(
+            static_cast<entt::storage<entt::entity>&>(m_registry.storage<entt::entity>()));
+    }
+
+private:
+    entt::registry m_registry;
+    std::vector<entt::entity> m_stale;
+};
+} // namespace
+
+bool GameSession::AdoptPreparedSimulationState(const std::shared_ptr<WorldPreparation>& prepared) {
+    if (!prepared || !prepared->ready || prepared->stop.stop_requested() ||
+        !prepared->loaded.simulation_plants || !m_worldUsable || !m_worldSystem ||
+        !IsSimulationTickBoundary())
+        return false;
+    const auto& options = prepared->options;
+    if (options.world_revision != WorldRevision() ||
+        options.simulation_tick != GetSimulationTickCount() || options.root_path != m_rootPath ||
+        options.configured_save_root != GetSaveRootPath() ||
+        options.required_assets != m_requiredClientAssets ||
+        options.active_regions != m_activeRegionsEnabled ||
+        options.aether_state != m_aetherStateEnabled ||
+        options.ledger_config != m_activeRegionLedger.config() ||
+        options.scheduler_override != m_regionSchedulerOverride)
+        return false;
+    auto& loaded = prepared->loaded;
+    try {
+        if (!loaded.ledger || !loaded.simulation_plants)
+            return false;
+        const auto& plants = *loaded.simulation_plants;
+        auto ledger = *loaded.ledger;
+        if (!ledger.reserve_persistent_ids(
+                std::max(ledger.next_persistent_id(), m_activeRegionLedger.next_persistent_id())))
+            return false;
+        std::set<std::uint64_t> resident_ids;
+        bool missing_identity = false;
+        const auto require_identity = [&]<typename T> {
+            for (const auto entity : m_registry.view<const T>())
+                if (!m_registry.all_of<C::PlantTag>(entity) &&
+                    !m_registry.all_of<C::SimulationIdentityComponent>(entity))
+                    missing_identity = true;
+        };
+        luminumbra::foliage::stage_detail::Participants(require_identity);
+        require_identity.template operator()<C::FlowingWaterSourceComponent>();
+        require_identity.template operator()<C::FieldEmitterComponent>();
+        if (missing_identity)
+            return false;
+        // Only explicit participants are inspected; scenery handles never enter admission.
+        for (const auto entity : m_registry.view<const C::SimulationIdentityComponent>()) {
+            if (m_registry.all_of<C::PlantTag>(entity))
+                continue;
+            const auto id = m_registry.get<const C::SimulationIdentityComponent>(entity).id;
+            if (!simulation::IsValidSimulationId(id) || id >= ledger.next_persistent_id() ||
+                !resident_ids.insert(id).second || loaded.ground_objects.find(id))
+                return false;
+        }
+        for (const auto& record : plants.entities)
+            if (resident_ids.contains(record.entity_id))
+                return false;
+        // Replace only ground notifications, retaining unrelated publications and subscribers.
+        // Scratch is bounded by the existing queue plus the ground file's 4 MiB admission cap.
+        auto pending = m_simulationEventBus.pending_events();
+        std::erase_if(pending, [](const auto& event) {
+            return event.topic == "ground.spawned" || event.topic == "ground.despawned";
+        });
+        std::set<std::uint64_t> sequences;
+        for (const auto& event : pending)
+            sequences.insert(event.sequence);
+        if (loaded.ground_notifications.events.size() > pending.max_size() - pending.size())
+            return false;
+        for (const auto& event : loaded.ground_notifications.events) {
+            if (!sequences.insert(event.sequence).second)
+                return false;
+            pending.push_back(event);
+        }
+        auto events = m_simulationEventBus;
+        events.restore_pending(
+            std::move(pending),
+            std::max(events.next_sequence(), loaded.ground_notifications.next_sequence));
+        SimulationPlantReplacement replacement;
+        replacement.Prepare(m_registry, plants);
+        if (prepared->stop.stop_requested())
+            return false;
+        // Every refusing operation has completed. These moves and pool swaps allocate nothing.
+        replacement.Commit(m_registry);
+        ReplaceActiveRegionLedger(std::move(ledger));
+        m_groundObjects = std::move(loaded.ground_objects);
+        static_assert(std::is_nothrow_move_assignable_v<decltype(m_simulationEventBus)>);
+        m_simulationEventBus = std::move(events);
+        m_regionSchedule = {};
+        m_regionWork.clear();
+        m_regionCompletedWork.clear();
+        prepared->ready = false;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions() const {
     return {.root_path = m_rootPath,
             .save_root = GetSaveRootPath(),
@@ -436,7 +656,8 @@ GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions
             .active_regions = m_activeRegionsEnabled,
             .aether_state = m_aetherStateEnabled,
             .job_system_available = m_jobSystem != nullptr,
-            .transient_creation = false};
+            .transient_creation = false,
+            .simulation_v2 = false};
 }
 
 std::vector<IVec3> GameSession::TakeInitialChunkLoadList() {
@@ -456,6 +677,9 @@ std::string GameSession::WorldPreparationError(const WorldPreparation& prepared)
 bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
                                      Persistence::CreatedWorldArtifacts* artifacts) {
     if (!prepared || (!prepared->create && !IsSimulationTickBoundary()))
+        return false;
+    // The dormant participant transaction has its own explicit publication entry.
+    if (prepared->loaded.simulation_plants)
         return false;
     m_worldOpenError = WorldPreparationError(*prepared);
     if (!prepared->ready || !m_worldOpenError.empty())
@@ -1939,6 +2163,7 @@ std::shared_ptr<GameSession::WorldPreparation>
 GameSession::PrepareWorldLoad(const WorldPreparationOptions& options,
                               const std::string& worldId,
                               const std::stop_token& stop) {
+    const Persistence::PlantSnapshotContract contract(options.simulation_v2);
     const Persistence::SavedJsonReadScope json_reads;
     const Persistence::WorldSaveService::WorldReadScope chunk_reads;
     auto prepared = std::make_shared<WorldPreparation>();
@@ -4407,6 +4632,7 @@ bool GameSession::ReadPreparedWorldState(
     bool resetting_clock,
     const std::stop_token& stop,
     const luminumbra::fields::EnergyFieldState* current_energy) {
+    const Persistence::PlantSnapshotContract contract(options.simulation_v2);
     const Persistence::SavedJsonReadScope json_reads;
     const Persistence::WorldSaveService::WorldReadScope chunk_reads;
     const Persistence::WorldSaveService service;
@@ -4428,9 +4654,17 @@ bool GameSession::ReadPreparedWorldState(
             return false;
         }
     }
-    if (!Persistence::WorldSaveService::load_plant_entities(
-            state.plants, save_dir, &errors, stop) ||
-        !luminumbra::foliage::ValidatePlantEntitySnapshot(state.plants)) {
+    if (Persistence::PlantSnapshotContract::selected()) {
+        state.simulation_plants.emplace();
+        if (!Persistence::WorldSaveService::load_plant_snapshot(
+                *state.simulation_plants, save_dir, &errors, stop)) {
+            state.input_refused = true;
+            error = errors.empty() ? "Invalid plant v2 snapshot." : errors.front();
+            return false;
+        }
+    } else if (!Persistence::WorldSaveService::load_plant_entities(
+                   state.plants, save_dir, &errors, stop) ||
+               !luminumbra::foliage::ValidatePlantEntitySnapshot(state.plants)) {
         state.input_refused = true;
         error = errors.empty() ? "Saved-input admission refused: invalid plant snapshot."
                                : errors.front();
@@ -4515,6 +4749,28 @@ bool GameSession::ReadPreparedWorldState(
                     "from explicit override.";
             return false;
         }
+    }
+
+    if (state.simulation_plants) {
+        // The envelope owns the cursor even without regional scheduling. Regional
+        // readers above already checked their persisted copy against the envelope.
+        if (!state.ledger) {
+            state.ledger.emplace(options.ledger_config);
+            if (!state.ledger->reserve_persistent_ids(state.simulation_plants->next_id) ||
+                !Persistence::WorldSaveService::load_ground_objects(
+                    state.ground_objects,
+                    save_dir,
+                    state.simulation_plants->next_id,
+                    &errors,
+                    stop,
+                    &state.ground_notifications)) {
+                error = errors.empty() ? "Invalid shared simulation allocator." : errors.front();
+                return false;
+            }
+        }
+        if (!Persistence::ValidatePlantSnapshot(
+                *state.simulation_plants, *state.ledger, state.ground_objects, error))
+            return false;
     }
 
     if (options.active_regions && !options.aether_state &&
