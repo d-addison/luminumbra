@@ -492,6 +492,9 @@ protected:
         GLint max_buffers = 8;
         GLint max_attachments = 8;
         GLint renderable = GL_FULL_SUPPORT;
+        GLint draw_attachment = 0;
+        GLint read_attachment = 0;
+        GLint attachment_type = static_cast<GLint>(GL_TEXTURE);
         GLuint next = 100;
         GLenum status = GL_FRAMEBUFFER_COMPLETE;
         bool zero_texture = false;
@@ -560,6 +563,25 @@ protected:
         EXPECT_EQ(name, GL_IMAGE_BINDING_NAME);
         EXPECT_LT(index, static_cast<GLuint>(state().images));
         *output = index == 1 ? state().image_binding : 0;
+    }
+    // Color attachment 3 of the bound draw and read framebuffers carries the
+    // modelled caller attachments; every other attachment point is empty.
+    static void APIENTRY Attachment(GLenum target, GLenum attachment, GLenum name, GLint* output) {
+        auto& driver = state();
+        EXPECT_TRUE(target == GL_DRAW_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER);
+        EXPECT_GE(attachment, static_cast<GLenum>(GL_COLOR_ATTACHMENT0));
+        EXPECT_LT(attachment, GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(driver.max_attachments));
+        GLint attached = 0;
+        if (attachment == GL_COLOR_ATTACHMENT0 + 3U) {
+            attached =
+                target == GL_DRAW_FRAMEBUFFER ? driver.draw_attachment : driver.read_attachment;
+        }
+        if (name == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+            *output = attached != 0 ? driver.attachment_type : static_cast<GLint>(GL_NONE);
+        } else {
+            EXPECT_EQ(name, static_cast<GLenum>(GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME));
+            *output = attached;
+        }
     }
     static void APIENTRY
     Internal(GLenum target, GLenum format, GLenum query, GLsizei count, GLint* value) {
@@ -650,6 +672,8 @@ protected:
     Replace<PFNGLGETINTEGERVPROC> get_{glad_glGetIntegerv, Get};
     Replace<PFNGLGETINTEGERI_VPROC> get_indexed_{glad_glGetIntegeri_v, GetIndexed};
     Replace<PFNGLGETINTERNALFORMATIVPROC> internal_{glad_glGetInternalformativ, Internal};
+    Replace<PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC> attachment_{
+        glad_glGetFramebufferAttachmentParameteriv, Attachment};
     Replace<PFNGLGENTEXTURESPROC> gen_texture_{glad_glGenTextures, GenTexture};
     Replace<PFNGLGENFRAMEBUFFERSPROC> gen_fbo_{glad_glGenFramebuffers, GenFbo};
     Replace<PFNGLDELETETEXTURESPROC> delete_texture_{glad_glDeleteTextures, Delete};
@@ -745,6 +769,11 @@ TEST_F(DiagnosticTargetDriver, MissingIntegerStorageOrClearEntryPointsRefuseBefo
         Replace<PFNGLCLEARTEXIMAGEPROC> missing(glad_glClearTexImage, nullptr);
         EXPECT_FALSE(targets.ensure(true, {2, 2}));
     }
+    {
+        Replace<PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC> missing(
+            glad_glGetFramebufferAttachmentParameteriv, nullptr);
+        EXPECT_FALSE(targets.ensure(true, {2, 2}));
+    }
     EXPECT_EQ(state().queries, 0U);
     EXPECT_EQ(state().allocations, 0U);
     ExpectBindings();
@@ -804,6 +833,48 @@ TEST_F(DiagnosticTargetDriver, BoundOwnedStorageRefusesResizeWithoutRetiringOrCh
         state().texture = 71;
         state().draw_fbo = 72;
         state().read_fbo = 73;
+    }
+}
+
+TEST_F(DiagnosticTargetDriver, CallerFramebufferAttachmentRefusesResizeWithoutDetaching) {
+    for (unsigned int scenario = 0; scenario < 6; ++scenario) {
+        state() = State{};
+        DiagnosticTargets targets;
+        ASSERT_TRUE(targets.ensure(true, {2, 2}));
+        const auto texture = static_cast<GLint>(targets.texture());
+        const auto framebuffer = targets.framebuffer();
+        if (scenario == 0) {
+            state().draw_attachment = texture;
+        } else if (scenario == 1) {
+            state().read_attachment = texture;
+        } else if (scenario == 2) {
+            state().max_attachments = 65;
+        } else if (scenario == 3) {
+            state().draw_attachment = texture + 1000;
+        } else if (scenario == 4) {
+            state().read_attachment = texture;
+            state().attachment_type = static_cast<GLint>(GL_RENDERBUFFER);
+        } else {
+            state().read_attachment = texture;
+            state().read_fbo = 0;
+        }
+        const bool refuse = scenario < 3;
+        EXPECT_EQ(targets.ensure(true, {3, 3}), !refuse);
+        if (refuse) {
+            EXPECT_EQ(targets.texture(), static_cast<GLuint>(texture));
+            EXPECT_EQ(targets.framebuffer(), framebuffer);
+            EXPECT_EQ(targets.extent().width, 2U);
+            EXPECT_EQ(state().deletes, 0U);
+            EXPECT_EQ(state().allocations, 2U);
+        } else {
+            EXPECT_NE(targets.texture(), static_cast<GLuint>(texture));
+            EXPECT_EQ(targets.extent().width, 3U);
+            EXPECT_EQ(state().deletes, 2U);
+        }
+        EXPECT_EQ(state().texture, 71);
+        EXPECT_EQ(state().draw_fbo, 72);
+        EXPECT_EQ(state().read_fbo, scenario == 5 ? 0 : 73);
+        EXPECT_EQ(state().active_texture, GL_TEXTURE0);
     }
 }
 

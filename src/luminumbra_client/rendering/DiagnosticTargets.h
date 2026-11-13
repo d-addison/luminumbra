@@ -10,6 +10,9 @@ namespace Luminumbra::Rendering {
 
 // Render-thread owner; destruction requires the creating GL context. Standalone
 // storage for later MRT integration: never modifies a caller's framebuffer.
+// Resize refuses while texture() is attached to the bound draw or read framebuffer,
+// because deleting it would detach it there. Unbound framebuffers keep the retired
+// storage until the caller detaches it; callers re-attach texture() after a resize.
 class DiagnosticTargets {
 public:
     DiagnosticTargets() = default;
@@ -33,7 +36,7 @@ public:
             return false;
         }
         if (glGetInternalformativ == nullptr || glTexStorage2D == nullptr ||
-            glClearTexImage == nullptr) {
+            glClearTexImage == nullptr || glGetFramebufferAttachmentParameteriv == nullptr) {
             return false;
         }
         GLint max_size = 0;
@@ -60,7 +63,9 @@ public:
         // Refuse instead; consumers must finish using old storage before resize.
         if (texture_bound() ||
             (framebuffer_ != 0 && (static_cast<GLuint>(guard.framebuffer) == framebuffer_ ||
-                                   static_cast<GLuint>(guard.read_framebuffer) == framebuffer_))) {
+                                   static_cast<GLuint>(guard.read_framebuffer) == framebuffer_)) ||
+            attached_to(GL_DRAW_FRAMEBUFFER, guard.framebuffer, max_attachments) ||
+            attached_to(GL_READ_FRAMEBUFFER, guard.read_framebuffer, max_attachments)) {
             return false;
         }
         GLuint texture = 0;
@@ -152,6 +157,33 @@ private:
         for (GLint unit = 0; unit < images; ++unit) {
             GLint name = 0;
             glGetIntegeri_v(GL_IMAGE_BINDING_NAME, static_cast<GLuint>(unit), &name);
+            if (static_cast<GLuint>(name) == texture_) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Deleting a texture detaches it from every attachment point of the bound
+    // framebuffers, so an attachment in a caller's bound framebuffer counts as in use.
+    bool attached_to(GLenum target, GLint framebuffer, GLint attachments) const {
+        if (texture_ == 0 || framebuffer == 0) {
+            return false;
+        }
+        // Resize-only scan, bounded to 64 color attachments; refuse larger contexts.
+        if (attachments > 64) {
+            return true;
+        }
+        for (GLint index = 0; index < attachments; ++index) {
+            const GLenum attachment = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(index);
+            GLint type = GL_NONE;
+            glGetFramebufferAttachmentParameteriv(
+                target, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+            if (type != GL_TEXTURE) {
+                continue;
+            }
+            GLint name = 0;
+            glGetFramebufferAttachmentParameteriv(
+                target, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
             if (static_cast<GLuint>(name) == texture_) {
                 return true;
             }
