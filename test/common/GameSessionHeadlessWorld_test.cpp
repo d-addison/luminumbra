@@ -7048,6 +7048,112 @@ TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved)
     EXPECT_EQ(restored.chunk->water_depth_mm, chunk->water_depth_mm);
 }
 
+TEST(GameSessionHeadlessWorldTest, NoEditWaterTickAfterOpenMatchesFreshSaveBytesAndRecords) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("No-edit water", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    GameSession control;
+    RegionalWaterScenario scenario;
+    auto& opened = scenario.session;
+    for (auto* session : {&control, &opened}) {
+        EnableSnapshotSession(*session, root, jobs);
+        ASSERT_TRUE(session->LoadWorld(owner.GetMetadata().worldId));
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+    }
+    // Compare fresh destinations at the same simulation tick and snapshot generation.
+    // Only the opened session receives a regenerable water column and a water update.
+    const auto fresh = root.path() / "fresh-water-save";
+    ASSERT_TRUE(control.SaveWorldStateTo(fresh));
+    const auto chunk = std::make_shared<Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(17u * 17u * 17u, 1.0f);
+    chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+    chunk->mark_sdf_generated_current_params();
+    ASSERT_TRUE(opened.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    scenario.water_chunks.emplace(chunk->get_id(), chunk);
+    auto* water = opened.GetWaterSystem();
+    water->SetBootPaused(false);
+    water->SetHydrology(true, 0, 0);
+    water->update(opened.GetRegistry(), scenario.water_chunks, true);
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    EXPECT_EQ(chunk->ticks_below_threshold, 1);
+    EXPECT_EQ(chunk->water_revision(), 0u);
+    const auto after_tick = root.path() / "water-tick-save";
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(opened.SaveWorldStateTo(after_tick, &report));
+    EXPECT_EQ(report.chunks_total, 0u);
+    EXPECT_EQ(report.chunks_dirty, 0u);
+    EXPECT_TRUE(opened.GetWorldSystem()->durable_chunk_inventory().empty());
+    EXPECT_FALSE(chunk->has_water_authority());
+    EXPECT_EQ(P::WorldSaveService::read_chunk(after_tick, chunk->get_coords(), true).status,
+              P::WorldSaveService::ChunkReadStatus::Absent);
+    EXPECT_EQ(SavedPresetTestDiskBytes(after_tick), SavedPresetTestDiskBytes(fresh));
+    EXPECT_EQ(opened.ComputeChunkStateHash(), control.ComputeChunkStateHash());
+}
+
+TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPersistAndRoundTrip) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    // Independently exercise depth, flux-only decay, sleep, wake, and resolution.
+    for (int mutation = 0; mutation < 5; ++mutation) {
+        SCOPED_TRACE(mutation);
+        RegionalWaterScenario scenario;
+        auto& session = scenario.session;
+        EnableSnapshotSession(session, root, jobs);
+        ASSERT_TRUE(session.CreateWorld("Water mutation", "1337", "default"));
+        const auto add = [&](int x) {
+            auto chunk = std::make_shared<Chunk>(Luminumbra::IVec3(x, 0, 0));
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            chunk->sdf_data.assign(17u * 17u * 17u, 1.0f);
+            chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+            chunk->mark_sdf_generated_current_params();
+            EXPECT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+            scenario.water_chunks.emplace(chunk->get_id(), chunk);
+            return chunk;
+        };
+        const auto chunk = add(0);
+        if (mutation == 3) {
+            add(1); // An awake neighbour wakes the target without changing depth or flux.
+        }
+        auto* water = session.GetWaterSystem();
+        water->SetHydrology(true, 0, 0);
+        water->update(session.GetRegistry(), scenario.water_chunks, true);
+        ASSERT_TRUE(chunk->has_complete_water_state());
+        ASSERT_FALSE(chunk->needs_authority());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        if (mutation == 0) {
+            water->SetHydrology(true, 2, 0);
+        } else if (mutation == 1) {
+            chunk->water_edge_flux[0] = 1;
+        } else if (mutation == 2) {
+            chunk->ticks_below_threshold = 119;
+        } else if (mutation == 3) {
+            chunk->is_water_sleeping.store(true);
+        } else {
+            ASSERT_TRUE(
+                water->ResizeSimulationGrid(*chunk, Luminumbra::Systems::WaterDetailLevel::High));
+        }
+        if (mutation != 4) {
+            water->update(session.GetRegistry(), scenario.water_chunks, true);
+            EXPECT_TRUE(chunk->has_water_authority());
+        }
+        Luminumbra::world::WorldStateSaveReport report;
+        ASSERT_TRUE(session.SaveWorldState(&report));
+        EXPECT_EQ(report.chunks_dirty, 1u);
+        EXPECT_TRUE(chunk->has_water_authority());
+        const auto restored =
+            P::WorldSaveService::read_chunk(session.GetWorldSaveDir(), chunk->get_coords(), true);
+        ASSERT_EQ(restored.status, P::WorldSaveService::ChunkReadStatus::Found) << restored.error;
+        ASSERT_NE(restored.chunk, nullptr);
+        EXPECT_TRUE(restored.chunk->same_water_state(*chunk));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, ExitSaveSkipsSimulatedButUnchangedWater) {
     const HeadlessRoot root;
     JobSystem jobs;

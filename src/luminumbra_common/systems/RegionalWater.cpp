@@ -810,6 +810,8 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
         ValidateStageGrid(grid);
         m_expectedVolume += Volume(grid) - before;
         entry.mesh_invalidated = true;
+        // Initial sampling is regenerable; resizing an existing grid is evolution.
+        entry.changed = entry.changed || initialized;
     } catch (...) {
         Rollback();
         throw;
@@ -818,7 +820,8 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
 
 void Transaction::Inject(const Source& source) {
     try {
-        auto& grid = Grid(source.target);
+        auto& entry = FindEntry(source.target);
+        auto& grid = *entry.grid;
         if (source.millimetres < 0 || source.cell >= grid.water_depth_mm.size()) {
             Refuse();
         }
@@ -829,6 +832,7 @@ void Transaction::Inject(const Source& source) {
         }
         grid.water_depth_mm[source.cell] = static_cast<std::int32_t>(depth);
         m_expectedVolume += static_cast<std::int64_t>(source.millimetres) * CellArea(grid);
+        entry.changed = entry.changed || source.millimetres != 0;
     } catch (...) {
         Rollback();
         throw;
@@ -837,7 +841,9 @@ void Transaction::Inject(const Source& source) {
 
 void Transaction::FinishInterior(ChunkID id) {
     try {
-        auto& grid = Grid(id);
+        auto& entry = FindEntry(id);
+        auto& grid = *entry.grid;
+        const bool was_sleeping = grid.is_water_sleeping.load();
         // Only interior visits advance calm time. Later seam flux can wake either endpoint.
         if (grid.max_water_delta_last_tick < 0.0001f) {
             grid.ticks_below_threshold = std::min(grid.ticks_below_threshold, 119) + 1;
@@ -846,6 +852,7 @@ void Transaction::FinishInterior(ChunkID id) {
             grid.ticks_below_threshold = 0;
             grid.is_water_sleeping.store(false);
         }
+        entry.changed = entry.changed || was_sleeping != grid.is_water_sleeping.load();
     } catch (...) {
         Rollback();
         throw;
@@ -869,7 +876,15 @@ void Transaction::Publish(SHIELD_WorldSystem* shield,
             }
             ValidateStageGrid(*entry.grid);
             volume = AddVolume(volume, Volume(*entry.grid));
-            entry.changed = !entry.live->same_water_state(*entry.grid);
+            // Kernels mark depth/bed/flux changes on the private grid. Preparation,
+            // sources and sleep transitions record their mutations explicitly.
+            // Persist calm bookkeeping only after water has durable ownership;
+            // initializing grids or refreshing float mirrors never claims it.
+            entry.changed =
+                entry.changed || entry.grid->is_water_state_dirty() ||
+                (entry.live->has_water_authority() &&
+                 (entry.live->ticks_below_threshold != entry.grid->ticks_below_threshold ||
+                  entry.live->max_water_delta_last_tick != entry.grid->max_water_delta_last_tick));
         }
         if (volume != m_expectedVolume) {
             Refuse();
