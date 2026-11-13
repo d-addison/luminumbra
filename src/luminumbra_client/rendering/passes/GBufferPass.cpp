@@ -180,7 +180,34 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
 }
 
 void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submission) {
+    const auto record_contributor = [&] {
+        abort(); // A table entry alone cannot describe the blended pixel.
+        constexpr std::string_view suffix = ":contributor_only";
+        // Bound the temporary label before copying, including its coverage suffix.
+        if (submission.shader_variant.empty() ||
+            submission.shader_variant.size() > 1024 - suffix.size()) {
+            unsupported("diagnostic_contributor_label_limit",
+                        submission.lod,
+                        submission.ownership,
+                        submission.pass);
+            throw std::runtime_error("Diagnostic contributor label exceeds registry bounds");
+        }
+        const std::string label = std::string(submission.shader_variant) + std::string(suffix);
+        auto contributor = submission;
+        contributor.shader_variant = label;
+        DiagnosticId id{};
+        if (!state_->table.submit(contributor, id)) {
+            unsupported("diagnostic_contributor_identity_refused",
+                        submission.lod,
+                        submission.ownership,
+                        submission.pass);
+            throw std::runtime_error("Diagnostic contributor identity refused");
+        }
+    };
     if (!state_->framebuffer) {
+        if (submission.pass == DiagnosticPass::Forward) {
+            record_contributor();
+        }
         return;
     }
     GLint program = 0;
@@ -190,6 +217,10 @@ void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submiss
             write(*entry.shader, submission);
             return;
         }
+    }
+    if (submission.pass == DiagnosticPass::Forward) {
+        record_contributor();
+        return;
     }
     unsupported(
         "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
@@ -250,10 +281,9 @@ bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
                                               std::uint32_t color_texture,
                                               const DiagnosticExtent& extent) {
     if (!state_->forward_targets) {
-        unsupported("foliage_forward_contributor_target_unavailable",
-                    0,
-                    DiagnosticOwnership::Live,
-                    DiagnosticPass::Forward);
+        // Original forward submissions still register exact contributor-only records.
+        // Without pixel storage the frame remains ineligible for publication.
+        abort();
         return false;
     }
     GBuffer target{};

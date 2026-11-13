@@ -25,8 +25,7 @@ void GBufferDiagnosticCapture::SetCurrent(GBufferDiagnosticCapture* capture) {
 bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
                                              const DiagnosticExtent& extent,
                                              bool forward) {
-    if (state_->framebuffer != 0 ||
-        (forward ? !state_->captured || state_->forward_captured : state_->captured)) {
+    if (state_->framebuffer != 0 || (forward ? !state_->captured : state_->forward_captured)) {
         state_->failure = "nested_gbuffer_attachment";
         return false;
     }
@@ -77,6 +76,13 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
     }
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
     auto& targets = forward ? *state_->forward_targets : state_->targets;
+    const bool already_captured = forward ? state_->forward_captured : state_->captured;
+    // Continuations keep earlier IDs, so resizing either plane mid-frame must refuse.
+    if (already_captured &&
+        (targets.extent().width != extent.width || targets.extent().height != extent.height)) {
+        state_->failure = "diagnostic_continuation_extent_mismatch";
+        return false;
+    }
     if (!targets.ensure(true, extent, 7)) {
         state_->failure = "diagnostic_integer_target_unsupported";
         return false;
@@ -94,7 +100,7 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
                                         gbuffer.authored_texture ? GLenum{GL_COLOR_ATTACHMENT5}
                                                                  : GLenum{GL_NONE},
                                         GL_COLOR_ATTACHMENT6};
-    if (forward) {
+    if (forward || already_captured) {
         auto forward_buffers = state_->buffers;
         forward_buffers[6] = GL_COLOR_ATTACHMENT6;
         glDrawBuffers(state_->buffer_count, forward_buffers.data());
@@ -109,7 +115,9 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
         state_->failure = "diagnostic_mrt_incomplete";
         return false;
     }
-    glClearTexImage(targets.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+    if (!already_captured) {
+        glClearTexImage(targets.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
     state_->forward = forward;
     if (forward) {
         state_->forward_captured = true;

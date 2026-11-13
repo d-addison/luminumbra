@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. GPU attribution, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. Guarded GPU variants attribute original deferred submissions including plant batches, plus separate foliage and scent-decal contributors. Missing contributor storage retains exact per-draw Forward records labeled :contributor_only and refuses completion; water, glass, particles and waterfall forward instrumentation, native qualification, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
       "status": "partial",
       "evidence": [
         {
@@ -19,6 +19,10 @@
         {
           "kind": "ctest",
           "ref": "DiagnosticDrawTable.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticAttribution.*"
         },
         {
           "kind": "ctest",
