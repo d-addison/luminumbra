@@ -2047,28 +2047,32 @@ class StormLightningWiring(unittest.TestCase):
         self.assertIn("view_projection * glm::vec4(point, 1.0f)", project)
         self.assertIn("const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);", project)
         self.assertNotIn("clamp", project)
-        predicate = re.search(r"if \(([^\n]+)\) \{", project)
-        self.assertIsNotNone(predicate)
-        self.assertIn("!std::isfinite(clip.w)", predicate[1])
-        for w, accepted in ((-1, False), (0, False), (float("nan"), False),
-                            (float("inf"), False), (-float("inf"), False),
-                            (0.001, True), (10, True)):
-            with self.subTest(w=w):
-                expression = predicate[1].replace("0.0f", "0.0").replace(
-                    "std::isfinite(clip.w)", "true" if math.isfinite(w) else "false")
-                self.assertEqual(not cpp_expression(expression, true=True, false=False,
-                                                    **{"clip.w": w}), accepted)
-        invalid = block(project, "if (!std::isfinite(ndc.x)")
-        self.assertIn("return kLiveBoltPenUp;", invalid)
-        predicate = re.search(r"if \((!std::isfinite\(ndc.x\)[^\n]+)\) \{", project)[1]
-        for x in (0.0, 2.0, float("nan"), float("inf")):
-            for y in (0.0, -2.0, float("nan"), -float("inf")):
-                with self.subTest(x=x, y=y):
-                    expression = predicate.replace(
-                        "std::isfinite(ndc.x)", "true" if math.isfinite(x) else "false").replace(
-                        "std::isfinite(ndc.y)", "true" if math.isfinite(y) else "false")
-                    self.assertEqual(cpp_expression(expression, true=True, false=False),
-                                     not (math.isfinite(x) and math.isfinite(y)))
+        live = block(read(CLIENT / "main_client.cpp"), "const auto project =")
+        for projection, sentinel_return in (
+                (project, "return kLiveBoltPenUp;"),
+                (live, "return Luminumbra::Rendering::kLiveBoltPenUp;")):
+            predicate = re.search(r"if \(([^\n]+)\) \{", projection)
+            self.assertIsNotNone(predicate)
+            self.assertIn("!std::isfinite(clip.w)", predicate[1])
+            for w, accepted in ((-1, False), (0, False), (float("nan"), False),
+                                (float("inf"), False), (-float("inf"), False),
+                                (0.001, True), (10, True)):
+                with self.subTest(w=w):
+                    expression = predicate[1].replace("0.0f", "0.0").replace(
+                        "std::isfinite(clip.w)", "true" if math.isfinite(w) else "false")
+                    self.assertEqual(not cpp_expression(expression, true=True, false=False,
+                                                        **{"clip.w": w}), accepted)
+            invalid = block(projection, "if (!std::isfinite(ndc.x)")
+            self.assertIn(sentinel_return, invalid)
+            predicate = re.search(r"if \((!std::isfinite\(ndc.x\)[^\n]+)\) \{", projection)[1]
+            for x in (0.0, 2.0, float("nan"), float("inf")):
+                for y in (0.0, -2.0, float("nan"), -float("inf")):
+                    with self.subTest(x=x, y=y):
+                        expression = predicate.replace(
+                            "std::isfinite(ndc.x)", "true" if math.isfinite(x) else "false").replace(
+                            "std::isfinite(ndc.y)", "true" if math.isfinite(y) else "false")
+                        self.assertEqual(cpp_expression(expression, true=True, false=False),
+                                         not (math.isfinite(x) and math.isfinite(y)))
         self.assertIn("project_stroke(bolt.main_channel)", project)
         self.assertIn("project_stroke(branch)", project)
         self.assertIn("project(bolt.ground_point)", project)
@@ -2111,10 +2115,11 @@ class StormLightningWiring(unittest.TestCase):
         self.assertAlmostEqual(evaluate(0.8, 0.01), 10 * evaluate(0.8, 0.001))
         self.assertGreater(evaluate(0.0, 0.1), evaluate(0.8, 0.1))
         main = block(shader, "void main()")
-        self.assertIn("length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0))", main)
+        self.assertIn("length((ndc - centre) * vec2(u_aspect, 1.0))", main)
         self.assertIn("dot(color, vec3(0.2126, 0.7152, 0.0722))", main)
         self.assertIn("flashResponse(distanceToStrike, sceneLuma)", main)
-        self.assertIn("u_pulse * flash", main)
+        self.assertIn("flash = max(flash, u_flashPulse[i] * response);", main)
+        self.assertIn("color += u_color * flash;", main)
         self.assertIn("if (u_active == 1 && u_pulse > 0.0)", main)
         self.assertNotIn("u_cloud", shader)
         self.assertNotIn("fbm(", shader)
@@ -2153,6 +2158,10 @@ class StormLightningWiring(unittest.TestCase):
                          dict(names, distanceToStrike=distance, sceneLuma=luma))
             ambient = eval(floor, {"__builtins__": {}},
                            dict(names, strikeExtent=extent, sceneLuma=luma))
+            if strike_ndc == (-3.0, -3.0):
+                local = 0.0
+            if extent <= 1.0:
+                ambient = 0.0
             return max(local, ambient)
 
         pen_up = (-3.0, -3.0)
@@ -2177,9 +2186,85 @@ class StormLightningWiring(unittest.TestCase):
             self.assertLessEqual(value - previous, 0.05)
             previous = value
         main = block(shader, "void main()")
-        self.assertIn("max(abs(u_strikeNdc.x), abs(u_strikeNdc.y))", main)
-        self.assertIn("offscreenFlashFloor(strikeExtent, sceneLuma)", main)
-        self.assertIn("max(flashResponse(distanceToStrike, sceneLuma),", main)
+        self.assertIn("max(abs(centre.x), abs(centre.y))", main)
+        offscreen = block(main, "if (u_flashOnscreen[i] == 0)")
+        self.assertIn("offscreenFlashFloor(strikeExtent, sceneLuma)", offscreen)
+        local = block(main, "if (!all(equal(centre, kLiveBoltPenUp)))")
+        self.assertIn("response = flashResponse(distanceToStrike, sceneLuma);", local)
+        self.assertNotIn("flashResponse(", offscreen)
+        self.assertNotIn("offscreenFlashFloor(", local)
+        self.assertEqual(main.count("offscreenFlashFloor("), 1)
+        self.assertIn("if (i >= u_flashCount) break;", main)
+        self.assertIn("for (int i = 0; i < MAX_STRIKE_FLASHES; ++i)", main)
+        update = re.search(r"flash = (max\(flash, u_flashPulse\[i\] \* response\));", main)[1]
+        update = update.replace("u_flashPulse[i]", "pulse")
+        code = compile(ast.parse(update, mode="eval"), "<shader flash max>", "eval")
+
+        def combined(strikes, pixel, luma, aspect=1.777):
+            value = 0.0
+            for centre, pulse in strikes:
+                value = eval(code, {"__builtins__": {}}, dict(
+                    max=max, flash=value, pulse=pulse,
+                    response=flash(centre, pixel, luma, aspect)))
+            return value
+
+        # A visible weaker strike retains its full localized response, even when
+        # a stronger behind-camera strike contributes the offscreen floor.
+        strikes = ((pen_up, 0.9), (visible_bolt, 0.4))
+        self.assertEqual(combined(strikes, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined(tuple(reversed(strikes)), visible_bolt, 0.5), 0.4)
+        self.assertAlmostEqual(combined(strikes, (-0.9, 0.9), 0.5), 0.9 * 0.35)
+        # A behind-camera sentinel receives only the bounded floor.
+        self.assertEqual(flash(pen_up, (-1.0, -1.0), 1.0, 0.01), 0.35)
+        # Two onscreen centres each win at their own pixel; overlapping flashes use
+        # a max rather than a sum. The old strongest-only result is zero on the left.
+        pair = (((-0.8, 0.0), 0.2), ((0.8, 0.0), 0.4))
+        self.assertEqual(combined(pair, (-0.8, 0.0), 0.5), 0.2)
+        self.assertEqual(combined(pair, (0.8, 0.0), 0.5), 0.4)
+        self.assertEqual(combined(((visible_bolt, 0.4),) * 2, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined((), visible_bolt, 0.5), 0.0)
+        self.assertEqual(combined(strikes, visible_bolt, 0.0), 0.0)
+        for centre in ((0.0, 0.0), (-1.0, 1.0), (1.0, -1.0)):
+            for pixel in ((0.0, 0.0), (-0.9, 0.9), (0.7, -0.4)):
+                for luma in (0.0, 0.001, 0.1, 1.0):
+                    for pulse in (0.0, 0.42, 3.0):
+                        with self.subTest(centre=centre, pixel=pixel, luma=luma, pulse=pulse):
+                            distance = math.hypot((pixel[0] - centre[0]) * 1.777,
+                                                  pixel[1] - centre[1])
+                            previous = pulse * eval(response, {"__builtins__": {}},
+                                                    dict(names, distanceToStrike=distance,
+                                                         sceneLuma=luma))
+                            self.assertEqual(combined(((centre, pulse),), pixel, luma), previous)
+
+    def test_flash_list_is_carried_by_every_producer_and_uniform_upload(self):
+        header = read(CLIENT / "rendering/LiveStrikeFlash.h")
+        cap = re.search(r"kMaxLiveStrikeFlashes = (\d+);", header)[1]
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("#define MAX_STRIKE_FLASHES " + cap, shader)
+        for uniform in ("u_flashNdc", "u_flashPulse", "u_flashOnscreen"):
+            self.assertIn(uniform + "[MAX_STRIKE_FLASHES]", shader)
+        frame = read(CLIENT / "rendering/RenderFrameTypes.h")
+        self.assertIn("LiveStrikeFlashList flashes;", frame)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertIn("std::min(lit.flashes.count, kMaxLiveStrikeFlashes)", lighting)
+        self.assertIn('setInt("u_flashCount", static_cast<int>(flash_count))', lighting)
+        self.assertIn("for (std::size_t i = 0; i < flash_count; ++i)", lighting)
+        self.assertIn("const auto& flash = lit.flashes.entries[i];", lighting)
+        for uniform, value in (("u_flashNdc", "flash.strike_ndc"),
+                               ("u_flashPulse", "flash.pulse"),
+                               ("u_flashOnscreen", "flash.onscreen ? 1 : 0")):
+            self.assertIn('("' + uniform + '" + suffix, ' + value + ')', lighting)
+        for path in ("core/ScenarioRunnerDrive.cpp", "core/scenarios/WorldVisualSweep.cpp"):
+            source = read(CLIENT / path)
+            self.assertEqual(source.count("lstate.flashes = composed.flashes;"),
+                             source.count("ComposeLiveStrikes("))
+        live = read(CLIENT / "main_client.cpp")
+        self.assertIn("g_app.weather.liveBolt.flashes = composed.flashes;", live)
+        self.assertIn("Luminumbra::Rendering::SelectLiveStrikeFlashCandidates( pulses)", compact(live))
+        self.assertIn("for (const std::size_t index : flash_selected)", live)
+        self.assertIn("std::sort(frame_indices.begin(), frame_indices.end());", live)
+        self.assertIn("for (const std::size_t index : frame_indices)", live)
+        self.assertNotIn("pulses[strongest]", live)
 
     def test_storm_does_not_add_a_night_visibility_floor(self):
         weather = read(ROOT / "res/shaders/weather_system.frag")
