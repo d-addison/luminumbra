@@ -62,20 +62,36 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
         collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
-        tree = body(collect, "if (impostorsOn && lod == 3 &&")
-        guard = ("if (!input.far_selection.submit || "
-                 "(input.far_selection.effective == FarWorldMode::Legacy && "
-                 "(!input.legacy_far || !input.legacy_far->terrain_resident_at(cp.position))))")
-        self.assertIn(guard, compact(tree))
-        self.assertEqual(compact(body(compact(tree), guard)), "continue;")
-        self.assertLess(compact(tree).index(guard), compact(tree).index("if (cp.impostorLeaf)"))
-        self.assertLess(compact(tree).index(guard), compact(tree).index("impostorInstances.push_back"))
+        self.assertIn("impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree", collect)
+        self.assertIn("input.legacy_far->live_terrain_owns_at(cp.position, cameraPos)", collect)
+        self.assertIn("dist < FarLodSystem::kFarClipInnerRadiusMeters", collect)
+        self.assertIn("impostor_candidate && !live_terrain_owned &&", collect)
+        self.assertIn("input.legacy_far->terrain_resident_at(cp.position)", collect)
+        decision = ("SelectStaticPropSubmission( input.far_selection, impostor_candidate, "
+                    "live_terrain_owned, far_terrain_resident)")
+        self.assertIn(decision, compact(collect))
+        guard = "if (submission == StaticPropSubmission::Refused)"
+        self.assertEqual(compact(body(collect, guard)), "continue;")
+        tree = body(collect, "if (submission == StaticPropSubmission::Impostor)")
+        self.assertIn("impostorInstances.push_back", tree)
+        self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
+        self.assertLess(collect.index(decision.split("(")[0]), collect.index(guard))
+        self.assertLess(collect.index(guard), collect.index("impostorInstances.push_back"))
+        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("auto rit = m_resolveMemo.find(rkey)"))
         legacy = read(RENDERING / "FarLodSystem.cpp")
+        policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
+        self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
+        self.assertLess(policy.index("if (live_terrain_owned)"), policy.index("if (!selection.submit"))
+        self.assertIn("selection.effective == FarWorldMode::Legacy && !far_terrain_resident", policy)
+        ownership = body(legacy, "bool FarLodSystem::live_terrain_owns_at(")
+        for retained in ("m_preview_mode", "m_preview_anchor", "m_preview_inner_radius",
+                         "kFarClipInnerRadiusMeters", "camera_position", "std::isfinite"):
+            self.assertIn(retained, ownership)
         query = body(legacy, "bool FarLodSystem::terrain_resident_at(")
         self.assertEqual(query.count("m_residents.find("), 1)
         self.assertNotIn("for (", query)
         for retained in ("!m_enabled", "std::isfinite", "m_outer_clip_m",
-                         "kFarClipInnerRadiusMeters", "m_preview_inner_radius",
+                         "live_terrain_owns_at(position, m_last_camera_position)",
                          "found->second.element_count != 0"):
             self.assertIn(retained, query)
 

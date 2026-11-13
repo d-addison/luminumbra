@@ -3,6 +3,7 @@
 #include "rendering/AttributedGl.h"
 
 #include "FarLodIntegrationBudget.h"
+#include "FarWorldSelection.h"
 #include "Shader.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Crc32.h"
@@ -1633,6 +1634,35 @@ FarLodSystem::region_admission(int rx, int rz, const glm::vec3& anchor) const {
             .wanted = nearest <= m_wanted_radius_m};
 }
 
+StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selection,
+                                                bool impostor_candidate,
+                                                bool live_terrain_owned,
+                                                bool far_terrain_resident) noexcept {
+    if (!impostor_candidate) {
+        return StaticPropSubmission::Mesh;
+    }
+    if (live_terrain_owned) {
+        return StaticPropSubmission::Impostor;
+    }
+    if (!selection.submit ||
+        (selection.effective == FarWorldMode::Legacy && !far_terrain_resident)) {
+        return StaticPropSubmission::Refused;
+    }
+    return StaticPropSubmission::Impostor;
+}
+
+bool FarLodSystem::live_terrain_owns_at(const glm::vec3& position,
+                                        const glm::vec3& camera_position) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) {
+        return false;
+    }
+    if (m_preview_mode) {
+        return glm::length(glm::vec2(position.x - m_preview_anchor.x,
+                                     position.z - m_preview_anchor.z)) < m_preview_inner_radius;
+    }
+    return glm::length(position - camera_position) < kFarClipInnerRadiusMeters;
+}
+
 bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
     if (!m_enabled || !std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z)) {
@@ -1640,10 +1670,7 @@ bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
     }
     const float distance = glm::length(position - m_last_camera_position);
     if (!std::isfinite(distance) || distance > m_outer_clip_m ||
-        (!m_preview_mode && distance < kFarClipInnerRadiusMeters) ||
-        (m_preview_mode &&
-         glm::length(glm::vec2(position.x - m_preview_anchor.x, position.z - m_preview_anchor.z)) <
-             m_preview_inner_radius)) {
+        live_terrain_owns_at(position, m_last_camera_position)) {
         return false;
     }
     const double region_x = std::floor(static_cast<double>(position.x) / kRegionSize);

@@ -36,6 +36,20 @@ struct FarLodSdfSnapshot;
 namespace Luminumbra::Rendering {
 
 class Shader;
+struct FarWorldSelection;
+
+enum class StaticPropSubmission {
+    Mesh,
+    Impostor,
+    Refused
+};
+
+// Live geometry keeps its existing representation regardless of far availability.
+// Only impostor candidates outside live ownership require submitted far terrain.
+StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selection,
+                                                bool impostor_candidate,
+                                                bool live_terrain_owned,
+                                                bool far_terrain_resident) noexcept;
 
 struct FarLodWorkerBuildOutcome {
     bool ok = false;
@@ -248,6 +262,10 @@ public:
     // Ring-diff scheduling + finished-build integration + eviction. Called
     // once per rendered frame from RenderPipeline::render_frame.
     void update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position);
+
+    // Const ownership diagnostic matching the live ring or anchored preview slice.
+    // Independent of far enablement and residency; uses the current render camera.
+    bool live_terrain_owns_at(const glm::vec3& position, const glm::vec3& camera_position) const;
 
     // Render-thread residency query for far props. One region lookup; excludes
     // the clipped live slice, empty terrain and positions outside the draw band.

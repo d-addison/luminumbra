@@ -726,15 +726,20 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             m_propMeshPaths[cp.pathIndex].starts_with("game-assets/tree-small-02/");
         const int lod =
             SelectTreeLod(dist, authoredTree ? AuthoredTreeLodConfig(impostorsOn) : kTreeLodCfg);
-        if (impostorsOn && lod == 3 &&
-            cp.impostorTree) { // a tree part -> impostor replaces it at LOD3
-            // Compatibility props wait for terrain at their own position,
-            // including when Legacy was selected by a Ladder refusal.
-            if (!input.far_selection.submit ||
-                (input.far_selection.effective == FarWorldMode::Legacy &&
-                 (!input.legacy_far || !input.legacy_far->terrain_resident_at(cp.position)))) {
-                continue;
-            }
+        const bool impostor_candidate = impostorsOn && lod == 3 && cp.impostorTree;
+        const bool live_terrain_owned =
+            impostor_candidate &&
+            (input.legacy_far ? input.legacy_far->live_terrain_owns_at(cp.position, cameraPos)
+                              : dist < FarLodSystem::kFarClipInnerRadiusMeters);
+        const bool far_terrain_resident = impostor_candidate && !live_terrain_owned &&
+                                          input.far_selection.submit && input.legacy_far &&
+                                          input.legacy_far->terrain_resident_at(cp.position);
+        const auto submission = SelectStaticPropSubmission(
+            input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
+        if (submission == StaticPropSubmission::Refused) {
+            continue;
+        }
+        if (submission == StaticPropSubmission::Impostor) {
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
                                    // billboard
                 const glm::vec3 c =

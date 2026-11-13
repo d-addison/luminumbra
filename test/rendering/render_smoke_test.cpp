@@ -2,12 +2,14 @@
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
+#include "luminumbra_client/rendering/TreeLod.h"
 #include "luminumbra_client/rendering/passes/AerialPass.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
@@ -61,6 +63,95 @@ namespace {
 #ifndef LUMINUMBRA_TEST_ARTIFACT_DIR
 #define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
+
+TEST(RenderSmokeTest, StaticPropCollectionPreservesLiveRingAndPreviewImpostors) {
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    far.set_enabled(false);
+    const glm::vec3 camera(0.0f);
+    const FarWorldSelection suppressed{.requested = FarWorldMode::Legacy,
+                                       .effective = FarWorldMode::Legacy,
+                                       .refusal = FarWorldRefusal::None,
+                                       .advance = false,
+                                       .submit = false};
+    for (const float distance : {65.0f, 100.0f, 175.99f}) {
+        const glm::vec3 position(distance, 0.0f, 0.0f);
+        const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+        ASSERT_TRUE(candidate);
+        ASSERT_TRUE(far.live_terrain_owns_at(position, camera));
+        EXPECT_EQ(SelectStaticPropSubmission(
+                      suppressed, candidate, far.live_terrain_owns_at(position, camera), false),
+                  StaticPropSubmission::Impostor);
+        EXPECT_EQ(SelectStaticPropSubmission(
+                      suppressed, false, far.live_terrain_owns_at(position, camera), false),
+                  StaticPropSubmission::Mesh);
+    }
+    for (const float distance : {176.0f, 300.0f}) {
+        const bool live_owned = far.live_terrain_owns_at({distance, 0.0f, 0.0f}, camera);
+        EXPECT_FALSE(live_owned);
+        EXPECT_EQ(SelectStaticPropSubmission({}, true, live_owned, true),
+                  StaticPropSubmission::Impostor);
+        EXPECT_EQ(SelectStaticPropSubmission({}, true, live_owned, false),
+                  StaticPropSubmission::Refused);
+    }
+    // The preview slice belongs to its anchor, even far from the orbit camera.
+    const glm::vec3 anchor(1000.0f, 0.0f, 0.0f);
+    far.set_preview_anchor(anchor, 50.0f);
+    EXPECT_FALSE(far.live_terrain_owns_at(camera, camera));
+    for (const glm::vec3 position : {anchor, anchor + glm::vec3(49.0f, 200.0f, 0.0f)}) {
+        ASSERT_TRUE(far.live_terrain_owns_at(position, camera));
+        EXPECT_EQ(SelectStaticPropSubmission(
+                      suppressed, true, far.live_terrain_owns_at(position, camera), false),
+                  StaticPropSubmission::Impostor);
+    }
+    EXPECT_FALSE(far.live_terrain_owns_at(anchor + glm::vec3(50.0f, 0.0f, 0.0f), camera));
+    far.set_preview_anchor(anchor, 0.0f);
+    EXPECT_FALSE(far.live_terrain_owns_at(anchor, camera));
+    far.clear_preview_anchor();
+    EXPECT_TRUE(far.live_terrain_owns_at(camera, camera));
+    for (const float invalid :
+         {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        EXPECT_FALSE(far.live_terrain_owns_at({invalid, 0.0f, 0.0f}, camera));
+        EXPECT_FALSE(far.live_terrain_owns_at({0.0f, invalid, 0.0f}, camera));
+        EXPECT_FALSE(far.live_terrain_owns_at({0.0f, 0.0f, invalid}, camera));
+    }
+}
+
+TEST(RenderSmokeTest, StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback) {
+    using namespace Luminumbra::Rendering;
+    GBufferPass pass;
+    const auto legacy =
+        SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto ladder =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    const auto shader_refused = pass.SelectFarWorldRenderer(ladder);
+    ASSERT_EQ(refused.requested, FarWorldMode::Ladder);
+    ASSERT_EQ(refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    ASSERT_TRUE(refused.submit);
+    ASSERT_TRUE(shader_refused.submit);
+    for (auto selection : {legacy, ladder, refused, shader_refused}) {
+        for (const bool submit : {false, true}) {
+            selection.submit = submit;
+            for (const bool resident : {false, true}) {
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, true, resident),
+                          StaticPropSubmission::Impostor);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, true, resident),
+                          StaticPropSubmission::Mesh);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, false, resident),
+                          StaticPropSubmission::Mesh);
+                const bool far_allowed =
+                    submit && (selection.effective == FarWorldMode::Ladder || resident);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, false, resident),
+                          far_allowed ? StaticPropSubmission::Impostor
+                                      : StaticPropSubmission::Refused);
+            }
+        }
+    }
+}
 
 struct ShaderProgramSpec {
     const char* name;
