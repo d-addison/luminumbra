@@ -11,6 +11,7 @@
 // This is a render-only offline-ish bake: it needs a current GL context (run from
 // the client's render loop via --bake-tree-impostor). Nothing here is hashed.
 
+#include "ImpostorCoverage.h"
 #include "OctaImpostor.h"
 
 #include <string>
@@ -53,6 +54,11 @@ struct ImpostorAtlasTextures {
     Vec3f center{};             // tree local bounding-sphere center
     float radius = 0;           // tree local bounding-sphere radius (billboard half-size)
     std::string error;
+    ImpostorCoverage alpha_coverage;
+
+    bool drawable() const {
+        return ok && albedoTex != 0 && normalTex != 0 && alpha_coverage.usable();
+    }
 };
 ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(const std::string& rootDir,
                                                       const RenderPipeline& rp,

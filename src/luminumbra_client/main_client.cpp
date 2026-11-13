@@ -2675,7 +2675,8 @@ int main(int argc, char* argv[]) {
         }
         if (Luminumbra::Rendering::TreeImpostorsRequested(
                 Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS")) &&
-            !renderPipeline.tree_impostor_enabled())
+            !renderPipeline.tree_impostor_enabled() &&
+            !renderPipeline.tree_impostor_coverage().refused())
             return "Required tree impostor baking failed. Check the client log for the renderer "
                    "error.";
         return {};
@@ -5792,9 +5793,14 @@ int main(int argc, char* argv[]) {
                                         g_camera->GetViewMatrix();
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
-                                        if (clip.w <= 0.0f)
+                                        if (!std::isfinite(clip.w) || !(clip.w > 0.0f)) {
                                             return Luminumbra::Rendering::kLiveBoltPenUp;
-                                        return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                                        }
+                                        const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);
+                                        if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y)) {
+                                            return Luminumbra::Rendering::kLiveBoltPenUp;
+                                        }
+                                        return ndc;
                                     };
                                     const auto project_stroke =
                                         [&](const std::vector<glm::vec3>& stroke) {
@@ -5840,20 +5846,34 @@ int main(int argc, char* argv[]) {
                                                     LiveStrikeMayBeVisible(project_strike(index),
                                                                            view_margin);
                                             });
-                                    // At most 48 geometry candidates plus one flash-only entry.
-                                    frame_strikes.reserve(selected.size() + 1);
-                                    const auto strongest = static_cast<std::size_t>(
-                                        std::max_element(pulses.begin(), pulses.end()) -
-                                        pulses.begin());
-                                    const auto& flash = *consumed[strongest].event;
-                                    auto& flash_only = frame_strikes.emplace_back();
-                                    flash_only.pulse = pulses[strongest];
-                                    flash_only.strike_ndc =
-                                        project(glm::vec3(flash.world_x,
-                                                          consumed[strongest].ground_y,
-                                                          flash.world_z));
-                                    for (const std::size_t index : selected) {
-                                        frame_strikes.push_back(project_strike(index));
+                                    const auto flash_selected =
+                                        Luminumbra::Rendering::SelectLiveStrikeFlashCandidates(
+                                            pulses);
+                                    // At most 48 geometry candidates plus eight flash candidates.
+                                    // Merge by original input index so ties have the same stable
+                                    // key.
+                                    auto frame_indices = selected;
+                                    for (const std::size_t index : flash_selected) {
+                                        if (!std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_indices.push_back(index);
+                                        }
+                                    }
+                                    std::sort(frame_indices.begin(), frame_indices.end());
+                                    frame_strikes.reserve(frame_indices.size());
+                                    for (const std::size_t index : frame_indices) {
+                                        if (std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_strikes.push_back(project_strike(index));
+                                        } else {
+                                            const auto& flash = *consumed[index].event;
+                                            auto& flash_only = frame_strikes.emplace_back();
+                                            flash_only.pulse = pulses[index];
+                                            flash_only.strike_ndc =
+                                                project(glm::vec3(flash.world_x,
+                                                                  consumed[index].ground_y,
+                                                                  flash.world_z));
+                                        }
                                     }
                                 }
                                 if (!frame_strikes.empty()) {
@@ -5867,7 +5887,7 @@ int main(int argc, char* argv[]) {
                                     g_app.weather.liveBolt.bolt_points_ndc =
                                         std::move(composed.points);
                                     g_app.weather.liveBolt.pulse_intensity = composed.pulse;
-                                    g_app.weather.liveBolt.strike_ndc = composed.strike_ndc;
+                                    g_app.weather.liveBolt.flashes = composed.flashes;
                                     g_app.weather.liveBolt.bolt_width_ndc = bolt_width;
                                     g_app.weather.liveBolt.bolt_glow_ndc = bolt_glow;
                                     g_app.weather.boltFramesLeft = 3; // a few frames of flash
