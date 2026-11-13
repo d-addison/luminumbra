@@ -31,6 +31,7 @@
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
 #include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
@@ -2412,6 +2413,8 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         snapshot.coords = chunk->get_coords();
         snapshot.source_chunk = chunk;
         snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
+        snapshot.near_terrain_snapshot =
+            chunk->near_terrain_snapshot.load(std::memory_order_acquire);
         snapshot.water_mesh_version = chunk->water_mesh_version.load(std::memory_order_acquire);
         snapshot.terrain_vertex_count = chunk->mesh_vertices.size();
         snapshot.terrain_index_count = chunk->mesh_indices.size();
@@ -2422,6 +2425,7 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         const u32 water_version_after_metadata =
             chunk->water_mesh_version.load(std::memory_order_acquire);
         if (version_after_metadata != snapshot.mesh_version) {
+            snapshot.near_terrain_snapshot.reset();
             snapshot.mesh_version = version_after_metadata;
             snapshot.terrain_vertex_count = 0;
             snapshot.terrain_index_count = 0;
@@ -4274,6 +4278,8 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -4670,9 +4676,15 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
     payload.mesh_version = version_before;
     payload.vertices = chunk.source_chunk->mesh_vertices;
     payload.indices = chunk.source_chunk->mesh_indices;
+    payload.near_terrain_snapshot = chunk.near_terrain_snapshot;
+    if (payload.near_terrain_snapshot &&
+        !payload.near_terrain_snapshot->matches(*chunk.source_chunk, version_before)) {
+        payload.near_terrain_snapshot.reset();
+    }
 
     const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
     if (version_after != version_before || !payload.has_mesh()) {
+        payload.near_terrain_snapshot.reset();
         payload.vertices.clear();
         payload.indices.clear();
         return false;

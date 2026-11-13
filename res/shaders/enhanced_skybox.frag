@@ -189,6 +189,26 @@ float hgPhase(float cosTheta, float g) {
     return (1.0 - g2) / (4.0 * PI_SKY * pow(max(denom, 1e-4), 1.5));
 }
 
+// Trilinear value noise keeps the vertical axis independent of XZ. Folding Y
+// into 2D lookups produces parallel sheets instead of rounded cloud volumes.
+float cloudNoise3D(vec3 p) {
+    vec3 cell = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    vec2 lower = cell.xz + cell.y * vec2(37.0, 113.0);
+    vec2 upper = lower + vec2(37.0, 113.0);
+    float a = mix(mix(hash(lower), hash(lower + vec2(1.0, 0.0)), f.x),
+                  mix(hash(lower + vec2(0.0, 1.0)), hash(lower + vec2(1.0)), f.x), f.z);
+    float b = mix(mix(hash(upper), hash(upper + vec2(1.0, 0.0)), f.x),
+                  mix(hash(upper + vec2(0.0, 1.0)), hash(upper + vec2(1.0)), f.x), f.z);
+    return mix(a, b, f.y);
+}
+
+float cloudHorizonFade(float elevation, float structureWeight) {
+    return mix(smoothstep(0.0, 0.22, elevation),
+               smoothstep(0.0, 0.10, elevation), structureWeight);
+}
+
 // Volumetric cloud density at a world-space sample p. Combines the shared 2D
 // coverage field (registration), a vertical profile, and 3D erosion. Returns
 // [0,1]; also outputs the raw horizontal coverage for the caller's cheap reject.
@@ -201,14 +221,14 @@ float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
     if (coverage <= 0.002) return 0.0;
 
     float hf = clamp((p.y - cloudSlabBottom()) / (cloudSlabTop() - cloudSlabBottom()), 0.0, 1.0);
-    // Vertical profile: feather in off the rounded base, taper the anvil top.
-    float profile = smoothstep(0.0, 0.16, hf) * (1.0 - smoothstep(0.50, 1.0, hf));
-
-    // 3D erosion: low-frequency billow shape + high-frequency cauliflower edge.
-    // p.y folded into the 2D fbm lookups gives vertical (3D) variation cheaply.
-    vec2 wind = u_cloudScrollOffset;
-    float shape   = fbm((p.xz + wind) * (1.0 / 430.0) + vec2(p.y * 0.0045), 4);
-    float erosion = fbm((p.xz - wind * 0.6) * (1.0 / 120.0) + vec2(p.y * 0.011, 0.0), 3);
+    // Both scales travel with the same wind as coverage and the cast shadow.
+    vec3 advected = p + vec3(u_cloudScrollOffset.x, 0.0, u_cloudScrollOffset.y);
+    float shape = cloudNoise3D(advected * (1.0 / 430.0));
+    float erosion = cloudNoise3D(advected * (1.0 / 120.0));
+    // Vary the base within the slab, with a wider feather to resolve its rounded
+    // underside at the bounded march spacing. Density is zero outside the slab.
+    float base = shape * 0.24;
+    float profile = smoothstep(base, base + 0.24, hf) * (1.0 - smoothstep(0.50, 1.0, hf));
 
     float d = coverage * profile;
     // Modulate the body by the billow shape, then erode the edges (less erosion
@@ -222,7 +242,7 @@ float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
 // tier-1 single-plane projection. dayFactor lights the clouds; at night they
 // fall to a faint dark silhouette.
 vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
-    if (viewDir.y < 0.02) return baseColor; // No clouds at/below the horizon.
+    if (viewDir.y <= 0.0) return baseColor;
 
     float structureWeight = smoothstep(0.55, 0.80, u_cloudCoverageAmount);
 
@@ -243,21 +263,20 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
 
     // Horizon fade: fair weather thins to clear haze at the horizon (clear-sky
     // gate intact); a storm keeps near-full cover right down to the horizon band.
-    float horizonFade = mix(smoothstep(0.02, 0.22, viewDir.y),
-                            0.55 + 0.45 * smoothstep(0.02, 0.10, viewDir.y),
-                            structureWeight);
+    float horizonFade = cloudHorizonFade(viewDir.y, structureWeight);
 
     // --- Raymarch the slab front-to-back. ---
     const int   kSteps      = 28;
     const int   kLightSteps = 5;
     float dt = (tExit - tEnter) / float(kSteps);
-    // Per-pixel jitter breaks the slab-entry banding without a blue-noise tex.
-    float jitter = hash(viewDir.xz * 512.0 + u_time);
+    // Stable per-pixel jitter breaks slab-entry bands without temporal swimming.
+    float jitter = hash(gl_FragCoord.xy);
 
     // Lighting palette. Sun colour reddens at low sun via the transmittance LUT
     // (coherent with the disc/aerial); ambient is a cool sky fill.
-    vec3 sunLight = sunTransmittance(u_sunCosZenith) * 2.4;
-    vec3 ambient  = vec3(0.42, 0.47, 0.58);
+    float sunlight = smoothstep(-0.08, 0.06, u_sunCosZenith);
+    vec3 sunLight = sunTransmittance(u_sunCosZenith) * (2.4 * sunlight);
+    vec3 ambient = mix(vec3(0.025, 0.028, 0.035), vec3(0.42, 0.47, 0.58), dayFactor);
     float cosToSun = dot(viewDir, u_sunDirection);
     // Blend a forward (silver lining) and a near-isotropic lobe.
     float phase = mix(hgPhase(cosToSun, 0.20), hgPhase(cosToSun, 0.76), 0.5);
@@ -275,7 +294,9 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
         float density = cloudDensity(p, structureWeight, cov);
         if (density > 0.001) {
             // Light march toward the sun for self-shadowing (Beer-Lambert).
-            float lightDt = (tExit - tEnter) / float(kSteps) * 1.4;
+            // Light sampling distance is a property of the cloud, independent of
+            // the viewer's elevation (grazing rays must not darken its lighting).
+            float lightDt = (cloudSlabTop() - cloudSlabBottom()) / float(kLightSteps);
             float lightDensity = 0.0;
             for (int j = 0; j < kLightSteps; ++j) {
                 vec3 lp = p + u_sunDirection * (lightDt * (float(j) + 0.5));
@@ -287,7 +308,7 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
             // look multiple scattering would give (Nubis, SIGGRAPH 2015).
             float powder = 1.0 - exp(-density * dt * kSigma * 2.0);
             vec3 sunTerm = sunLight * lightTrans * phase * powder;
-            vec3 stepColor = (sunTerm + ambient) * density;
+            vec3 stepColor = sunTerm + ambient;
 
             float stepExt = exp(-density * dt * kSigma);
             // Energy-conserving front-to-back integration.
@@ -298,7 +319,9 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     }
 
     float alpha = clamp((1.0 - transmittance) * horizonFade, 0.0, 1.0);
-    vec3 cloudColor = scatter;
+    // The integral already contains opacity. Unpremultiply before grading and
+    // the straight-alpha composite below; applying alpha twice darkens fringes.
+    vec3 cloudColor = scatter / max(1.0 - transmittance, 1e-4);
 
     // Storm deck reads charcoal-grey (menacing), not bright white.
     cloudColor = mix(cloudColor, cloudColor * 0.66, structureWeight);
@@ -313,12 +336,7 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
         float lit = clamp(dot(viewDir, u_sunDirection) * 0.5 + 0.5, 0.0, 1.0); // sun-facing
         cloudColor = mix(cloudColor, cloudColor * (vec3(1.0) + warmSun * 1.6), lowSun * (0.35 + 0.65 * lit) * dayFactor);
     }
-    // Night tint so clouds silhouette against the dark dome -- but ONLY in true
-    // night, not through twilight (else dusk/dawn clouds read as dark silhouettes
-    // even while the sky still glows). Gated on a sharp night ramp.
-    float nightT = 1.0 - smoothstep(0.0, 0.32, dayFactor);
-    cloudColor = mix(cloudColor, cloudColor * 0.12 + vec3(0.02, 0.02, 0.03), nightT);
-
+    // Keep clouds bright through twilight (was dayFactor*1.04 -> halved at dusk).
     float cloudBright = 0.5 + 0.55 * dayFactor;
     cloudColor *= cloudBright;
 
@@ -697,7 +715,9 @@ void main()
     }
 
     // Color grading for fantasy atmosphere
-    skyColor = pow(skyColor, vec3(0.9, 0.95, 1.05));
+    // Unequal exponents turn even neutral dark clouds brown. Keep the night
+    // palette supplied by cloud ambient and the atmosphere.
+    skyColor = pow(skyColor, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor));
 
     //  ( part B): NOON sun-disc PUNCH. At a high sun the open pale dome
     // ALSO saturates near the tonemap ceiling, so the pre-tonemap disc/corona above
