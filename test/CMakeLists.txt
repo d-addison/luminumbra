@@ -2750,6 +2750,9 @@ add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE
 option(LUMINUMBRA_SHADER_SCENES "Register software shader reference scenes" OFF)
 if(LUMINUMBRA_SHADER_SCENES)
     add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
+    # Re-run configuration when the fixture changes so its embedded hash stays current.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
     file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
     string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
     string(SHA256 _shader_scene_hash "${_shader_scene_source}")
@@ -2768,7 +2771,7 @@ if(LUMINUMBRA_SHADER_SCENES)
     add_test(NAME ShaderSceneSoftwareGl COMMAND "${Python3_EXECUTABLE}" -I -B
         "${CMAKE_SOURCE_DIR}/tools/static_preview/run_software_gl.py"
         --binary "$<TARGET_FILE:shader_scene_render_test>" --profile shader-scenes
-        --output "${CMAKE_BINARY_DIR}/shader-scene-capture")
+        --output-parent "${CMAKE_BINARY_DIR}/shader-scene-capture")
     set_tests_properties(ShaderSceneSoftwareGl PROPERTIES TIMEOUT 180
         RESOURCE_LOCK luminumbra_gl_context)
 endif()

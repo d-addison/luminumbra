@@ -653,7 +653,7 @@ jobs:
           python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator
           python3 -I -B tools/ci/compile_shaders.py
       - name: Install fast validation dependencies
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -663,19 +663,19 @@ jobs:
             wayland-protocols xorg-dev xvfb libgl1-mesa-dri
       - name: Restore fast dependency sources
         id: fast-deps
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: scratch/fast-deps
           key: fast-deps-v1-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'vendor/CMakeLists.txt', 'tools/ci/deps-lock.json', 'tools/ci/offline_deps.py', 'tools/ci/path_safety.py', 'tools/ci/jolt_startup.py', 'cmake/jolt_startup.cmake', 'cmake/patches/jolt-startup.*') }}
       - name: Populate missing fast dependency sources
-        if: steps.route.outputs.native != 'false' && steps.fast-deps.outputs.cache-hit != 'true'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true') && steps.fast-deps.outputs.cache-hit != 'true'
         run: >-
           python3 -I -B tools/ci/offline_deps.py snapshot
           --cache scratch/fast-deps/sources --lock scratch/fast-deps/lock.json
       - name: Verify and stage isolated fast dependency sources
         id: stage-deps
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           for compiler in gcc clang; do
             python3 -I -B tools/ci/offline_deps.py stage --build-local \
@@ -697,7 +697,7 @@ jobs:
           path: scratch/fast-deps
           key: ${{ steps.fast-deps.outputs.cache-primary-key }}
       - name: Configure GCC and Clang databases and generate headers
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/fast-gcc
           cmake -C scratch/fast-gcc-init.cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
@@ -718,7 +718,6 @@ jobs:
       - name: Render and compare software shader scenes
         if: steps.shader-scenes.outputs.needs_shader_scenes == 'true'
         run: |
-          test "${{ steps.route.outputs.native }}" != false
           cmake --build build/fast-gcc --target shader_scene_render_test --parallel 2
           python3 -I -B tools/static_preview/run_software_gl.py --binary build/fast-gcc/bin/shader_scene_render_test --profile shader-scenes --output build/fast-gcc/shader-scene-capture
           python3 -I -B tools/gates/shader-scenes.py compare --manifest test/rendering/shader_scenes/scenes.json --capture build/fast-gcc/shader-scene-capture
