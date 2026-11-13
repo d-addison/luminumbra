@@ -484,6 +484,8 @@ protected:
         GLint inactive_texture = 0;
         GLenum active_texture = GL_TEXTURE0;
         GLint units = 2;
+        GLint images = 2;
+        GLint image_binding = 0;
         GLint draw_fbo = 72;
         GLint read_fbo = 73;
         GLint max_size = 16384;
@@ -531,6 +533,9 @@ protected:
             case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
                 *output = driver.units;
                 break;
+            case GL_MAX_IMAGE_UNITS:
+                *output = driver.images;
+                break;
             case GL_READ_FRAMEBUFFER_BINDING:
                 *output = driver.read_fbo;
                 break;
@@ -550,6 +555,11 @@ protected:
                 ADD_FAILURE() << name;
                 break;
         }
+    }
+    static void APIENTRY GetIndexed(GLenum name, GLuint index, GLint* output) {
+        EXPECT_EQ(name, GL_IMAGE_BINDING_NAME);
+        EXPECT_LT(index, static_cast<GLuint>(state().images));
+        *output = index == 1 ? state().image_binding : 0;
     }
     static void APIENTRY
     Internal(GLenum target, GLenum format, GLenum query, GLsizei count, GLint* value) {
@@ -638,6 +648,7 @@ protected:
         EXPECT_EQ(state().inactive_texture, 0);
     }
     Replace<PFNGLGETINTEGERVPROC> get_{glad_glGetIntegerv, Get};
+    Replace<PFNGLGETINTEGERI_VPROC> get_indexed_{glad_glGetIntegeri_v, GetIndexed};
     Replace<PFNGLGETINTERNALFORMATIVPROC> internal_{glad_glGetInternalformativ, Internal};
     Replace<PFNGLGENTEXTURESPROC> gen_texture_{glad_glGenTextures, GenTexture};
     Replace<PFNGLGENFRAMEBUFFERSPROC> gen_fbo_{glad_glGenFramebuffers, GenFbo};
@@ -754,7 +765,7 @@ TEST_F(DiagnosticTargetDriver, NondefaultActiveTextureAndCaveatSupportPreserveCa
 }
 
 TEST_F(DiagnosticTargetDriver, BoundOwnedStorageRefusesResizeWithoutRetiringOrChangingBindings) {
-    for (unsigned int binding = 0; binding < 6; ++binding) {
+    for (unsigned int binding = 0; binding < 8; ++binding) {
         state() = State{};
         DiagnosticTargets targets;
         ASSERT_TRUE(targets.ensure(true, {2, 2}));
@@ -768,6 +779,10 @@ TEST_F(DiagnosticTargetDriver, BoundOwnedStorageRefusesResizeWithoutRetiringOrCh
             state().read_fbo = static_cast<GLint>(framebuffer);
         } else if (binding == 3) {
             state().inactive_texture = static_cast<GLint>(texture);
+        } else if (binding == 6) {
+            state().image_binding = static_cast<GLint>(texture);
+        } else if (binding == 7) {
+            state().images = 257;
         } else {
             state().units = binding == 4 ? 0 : 257;
         }
