@@ -625,5 +625,86 @@ class RegistrationTests(unittest.TestCase):
                             self.assertEqual(output[-1], "native=" + native)
 
 
+class TaauShaderContracts(unittest.TestCase):
+    def setUp(self):
+        self.source = (ROOT / "res/shaders/taau_resolve.frag").read_text(encoding="utf-8")
+
+    def body(self, name):
+        match = re.search(r"\b" + name + r"\([^)]*\)\s*\{([^}]+)\}", self.source)
+        self.assertIsNotNone(match, name)
+        return re.sub(r"//[^\n]*", "", match[1])
+
+    def test_sharpen_uses_luminance_and_bounds_the_published_history(self):
+        body = self.body("sharpenLuma")
+        for statement in (
+            "const vec3 weights = vec3(0.2126, 0.7152, 0.0722);",
+            "float luminance = dot(color, weights);",
+            "float detail = luminance - dot(mean, weights);",
+            "return clamp(color * gain, lower, upper);",
+        ):
+            self.assertIn(statement, body)
+        self.assertIn("resolved = sharpenLuma(resolved, mean, nmin, nmax);", self.source)
+        self.assertNotIn("resolved + u_sharpness * (resolved - mean)", self.source)
+        self.assertIn("hist = clamp(hist, nmin, nmax);", self.source)
+
+    def test_sharpen_black_hdr_flat_and_silhouette_inputs(self):
+        # Evaluate the shipping scalar gain expression; RGB multiplication and
+        # range checks below are independent oracles for its output contract.
+        body = self.body("sharpenLuma")
+        match = re.search(r"float gain = ([^;]+);", body)
+        self.assertIsNotNone(match)
+        weights = (0.2126, 0.7152, 0.0722)
+        cases = (
+            ((0., 0., 0.), (1., 1., 1.), (0., 0., 0.), (1., 1., 1.)),
+            ((0.1, 0.4, 0.05), (0.3, 0.6, 0.9), (0., 0., 0.), (1., 1., 1.)),
+            ((0.8, 0.9, 1.), (0.1, 0.3, 0.05), (0.1, 0.3, 0.05), (0.8, 0.9, 1.)),
+            ((4., 8., 2.), (2., 4., 1.), (0., 0., 0.), (16., 16., 16.)),
+            ((0.2, 0.5, 0.1), (0.2, 0.5, 0.1), (0.2, 0.5, 0.1), (0.2, 0.5, 0.1)),
+        )
+        for color, mean, lower, upper in cases:
+            for sharpness in (0., 0.4):
+                with self.subTest(color=color, sharpness=sharpness):
+                    luminance = sum(c * w for c, w in zip(color, weights))
+                    detail = luminance - sum(c * w for c, w in zip(mean, weights))
+                    gain = eval(match[1], {"__builtins__": {}}, {
+                        "max": max, "luminance": luminance, "detail": detail,
+                        "u_sharpness": sharpness,
+                    })
+                    self.assertGreaterEqual(gain, 0.)
+                    result = tuple(min(hi, max(lo, c * gain))
+                                   for c, lo, hi in zip(color, lower, upper))
+                    for value, lo, hi in zip(result, lower, upper):
+                        self.assertGreaterEqual(value, lo)
+                        self.assertLessEqual(value, hi)
+                    if sharpness == 0. or color == mean:
+                        self.assertEqual(result, color)
+                    if color == (0., 0., 0.):
+                        self.assertEqual(result, color)
+                    if color == (4., 8., 2.) and sharpness > 0.:
+                        self.assertGreater(result[0], color[0])
+                        self.assertAlmostEqual(result[1] / result[0], 2.)
+                        self.assertAlmostEqual(result[2] / result[0], 0.5)
+
+    def test_current_reads_clamp_before_filtering_at_all_extents(self):
+        body = self.body("currentUv")
+        expression = re.search(r"return ([^;]+);", body)
+        self.assertIsNotNone(expression)
+        for size in (1, 2, 1920, 3840):
+            texel = 1. / size
+            for uv in (-texel, 0., texel * 0.5, 0.5, 1. - texel * 0.5, 1., 1. + texel):
+                with self.subTest(size=size, uv=uv):
+                    result = eval(expression[1], {"__builtins__": {}}, {
+                        "uv": uv, "u_texel": texel, "vec2": float,
+                        "clamp": lambda v, lo, hi: min(hi, max(lo, v)),
+                    })
+                    self.assertEqual(result, min(1. - texel * 0.5, max(texel * 0.5, uv)))
+        self.assertIn("texture(u_current, currentUv(TexCoords))", self.source)
+        self.assertIn("texture(u_motion, currentUv(TexCoords))", self.source)
+        self.assertIn("sampleUV = currentUv(TexCoords + vec2(float(dx), float(dy)) * u_texel);",
+                      self.source)
+        self.assertIn("texture(u_current, sampleUV)", self.source)
+        self.assertEqual(len(re.findall(r"texture\(u_current,", self.source)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
