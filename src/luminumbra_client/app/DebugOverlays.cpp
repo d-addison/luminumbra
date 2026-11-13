@@ -332,8 +332,12 @@ void UpdatePhotoCapture(ClientAppContext& app,
     static int s_photoWeatherIdx = 0;
     static bool s_photoWeatherActive = false;
     if (!app.hud.photoMode.active && s_photoEnvEngaged) {
-        // Left photo mode: release the day-clock hold (live clock resumes); the
-        // per-frame sim weather push restores driven weather next frame.
+        // Left photo mode: release only weather that the photo controls overrode.
+        // set_weather retains the sim payload, so restore it even when no further
+        // gameplay frame will push live weather (for example, a menu transition).
+        if (s_photoWeatherActive) {
+            renderPipeline.set_weather_state(renderPipeline.get_weather_state());
+        }
         s_photoEnvEngaged = false;
         s_photoWeatherActive = false;
         renderPipeline.set_time_of_day_hold(false);
@@ -634,7 +638,6 @@ void ReleasePhotoModeAndHud(ClientAppContext& app,
     // Transition cleanup must also work without a subsequent gameplay frame.
     renderPipeline.set_time_of_day_hold(false);
     renderPipeline.set_exposure_override(-1.0f);
-    renderPipeline.set_weather(Luminumbra::Rendering::WeatherType::None, 0.0f);
 }
 
 void DrawCreatureNameplates(ClientAppContext& app,

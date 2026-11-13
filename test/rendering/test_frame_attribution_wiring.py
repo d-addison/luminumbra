@@ -186,9 +186,48 @@ class GameplayPhotoRelease(unittest.TestCase):
         self.exposure = 4.0
         self.hold = True
         self.weather = "Storm"
+        self.driven = True
+        self.weather_payload = {"rain_intensity": 0.6, "storm_intensity": 0.8,
+                                "wetness": 0.9, "wind_strength": 0.4}
+        self.photo_env = True
+        self.photo_weather = False
         self.photo = True
         self.photo_ui = True
         self.releases = 0
+
+    def leave_photo_environment(self):
+        capture = block(self.overlays, "void UpdatePhotoCapture(")
+        condition = re.search(r"if \(([^\n]*)\) \{", capture).group(1)
+        if not cpp_expression(condition, **{"app.hud.photoMode.active": self.photo,
+                                            "s_photoEnvEngaged": self.photo_env}):
+            return
+        inactive = block(capture, "if (!app.hud.photoMode.active")
+        if "if (s_photoWeatherActive)" in inactive:
+            restore = compact(block(inactive, "if (s_photoWeatherActive)"))
+            self.assertEqual(restore, "renderPipeline.set_weather_state("
+                             "renderPipeline.get_weather_state());")
+            self.assertLess(inactive.index("if (s_photoWeatherActive)"),
+                            inactive.index("s_photoWeatherActive = false;"))
+            if self.photo_weather:
+                self.driven = True
+                self.weather = "Storm"
+        if "s_photoEnvEngaged = false;" in inactive:
+            self.photo_env = False
+        if "s_photoWeatherActive = false;" in inactive:
+            self.photo_weather = False
+
+    def apply_photo_weather(self, index):
+        capture = block(self.overlays, "void UpdatePhotoCapture(")
+        active = block(capture, "if (app.hud.photoMode.active)")
+        cycle = block(active, "if (const int wc =")
+        self.assertIn("s_photoWeatherActive = true;", cycle)
+        override = compact(block(active, "if (s_photoWeatherActive)"))
+        self.assertIn("renderPipeline.set_weather(kW[s_photoWeatherIdx], "
+                      "s_photoWeatherIdx == 0 ? 0.0f : 0.7f);", override)
+        types = re.search(r"kW\[5\] = \{([^}]+)\}", override).group(1).split(", ")
+        self.photo_weather = True
+        self.weather = types[index].removeprefix("WT::")
+        self.driven = False
 
     def retire(self):
         if "auto release_player_controller =" not in self.main:
@@ -206,6 +245,8 @@ class GameplayPhotoRelease(unittest.TestCase):
             self.photo = False
         if "app.hud.photoModeUiShown = false;" in release:
             self.photo_ui = False
+        if "UpdatePhotoCapture(" in release:
+            self.leave_photo_environment()
         for method, value in re.findall(r"renderPipeline\.(set_\w+)\(([^;]*)\);", release):
             if method == "set_exposure_override":
                 self.exposure = float(value.removesuffix("f"))
@@ -213,12 +254,14 @@ class GameplayPhotoRelease(unittest.TestCase):
                 self.hold = cpp_expression(value, false=False, true=True)
             elif method == "set_weather":
                 self.weather = value.split("::")[-1].split(",")[0]
+                self.driven = False
         self.player = False
 
     def assert_released(self):
         self.assertEqual(self.exposure, -1.0, "manual exposure leaked into the menu preview")
         self.assertFalse(self.hold)
-        self.assertEqual(self.weather, "None")
+        self.assertEqual(self.weather, "Storm")
+        self.assertTrue(self.driven)
         self.assertFalse(self.photo)
         self.assertFalse(self.photo_ui)
         self.assertFalse(self.player)
@@ -231,6 +274,54 @@ class GameplayPhotoRelease(unittest.TestCase):
         self.assertLess(quit_body.index(retirement), quit_body.index("GameState::MAIN_MENU"))
         self.retire()
         self.assert_released()
+
+    def test_release_preserves_weather_without_a_photo_override(self):
+        for engaged, driven in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(engaged=engaged, driven=driven):
+                self.setUp()
+                self.photo_env = engaged
+                self.driven = driven
+                before = (self.weather, self.driven, dict(self.weather_payload))
+                self.retire()
+                self.assertEqual((self.weather, self.driven, self.weather_payload), before)
+
+    def test_each_photo_weather_override_restores_driven_weather_on_both_exits(self):
+        for index in range(5):
+            for retire_player in (False, True):
+                with self.subTest(index=index, retire_player=retire_player):
+                    self.setUp()
+                    payload = dict(self.weather_payload)
+                    self.apply_photo_weather(index)
+                    if retire_player:
+                        self.retire()
+                        self.assert_released()
+                    else:
+                        self.photo = False
+                        self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Storm", True))
+                    self.assertEqual(self.weather_payload, payload)
+                    self.assertFalse(self.photo_weather)
+                    self.assertFalse(self.photo_env)
+                    # Repeated exit and a fresh photo session without cycling must
+                    # not overwrite a later weather update from another owner.
+                    self.weather = "Rain"
+                    self.leave_photo_environment()
+                    self.photo_env = True
+                    self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Rain", True))
+
+    def test_weather_pipeline_retains_payload_and_reenables_driven_classification(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        direct = block(pipeline, "void RenderPipeline::set_weather(")
+        direct = compact(re.sub(r"//[^\n]*", "", direct))
+        self.assertEqual(direct, "m_weather_type = type; "
+                         "m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f); "
+                         "m_weather_state.driven = false;")
+        driven = compact(block(pipeline, "void RenderPipeline::set_weather_state("))
+        self.assertIn("m_weather_state = state; m_weather_state.driven = true;", driven)
+        self.assertIn("const auto classification = ClassifyWeatherState(m_weather_state); "
+                      "m_weather_type = classification.type; "
+                      "m_weather_intensity = classification.intensity;", driven)
 
     def test_save_refusals_preserve_photo_presentation(self):
         quit_body = block(self.main, 'else if (act == "quit")')
