@@ -2237,7 +2237,10 @@ class TerrainMaterialWiring(unittest.TestCase):
         self.assertIn("worldN = normalize(worldN);", blend)
         surface = block(self.fragment, "void terrainSurface(")
         self.assertIn("float matIndex = float(materialId) / 255.0;", surface)
-        self.assertIn("albedo = baseAlbedo * albedoScale * albedoTint;", surface)
+        self.assertIn("baseAlbedo *= albedoScale * albedoTint;", surface)
+        self.assertLess(surface.index("baseAlbedo *= albedoScale * albedoTint;"),
+                        surface.index("baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);"))
+        self.assertIn("albedo = baseAlbedo;", surface)
         # No new coverage path can change the material-ID attachment or water ownership.
         self.assertIn("float material_id_normalized = float(fs_in.MaterialID) / 255.0;", main)
         self.assertIn("farLiveOwns(local, fs_in.MaterialID)", main)
@@ -2460,6 +2463,90 @@ class WorldVisualSweepWiring(unittest.TestCase):
                                       (2**31-1, 2**31-1, 2**64-1, False),
                                       (2**31-1, 2**31-1, 2**63-1, True)):
                 self.assertEqual(cpp_expression(guard, **{width: w, height: h, size: n}), refused)
+
+
+class TreeImpostorCoverageWiringTest(unittest.TestCase):
+    def test_both_bake_consumers_validate_before_publishing(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        render = block(source, "RenderAtlas(const std::string&")
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", render)), 1)
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", source)), 1)
+        self.assertIn("MeasureImpostorCoverage(out.rgba, atlas, atlas, n)", compact(render))
+        self.assertIn("out.ok = out.alpha_coverage.usable();", render)
+        refusal = block(render, "if (!out.ok)")
+        for required in ("LUMINUMBRA_CORE_ERROR", "kTreeImpostorAtlasName",
+                         "out.alpha_coverage.coverage", "glDeleteTextures(1, &out.albedo)",
+                         "glDeleteTextures(1, &out.normal)", "out.albedo = out.normal = 0;"):
+            self.assertIn(required, refusal)
+        for marker in ("ImpostorBakeResult BakeTreeImpostorAtlas(",
+                       "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures("):
+            consumer = block(source, marker)
+            self.assertIn("RenderAtlas(rootDir, rp, grid)", consumer)
+            self.assertIn("if (!ra.ok)", consumer)
+            self.assertNotIn("glGetTexImage", consumer)
+        runtime = block(source, "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(")
+        self.assertLess(runtime.index("out.alpha_coverage = ra.alpha_coverage;"),
+                        runtime.index("if (!ra.ok)"))
+        export = block(source, "ImpostorBakeResult BakeTreeImpostorAtlas(")
+        self.assertLess(export.index("if (!ra.ok)"), export.index("WritePpm("))
+        self.assertIn("ra.alpha_coverage.cells[k]", export)
+
+    def test_refusal_reaches_draw_and_mesh_fallback_without_blocking_entry(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        self.assertIn("m_treeImpostorCoverage = ia.alpha_coverage;", pipeline)
+        enable = block(pipeline, "if (ia.drawable())")
+        self.assertIn("m_treeImpostorsEnabled = true;", enable)
+        enabled = block(header, "bool tree_impostor_enabled() const")
+        self.assertIn("m_treeImpostorsEnabled && m_treeImpostorCoverage.usable()", enabled)
+        self.assertIn("gbuffer_input.tree_impostor_enabled = tree_impostor_enabled();", pipeline)
+        gate = block(read(CLIENT / "main_client.cpp"), "auto game_content_error =")
+        self.assertIn("!renderPipeline.tree_impostor_coverage().refused()", gate)
+        draw = compact(read(CLIENT / "rendering/passes/GBufferPass.cpp"))
+        self.assertIn("const bool impostorsOn = input.tree_impostor_enabled;", draw)
+        self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree)", draw)
+        self.assertIn("if (cp.impostorTree && !authoredTree) { lod = std::min(lod, 2); }", draw)
+        self.assertIn("AuthoredTreeLodConfig(impostorsOn)", draw)
+        self.assertIn("if (impostorsOn && !impostorInstances.empty())", draw)
+        lod = read(CLIENT / "rendering/TreeLod.h")
+        self.assertIn("impostors ? 65.0f : std::numeric_limits<float>::infinity()", lod)
+        self.assertIn('TreeImpostorsRequested(Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS"))',
+                      compact(pipeline))
+
+    def test_live_capture_serializes_measured_coverage_and_refusal(self):
+        live = compact(read(CLIENT / "rendering/CaptureManifestLive.cpp"))
+        self.assertIn("const auto& atlas = pipeline.tree_impostor_coverage();", live)
+        for key, value in (("atlas", "std::string(kTreeImpostorAtlasName)"),
+                           ("alpha_coverage", "atlas.coverage"),
+                           ("alpha_refused", "atlas.refused()"),
+                           ("alpha_status", "std::string(atlas.status())"),
+                           ("alpha_min_cell", "atlas.min_cell"),
+                           ("alpha_max_cell", "atlas.max_cell"),
+                           ("alpha_cell_count", "std::uint64_t(atlas.cell_count)")):
+            self.assertIn('input.render_settings.emplace("tree_impostor_' + key + '", ' +
+                          value + ');', live)
+        # The manifest has a fixed 128-setting budget; full cell values stay in bake JSON.
+        settings = re.findall(r'\{"[a-z0-9_]+",|render_settings\.emplace\("', live)
+        self.assertLessEqual(len(settings), 128)
+        manifest = read(CLIENT / "rendering/CaptureManifest.cpp")
+        self.assertIn("input.render_settings", manifest)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertRegex(cmake, r"add_executable\(octa_impostor_test\s+rendering/octa_impostor_test.cpp")
+
+    def test_readback_restores_transfer_state_and_uses_bounded_dsa(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        guard = block(source, "struct BakeGlState")
+        for name in ("GL_PACK_ALIGNMENT", "GL_PACK_ROW_LENGTH", "GL_PACK_SKIP_ROWS",
+                     "GL_PACK_SKIP_PIXELS", "GL_PACK_IMAGE_HEIGHT", "GL_PACK_SKIP_IMAGES",
+                     "GL_PACK_SWAP_BYTES", "GL_PACK_LSB_FIRST"):
+            self.assertIn(name, guard)
+        self.assertIn("glPixelStorei(pack_names[i], pack_values[i]);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));", guard)
+        render = compact(block(source, "RenderAtlas(const std::string&"))
+        self.assertLess(render.index("kImpostorMaxAtlasSide / n"), render.index("const int atlas = n * tile"))
+        self.assertIn("const BakeGlState gl_state;", render)
+        self.assertIn("static_cast<GLsizei>(bytes), out.rgba.data()", render)
 
 
 if __name__ == "__main__":
