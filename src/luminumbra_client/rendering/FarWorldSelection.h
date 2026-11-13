@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luminumbra_common/world/FarHorizon.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 
 #include <array>
 #include <cstddef>
@@ -89,6 +90,9 @@ void AdvanceSelectedFarWorld(const FarWorldSelection& selection,
 // receives or retains a borrowed resource pointer. Origin subtraction happens
 // in double before narrowing. No CPU frustum or estimated-height culling.
 struct FarWorldDrawCommand {
+    World::FarBuildIdentity diagnostic_identity{};
+    std::array<std::int64_t, 2> diagnostic_span{};
+    std::uint64_t diagnostic_water_indices = 0;
     std::array<float, 3> relative_origin{}, world_origin{};
     double horizontal_outer_clip_meters = 0, view_ray_bias_meters = 0;
     std::int32_t index_count = 0;

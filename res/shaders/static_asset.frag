@@ -5,6 +5,11 @@ layout(location = 2) out vec4 gAlbedoRoughness;
 layout(location = 3) out vec2 gMetallicAO;
 layout(location = 4) out vec2 gMotionVector;
 layout(location = 5) out vec4 gAuthoredSurface;
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 in vec3 worldPosition;
 in vec3 worldNormal;
 in vec3 viewPosition;
@@ -64,4 +69,7 @@ void main() {
     // The first static profile has no temporal history; its caller refuses TAAU.
     gMotionVector = vec2(0.0);
     gAuthoredSurface = vec4(texture(u_emissive, sampleUv(4)).rgb * u_emissiveFactor, 1.0);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }

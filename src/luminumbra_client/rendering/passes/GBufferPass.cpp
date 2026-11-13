@@ -199,6 +199,53 @@ bool GBufferDiagnosticCapture::deferred_attached() const {
     return state_->framebuffer != 0 && !state_->forward;
 }
 
+void GBufferDiagnosticCapture::prepare_ladder(const FarWorldDrawCommand& command) {
+    state_->ladder_prepared = deferred_attached();
+    state_->ladder_command = command;
+}
+
+bool GBufferDiagnosticCapture::write_ladder(std::int32_t index_count) noexcept {
+    if (!deferred_attached()) {
+        return true;
+    }
+    try {
+        const auto& command = state_->ladder_command;
+        const auto& identity = command.diagnostic_identity;
+        const bool prepared = std::exchange(state_->ladder_prepared, false);
+        if (!prepared || index_count != command.index_count || index_count <= 0 ||
+            identity.key.tier < 1 || identity.key.tier > World::kFarTierCount ||
+            command.diagnostic_span[0] >= command.diagnostic_span[1]) {
+            unsupported("ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+            return false;
+        }
+        // Fixed numeric fields keep the generated key below 512 bytes.
+        const std::string mesh_key = "ladder/" + std::to_string(identity.key.tier) + "/" +
+                                     std::to_string(identity.key.tx) + "/" +
+                                     std::to_string(identity.key.tz) + "/epoch/" +
+                                     std::to_string(identity.world_epoch) + "/content/" +
+                                     std::to_string(identity.content_hash) + "/caves/" +
+                                     std::to_string(identity.cave_policy) + "/bake/" +
+                                     std::to_string(identity.bake_generation) + "/span/" +
+                                     std::to_string(identity.span_generation) + "/" +
+                                     std::to_string(command.diagnostic_span[0]) + "/" +
+                                     std::to_string(command.diagnostic_span[1]);
+        write_current({.mesh_path = {},
+                       .shader_variant = "g_buffer_ladder_far",
+                       .chunk = command.origin_chunk,
+                       .lod = identity.key.tier,
+                       .ownership = DiagnosticOwnership::LadderFar,
+                       .pass = DiagnosticPass::GBuffer,
+                       .provenance = command.diagnostic_water_indices == 0
+                                         ? DiagnosticProvenance::Sdf
+                                         : DiagnosticProvenance::Unknown,
+                       .generated_mesh = mesh_key});
+        return true;
+    } catch (...) {
+        abort();
+        return false;
+    }
+}
+
 bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
                                               std::uint32_t color_texture,
                                               const DiagnosticExtent& extent) {
@@ -594,9 +641,6 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
-            if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                capture->unsupported("authored_static_surface");
-            }
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -732,11 +776,13 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         },
         input.submit_ladder,
         [&uniforms, capture](const FarWorldDrawCommand& command) {
-            if (capture) {
-                capture->unsupported(
-                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+            if (!uniforms.Prepare(command)) {
+                return false;
             }
-            return uniforms.Prepare(command);
+            if (capture) {
+                capture->prepare_ladder(command);
+            }
+            return true;
         });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
@@ -1166,6 +1212,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
+                const std::string generated_key =
+                    generated ? "procedural/" + batch.drawPath.substr(10) : std::string{};
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
                     capture->write(
                         *shader,
@@ -1177,8 +1225,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                          .lod = resolved_lod,
                          .ownership = DiagnosticOwnership::Live,
                          .pass = DiagnosticPass::GBuffer,
-                         .provenance = generated ? DiagnosticProvenance::Unsupported
-                                                 : DiagnosticProvenance::Mesh});
+                         .provenance = DiagnosticProvenance::Mesh,
+                         .generated_mesh = generated_key});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},

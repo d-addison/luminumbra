@@ -1,5 +1,7 @@
 #pragma once
+
 #include "DiagnosticCapture.h"
+#include "FarWorldSelection.h"
 #include "GBuffer.h"
 
 #include <array>
@@ -44,6 +46,8 @@ public:
     variant(Shader* shader, bool ladder, const std::vector<std::string>& feedback_varyings = {});
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void write_current(const DiagnosticSubmission& submission);
+    void prepare_ladder(const FarWorldDrawCommand& command);
+    bool write_ladder(std::int32_t index_count) noexcept;
     void unsupported(std::string_view producer,
                      std::uint32_t lod = 0,
                      DiagnosticOwnership ownership = DiagnosticOwnership::Live,
@@ -74,8 +78,10 @@ private:
             std::unique_ptr<Shader> shader;
             int identity;
         };
-        // Six deferred variants, one impostor and one forward foliage variant.
+        // Three selected deferred variants, authored surfaces, impostors and foliage.
         std::vector<Variant> variants;
+        FarWorldDrawCommand ladder_command{};
+        bool ladder_prepared = false;
         std::string_view failure;
     };
     static void SetCurrent(GBufferDiagnosticCapture* capture);

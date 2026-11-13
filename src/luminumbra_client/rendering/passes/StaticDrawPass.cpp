@@ -1,5 +1,7 @@
 #include "StaticDrawPass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../GBuffer.h"
+#include "../GBufferTargets.h"
 #include "../Shader.h"
 #include "rendering/AttributedGl.h"
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 
 namespace Luminumbra::Rendering {
@@ -381,7 +384,15 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
     glCullFace(GL_BACK);
     auto& impl = *m_impl;
     Impl::UploadTransaction uploads(impl);
-    auto& shader = impl.shader;
+    auto* capture = GBufferDiagnosticCapture::Current();
+    if (capture && !capture->deferred_attached()) {
+        capture = nullptr;
+    }
+    Shader* selected_shader = &impl.shader;
+    if (capture) {
+        selected_shader = capture->variant(selected_shader, false);
+    }
+    auto& shader = *selected_shader;
     shader.use();
     shader.setMat4("u_view", glm::make_mat4(view.view().data()));
     shader.setMat4("u_projection", glm::make_mat4(view.projection().data()));
@@ -477,6 +488,31 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
         else
             glEnable(GL_CULL_FACE);
         glBindVertexArray(mesh->vao);
+        if (capture) {
+            const auto& identity = draw.mesh->identity;
+            // Hex encoding is injective and bounded by the 1,024-byte registry key.
+            if (identity.empty() || identity.size() > (1024 - 8) / 2) {
+                capture->unsupported("authored_static_surface");
+                throw std::runtime_error("Authored diagnostic mesh identity exceeds bounds");
+            }
+            std::string mesh_key = "authored/";
+            mesh_key.reserve(8 + 2 * identity.size());
+            constexpr std::string_view digits = "0123456789abcdef";
+            for (const char character : identity) {
+                const auto byte = static_cast<unsigned char>(character);
+                mesh_key += digits[byte >> 4];
+                mesh_key += digits[byte & 15];
+            }
+            capture->write(shader,
+                           {.mesh_path = {},
+                            .shader_variant = "static_asset",
+                            .chunk = {},
+                            .lod = 0,
+                            .ownership = DiagnosticOwnership::Live,
+                            .pass = DiagnosticPass::GBuffer,
+                            .provenance = DiagnosticProvenance::Mesh,
+                            .generated_mesh = mesh_key});
+        }
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawElements, GL_TRIANGLES, mesh->count, GL_UNSIGNED_INT, nullptr);
         ++stats.draws;
