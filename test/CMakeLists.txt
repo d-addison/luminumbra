@@ -295,6 +295,7 @@ add_executable(common_tests
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
     common/SimulationIdentityAllocator_test.cpp
+    common/PlantCreationIdentity_test.cpp
     common/GroundObjectStore_test.cpp
     common/WaterShare_test.cpp
     common/FieldPageState_test.cpp
@@ -327,6 +328,7 @@ add_executable(common_tests
     persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
+    sim/soil_fire_disease_ordering_test.cpp
     sim/pollination_test.cpp
     sim/plant_disease_test.cpp
     sim/irrigation_test.cpp
@@ -1633,6 +1635,7 @@ add_executable(frontier_gates_test
     scripting/aether_script_binding_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     fields/energy_field_state_test.cpp
+    fields/source_identity_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp

@@ -23,6 +23,20 @@ public:
     // Owning aliases permit frozen capture to retain this exact memory domain.
     std::shared_ptr<World::FarVolumeMemoryPool> MemoryPool(std::size_t tier) const;
     bool StageTarget(const FarHandoffManifest&);
+    bool StageSessionTarget(const World::FarWorldAuthorityProducer&,
+                            const Systems::SHIELD_WorldSystem&,
+                            std::span<const FarSessionHandoffTile>,
+                            const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                            const World::FarFrozenCaptureLimits&,
+                            const World::FarFrozenCaptureWork::Counts&);
+    FarWorldRefusal AdmissionRefusal() const;
+    World::FarWorldAuthorityProducer::FrozenResult SessionCaptureFailure() const;
+    // Drains workers and GPU pairs before transferring the sole backend owner.
+    std::unique_ptr<FarVolumeGpuDriver> TakeBackend();
+    bool BackendAvailable() const noexcept;
+    const FarWorldOwnership& LiveOwnership() const noexcept {
+        return ownership_;
+    }
     bool AdvanceFrame(std::uint64_t frame,
                       const std::array<double, 3>& camera,
                       const FarVolumeFrameLimits&);
@@ -45,6 +59,8 @@ private:
     void Drain();
     const std::thread::id owner_ = std::this_thread::get_id();
     bool submitting_ = false, mutating_ = false;
+    FarWorldRefusal admission_refusal_ = FarWorldRefusal::None;
+    World::FarWorldAuthorityProducer::FrozenResult capture_failure_;
     std::uint64_t world_epoch_ = 0;
     World::FarCaveMode caves_ = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric_ = World::FarVolumeNumericProfile::RawFloat;
