@@ -11,13 +11,15 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capability | State | Evidence / remaining work |
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
-| GPU ID attachment, draw table, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
+| Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
+| GPU ID attachment, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
 
-The codecs alone do not create scenario bundles or enable a runtime flag. They are
-compiled in the existing GL-free capture test target; rendering does not call them yet.
+The codecs and standalone draw registry do not create scenario bundles or enable a
+runtime flag. They are compiled in the existing GL-free capture test target; rendering
+does not call them yet. The client source manifest includes the codecs.
 The acceptance matrix records this partial state. No new runtime asset is added.
 
 ## A: capture bundle and pixel identity
