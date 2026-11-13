@@ -11,6 +11,7 @@
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/game/PhotoMode.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 #include "../support/UniqueTempPath.h"
@@ -2493,7 +2494,9 @@ TEST_F(FarWorldWaterGl, PeakDiagnosticsObserveCentreDepthAndStableMeshInputs) {
     Camera camera({8, 8, 8}, {0, 1, 0}, -90, -89);
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
     EXPECT_EQ(pipeline.terrain_peak_diagnostics({8, 4.5f, 8}).at("status"), "background");
-    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, nullptr, 3, 0));
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, &physics, 3, 0));
     for (const int column : {0, 1, 3}) {
         SCOPED_TRACE(column);
         camera.Position.x = static_cast<float>(column * CHUNK_SIZE_X + 8);
@@ -2536,7 +2539,9 @@ TEST_F(FarWorldWaterGl, PeakDiagnosticsDoNotGuessPendingUnknownOrInvalidMeshPath
     params.base_amplitude = 0;
     params.height_offset = 4.5f;
     Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
-    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, nullptr, 0, 0));
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, &physics, 0, 0));
     entt::registry registry;
     Camera camera({8, 8, 8}, {0, 1, 0}, -90, -89);
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
