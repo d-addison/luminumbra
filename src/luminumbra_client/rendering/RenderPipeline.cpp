@@ -3020,6 +3020,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             auto& live = m_farlod->submitted_live_terrain();
             live.clear();
             gbuffer_input.submitted_live_terrain = &live;
+            gbuffer_input.resident_live_terrain = &m_farlod->resident_live_terrain();
         }
         m_authored_view.reset();
         if (m_authored_draws && !m_authored_draws->draws.empty()) {
@@ -3926,6 +3927,10 @@ void RenderPipeline::clear_offscreen_target() {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().clear();
+        m_farlod->submitted_live_terrain().clear();
+    }
     m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
     // Retire the world's pool slices while keeping pending GPU storage charged
@@ -4911,6 +4916,11 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.mesh_version = payload.mesh_version;
     render_data.frames_since_inactive = 0;
 
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().add_origin(
+            glm::vec3(chunk.coords) * glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+    }
+
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
     // "slot created"; an existing chunk whose mesh outgrew its reserved slot
     // (so the pool reallocated, raising capacity) is a "slot grown"; a
@@ -4944,6 +4954,10 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().remove_chunk(chunk_id);
+        m_farlod->submitted_live_terrain().remove_chunk(chunk_id);
+    }
     m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {

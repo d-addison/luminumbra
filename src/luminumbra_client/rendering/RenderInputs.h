@@ -45,6 +45,8 @@ struct GBufferPassInput {
     SubmitTerrainChunksFn submit_terrain_chunks;
     // Filled by this frame's live submit; null means no submitted live support.
     const SubmittedLiveTerrain* submitted_live_terrain = nullptr;
+    // Resident nonempty live GPU chunks, including chunks outside the frustum.
+    const SubmittedLiveTerrain* resident_live_terrain = nullptr;
 
     // Exclusive selected far submission. Legacy uses the pass-owned shader;
     // ladder consumes value commands synchronously through its owned backend.

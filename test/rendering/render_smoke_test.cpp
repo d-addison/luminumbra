@@ -180,6 +180,106 @@ TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisa
               StaticPropSubmission::Refused);
 }
 
+TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    const glm::vec3 root(100, 12, 0);
+    const IVec3 ground(6, 0, 0);
+    const IVec3 canopy(6, 3, 0);
+    // An upward view can include the canopy above y=32 but exclude its ground.
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    planes[0] = glm::vec4(0, 1, 0, -32);
+    const auto visible = TerrainCullingTestPeer::Cull({ground, canopy}, planes);
+    ASSERT_FALSE(visible.contains(Chunk::calculate_id(ground)));
+    ASSERT_TRUE(visible.contains(Chunk::calculate_id(canopy)));
+
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    auto& submitted = far.submitted_live_terrain();
+    resident.add_origin({96, 0, 0});
+    submitted.add_origin({96, 0, 0});
+    ASSERT_TRUE(submitted.covers(root));
+    submitted.clear(); // No ground draw in the upward view.
+    ASSERT_FALSE(submitted.covers(root));
+    ASSERT_TRUE(resident.covers(root));
+    ASSERT_EQ(SelectTreeLod(glm::length(root), AuthoredTreeLodConfig(true)), 3);
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Impostor);
+    resident.remove_chunk(Chunk::calculate_id(ground));
+    EXPECT_FALSE(resident.covers(root));
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Refused);
+}
+
+TEST(RenderSmokeTest, AuthoredTreeBandUsesResidentLiveTerrainWithoutFarSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    far.set_enabled(true);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    for (const float distance : {65.0f, 100.0f, 175.99f, 176.0f, 200.0f, 384.0f, 640.0f}) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            SCOPED_TRACE(::testing::Message() << distance << " sign " << sign);
+            const glm::vec3 root(sign * distance, 0, 0);
+            // A root on a top face must also find the resident chunk below it.
+            const IVec3 coords(static_cast<int>(std::floor(root.x / CHUNK_SIZE_X)), -1, 0);
+            auto& resident = far.resident_live_terrain();
+            resident.add_origin(glm::vec3(coords) *
+                                glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+            far.submitted_live_terrain().clear();
+            ASSERT_FALSE(far.submitted_live_terrain().covers(root));
+            ASSERT_FALSE(far.terrain_resident_at(root));
+            ASSERT_TRUE(resident.covers(root));
+            const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+            ASSERT_TRUE(candidate);
+            for (auto selection : {FarWorldSelection{}, refused}) {
+                for (const bool submit : {false, true}) {
+                    selection.submit = submit;
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Impostor);
+                    resident.remove_chunk(Chunk::calculate_id(coords));
+                    EXPECT_FALSE(resident.covers(root));
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Refused);
+                    resident.add_origin(glm::vec3(coords) *
+                                        glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+                }
+            }
+            resident.clear();
+        }
+    }
+}
+
+TEST(RenderSmokeTest, ResidentLiveTerrainRetirementDoesNotRetainStaleSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    resident.add_origin({96, 0, 0});
+    resident.add_origin({96, 0, 0}); // Replacement keeps one ownership entry.
+    resident.add_origin({112, 0, 0});
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0}));
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0})); // Missing removal is harmless.
+    EXPECT_FALSE(resident.covers({100, 12, 0}));
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    far.set_enabled(false);
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::max()}) {
+        resident.add_origin({invalid, 0, 0});
+        EXPECT_FALSE(resident.covers({invalid, 0, 0}));
+    }
+    far.prepare_world_swap();
+    EXPECT_TRUE(resident.covers({116, 12, 0})); // The drain retains live GPU allocations.
+    far.shutdown();
+    EXPECT_FALSE(resident.covers({116, 12, 0}));
+}
+
 TEST(RenderSmokeTest, StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback) {
     using namespace Luminumbra::Rendering;
     GBufferPass pass;

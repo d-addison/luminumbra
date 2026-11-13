@@ -39,12 +39,14 @@ namespace Luminumbra::Rendering {
 class Shader;
 struct FarWorldSelection;
 
-// Coverage of nonempty live chunk draws in the current G-buffer pass.
-// Storage is bounded by the submitted live chunks, independent of world residency.
+// Coverage of nonempty live chunks submitted to GPU storage or a draw pass.
+// The caller owns the lifetime: resident chunks survive frame visibility changes.
+// Storage is bounded by the live GPU chunks (or the current pass's subset).
 class SubmittedLiveTerrain {
 public:
     void clear();
     void add_origin(const glm::vec3& origin);
+    void remove_chunk(u64 chunk_id);
     bool covers(const glm::vec3& position) const;
 
 private:
@@ -280,6 +282,12 @@ public:
         return m_submitted_live_terrain;
     }
 
+    // Updated only on successful live uploads and resource retirement, even when
+    // far rendering is disabled. Never cleared by frustum or distance culling.
+    SubmittedLiveTerrain& resident_live_terrain() {
+        return m_resident_live_terrain;
+    }
+
     // Render-thread residency query for far props. One region lookup; excludes
     // the clipped live slice, empty terrain and positions outside the draw band.
     bool terrain_resident_at(const glm::vec3& position) const;
@@ -306,6 +314,7 @@ public:
 
 private:
     SubmittedLiveTerrain m_submitted_live_terrain;
+    SubmittedLiveTerrain m_resident_live_terrain;
     struct ResidentRegion {
         World::FarLodTier tier = World::FarLodTier::F1;
         int rx = 0;

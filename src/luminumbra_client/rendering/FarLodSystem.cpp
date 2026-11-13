@@ -1042,6 +1042,7 @@ void FarLodSystem::release_region(ResidentRegion& region) {
 
 void FarLodSystem::shutdown() {
     prepare_world_swap();
+    m_resident_live_terrain.clear();
     for (auto& [key, region] : m_residents) {
         (void)key;
         release_region(region);
@@ -1681,6 +1682,10 @@ void SubmittedLiveTerrain::add_origin(const glm::vec3& origin) {
     if (live_chunk_key(origin, key)) {
         m_chunks.insert(key);
     }
+}
+
+void SubmittedLiveTerrain::remove_chunk(u64 chunk_id) {
+    m_chunks.erase(chunk_id);
 }
 
 bool SubmittedLiveTerrain::covers(const glm::vec3& position) const {

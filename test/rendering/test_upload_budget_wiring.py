@@ -158,6 +158,81 @@ class UploadBudgetWiring(unittest.TestCase):
         for boundary in ("191.99f", "192.0f", "192.01f", "383.99f", "384.0f", "384.01f", "639.99f", "640.0f"):
             self.assertIn(boundary, bands)
 
+    def assert_resident_live_support_wiring(self):
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        self.assertIn("gbuffer_input.resident_live_terrain = &m_farlod->resident_live_terrain();", frame)
+        self.assertNotIn("resident_live_terrain().clear()", frame)
+        self.assertNotIn("resident_live_terrain().add_origin(", frame)
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        ownership = compact(collect[collect.index("const bool live_terrain_owned"):
+                                    collect.index("const bool far_terrain_resident")])
+        self.assertIn("impostor_candidate &&", ownership)
+        self.assertIn("|| (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position))", ownership)
+        for forbidden in ("selection", "distance", "dist <", "legacy_far", "for (", "while ("):
+            self.assertNotIn(forbidden, ownership)
+        inputs = read(RENDERING / "RenderInputs.h")
+        self.assertIn("const SubmittedLiveTerrain* resident_live_terrain = nullptr;", inputs)
+
+    def test_culled_ground_keeps_visible_canopy_support(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled)")
+        for required in ("TerrainCullingTestPeer::Cull({ground, canopy}, planes)",
+                         "ASSERT_FALSE(visible.contains(Chunk::calculate_id(ground)))",
+                         "ASSERT_TRUE(visible.contains(Chunk::calculate_id(canopy)))",
+                         "submitted.clear()", "ASSERT_FALSE(submitted.covers(root))",
+                         "ASSERT_TRUE(resident.covers(root))", "StaticPropSubmission::Impostor"):
+            self.assertIn(required, regression)
+
+    def test_authored_tree_band_keeps_resident_live_support_when_far_refuses(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, AuthoredTreeBandUsesResidentLiveTerrainWithoutFarSupport)")
+        for required in ("65.0f", "100.0f", "175.99f", "176.0f", "640.0f",
+                         "AuthoredTreeLodConfig(true)", "ASSERT_FALSE(far.terrain_resident_at(root))",
+                         "ASSERT_TRUE(resident.covers(root))", "StaticPropSubmission::Impostor",
+                         "StaticPropSubmission::Refused", "FarWorldRefusal::BackendUnavailable"):
+            self.assertIn(required, regression)
+
+    def test_live_residency_follows_successful_uploads_and_all_retirement_paths(self):
+        upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
+        publish = "m_farlod->resident_live_terrain().add_origin("
+        self.assertEqual(upload.count(publish), 1)
+        self.assertLess(upload.index("if (!payload.has_mesh())"), upload.index(publish))
+        failure = body(upload, "if (new_handle == ChunkRenderData::kInvalidPoolHandle)")
+        self.assertNotIn("resident_live_terrain", failure)
+        self.assertIn("return;", failure)
+        self.assertLess(upload.index("render_data.element_count = index_count;"), upload.index(publish))
+        self.assertLess(upload.index("render_data.pool_handle = new_handle;"), upload.index(publish))
+        self.assertNotIn("resident_live_terrain", body(self.pipeline, "void RenderPipeline::upload_water_mesh("))
+        unload = body(self.pipeline, "void RenderPipeline::unload_chunk_resources(")
+        self.assertIn("resident_live_terrain().remove_chunk(chunk_id)", unload)
+        self.assertIn("submitted_live_terrain().remove_chunk(chunk_id)", unload)
+        clear = body(self.pipeline, "void RenderPipeline::clear_all_chunk_data(")
+        self.assertIn("resident_live_terrain().clear()", clear)
+        self.assertIn("submitted_live_terrain().clear()", clear)
+        far = read(RENDERING / "FarLodSystem.cpp")
+        swap = body(far, "void FarLodSystem::prepare_world_swap(")
+        self.assertNotIn("m_resident_live_terrain.clear()", swap)
+        shutdown = body(far, "void FarLodSystem::shutdown(")
+        self.assertIn("prepare_world_swap();", shutdown)
+        self.assertIn("m_resident_live_terrain.clear()", shutdown)
+        self.assertIn("m_farlod->shutdown();", body(self.pipeline, "void RenderPipeline::cleanup_gpu_resources("))
+        removal = body(far, "void SubmittedLiveTerrain::remove_chunk(")
+        self.assertEqual(compact(removal), "m_chunks.erase(chunk_id);")
+
+    def test_missing_live_and_far_terrain_still_refuses_tree(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled)")
+        self.assertLess(regression.index("resident.remove_chunk("),
+                        regression.index("StaticPropSubmission::Refused"))
+        self.assertIn("EXPECT_FALSE(resident.covers(root))", regression)
+        policy = body(read(RENDERING / "FarLodSystem.cpp"), "StaticPropSubmission SelectStaticPropSubmission(")
+        self.assertIn("selection.effective == FarWorldMode::Legacy && !far_terrain_resident", policy)
+        self.assertIn("return StaticPropSubmission::Refused;", policy)
+
     def test_player_view_eye_is_above_the_surface_water_at_the_spawn(self):
         source = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")
         eye = compact(body(source, "Luminumbra::Vec3 PlayerViewEyePosition("))
