@@ -9,15 +9,27 @@
 #   - any *gpu_ms values (per-run GPU timings vary; structure and pass NAMES must still match)
 #   - any *timestamp* fields
 #
-# Exit code 0 when no non-volatile field differs; exit code 1 otherwise, printing
-# the JSON path of every differing field.
+# Exit 0 when fields match and any selected bundle validates; exit 1 on a
+# difference or invalid bundle, printing findings. The optional bundle checker
+# propagates exit 2 for its usage/I/O errors.
 
 param(
     [Parameter(Mandatory = $true)][string]$BaselinePath,
-    [Parameter(Mandatory = $true)][string]$CurrentPath
+    [Parameter(Mandatory = $true)][string]$CurrentPath,
+    [string]$CapturePath
 )
 
 $ErrorActionPreference = "Stop"
+
+# Opt-in capture association; ordinary render-health comparisons are unchanged.
+if ($CapturePath) {
+    $bundlePath = "$CapturePath.diagnostics.json"
+    if (Test-Path -LiteralPath $bundlePath) {
+        $checker = Join-Path $PSScriptRoot "check-diagnostic-capture.py"
+        & python3 -I -B $checker $bundlePath
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+}
 
 function Test-VolatilePath {
     param([string]$Path)
