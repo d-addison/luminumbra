@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. Completed-frame GL readback and scenario integration remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. Completed-frame GL readback and scenario integration remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation and path-gated llvmpipe scenes; these runtime and shader layers remain planned. Implemented bundle validation and advisory ROI image checks are recorded separately.",
       "status": "partial",
       "evidence": [
         {
@@ -61,7 +61,7 @@
     {
       "id": "render.visual-diagnostic-validation",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "The standard-library schema-1 diagnostic reader validates a bundle directory, completion JSON or bounded capture tree. It checks completion status, final file-list position and payload timestamps, exact dimension-derived PFM and LVID sizes, little-endian encodings, ordered draw/mesh joins, explicit unsupported coverage, capture-manifest camera and resolution, and same-pixel probes in every plane. Nonfinite samples are invalid findings reported per plane. Reads use verified regular-file handles and bounded buffers; unknown versions, partial payloads and descendant links are refused. Equal timestamps are accepted; schema 1 has no recorded sizes or checksums and cannot prove historical write order. Registered synthetic Python regressions run without a renderer. Render-health comparison optionally validates an associated capture when its completion sidecar exists. Runtime bundle integration and qualified image metrics remain pending; no required CI check is added.",
+      "statement": "The standard-library schema-1 diagnostic reader validates a bundle directory, completion JSON or bounded capture tree. It checks completion status, final file-list position and payload timestamps, exact dimension-derived PFM and LVID sizes, little-endian encodings, ordered draw/mesh joins, explicit unsupported coverage, capture-manifest camera and resolution, and same-pixel probes in every plane. Nonfinite samples are invalid findings reported per plane. Reads use verified regular-file handles and bounded buffers; unknown versions, partial payloads and descendant links are refused. Equal timestamps are accepted; schema 1 has no recorded sizes or checksums and cannot prove historical write order. Registered synthetic Python regressions run without a renderer. Render-health comparison optionally validates an associated capture when its completion sidecar exists. Runtime bundle integration remains pending; ROI image metrics are recorded separately; no required CI check is added.",
       "status": "covered",
       "evidence": [
         {
@@ -72,6 +72,32 @@
         {
           "kind": "ctest",
           "ref": "DiagnosticCapturePython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.visual-diagnostic-image-metrics",
+      "source": "docs/development/visual-diagnostics.md#d-capture-checks",
+      "statement": "The standard-library diagnostic reader measures normalized named ROIs: exact ID-class coverage fractions, per-AOV validity fractions, scalar weather contribution mean and ranges when declared, and maximum adjacent-column or adjacent-row channel discontinuities. Schema-1 bundles remain unchanged; reader-only schema 2 declares bounded precipitation, fog and cloud contribution planes for future producers. Missing or undefined measurements report unavailable with null values. Enforcement is opt-in per ROI and defaults to advisory; all shipped regions are advisory. Qualified threshold misses and unavailable measurements fail. A stdlib SVG montage path validates a bundle and labels clipped raw-albedo worst-pixel crops with metric values and qualification. Registered synthetic regressions cover measurement, configuration and bundle refusals, enforcement, unavailable data and montage output. Runtime contribution producers, scenario qualification and native fixture evidence remain pending; no required CI check is added.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_diagnostic_rois.py",
+          "command": "python3 -I -B tools/gates/test_diagnostic_rois.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticRoisPython"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/baselines/diagnostic-rois.json"
         },
         {
           "kind": "doc",

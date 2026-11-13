@@ -555,5 +555,40 @@ for name, reason, mutate in INVALID:
     setattr(DiagnosticCaptureTests, 'test_invalid_' + name, invalid_test(reason, mutate))
 
 
+class MetricIntegration(unittest.TestCase):
+    def test_default_rois_are_advisory_and_missing_weather_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = Bundle(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(checker.main([str(root)]), 0)
+            records = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+            self.assertEqual(len(records), 9)
+            self.assertTrue(all(r['qualification'] == 'advisory' for r in records))
+            weather = [r for r in records if r['metric']['kind'] == 'weather']
+            self.assertEqual(len(weather), 3)
+            self.assertTrue(all(r['status'] == 'unavailable' and r['value'] is None for r in weather))
+
+    def test_qualified_unavailable_is_a_cli_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Bundle(root)
+            config = json.loads(checker.DEFAULT_ROIS.read_text(encoding='utf-8'))
+            config['rois'][1]['enforce'] = True
+            path = root / 'rois.json'
+            path.write_text(json.dumps(config), encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checker.main([str(root), '--rois', str(path)]), 1)
+
+    def test_roi_io_and_invalid_configuration_keep_exit_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rois.json'
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(checker.main([directory, '--rois', str(path)]), 2)
+                path.write_text('{', encoding='utf-8')
+                self.assertEqual(checker.main([directory, '--rois', str(path)]), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

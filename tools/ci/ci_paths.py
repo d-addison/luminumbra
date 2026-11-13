@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_diagnostic_rois.py",
     "tools/gates/test_diagnostic_capture.py",
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
@@ -240,6 +241,7 @@ def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
     return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+            or path == "tools/gates/baselines/diagnostic-rois.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 

@@ -17,7 +17,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
-| Bundle validity checks | Implemented for schema 1 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. Qualified image metrics remain planned |
+| Bundle validity and image checks | Implemented for schema 1 and reader-only schema 2 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather and edge metrics plus worst-pixel SVG crops are implemented; shipped ROIs are advisory |
 
 The GL-free bundle writer can publish supplied immutable completed-frame planes.
 Runtime scenario capture does not yet supply those planes or enable diagnostics.
@@ -266,11 +266,70 @@ and 8 MiB expanded source per translation unit; refuse budgets before compilatio
 
 ## D: capture checks
 
-These are proposed additional thresholds, not changes to existing gates or baselines.
-Require complete, matching-frame bundles before a check is eligible. Pinned masks
-and scenario expectations select meaningful regions; unknown/missing data is an
-error, never a pass. Analyze raw channels before color transforms. Apply O(pixels)
+The reader implements ROI metrics alongside the proposed thresholds below; existing
+gates and baselines are unchanged. Complete, matching-frame bundles are required
+before measurement. Missing channels or edge bands without adjacent pairs report
+`unavailable` with a null value, never zero or a pass. Analyze raw channels before color transforms. Apply O(pixels)
 bounded passes, not repeated flood fills for every pixel.
+
+`tools/gates/baselines/diagnostic-rois.json` uses schema 1 with a `rois` list.
+Each ROI has a unique `name`, a half-open normalized top-left `rect` of
+`[left, top, right, bottom]`, and `metrics`. Pixel bounds round outward using
+floor/ceil; every nonempty rectangle touches at least one pixel. Each metric has
+`kind`, `channel` and inclusive `[minimum, maximum]` `thresholds`. Optional ROI
+`enforce: true` qualifies every metric in that ROI; omitted/false is advisory.
+All shipped ROIs are advisory, so threshold misses and unavailable channels add
+no failure to current valid captures. Existing bundle validity failures still fail.
+Qualified metrics fail on a threshold miss or unavailable result. Use
+`--rois CONFIG` to select reviewed scenario-specific expectations. The shipped
+regions illustrate near-ground coverage, weather, a dusk sky column band and a
+terrain blend row band; they do not establish camera or scenario qualification.
+
+Coverage reports the fraction of all ROI pixels matching an exact `field`/`value`
+class in `ids`: background (1=true, 0=false), draw, mesh, LOD, ownership or pass.
+Background retains its zero ID fields. Validity reports the fraction whose whole
+pixel is finite; depth additionally requires [0,1], normal components [-1,1], and
+material integral [0,255]. Albedo validity only requires finiteness. Undefined
+background AOVs are not inferred or masked. Weather reports the mean, minimum and
+maximum scalar contribution, enforcing the range against every pixel, not just
+the mean. Edge `axis: x` compares adjacent columns and `axis: y` adjacent rows,
+only inside the ROI; the value is the maximum absolute channel difference.
+Coordinates select the second pixel of that pair. No final-color weather inference,
+silhouette rejection or reference-scene error measurement is claimed.
+
+Schema-1 bundles remain unchanged and have no weather channel. Reader-only bundle
+schema 2 requires at least one declared scalar `precipitation`, `fog` or `cloud`
+plane, encoded as `linear_contribution_float32` in `encodings`. The corresponding
+`CAPTURE.CHANNEL.pfm` members follow draws in that order, before the optional probe
+and completion member. All other schema-1 metadata, AOV, ID, draw, probe and capture
+manifest contracts remain unchanged; nested documents retain schema 1. Dimensions,
+exact byte sizes, orientation, timestamps and nonfinite checks apply to contribution
+planes too. Unknown channels/encodings are refused. There is no schema-2 runtime
+writer yet; synthetic tests cover this contract for future instrumented producers.
+C2 software-GL fixtures are not present in this checkout and are not claimed as evidence.
+
+Each metric emits a JSON record with ROI, metric specification, pixel rectangle,
+`qualification` (`qualified`/`advisory`), `status` (`pass`/`fail`/`unavailable`),
+value, sample count and worst-pixel coordinates when available. Nonfinite weather
+or edge inputs make that metric unavailable; bundle nonfinite findings still fail.
+Worst coverage/validity pixels maximize distance outside the requested interval;
+weather uses the same rule and edges use maximum difference. Ties choose top row
+then left column. At most 32 metrics and ROIs, 1 MiB configuration, 16,384 pixels per
+axis and 16,777,216 pixels per plane bound the work. Metric scans use at most two
+rows (262,144 wire bytes each for IDs, 196,608 for RGB; decoded tuples add bounded
+interpreter overhead), and each metric visits its ROI once. No simulation path changes.
+
+For a labelled worst-pixel montage, run
+`python3 -I -B tools/gates/build-visual-sweep-montages.py --diagnostics CAPTURE.diagnostics.json --output worst.svg`
+with optional `--rois CONFIG`. This stdlib-only path validates one bundle before
+creating a new output, refuses an existing output and emits up to 32 labelled
+33x33 raw-albedo crops centered/clipped around worst pixels, with a yellow pixel
+outline and metric value/qualification/status. Display values clamp to [0,1];
+nonfinite pixels are magenta. Unavailable rows carry labels without fabricated
+crops. These are raw-albedo evidence, not final-color visual approval. The existing
+PNG contact-sheet path retains its optional Pillow dependency. Registered
+`DiagnosticRoisPython` and `DiagnosticCapturePython` tests cover metrics, refusal,
+advisory/qualified results and montage generation without native rendering.
 
 | Check | Initial threshold | False-positive control |
 | --- | --- | --- |

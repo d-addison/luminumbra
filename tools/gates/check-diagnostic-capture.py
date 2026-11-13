@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate schema-1 deferred diagnostic bundles without loading whole planes.
+"""Validate deferred diagnostic bundles and bounded, qualified ROI image metrics.
 
 Accept a bundle directory, completion JSON, or recursive capture tree. Exit codes:
 0 valid, 1 invalid bundle, 2 usage or operating-system I/O error. Nonfinite AOV
@@ -27,6 +27,8 @@ MAX_COMPLETION = MAX_JSON + 64 * 1024
 MAX_PIXELS = 16777216
 MAX_ENTRIES = 100000
 SUFFIX = '.diagnostics.json'
+WEATHER = ('precipitation', 'fog', 'cloud')
+DEFAULT_ROIS = Path(__file__).with_name('baselines') / 'diagnostic-rois.json'
 PLANES = {'albedo': 3, 'normal': 3, 'depth': 1, 'material': 1}
 ENCODINGS = dict(albedo='linear_rgb_float32', normal='signed_view_xyz_float32',
                  depth='hardware_depth_float32', material='integral_0_255_float32',
@@ -242,7 +244,154 @@ def probe(document_value, x, y, width, height, identity, samples):
             and document_value['non_finite'] == nonfinite, 'probe nonfinite flag')
 
 
-def validate(completion, members, tree_root=None):
+def load_rois(path):
+    """Bound configuration work to 32 metrics and 1 MiB of JSON."""
+    path = Path(path).absolute()
+    with open_regular(path.parent, path) as stream:
+        config = document(stream, 1024 * 1024)
+    schema(config)
+    rois = config.get('rois')
+    require(isinstance(rois, list) and len(rois) <= 32, 'ROI count bound')
+    names, count = set(), 0
+    for roi in rois:
+        require(isinstance(roi, dict) and leaf(roi.get('name'))
+                and len(roi['name']) <= 80 and roi['name'] not in names, 'ROI name')
+        names.add(roi['name'])
+        rect = roi.get('rect')
+        require(isinstance(rect, list) and len(rect) == 4 and all(finite(v) for v in rect)
+                and 0 <= rect[0] < rect[2] <= 1 and 0 <= rect[1] < rect[3] <= 1,
+                'normalized ROI rectangle')
+        require(type(roi.get('enforce', False)) is bool, 'ROI enforcement')
+        metrics = roi.get('metrics')
+        require(isinstance(metrics, list) and bool(metrics), 'ROI metric list')
+        count += len(metrics)
+        require(count <= 32, 'metric count bound')
+        for metric in metrics:
+            require(isinstance(metric, dict), 'metric object')
+            kind, channel = metric.get('kind'), metric.get('channel')
+            require(isinstance(kind, str) and isinstance(channel, str), 'metric kind/channel')
+            bounds = metric.get('thresholds')
+            require(isinstance(bounds, list) and len(bounds) == 2
+                    and all(finite(v) for v in bounds) and bounds[0] <= bounds[1],
+                    'metric thresholds')
+            if kind == 'coverage':
+                require(channel == 'ids' and metric.get('field') in
+                        ('background', 'draw', 'mesh', 'lod', 'ownership', 'pass'), 'ID class')
+                maximum = dict(background=1, draw=65536, mesh=65536, lod=255,
+                               ownership=3, **{'pass': 4})[metric['field']]
+                require(integer(metric.get('value'), 0, maximum), 'ID class value')
+            elif kind == 'validity':
+                require(channel in PLANES, 'validity channel')
+            elif kind == 'weather':
+                require(channel in WEATHER, 'weather channel')
+            elif kind == 'edge':
+                require(channel in PLANES or channel in WEATHER, 'edge channel')
+                require(metric.get('axis') in ('x', 'y'), 'edge axis')
+            else:
+                raise Invalid('unknown metric kind')
+            require(bounds[0] >= 0 and (kind == 'edge' or bounds[1] <= 1),
+                    'metric threshold range')
+    return rois
+
+
+def rectangle(rect, width, height):
+    # Half-open ROI includes every pixel touched by the normalized rectangle.
+    return (math.floor(rect[0] * width), math.floor(rect[1] * height),
+            math.ceil(rect[2] * width), math.ceil(rect[3] * height))
+
+
+def pixels_row(stream, offset, width, height, channels, y, left, right, ids=False):
+    row = y if ids else height - 1 - y
+    size = channels * 4
+    stream.seek(offset + (row * width + left) * size)
+    # One row: <= 262144 bytes (IDs) or 196608 bytes (RGB), width <= 16384.
+    return list(struct.iter_unpack('<' + ('I' if ids else 'f') * channels,
+                                  read_exact(stream, (right - left) * size)))
+
+
+def metric_scan(stream, offset, width, height, channels, rect, metric):
+    left, top, right, bottom = rect
+    kind = metric['kind']
+    total, count, worst, location, previous = 0.0, 0, -1.0, None, None
+    minimum, maximum = math.inf, -math.inf
+    for y in range(top, bottom):
+        row = pixels_row(stream, offset, width, height, channels, y, left, right,
+                         kind == 'coverage')
+        for index, pixel in enumerate(row):
+            x = left + index
+            if kind == 'coverage':
+                field = metric['field']
+                value = (int(pixel == (0, 0, 0, 0)) if field == 'background' else
+                         dict(draw=pixel[0], mesh=pixel[1], lod=pixel[2],
+                              ownership=pixel[3] & 255, **{'pass': pixel[3] >> 8})[field])
+                score = float(value == metric['value'])
+            elif kind == 'validity':
+                valid = all(math.isfinite(v) for v in pixel)
+                if metric['channel'] == 'depth':
+                    valid = valid and 0 <= pixel[0] <= 1
+                elif metric['channel'] == 'material':
+                    valid = valid and 0 <= pixel[0] <= 255 and pixel[0] == math.trunc(pixel[0])
+                elif metric['channel'] == 'normal':
+                    valid = valid and all(-1 <= v <= 1 for v in pixel)
+                score = float(valid)
+            elif kind == 'weather':
+                if not all(math.isfinite(v) for v in pixel):
+                    return None
+                score = pixel[0]
+                minimum, maximum = min(minimum, score), max(maximum, score)
+            else:
+                neighbor = (row[index - 1] if index else None) if metric['axis'] == 'x' else (
+                    previous[index] if previous is not None else None)
+                if neighbor is None:
+                    continue
+                if not all(math.isfinite(v) for v in pixel + neighbor):
+                    return None
+                score = max(abs(v - n) for v, n in zip(pixel, neighbor))
+            count += 1
+            total += score
+            severity = (max(metric['thresholds'][0] - score, score - metric['thresholds'][1])
+                        if kind != 'edge' else score)
+            if severity > worst:
+                worst, location = severity, [x, y]
+        previous = row
+    if not count:
+        return None
+    value = worst if kind == 'edge' else total / count
+    return dict(value=value, samples=count, worst_pixel=location,
+                **(dict(minimum=minimum, maximum=maximum) if kind == 'weather' else {}))
+
+
+def image_metrics(streams, offsets, width, height, rois, crops=None):
+    """At most 32 bounded ROI scans; missing/undefined values stay unavailable."""
+    results = []
+    for roi in rois:
+        rect = rectangle(roi['rect'], width, height)
+        for metric in roi['metrics']:
+            channel, kind = metric['channel'], metric['kind']
+            result = dict(roi=roi['name'], metric=dict(metric), rect=list(rect),
+                          qualification='qualified' if roi.get('enforce', False) else 'advisory',
+                          status='unavailable', value=None, worst_pixel=None)
+            if channel in streams:
+                channels = 4 if channel == 'ids' else PLANES.get(channel, 1)
+                measured = metric_scan(streams[channel], offsets[channel], width, height,
+                                       channels, rect, metric)
+                if measured is not None:
+                    low, high = metric['thresholds']
+                    result.update(measured)
+                    passed = (low <= measured['minimum'] and measured['maximum'] <= high
+                              if kind == 'weather' else low <= measured['value'] <= high)
+                    result['status'] = 'pass' if passed else 'fail'
+            if crops is not None and result['worst_pixel'] is not None:
+                x, y = result['worst_pixel']
+                box = (max(0, x - 16), max(0, y - 16), min(width, x + 17), min(height, y + 17))
+                pixels = [pixels_row(streams['albedo'], offsets['albedo'], width, height,
+                                     3, row, box[0], box[2]) for row in range(box[1], box[3])]
+                crops.append(dict(result=result, box=list(box), pixels=pixels))
+            results.append(result)
+    return results
+
+
+def validate(completion, members, tree_root=None, rois=None, metrics=None, crops=None):
     """Return per-plane findings; malformed bundles raise Invalid immediately."""
     root, name = tree_root or completion.parent, completion.name
     prefix = name[:-len(SUFFIX)]
@@ -261,26 +410,32 @@ def validate(completion, members, tree_root=None):
 
         meta_stream = opened(name)
         meta = document(meta_stream, MAX_COMPLETION)
-        schema(meta)
+        require(integer(meta.get('schema'), 1, 2), 'unknown schema version')
+        encodings = meta.get('encodings')
+        contributions = ([c for c in WEATHER if isinstance(encodings, dict) and c in encodings]
+                         if meta['schema'] == 2 else [])
+        require(meta['schema'] == 1 or bool(contributions), 'unknown schema version')
+        expected_encodings = dict(ENCODINGS, **{c: 'linear_contribution_float32' for c in contributions})
         require(meta.get('status') == 'complete' and meta.get('identity_complete') is True,
                 'completion status')
         width, height = meta.get('width'), meta.get('height')
         require(integer(width, 1, 16384) and integer(height, 1, 16384)
                 and width * height <= MAX_PIXELS, 'dimension bound')
         require(meta.get('origin') == 'top_left' and meta.get('surface') == 'deferred_only'
-                and meta.get('encodings') == ENCODINGS, 'attachment encodings')
+                and encodings == expected_encodings, 'attachment encodings')
         camera = meta.get('camera')
         require(isinstance(camera, dict) and matrix(camera.get('view'))
                 and matrix(camera.get('projection')) and camera.get('matrix_order') == 'column_major'
                 and type(camera.get('reversed_z')) is bool
                 and integer(meta.get('frame'), 0, 18446744073709551615), 'frame camera')
         filenames = meta.get('files')
-        require(isinstance(filenames, list) and 7 <= len(filenames) <= 8
+        require(isinstance(filenames, list) and 7 + len(contributions) <= len(filenames) <= 8 + len(contributions)
                 and all(leaf(v) for v in filenames) and len(set(filenames)) == len(filenames),
                 'manifest filenames')
         base = [prefix + '.' + plane + '.pfm' for plane in PLANES]
         base += [prefix + '.ids.bin', prefix + '.draws.json']
-        extras = filenames[6:-1]
+        base += [prefix + '.' + c + '.pfm' for c in contributions]
+        extras = filenames[len(base):-1]
         coordinates = []
         for extra in extras:
             match = re.fullmatch(re.escape(prefix) + r'\.probe-([0-9]{1,5})-([0-9]{1,5})\.json', extra)
@@ -313,10 +468,11 @@ def validate(completion, members, tree_root=None):
                         for k in ('view', 'projection')),
                 'capture manifest mismatch')
         joined = tables(document(streams[prefix + '.draws.json']), meta)
-        findings, samples = [], {}
+        findings, samples, offsets, planes = [], {}, {}, {}
         for plane, channels in PLANES.items():
             stream = streams[prefix + '.' + plane + '.pfm']
             offset = header(stream, width, height, channels)
+            offsets[plane], planes[plane] = offset, stream
             count, bad_material, samples[plane] = aov(stream, offset, width, height, channels, coordinates)
             if count:
                 findings.append(f'{plane}: {count} nonfinite samples')
@@ -326,6 +482,21 @@ def validate(completion, members, tree_root=None):
         for index, ((x, y), filename) in enumerate(zip(coordinates, extras)):
             probe(document(streams[filename]), x, y, width, height, ids[index],
                   {plane: values[index] for plane, values in samples.items()})
+        for channel in contributions:
+            stream = streams[prefix + '.' + channel + '.pfm']
+            offsets[channel] = header(stream, width, height, 1)
+            planes[channel] = stream
+            count, _, _ = aov(stream, offsets[channel], width, height, 1, [])
+            if count:
+                findings.append(f'{channel}: {count} nonfinite samples')
+        planes['ids'], offsets['ids'] = streams[prefix + '.ids.bin'], 16
+        if rois is not None:
+            results = image_metrics(planes, offsets, width, height, rois, crops)
+            if metrics is not None:
+                metrics.extend(results)
+            for result in results:
+                if result['qualification'] == 'qualified' and result['status'] != 'pass':
+                    findings.append(f"{result['roi']}: {result['metric']['kind']} {result['status']}")
         for stream, before in snapshots:
             after = os.fstat(stream.fileno())
             require(before == (after.st_size, after.st_mtime_ns, after.st_ctime_ns),
@@ -350,7 +521,7 @@ def discover(selected):
                 entries += 1
                 require(entries <= MAX_ENTRIES, 'capture tree entry bound')
                 match = re.fullmatch(r'(.+)\.(?:albedo\.pfm|normal\.pfm|depth\.pfm|'
-                                     r'material\.pfm|ids\.bin|draws\.json|probe-.*\.json|'
+                                     r'material\.pfm|precipitation\.pfm|fog\.pfm|cloud\.pfm|ids\.bin|draws\.json|probe-.*\.json|'
                                      r'diagnostics\.json(?:\.pending)?)', entry.name)
                 if wanted is not None and (match is None or match[1] != wanted):
                     continue
@@ -373,15 +544,20 @@ def discover(selected):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('path', type=Path)
+    parser.add_argument('--rois', type=Path, default=DEFAULT_ROIS)
     args = parser.parse_args(argv)
     invalid = False
     try:
+        rois = load_rois(args.rois)
         selected = args.path.resolve()
         bundles = discover(selected)
         tree_root = selected.parent if selected.name.endswith(SUFFIX) else selected
         for completion, members in bundles:
             try:
-                findings = validate(completion, members, tree_root)
+                metrics = []
+                findings = validate(completion, members, tree_root, rois, metrics)
+                for result in metrics:
+                    print(json.dumps(dict(bundle=str(completion), **result), allow_nan=False, sort_keys=True))
             except (Invalid, ValueError) as error:
                 findings = [str(error)]
             for finding in findings:
