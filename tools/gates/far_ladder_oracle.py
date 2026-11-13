@@ -124,6 +124,18 @@ def span(value, path):
 
 def validate_snapshot(s, mode, camera, expected):
     obj(s, SNAPSHOT_FIELDS, "snapshot")
+    authority = s.get("authority_kind", "fixture")
+    require(authority in ("fixture", "session"), "unknown authority kind")
+    session = authority == "session"
+    if session:
+        require(mode == "ladder", "session evidence requires ladder")
+        obj(s, ("serving_serial", "target_serial", "latest_target_ready", "source_error", "capture_error",
+                "submitted_water_indices"), "session")
+        serial = integer(s["target_serial"], "target_serial", 1)
+        require(integer(s["serving_serial"], "serving_serial", 1) == serial, "old serving serial")
+        require(boolean(s["latest_target_ready"], "latest_target_ready"), "latest target not ready")
+        require(integer(s["source_error"], "source_error") == 0 and
+                integer(s["capture_error"], "capture_error") == 0, "producer refusal")
     require(s["requested_mode"] == mode and s["effective_mode"] == mode, "wrong-mode/refused selection")
     require(s["refusal"] == "None" and s["submission_refusal"] == "None" and s["suppression"] == "None", "renderer refusal/suppression")
     for field in ("selected", "captured", "complete", "advancement_occurred", "submission_occurred", "ladder_water_available"):
@@ -175,7 +187,8 @@ def validate_snapshot(s, mode, camera, expected):
     if mode == "legacy":
         require(s["tiles"] == [], "legacy evidence contains ladder residency")
         return
-    integer(s["content_identity"], "content_identity", 1)
+    if not session:
+        integer(s["content_identity"], "content_identity", 1)
     require(s["advancement_occurred"], "station did not advance")
     observed = set()
     states = {i: {"Uploaded": 0, "Empty": 0} for i in range(1, 6)}
@@ -187,7 +200,15 @@ def validate_snapshot(s, mode, camera, expected):
         require(key not in observed, "duplicate coverage tile")
         observed.add(key)
         require(tile["built"] == tile["desired"], "stale-generation coverage identity")
-        for f in ("world_epoch", "content_identity", "bake_generation"):
+        if session:
+            obj(tile, ("accepted_content_identity", "numeric_policy", "built_field_identity"), "session tile")
+            accepted = integer(tile["accepted_content_identity"], "accepted_content_identity", 1)
+            require(tile["desired"]["content_identity"] == accepted and
+                    integer(tile["built_field_identity"], "built_field_identity", 1) == accepted,
+                    "stale per-tile accepted identity")
+            require(integer(tile["numeric_policy"], "tile.numeric_policy") == s["numeric_policy"], "stale numeric policy")
+        for f in (("world_epoch", "bake_generation") if session else
+                  ("world_epoch", "content_identity", "bake_generation")):
             require(tile["desired"][f] == s[f], "stale binding identity")
         require(tile["desired"]["cave_policy"] == s["bound_cave_policy"], "stale binding identity")
         require(all(boolean(tile[f], f) for f in ("has_pair", "current", "span_ok")), "missing current spanning pair")
@@ -195,6 +216,10 @@ def validate_snapshot(s, mode, camera, expected):
         require(integer(tile["eligibility"], "eligibility") == 4, "unsettled/rejected tile eligibility")
         built = span(tile["built_span"], "built_span")
         require(built[0] < built[1], "empty built span")
+        if session:
+            edge = 16 * 2 ** (key[0] - 1)
+            require(all(type(v) is int and abs(v) <= 8388608 and v % edge == 0
+                        for v in tile["built_span"]), "invalid session span alignment/range")
         if tile["requested_span"] is not None:
             requested = span(tile["requested_span"], "requested_span")
             require(built[0] <= requested[0] and built[1] >= requested[1], "span refusal")
@@ -228,6 +253,9 @@ def validate_snapshot(s, mode, camera, expected):
         require(tier["indices"] == water_count + terrain_count, "combined submitted index accounting disagrees")
     wet = sum(t["water_wet_tiles"] for t in tiers)
     submitted_water = sum(t["submitted_water_indices"] for t in tiers)
+    if session:
+        require(integer(s["submitted_water_indices"], "submitted_water_indices") == submitted_water,
+                "actual session water submission disagrees")
     require(capability != 1 or wet == submitted_water == 0, "explicitly dry fixture contains wet water")
     require(capability != 2 or (wet > 0 and submitted_water > 0), "wet fixture has zero water draws")
     require(sum(t["draws"] for t in tiers) == s["draws"] and sum(t["indices"] for t in tiers) == s["indices"], "per-tier draw totals differ")
@@ -298,6 +326,9 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
         validate_legacy_aggregate(a)
     poses = {}
     names, previous_frame, binding = set(), 0, None
+    previous_publication = None
+    # Retain one tile map per distinct publication, bounded by serials times tiles.
+    publication_tiles = {}
     for row in a["stations"]:
         fields = ("name", "camera", "settle_seconds", "ready_within_deadline", "paired_capture_preserved", "snapshot", "ladder")
         obj(row, fields + (("legacy",) if renderer == "legacy" else ()), "station")
@@ -327,10 +358,34 @@ def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wante
         validate_snapshot(s, renderer, xyz, expected)
         require(s["frame_id"] > previous_frame, "stale frame snapshot")
         previous_frame = s["frame_id"]
-        identity_binding = tuple(s[f] for f in ("world_epoch", "content_identity", "bake_generation",
-                                               "requested_cave_policy", "bound_cave_policy", "numeric_policy"))
+        authority = s.get("authority_kind", "fixture")
+        fields = (("world_epoch", "requested_cave_policy", "bound_cave_policy", "numeric_policy")
+                  if authority == "session" else
+                  ("world_epoch", "content_identity", "bake_generation", "requested_cave_policy",
+                   "bound_cave_policy", "numeric_policy"))
+        identity_binding = (authority,) + tuple(s[f] for f in fields)
         require(binding is None or binding == identity_binding, "stale station binding")
         binding = identity_binding
+        if authority == "session":
+            publication = (s["target_serial"], s["bake_generation"])
+            require(previous_publication is None or
+                    (publication[0] >= previous_publication[0] and publication[1] >= previous_publication[1] and
+                     (publication[0] != previous_publication[0] or publication[1] == previous_publication[1])),
+                    "out-of-order session publication")
+            tiles = {
+                tuple(tile["desired"]["key"]): (
+                    tile["accepted_content_identity"], tile["built_field_identity"],
+                    tuple(tile["desired"][f] for f in IDENTITY if f != "key"),
+                    tuple(tile["built"][f] for f in IDENTITY if f != "key"),
+                    None if tile["requested_span"] is None else tuple(tile["requested_span"]),
+                    tuple(tile["built_span"]))
+                for tile in s["tiles"]
+            }
+            if publication in publication_tiles:
+                require(publication_tiles[publication] == tiles, "changed session publication tile identity/span")
+            else:
+                publication_tiles[publication] = tiles
+            previous_publication = publication
         if renderer == "legacy":
             legacy = obj(row["legacy"], ("regions_wanted", "regions_resident", "regions_missing"), "legacy")
             require(integer(legacy["regions_wanted"], "regions_wanted") == legacy_count(xyz[0], xyz[2]), "legacy oracle disagreement")

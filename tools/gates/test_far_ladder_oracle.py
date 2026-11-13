@@ -508,5 +508,197 @@ class HorizonValidatorTests(unittest.TestCase):
             self.validate(read_artifact(path))
 
 
+class SessionValidatorTests(unittest.TestCase):
+    @staticmethod
+    def session(heterogeneous=True):
+        artifact = wet_fixture()
+        snapshot = artifact["stations"][0]["snapshot"]
+        snapshot.update(authority_kind="session", serving_serial=3, target_serial=3,
+                        latest_target_ready=True, source_error=0, capture_error=0,
+                        submitted_water_indices=6)
+        for index, tile in enumerate(snapshot["tiles"]):
+            accepted = 100 + index if heterogeneous else snapshot["content_identity"]
+            tile["desired"]["content_identity"] = tile["built"]["content_identity"] = accepted
+            tile.update(accepted_content_identity=accepted, built_field_identity=accepted,
+                        numeric_policy=snapshot["numeric_policy"])
+            edge = 16 * 2 ** (tile["desired"]["key"][0] - 1)
+            tile["built_span"] = [(-320 // edge) * edge, ((128 + edge - 1) // edge) * edge]
+        return artifact
+
+    def test_session_accepts_heterogeneous_fingerprints_and_generation_zero(self):
+        for generation in (0, 5):
+            artifact = self.session()
+            snapshot = artifact["stations"][0]["snapshot"]
+            snapshot.update(content_identity=0, bake_generation=generation)
+            for tile in snapshot["tiles"]:
+                tile["desired"]["bake_generation"] = tile["built"]["bake_generation"] = generation
+            validate_artifact(artifact)
+        artifact = self.session()
+        artifact["stations"][0]["snapshot"]["authority_kind"] = "fixture"
+        with self.assertRaisesRegex(ArtifactError, "stale binding"):
+            validate_artifact(artifact)
+
+    def test_session_refuses_old_serving_pending_target_and_unknown_metadata(self):
+        mutations = (
+            lambda s: s.update(serving_serial=2),
+            lambda s: s.update(target_serial=0),
+            lambda s: s.update(latest_target_ready=False),
+            lambda s: s.update(source_error=8),
+            lambda s: s.update(capture_error=10),
+            lambda s: s.update(authority_kind="unknown"),
+            lambda s: s.pop("target_serial"),
+            lambda s: s.update(latest_target_ready=1),
+        )
+        for mutate in mutations:
+            # Equal fingerprints ensure the old global-identity validator accepts
+            # these stale publications; only explicit session metadata refuses.
+            artifact = self.session(False)
+            mutate(artifact["stations"][0]["snapshot"])
+            with self.subTest(mutation=mutate), self.assertRaises(ArtifactError):
+                validate_artifact(artifact)
+
+    def test_session_validates_every_accepted_tile_policy_span_and_submission(self):
+        mutations = (
+            lambda s, t: t.update(accepted_content_identity=999),
+            lambda s, t: t.pop("accepted_content_identity"),
+            lambda s, t: t.update(built_field_identity=999),
+            lambda s, t: t.update(numeric_policy=1-s["numeric_policy"]),
+            lambda s, t: t["desired"].update(world_epoch=8),
+            lambda s, t: t["desired"].update(bake_generation=6),
+            lambda s, t: t["desired"].update(cave_policy=1),
+            lambda s, t: t.update(built_span=[-1, 1]),
+            lambda s, t: t.update(built_span=[-321, 128]),
+            lambda s, t: t.update(built_span=[-2**24, 128]),
+            lambda s, t: t.update(built_span=[-320.0, 128]),
+            lambda s, t: t.update(water_complete=False),
+            lambda s, t: s["tiers"][0].update(submitted_water_indices=0),
+            lambda s, t: s.update(submission_occurred=False),
+            lambda s, t: s.update(submitted_water_indices=0),
+            lambda s, t: s["tiles"].pop(),
+            lambda s, t: s["tiles"].append(copy.deepcopy(t)),
+        )
+        for mutate in mutations:
+            artifact = self.session(False)
+            snapshot = artifact["stations"][0]["snapshot"]
+            mutate(snapshot, snapshot["tiles"][0])
+            with self.subTest(mutation=mutate), self.assertRaises(ArtifactError):
+                validate_artifact(artifact)
+
+    def test_session_stations_allow_refresh_but_reject_publication_regression(self):
+        for serial, generation, accepted in ((4, 6, True), (2, 5, False), (4, 4, False), (3, 6, False)):
+            artifact = self.session()
+            second = copy.deepcopy(artifact["stations"][0])
+            second["name"] = "refresh"
+            snapshot = second["snapshot"]
+            snapshot.update(frame_id=10, target_serial=serial, serving_serial=serial,
+                            bake_generation=generation)
+            for tile in snapshot["tiles"]:
+                tile["desired"]["bake_generation"] = tile["built"]["bake_generation"] = generation
+            artifact["stations"].append(second)
+            artifact["expected_stations"] = 2
+            if accepted:
+                validate_artifact(artifact)
+            else:
+                with self.assertRaisesRegex(ArtifactError, "publication"):
+                    validate_artifact(artifact)
+
+    def test_session_repeated_serial_requires_identical_tile_content(self):
+        for change in ("fingerprint", "span_generation", "requested_span", "absent_requested_span",
+                       "added_requested_span", "built_span"):
+            for serial in (3, 4):
+                with self.subTest(change=change, serial=serial):
+                    artifact = self.session()
+                    original = artifact["stations"][0]
+                    if change == "added_requested_span":
+                        original["snapshot"]["tiles"][-1]["requested_span"] = None
+                    second = copy.deepcopy(original)
+                    second["name"] = "repeat"
+                    second["snapshot"]["frame_id"] += 1
+                    third = copy.deepcopy(second)
+                    third["name"] = "refresh"
+                    snapshot = third["snapshot"]
+                    snapshot.update(frame_id=11, target_serial=serial, serving_serial=serial)
+                    tile = snapshot["tiles"][-1]
+                    if change == "fingerprint":
+                        tile["accepted_content_identity"] += 1
+                        tile["built_field_identity"] = tile["accepted_content_identity"]
+                        for field in ("desired", "built"):
+                            tile[field]["content_identity"] = tile["accepted_content_identity"]
+                    elif change == "span_generation":
+                        for field in ("desired", "built"):
+                            tile[field]["span_generation"] += 1
+                    elif change == "requested_span":
+                        tile["requested_span"][0] += 16
+                    elif change == "absent_requested_span":
+                        tile["requested_span"] = None
+                    elif change == "added_requested_span":
+                        tile["requested_span"] = [-256, 80]
+                    else:
+                        tile["built_span"][0] -= 256
+                    artifact["stations"].extend((second, third))
+                    artifact["expected_stations"] = 3
+                    if serial == 3:
+                        with self.assertRaisesRegex(ArtifactError, "changed session publication tile identity/span"):
+                            validate_artifact(artifact)
+                    else:
+                        self.assertTrue(validate_artifact(artifact)["LadderChecked"])
+
+    def test_session_repeated_serial_accepts_identical_content_in_any_tile_order(self):
+        artifact = self.session()
+        original = artifact["stations"][0]
+        original["snapshot"]["tiles"][-1]["requested_span"] = None
+        for index in range(1, 4):
+            row = copy.deepcopy(original)
+            row["name"] = f"repeat_{index}"
+            row["snapshot"]["frame_id"] += index
+            if index % 2:
+                row["snapshot"]["tiles"].reverse()
+            artifact["stations"].append(row)
+        artifact["expected_stations"] = len(artifact["stations"])
+        self.assertTrue(validate_artifact(artifact)["LadderChecked"])
+
+    def test_session_repeated_serial_still_validates_each_snapshot(self):
+        mutations = (
+            lambda row: row["snapshot"]["tiles"][0]["desired"].update(span_generation=3),
+            lambda row: row["snapshot"]["tiles"][0]["built"].update(span_generation=3),
+            lambda row: row["snapshot"]["tiles"][0].pop("accepted_content_identity"),
+            lambda row: row["snapshot"]["tiles"][0].pop("requested_span"),
+            lambda row: row["snapshot"]["tiles"][0].update(requested_span=[80, -256]),
+            lambda row: row["snapshot"].update(tiles=[]),
+            lambda row: row["snapshot"].update(authority_kind="unknown"),
+            lambda row: row.update(settle_seconds=91),
+        )
+        for mutate in mutations:
+            artifact = self.session()
+            second = copy.deepcopy(artifact["stations"][0])
+            second["name"] = "repeat"
+            second["snapshot"]["frame_id"] += 1
+            mutate(second)
+            artifact["stations"].append(second)
+            artifact["expected_stations"] = 2
+            with self.subTest(mutation=mutate), self.assertRaises(ArtifactError):
+                validate_artifact(artifact)
+
+    def test_session_repeated_serial_cli_refuses_changed_fingerprint(self):
+        artifact = self.session()
+        second = copy.deepcopy(artifact["stations"][0])
+        second["name"] = "repeat"
+        second["snapshot"]["frame_id"] += 1
+        tile = second["snapshot"]["tiles"][0]
+        tile.update(accepted_content_identity=999, built_field_identity=999)
+        tile["desired"]["content_identity"] = tile["built"]["content_identity"] = 999
+        artifact["stations"].append(second)
+        artifact["expected_stations"] = 2
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.json"
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+            helper = Path(__file__).with_name("far_ladder_oracle.py")
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", str(helper), "validate", str(path),
+                 "--station", "origin", "--station", "repeat"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("far horizon refused: changed session publication tile identity/span", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
