@@ -17,6 +17,7 @@
 #include "PlantGrowthSystem.h" // ExpressGenome, BreedPlants, Comp alias, namespace
 
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 
 namespace luminumbra::foliage {
@@ -26,10 +27,63 @@ namespace luminumbra::foliage {
 // publication. Standalone registries remain editable without this context.
 struct FarmingReplayGate {
     bool blocked = false;
+    bool inputs_pending = false;
+    // Borrowed runtime indices, bounded by kMaxRegions. The session clears this
+    // context before releasing them; actions never copy or scan either one.
+    const std::map<::Luminumbra::world::RegionKey, std::uint64_t>* owner_deadlines = nullptr;
+    std::uint64_t current_deadline = 0;
+    const ::Luminumbra::world::ActiveRegionLedger* owner_ledger = nullptr;
 };
+// Session-wide refusals. Targeted actions also seal their owner's short window.
 inline bool FarmingActionsAllowed(const entt::registry& registry) {
     const auto* gate = registry.ctx().find<FarmingReplayGate>();
     return !gate || !gate->blocked;
+}
+inline bool FarmingActionsAllowed(const entt::registry& registry,
+                                  ::Luminumbra::world::RegionKey owner) {
+    const auto* gate = registry.ctx().find<FarmingReplayGate>();
+    if (!gate)
+        return true;
+    if (gate->blocked)
+        return false;
+    if (gate->owner_ledger) {
+        const auto& records = gate->owner_ledger->records();
+        const auto record = records.find(owner);
+        // Frozen sources belong to the eventual resume. Activate and replay
+        // their owner before accepting a mutation or introducing a new source.
+        if (record != records.end() &&
+            record->second.state == ::Luminumbra::world::RegionState::Frozen)
+            return false;
+    }
+    if (!gate->inputs_pending)
+        return true;
+    if (!gate->owner_deadlines)
+        return false;
+    const auto found = gate->owner_deadlines->find(owner);
+    return found == gate->owner_deadlines->end() || found->second >= gate->current_deadline;
+}
+inline bool FarmingActionsAllowed(const entt::registry& registry, const ::Luminumbra::Vec3& pos) {
+    const auto* gate = registry.ctx().find<FarmingReplayGate>();
+    if (!gate)
+        return true;
+    if (gate->blocked)
+        return false;
+    return ::Luminumbra::world::ActiveRegionLedger::valid_anchor(pos) &&
+           FarmingActionsAllowed(registry, ::Luminumbra::world::ActiveRegionLedger::region_at(pos));
+}
+inline bool FarmingActionsAllowed(const entt::registry& registry, entt::entity entity) {
+    const auto* gate = registry.ctx().find<FarmingReplayGate>();
+    if (!gate)
+        return true;
+    if (gate->blocked)
+        return false;
+    if (!registry.valid(entity))
+        return false;
+    if (const auto* owner = registry.try_get<const Comp::PlantRegionComponent>(entity))
+        return FarmingActionsAllowed(
+            registry, ::Luminumbra::world::RegionKey{owner->owner_x, owner->owner_z});
+    const auto* transform = registry.try_get<const Comp::TransformComponent>(entity);
+    return transform && FarmingActionsAllowed(registry, transform->position);
 }
 
 namespace farming_detail {
@@ -62,7 +116,7 @@ inline entt::entity PlantSeed(entt::registry& reg,
                               const Comp::PlantGenomeComponent& genome,
                               std::uint16_t species_id,
                               std::uint64_t tick) {
-    if (!FarmingActionsAllowed(reg))
+    if (!FarmingActionsAllowed(reg, pos))
         return entt::null;
     return farming_detail::CreateSeed(reg, pos, genome, species_id, tick, nullptr);
 }
@@ -75,7 +129,7 @@ inline entt::entity PlantSeed(entt::registry& reg,
                               std::uint16_t species_id,
                               std::uint64_t tick,
                               ::Luminumbra::world::ActiveRegionLedger& allocator) {
-    if (!FarmingActionsAllowed(reg))
+    if (!FarmingActionsAllowed(reg, pos))
         return entt::null;
     const auto identity = ::Luminumbra::simulation::AllocateSimulationIdentity(allocator);
     if (!identity.has_value())
@@ -97,7 +151,7 @@ MakePlantFromSpecies(entt::registry& reg,
                      luminumbra::core::DeterministicRng& rng,
                      std::uint64_t tick,
                      ::Luminumbra::world::ActiveRegionLedger* allocator = nullptr) {
-    if (!FarmingActionsAllowed(reg))
+    if (!FarmingActionsAllowed(reg, pos))
         return entt::null;
     // Reserve before sampling: allocator refusal preserves the caller's RNG as well.
     Comp::SimulationIdentityComponent identity;
@@ -222,7 +276,7 @@ struct FarmingController {
                       const SpeciesTemplate& tmpl,
                       luminumbra::core::DeterministicRng& rng,
                       std::uint64_t tick) {
-        if (!FarmingActionsAllowed(reg) || seeds <= 0)
+        if (!FarmingActionsAllowed(reg, pos) || seeds <= 0)
             return entt::null;
         --seeds;
         return MakePlantFromSpecies(reg, pos, tmpl, rng, tick);
@@ -244,14 +298,14 @@ struct FarmingController {
     }
 
     bool Water(entt::registry& reg, entt::entity e) {
-        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+        if (!FarmingActionsAllowed(reg, e) || !reg.valid(e) ||
             !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Water(reg.get<Comp::PlantGrowthComponent>(e));
         return true;
     }
     bool Fertilize(entt::registry& reg, entt::entity e) {
-        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+        if (!FarmingActionsAllowed(reg, e) || !reg.valid(e) ||
             !reg.all_of<Comp::PlantGrowthComponent>(e))
             return false;
         luminumbra::foliage::Fertilize(reg.get<Comp::PlantGrowthComponent>(e));
@@ -262,7 +316,7 @@ struct FarmingController {
     // the HarvestResult (harvestable=false if the target is not ready / invalid).
     HarvestResult Harvest(entt::registry& reg, entt::entity e) {
         HarvestResult r;
-        if (!FarmingActionsAllowed(reg) || !reg.valid(e) ||
+        if (!FarmingActionsAllowed(reg, e) || !reg.valid(e) ||
             !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
             return r;
         r = luminumbra::foliage::Harvest(reg.get<Comp::PlantGrowthComponent>(e),

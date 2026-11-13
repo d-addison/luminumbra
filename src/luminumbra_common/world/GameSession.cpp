@@ -573,6 +573,24 @@ struct GameSession::FoliageStep {
         input_deadlines[deadline].insert(key);
         owner_deadlines.emplace(key, deadline);
     }
+    bool InputsPending(std::uint64_t tick) const {
+        // The earliest deadline also identifies the earliest unfinished input
+        // window. Even one unreplayed tick must seal its historical sources.
+        return blocked || !stale_inputs.empty() ||
+               (!input_deadlines.empty() &&
+                input_deadlines.begin()->first -
+                        luminumbra::foliage::FoliageWindowReplay::kStepBudget <
+                    tick);
+    }
+    void UpdateFarmingGate(GameSession& session) const {
+        auto& gate = session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>();
+        gate.blocked = session.m_regionFault || blocked || !stale_inputs.empty();
+        gate.inputs_pending = InputsPending(session.m_worldClock.tick());
+        gate.owner_deadlines = &owner_deadlines;
+        gate.owner_ledger = &session.m_activeRegionLedger;
+        gate.current_deadline =
+            session.m_worldClock.tick() + luminumbra::foliage::FoliageWindowReplay::kStepBudget;
+    }
     void RefreshInputGate(GameSession& session) {
         // Each deadline is removed once; idle owners are never polled per tick.
         while (!input_deadlines.empty() &&
@@ -583,12 +601,16 @@ struct GameSession::FoliageStep {
             }
             input_deadlines.erase(input_deadlines.begin());
         }
-        session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked =
-            blocked || !stale_inputs.empty();
+        UpdateFarmingGate(session);
     }
     static bool PersistencePending(const GameSession& session) {
         const auto* step = session.m_foliageStep.get();
         return step && (step->blocked || step->prepared || !step->stale_inputs.empty());
+    }
+    static bool LoadPending(const GameSession& session) {
+        // A fault stops replay permanently. A validated replacement is the
+        // recovery path; saving the incomplete world must still refuse.
+        return !session.m_regionFault && PersistencePending(session);
     }
 
     void IndexOwner(RegionKey key, const ActiveRegionRecord& record) {
@@ -746,6 +768,9 @@ struct GameSession::FoliageStep {
                const luminumbra::ai::CreatureTickAdmission* admission) {
         const auto& ledger = session.m_activeRegionLedger;
         auto& step = *this;
+        // Guard even a partial preparation: every refusing allocation and
+        // admission must abort and retain the incomplete-save refusal.
+        prepared = true;
         target_tick = clock.tick();
         states.clear();
         staged_pages = preparation_pages = 0;
@@ -762,7 +787,6 @@ struct GameSession::FoliageStep {
             step.replay = std::make_unique<luminumbra::foliage::FoliageWindowReplay>(
                 step.pages, step.field_windows, target_tick, true);
             replay_work.clear();
-            prepared = true;
             return;
         }
         // Reserve history for every scheduled owner, even while it is empty.
@@ -852,7 +876,6 @@ struct GameSession::FoliageStep {
         step.replay = std::make_unique<luminumbra::foliage::FoliageWindowReplay>(
             step.pages, step.field_windows, target_tick, true);
         replay_work.clear();
-        prepared = true;
     }
     std::vector<RegionKey> due;
     static RegionConsumerGate
@@ -987,7 +1010,7 @@ struct GameSession::FoliageStep {
                 luminumbra::foliage::FoliageWindowReplay::kStepBudget ||
             (step.advanced && step.replay->remaining_history_steps() != 0)) {
             step.blocked = true;
-            session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked = true;
+            step.UpdateFarmingGate(session);
             step.deferred.clear();
             for (const auto& [key, elapsed] : step.field_windows) {
                 if (elapsed > luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
@@ -1239,8 +1262,7 @@ struct GameSession::FoliageStep {
         active = false;
         prepared = false;
         replay.reset();
-        session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked =
-            blocked || !stale_inputs.empty();
+        UpdateFarmingGate(session);
     }
     void CommitTicks(GameSession& session) noexcept {
         for (const auto& [key, elapsed] : windows.elapsed) {
@@ -1251,16 +1273,17 @@ struct GameSession::FoliageStep {
                 RemoveDeadline(key);
             }
         }
-        session.m_registry.ctx().get<luminumbra::foliage::FarmingReplayGate>().blocked =
-            blocked || !stale_inputs.empty();
+        UpdateFarmingGate(session);
     }
     struct Guard {
         GameSession& session;
         ~Guard() {
-            if (auto* step = session.m_foliageStep.get(); step && step->active) {
+            if (auto* step = session.m_foliageStep.get(); step && step->prepared) {
+                step->blocked = true;
                 step->registry.Abort();
                 step->active = false;
                 step->prepared = false;
+                step->replay.reset();
             }
             if (auto* step = session.m_foliageStep.get();
                 step && step->published_tick != session.m_worldClock.tick()) {
@@ -1363,8 +1386,8 @@ std::string GameSession::WorldPreparationError(const WorldPreparation& prepared)
 
 bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& prepared,
                                      Persistence::CreatedWorldArtifacts* artifacts) {
-    if (!prepared || (!prepared->create &&
-                      (!IsSimulationTickBoundary() || FoliageStep::PersistencePending(*this))))
+    if (!prepared ||
+        (!prepared->create && (!IsSimulationTickBoundary() || FoliageStep::LoadPending(*this))))
         return false;
     m_worldOpenError = WorldPreparationError(*prepared);
     if (!prepared->ready || !m_worldOpenError.empty())
@@ -1402,6 +1425,7 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
+    m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     DisableFarWorldAuthorityProducer();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .disconnect<&RemoveCreatureAvatar>(*this);
@@ -1416,8 +1440,8 @@ GameSession::~GameSession() {
 void GameSession::ResetWorldSystems() {
     DisableFarWorldAuthorityProducer();
     m_regionalEnergyStep.reset();
-    m_foliageStep.reset();
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
+    m_foliageStep.reset();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -2844,13 +2868,13 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (FoliageStep::LoadPending(*this) || !IsSimulationTickBoundary())
         return false;
     return AdoptPreparedWorld(PrepareWorldLoad(CaptureWorldPreparationOptions(), worldId));
 }
 
 bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save_root) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (FoliageStep::LoadPending(*this) || !IsSimulationTickBoundary())
         return false;
     auto options = CaptureWorldPreparationOptions();
     options.save_root = save_root;
@@ -3970,6 +3994,21 @@ void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& messag
     if (m_regionFault)
         return; // first fault wins
     m_regionFault = RegionSchedulerFault{tick, message};
+    if (m_foliageStep) {
+        // Begin and admission can refuse before the candidate becomes active,
+        // including preflight before the per-tick guard exists.
+        if (m_foliageStep->published_tick != m_worldClock.tick()) {
+            m_foliageStep->RestoreUnpublishedTicks(*this);
+        }
+        if (m_foliageStep->prepared || m_foliageStep->active) {
+            m_foliageStep->blocked = true;
+        }
+        m_foliageStep->registry.Abort();
+        m_foliageStep->active = false;
+        m_foliageStep->prepared = false;
+        m_foliageStep->replay.reset();
+        m_foliageStep->UpdateFarmingGate(*this);
+    }
     m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
     m_activeRegionLedger.clear_completed_work();
@@ -5292,7 +5331,7 @@ bool GameSession::LoadWorldState() {
 }
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
-    if (FoliageStep::PersistencePending(*this) || !IsSimulationTickBoundary())
+    if (FoliageStep::LoadPending(*this) || !IsSimulationTickBoundary())
         return false;
     if (!m_worldUsable || !m_worldSystem || save_dir.empty()) {
         return false;
@@ -5300,6 +5339,9 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     LoadedWorldState state;
     if (!ReadWorldStateFrom(save_dir, state)) {
+        // Recovery refusal leaves the faulted session available for another replacement.
+        if (m_regionFault)
+            return false;
         if (!state.input_refused) {
             ++m_worldRevision;
             m_lastLoadedChunkCount = 0;
@@ -5446,21 +5488,52 @@ bool GameSession::ReadPreparedWorldState(
             error = errors.empty() ? "Corrupt field pages." : errors.front();
             return false;
         }
+        const auto& history_records = state.ledger->records();
+        const auto admit_history_owner = [&](RegionKey owner) {
+            const auto found = history_records.find(owner);
+            if (found == history_records.end() || found->second.state == RegionState::Frozen) {
+                return true;
+            }
+            const auto prior = FoliageInputPriorTick(found->second);
+            if (prior <= state.clock.tick() &&
+                state.clock.tick() - prior >=
+                    luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
+                state.input_refused = true;
+                error = "Pending foliage history cannot be loaded.";
+                return false;
+            }
+            return true;
+        };
         for (const bool soil : {true, false}) {
             const auto& channel = soil ? state.field_pages.soil() : state.field_pages.irrigation();
             for (const auto& [key, page] : channel.pages()) {
-                const auto owner = FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16});
-                const auto found = state.ledger->records().find(owner);
-                if (found == state.ledger->records().end() ||
-                    found->second.state == RegionState::Frozen) {
-                    continue;
+                if (!admit_history_owner(
+                        FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16}))) {
+                    return false;
                 }
-                const auto prior = FoliageInputPriorTick(found->second);
-                if (prior <= state.clock.tick() &&
-                    state.clock.tick() - prior >=
-                        luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
-                    state.input_refused = true;
-                    error = "Pending foliage history cannot be loaded.";
+            }
+        }
+        // Save/load only: admitted page and plant limits bound these owner lookups.
+        // Use the same explicit-owner precedence as live participant selection.
+        for (const auto& plant : state.plants.entities) {
+            if (cancelled())
+                return false;
+            if (plant.name != "plant")
+                continue;
+            const auto* owner = luminumbra::foliage::pp_detail::ComponentData(plant, "PlantRegion");
+            const auto* transform =
+                luminumbra::foliage::pp_detail::ComponentData(plant, "Transform");
+            if (owner) {
+                if (!admit_history_owner({owner->at("owner_x").get<std::int32_t>(),
+                                          owner->at("owner_z").get<std::int32_t>()})) {
+                    return false;
+                }
+            } else if (transform) {
+                const Vec3 position{transform->at("x").get<float>(),
+                                    transform->at("y").get<float>(),
+                                    transform->at("z").get<float>()};
+                if (ActiveRegionLedger::valid_anchor(position) &&
+                    !admit_history_owner(ActiveRegionLedger::region_at(position))) {
                     return false;
                 }
             }
@@ -5551,8 +5624,8 @@ bool GameSession::ReadPreparedWorldState(
 void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState& saved) {
     DisableFarWorldAuthorityProducer();
     // All refusing readers have passed; publish the staged state together.
-    m_foliageStep.reset();
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
+    m_foliageStep.reset();
     m_lastLoadedChunkCount = 0;
     m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;

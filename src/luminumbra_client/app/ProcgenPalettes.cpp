@@ -227,9 +227,12 @@ entt::entity PromoteNearestScatter(ProcgenPlantState& state,
     if (best < 0)
         return entt::null;
     ProcgenPlantInstance& inst = state.plants[static_cast<std::size_t>(best)];
+    const Luminumbra::Vec3 position{inst.worldPos.x, inst.worldPos.y, inst.worldPos.z};
+    if (!luminumbra::foliage::FarmingActionsAllowed(reg, position))
+        return entt::null;
     const entt::entity e = reg.create();
     auto& tf = reg.emplace<C::TransformComponent>(e);
-    tf.position = Luminumbra::Vec3(inst.worldPos.x, inst.worldPos.y, inst.worldPos.z);
+    tf.position = position;
     reg.emplace<C::PlantTag>(e);
     reg.emplace<C::PlantGenomeComponent>(e, inst.genome);
     auto& g = reg.emplace<C::PlantGrowthComponent>(e);
