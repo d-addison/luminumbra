@@ -6,6 +6,7 @@ in vec2 TexCoords;
 
 uniform sampler2D u_sceneDepth; // D32F reversed-Z: near 1, sky 0
 uniform mat4 u_gbufferInverseProjection; // selected Legacy or Ladder projection
+uniform vec2 u_jitter_ndc; // current G-buffer projection jitter; zero when TAAU is off
 uniform sampler2D u_scene;   // the composited (lit + sky) tonemapped color
 
 #define MAX_BOLT_POINTS 96
@@ -48,9 +49,13 @@ float offscreenFlashFloor(float strikeExtent, float sceneLuma) {
 // Clear sky and invalid samples never occlude. This also handles Ladder's far
 // plane and temporal jitter without assuming the bolt used the same projection.
 float sceneInverseDepth(vec2 uv) {
-    float depth = texture(u_sceneDepth, uv).r;
+    // projection[2].xy += jitter shifts raster NDC by minus jitter (w = -z).
+    // The overlay is unjittered: sample its ray in the jittered G-buffer, and
+    // use that same NDC with the inverse of the jittered projection.
+    vec2 depthUv = uv - u_jitter_ndc * 0.5;
+    float depth = texture(u_sceneDepth, depthUv).r;
     if (isnan(depth) || isinf(depth) || depth <= 0.0 || depth > 1.0) return 0.0;
-    vec4 view = u_gbufferInverseProjection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 view = u_gbufferInverseProjection * vec4(depthUv * 2.0 - 1.0, depth, 1.0);
     if (any(isnan(view)) || any(isinf(view)) || view.z >= 0.0 || view.w <= 0.0) return 0.0;
     float inverseDepth = view.w / -view.z;
     return isnan(inverseDepth) || isinf(inverseDepth) ? 0.0 : inverseDepth;

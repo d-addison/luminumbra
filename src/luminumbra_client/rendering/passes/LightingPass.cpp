@@ -522,6 +522,9 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     m_lightning_overlay_shader->setInt("u_sceneDepth", 1);
     m_lightning_overlay_shader->setMat4("u_gbufferInverseProjection",
                                         ctx.gbuffer_inverse_projection);
+    // Both selected symmetric perspective projections carry the current frame's
+    // jitter in column 2. The lighting context does not populate taau_jitter_ndc.
+    m_lightning_overlay_shader->setVec2("u_jitter_ndc", glm::vec2(ctx.gbuffer_projection[2]));
     m_lightning_overlay_shader->setInt("u_active", 1);
     m_lightning_overlay_shader->setFloat("u_pulse", lit.pulse_intensity);
     m_lightning_overlay_shader->setVec3("u_color", lit.pulse_color);

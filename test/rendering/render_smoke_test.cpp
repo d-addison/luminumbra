@@ -2923,6 +2923,65 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
         glDeleteProgram(program);
 }
 
+// A reduced-resolution G-buffer silhouette moves between depth texels across
+// subpixel jitter phases. Check both sides of the unjittered channel and glow.
+void ExpectLightningJitteredSilhouettes(
+    Luminumbra::Rendering::Shader& shader,
+    FullscreenFloatProbe& probe,
+    const glm::mat4& projection,
+    float occluder_depth,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& flash_pixels,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& sky_pixels) {
+    std::array<glm::vec4, FullscreenFloatProbe::width> first_phase{};
+    for (int phase = 0; phase < 2; ++phase) {
+        const glm::vec2 jitter =
+            phase == 0 ? glm::vec2(0.025f, -0.015f) : glm::vec2(-0.025f, 0.015f);
+        auto jittered_projection = projection;
+        jittered_projection[2][0] += jitter.x;
+        jittered_projection[2][1] += jitter.y;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(jittered_projection));
+        shader.setVec2("u_jitter_ndc", jitter);
+        // Fixed 24-texel storage models a 75-percent internal render scale.
+        std::vector<glm::vec4> silhouette_depth(24, glm::vec4(0));
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            const float unjittered_uv = raster_uv + jitter.x * 0.5f;
+            if (unjittered_uv < 0.56f) {
+                silhouette_depth[texel] = glm::vec4(occluder_depth);
+            }
+        }
+        probe.texture(1, silhouette_depth);
+        const auto pixels = probe.draw();
+        EXPECT_FLOAT_EQ(pixels[17].r, flash_pixels[17].r);
+        EXPECT_FLOAT_EQ(pixels[18].r, sky_pixels[18].r);
+        if (phase == 0) {
+            first_phase = pixels;
+        } else {
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel) {
+                EXPECT_FLOAT_EQ(pixels[pixel].r, first_phase[pixel].r);
+                EXPECT_FLOAT_EQ(pixels[pixel].g, first_phase[pixel].g);
+                EXPECT_FLOAT_EQ(pixels[pixel].b, first_phase[pixel].b);
+            }
+        }
+        // Also cross a horizontal silhouette: the single output row's ray
+        // stays behind terrain while its depth row changes with Y jitter.
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            silhouette_depth[texel] =
+                glm::vec4(raster_uv + jitter.y * 0.5f < 0.515f ? occluder_depth : 0.0f);
+        }
+        probe.texture(1, silhouette_depth, 24);
+        const auto horizontal_pixels = probe.draw();
+        for (std::size_t pixel = 0; pixel < horizontal_pixels.size(); ++pixel) {
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].r, flash_pixels[pixel].r);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].g, flash_pixels[pixel].g);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].b, flash_pixels[pixel].b);
+        }
+    }
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+}
+
 TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -2934,6 +2993,7 @@ TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges)
     shader.use();
     shader.setInt("u_scene", 0);
     shader.setInt("u_sceneDepth", 1);
+    shader.setVec2("u_jitter_ndc", {0, 0});
     shader.setInt("u_active", 1);
     shader.setFloat("u_pulse", 1);
     shader.setFloat("u_aspect", 1);
@@ -2955,9 +3015,6 @@ TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges)
     for (float far_plane : {3200.0f, 17408.0f}) {
         auto projection =
             Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
-        // The scene may be jittered while the overlay bolt stays unjittered.
-        projection[2][0] += 0.001f;
-        projection[2][1] -= 0.001f;
         shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
         const auto depth_at = [&](float distance) {
             const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
@@ -3000,6 +3057,9 @@ TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges)
         const auto ridge_glow = probe.draw();
         EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
         EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        bolt(0, 0.01f);
+        ExpectLightningJitteredSilhouettes(
+            shader, probe, projection, depth_at(25), flash_pixels, sky_pixels);
         // A hidden closest segment must not erase an overlapping visible one.
         bolt(0, 0.01f);
         shader.setInt("u_boltCount", 5);
@@ -3061,6 +3121,52 @@ TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges)
             EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
         }
     }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    probe.texture(1, {glm::vec4(0)});
+    // Exercise the production upload too: make_lighting_context supplies the
+    // jittered depth contract but leaves its generic taau_jitter_ndc at zero.
+    GLint quad = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad);
+    glActiveTexture(GL_TEXTURE1);
+    GLint depth_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &depth_texture);
+    Luminumbra::Rendering::RenderResourceRegistry registry;
+    Luminumbra::Rendering::LightingPass lighting;
+    lighting.init_shader(SourceRoot());
+    lighting.init_lighting_fbo(registry, FullscreenFloatProbe::width, 1);
+    Luminumbra::Rendering::LightningRenderState lightning;
+    lightning.active = true;
+    lightning.pulse_intensity = 1;
+    Luminumbra::Rendering::RenderContext ctx;
+    ctx.screen_width = FullscreenFloatProbe::width;
+    ctx.screen_height = 1;
+    ctx.lightning_state = &lightning;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad);
+    ctx.gbuffer_depth.id = static_cast<GLuint>(depth_texture);
+    for (bool ladder : {false, true}) {
+        const auto projection = Luminumbra::Rendering::ReversedZPerspective(
+            glm::radians(70.0f), 1.0f, 0.1f, ladder ? 17408.0f : 3200.0f);
+        for (const glm::vec2 jitter :
+             {glm::vec2(0), glm::vec2(0.025f, -0.015f), glm::vec2(-0.025f, 0.015f)}) {
+            ctx.set_gbuffer_depth_contract(ladder, projection, jitter);
+            lighting.execute_lightning_overlay(ctx);
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            const auto overlay = static_cast<GLuint>(program);
+            const GLint location = glGetUniformLocation(overlay, "u_jitter_ndc");
+            ASSERT_GE(location, 0);
+            glm::vec2 uploaded(0);
+            glGetUniformfv(overlay, location, &uploaded.x);
+            EXPECT_EQ(uploaded, jitter);
+        }
+    }
+    lighting.destroy_lighting_fbo(registry);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
