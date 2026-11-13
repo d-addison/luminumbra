@@ -39,6 +39,7 @@
 #include "audio/EnvironmentalAudioSystem.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -90,6 +91,8 @@ struct SweepCell {
     std::uint64_t foliage_instances = 0;
     std::uint64_t particle_draws = 0;
     std::uint64_t particles_drawn = 0;
+    std::uint64_t water_draws = 0;
+    std::uint64_t water_indices_drawn = 0;
     bool lightning_active = false;
     double cloud_coverage = 0.0;
     std::uint64_t water_like_pixels = 0;
@@ -110,7 +113,7 @@ void MeasureSweepFrame(const std::vector<unsigned char>& pixels,
     out_water_pixels = 0;
     out_water_ratio = 0.0;
     if (width <= 0 || height <= 0 ||
-        pixels.size() < static_cast<std::size_t>(width) * height * 3u) {
+        static_cast<std::size_t>(width) > pixels.size() / static_cast<std::size_t>(height) / 3u) {
         return;
     }
     const std::size_t total = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
@@ -184,7 +187,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     using namespace Luminumbra::Rendering;
 
     if (deps.game_session == nullptr || deps.pipeline == nullptr || deps.camera == nullptr ||
-        !deps.render_and_read) {
+        !deps.render_and_read || deps.readiness_timeout_seconds <= 0) {
         LUMINUMBRA_CORE_ERROR("world_visual_sweep: missing dependencies.");
         return false;
     }
@@ -201,10 +204,6 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     const std::filesystem::path sweep_dir = deps.artifact_dir / "sweep";
     std::error_code ec;
     std::filesystem::create_directories(sweep_dir, ec);
-
-    // Resolve the most open water near spawn for the water-aimed cell (also used
-    // to bias the land anchor toward the shore so water stays in the vistas).
-    const WaterVisualCameraTarget water_target = FindWaterVisualCameraTarget(game_session);
 
     // --- anchor + framing --------------------------------------------------
     // Pick a feature-rich LAND anchor: a column comfortably ABOVE sea level (so
@@ -269,8 +268,31 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     }
     // Eye level a person-height above the ground so the down-pitch frames the
     // nearby foliage-covered ground rather than a distant sea horizon.
-    const float eye_y = land_terrain_h + 2.5f;
+    const float eye_y = std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f;
     const Luminumbra::Vec3 anchor(land.x, eye_y, land.z);
+
+    // Keep the water focus inside the anchor's live ring. The spawn-centred
+    // water search can select a distant ocean hidden behind intervening land.
+    // At most 169 height queries, once per sweep.
+    WaterVisualCameraTarget water_target;
+    float nearest_water_distance_sq = std::numeric_limits<float>::max();
+    for (int dz = -96; dz <= 96; dz += 16) {
+        for (int dx = -96; dx <= 96; dx += 16) {
+            const float x = anchor.x + static_cast<float>(dx);
+            const float z = anchor.z + static_cast<float>(dz);
+            const float height = world_system->GetTerrainHeightAt(x, z);
+            const float distance_sq = static_cast<float>(dx * dx + dz * dz);
+            if (height < Luminumbra::SEA_LEVEL - 0.5f && distance_sq < nearest_water_distance_sq) {
+                nearest_water_distance_sq = distance_sq;
+                water_target.found = true;
+                water_target.focus = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL + 0.1f, z);
+            }
+        }
+    }
+    if (!water_target.found) {
+        LUMINUMBRA_CORE_ERROR("world_visual_sweep: no water target in the anchor's live ring.");
+        return false;
+    }
 
     // --- foliage scatter (drives the down-daytime cells) -------------------
     bool foliage_ready = false;
@@ -290,11 +312,10 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         foliage->set_wind(glm::vec2(3.0f, 1.5f));
     }
     FoliageScatterContext foliage_ctx{world_system};
-    const auto chunk_scatter = BuildSweepFoliageScatter(world_system);
+    std::vector<FoliagePass::ChunkScatter> chunk_scatter;
 
-    // --- rain emitter (lazily spawned for the storm cells) -----------------
+    // --- rain emitter -----------------------------------------------------
     ParticlePass* particles = pipeline->particles();
-    std::uint32_t rain_emitter = ParticlePass::kInvalidEmitter;
 
     // --- matrix dimensions -------------------------------------------------
     const std::array<SweepTimeOfDay, 4> tods = {{
@@ -367,7 +388,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                     camera->Position,
                     Luminumbra::Rendering::FoliagePass::Preparation::Complete);
             }
-            ok = deps.render_and_read(pixels, fb_w, fb_h);
+            ok = deps.render_and_read(pixels, fb_w, fb_h, false);
             if (!ok) {
                 break;
             }
@@ -380,21 +401,43 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     // never changes across the matrix, so this geometry is reused by every cell.
     pipeline->set_time_of_day(0.0f);
     camera->Position = anchor;
-    camera->Yaw = 0.0f;
-    camera->Pitch = 0.0f;
-    camera->updateCameraVectors();
-    for (int i = 0; i < 28; ++i) {
-        if (foliage != nullptr && foliage_ready && !chunk_scatter.empty()) {
-            foliage->rebuild_instances(chunk_scatter,
-                                       &FoliageSurfaceQuery,
-                                       &foliage_ctx,
-                                       camera->Position,
-                                       Luminumbra::Rendering::FoliagePass::Preparation::Complete);
+    AimCameraAt(camera, water_target.focus);
+    const auto readiness_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(deps.readiness_timeout_seconds);
+    int warmup_frames = 0;
+    bool streaming_ready = false;
+    std::size_t water_indices_drawn = 0;
+    while (!streaming_ready && std::chrono::steady_clock::now() < readiness_deadline) {
+        if (!deps.render_and_read(pixels, fb_w, fb_h, true)) {
+            LUMINUMBRA_CORE_ERROR("world_visual_sweep: warmup render failed.");
+            return false;
         }
-        if (!deps.render_and_read(pixels, fb_w, fb_h)) {
-            break;
+        ++warmup_frames;
+        // 625 columns cover the 176 m legacy far-terrain inner clip in every
+        // direction. This diagnostic runs only in the deadline-bounded warmup.
+        const auto coverage = world_system->get_camera_local_coverage_stats(anchor, 12);
+        const auto near_coverage = world_system->get_camera_local_coverage_stats(anchor, 3);
+        const bool terrain_ready =
+            warmup_frames >= 28 && coverage.near_field_renderable &&
+            coverage.ready_surface_chunks == coverage.expected_surface_chunks &&
+            coverage.pending_lod_chunks == 0 && near_coverage.expected_surface_chunks > 0 &&
+            near_coverage.lod_counts[0] == near_coverage.expected_surface_chunks;
+        if (terrain_ready) {
+            // The warmup faces the local water target. Require submitted water,
+            // rather than counting unrelated water still resident near spawn.
+            const auto& stats = pipeline->get_last_render_pass_stats();
+            water_indices_drawn = stats.water_indices_drawn;
+            streaming_ready = stats.water_draws > 0 && water_indices_drawn > 0;
         }
     }
+    if (!streaming_ready) {
+        LUMINUMBRA_CORE_ERROR("world_visual_sweep: anchor residency timed out (water indices={}).",
+                              water_indices_drawn);
+        return false;
+    }
+    // Residency may have changed completely since spawn. Build scatter from the
+    // settled anchor's chunks, then reuse it throughout the fixed-anchor matrix.
+    chunk_scatter = BuildSweepFoliageScatter(world_system);
 
     // Drive the renderer state for a weather condition, returning whether
     // lightning is active + cloud coverage so the manifest can record them.
@@ -404,6 +447,11 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         WeatherRenderState wstate;
         CloudRenderState cstate;
         LightningRenderState lstate; // default inactive
+        // Each cell starts with an empty particle pool, so its frame statistics
+        // describe this cell's rain rather than surviving drops from earlier views.
+        if (particles != nullptr) {
+            particles->clear_emitters();
+        }
         if (storm) {
             wstate.driven = true;
             wstate.rain_intensity = 1.0f;
@@ -420,17 +468,10 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             cstate.scroll_offset = glm::vec2(static_cast<float>(phase) * 22.0f, 0.0f);
             cloud_cov = cstate.coverage_amount;
 
-            // Rain particles at the camera. Re-add the emitter for each storm cell
-            // (it was cleared on the previous clear cell) and re-center it on the
-            // live camera so the rain falls past the viewer.
+            // Rain particles at the camera, with the same fill time in every cell.
             if (particles != nullptr) {
-                if (rain_emitter == ParticlePass::kInvalidEmitter) {
-                    rain_emitter = particles->add_emitter(
-                        deps.root_dir / "data/common/particles/precip_rain.json",
-                        glm::vec3(camera->Position));
-                } else {
-                    particles->set_emitter_origin(rain_emitter, glm::vec3(camera->Position));
-                }
+                particles->add_emitter(deps.root_dir / "data/common/particles/precip_rain.json",
+                                       glm::vec3(camera->Position));
                 particles->set_wind(glm::vec3(4.0f, 0.0f, 1.0f));
             }
             // Keep one strike fixed in the world across every yaw and pitch.
@@ -472,14 +513,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             cstate.shadow_strength = 0.75f; // pronounced cast shadows (bolder look)
             cstate.scroll_offset = glm::vec2(static_cast<float>(phase) * 14.0f, 0.0f);
             cloud_cov = cstate.coverage_amount;
-            // Fully remove the rain emitter so no streaks bleed into the clear
-            // cells (relocating it is not enough — it keeps emitting). It is
-            // re-added on the next storm cell. set_wind(0) so any in-flight drops
-            // stop being advected.
+            // Clear cells also reset the rain wind.
             if (particles != nullptr) {
-                particles->clear_emitters();
                 particles->set_wind(glm::vec3(0.0f));
-                rain_emitter = ParticlePass::kInvalidEmitter;
             }
         }
         pipeline->set_weather_state(wstate);
@@ -536,6 +572,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                         cell.foliage_instances = stats.foliage_instances_drawn;
                         cell.particle_draws = stats.particle_draws;
                         cell.particles_drawn = stats.particles_drawn;
+                        cell.water_draws = stats.water_draws;
+                        cell.water_indices_drawn = stats.water_indices_drawn;
                         MeasureSweepFrame(pixels,
                                           fb_w,
                                           fb_h,
@@ -588,6 +626,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         if (c.water_aimed && c.daytime && c.water_like_pixels == 0) {
             failures.push_back("no_water:" + c.file);
         }
+        if (c.water_aimed && (c.water_draws == 0 || c.water_indices_drawn == 0)) {
+            failures.push_back("no_water_geometry:" + c.file);
+        }
     }
 
     nlohmann::json manifest;
@@ -596,6 +637,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     manifest["world_preset"] = "archipelago";
     manifest["anchor"] = Vec3ToJson(anchor);
     manifest["water_target_found"] = water_target.found;
+    manifest["warmup_water_indices_drawn"] = water_indices_drawn;
     manifest["foliage_scatter_loaded"] = foliage_ready;
     manifest["matrix"] = {
         {"seasons", static_cast<int>(seasons.size())},
@@ -622,6 +664,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             {"foliage_instances", c.foliage_instances},
             {"particle_draws", c.particle_draws},
             {"particles_drawn", c.particles_drawn},
+            {"water_draws", c.water_draws},
+            {"water_indices_drawn", c.water_indices_drawn},
             {"lightning_active", c.lightning_active},
             {"cloud_coverage", c.cloud_coverage},
             {"water_like_pixels", c.water_like_pixels},
