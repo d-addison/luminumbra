@@ -133,7 +133,7 @@ TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
             ExpectContains(palette,
                            "rp.register_procgen_mesh(base + \".lod" + std::to_string(lod) +
                                "\", BuildGroundCoverMesh(lo, hi, " + (lod == 3 ? "true" : "false") +
-                               ");");
+                               "));");
         }
         EXPECT_EQ(palette.find("Billboard"), std::string::npos);
     }
