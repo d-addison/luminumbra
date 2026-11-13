@@ -2,7 +2,12 @@
 """Package a native RegionFixtureCapture capture as a reproducible fixture ZIP.
 
 Set LUMINUMBRA_REGION_FIXTURE_CAPTURE to an absolute output JSON filename outside
-the source tree, then run common_tests --gtest_filter=RegionFixtureCapture.Emit.
+the source tree, then run the built bin/region_fixture_capture executable
+(bin/<config>/region_fixture_capture.exe for multi-config Windows builds). Build
+the region_fixture_capture target first; it is built by default but never
+registered with CTest. With the
+environment variable unset, the tool refuses the request without creating a world.
+The registered RegionFixtureCapture publication tests always run without it.
 Run this script with --capture that.json --output fixtures.zip. Review the ZIP's
 explicit scenario/member inventory before extracting fixtures. Existing fixtures
 are never read or modified. SHA-256 pins are computed from captured payloads;

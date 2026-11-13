@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -472,7 +473,21 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
         self.assertNotEqual(self.cli().returncode, 0)
         self.assertEqual(self.output.read_bytes(), b"previous")
 
-    def test_registration_and_dormant_native_capture(self):
+    def test_registered_capture_tests_cannot_skip_without_environment(self):
+        native = (ROOT / "test/common/RegionFixtureCapture_test.cpp").read_text(encoding="utf-8")
+        publication = (ROOT / "test/support/RegionFixtureCapturePublication.h").read_text(
+            encoding="utf-8")
+        for source in (native, publication):
+            self.assertNotIn("GTEST_SKIP", source)
+            self.assertNotIn("DISABLED_", source)
+            self.assertNotIn("LUMINUMBRA_REGION_FIXTURE_CAPTURE", source)
+            self.assertNotIn("RequestedCapture", source)
+        self.assertEqual(re.findall(r"TEST\(RegionFixtureCapture, (\w+)\)", native), [
+            "PublicationRefusesExistingDestinationAndCleansStaging",
+            "PublicationCreatesNewDestinationAndCleansStaging",
+            "PublicationFailuresLeaveNoStagingOrDestination"])
+
+    def test_capture_tool_is_built_but_never_registered(self):
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
         paths = (ROOT / "tools/ci/ci_paths.py").read_text(encoding="utf-8")
         self.assertIn("common/RegionFixtureCapture_test.cpp", cmake)
@@ -480,12 +495,45 @@ class RegionFixtureRegeneratorTests(unittest.TestCase):
         self.assertIn("test/tools/test_regenerate_region_fixtures.py", cmake)
         self.assertIn('"test/tools/test_regenerate_region_fixtures.py"', paths)
         self.assertIn('"tools/regenerate_region_fixtures.py"', paths)
-        native = (ROOT / "test/common/RegionFixtureCapture_test.cpp").read_text(encoding="utf-8")
+        cmake = re.sub(r"#[^\n]*", "", cmake)
+        executables = re.findall(r"add_executable\(\s*(\w+)\s+([^)]*)\)", cmake)
+        self.assertEqual([name for name, sources in executables
+                          if "tools/RegionFixtureCapture.cpp" in sources],
+                         ["region_fixture_capture"])
+        self.assertIn(("region_fixture_capture", "tools/RegionFixtureCapture.cpp"), executables)
+        for command in re.findall(r"\b(?:add_test|gtest_discover_tests|set|list)\s*\(([^)]*)\)",
+                                  cmake):
+            self.assertNotIn("region_fixture_capture", command)
+            self.assertNotIn("RegionFixtureCapture.Emit", command)
+        native = (ROOT / "test/tools/RegionFixtureCapture.cpp").read_text(encoding="utf-8")
+        self.assertNotRegex(native, r"\bTEST(?:_F|_P)?\s*\(")
+        self.assertNotIn("GTEST_SKIP", native)
+        self.assertIn("int main()", native)
+        self.assertIn("return EXIT_FAILURE;", native)
+        self.assertIn("bin/region_fixture_capture", REGEN.__doc__)
+        self.assertNotIn("--gtest_filter", REGEN.__doc__)
+
+    def test_capture_tool_preserves_platform_admission_and_inventory(self):
+        native = (ROOT / "test/tools/RegionFixtureCapture.cpp").read_text(encoding="utf-8")
         self.assertLess(native.index('std::getenv("LUMINUMBRA_REGION_FIXTURE_CAPTURE")'),
                         native.index("Capture(false)"))
-        self.assertIn("if (!RequestedCapture(destination)) {\n        GTEST_SKIP()", native)
         self.assertIn('_wdupenv_s(&value, &size, L"LUMINUMBRA_REGION_FIXTURE_CAPTURE")', native)
         self.assertIn('_wgetenv(L"LUMINUMBRA_REGION_FIXTURE_CAPTURE")', native)
+        for condition, error in (
+                ("!RequestedCapture(destination)",
+                 "set LUMINUMBRA_REGION_FIXTURE_CAPTURE to request a capture"),
+                ("!Luminumbra::Filesystem::IsAbsolutePath(destination)",
+                 "capture destination must be absolute"),
+                ("IsWithinSourceTree(parent)", "capture destination must be outside source tree"),
+                ("fs::exists(destination)", "capture destination must be new"),
+                ("payload.size() > (16U << 20)", "capture payload exceeds size limit")):
+            with self.subTest(condition=condition):
+                self.assertIn('if (' + condition + ') {\n        throw std::runtime_error("'
+                              + error + '");\n    }', native)
+        self.assertLess(native.index("!RequestedCapture(destination)"), native.index("Capture(false)"))
+        self.assertLess(native.index("IsWithinSourceTree(parent)"), native.index("Capture(false)"))
+        self.assertLess(native.index("payload.size() >"),
+                        native.index("PublishCapture(destination, payload)"))
         for name in (REGEN.REGION, REGEN.MANIFEST, REGEN.PLANTS, REGEN.INDEX):
             self.assertIn('"' + name + '"', native)
 

@@ -383,6 +383,12 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_save_fixture_support
 )
 
+# Explicit capture tool: built by default, never registered with CTest discovery.
+add_executable(region_fixture_capture tools/RegionFixtureCapture.cpp)
+target_compile_definitions(region_fixture_capture PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(region_fixture_capture PRIVATE gtest luminumbra_common)
+luminumbra_configure_first_party_target(region_fixture_capture)
+
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
 target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)

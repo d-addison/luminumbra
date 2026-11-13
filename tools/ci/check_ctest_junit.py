@@ -12,16 +12,13 @@ from pathlib import Path
 # Empty by design. Every test that used to be allow-listed here now genuinely
 # runs: the JobSystem throughput benchmark was re-enabled as a real test, and
 # AudioBankIntegrity gained a generated fixture so it no longer skips when the
-# external sound banks are absent. Opt-in capture tooling is checked separately
-# by its exact name and reason; required correctness tests cannot skip.
+# external sound banks are absent. A skip reaching this gate is now always a
+# problem worth failing the lane over.
 ALLOWED_SKIPS: set[str] = set()
 
 
 def skip_is_allowed(case: ET.Element) -> bool:
     name = case.get("name", "<unnamed>")
-    if name == "RegionFixtureCapture.Emit":
-        return ("set LUMINUMBRA_REGION_FIXTURE_CAPTURE to request a capture"
-                in case.findtext("system-out", "").splitlines())
     return name in ALLOWED_SKIPS
 
 
