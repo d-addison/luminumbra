@@ -1398,8 +1398,11 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_sweep_qualification_and_capture_callers_require_complete_preparation(self):
         sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
-        self.assertEqual(sweep.count("rebuild_instances("), 2)
-        self.assertEqual(sweep.count("FoliagePass::Preparation::Complete"), 2)
+        # Scatter is now built after residency; warmup has no stale spawn scatter.
+        self.assertEqual(sweep.count("rebuild_instances("), 1)
+        self.assertEqual(sweep.count("FoliagePass::Preparation::Complete"), 1)
+        self.assertGreater(sweep.index("chunk_scatter = BuildSweepFoliageScatter(world_system);"),
+                           sweep.index("if (!streaming_ready)"))
         drive = block(read(CLIENT / "core/ScenarioRunnerDrive.cpp"),
                       "bool ScenarioRunnerImpl::onPreRenderFoliage()")
         self.assertIn("FoliagePass::Preparation::Complete", drive)
@@ -2109,6 +2112,158 @@ class TerrainMaterialWiring(unittest.TestCase):
             settings = after_bind.split("glBindTexture(GL_TEXTURE_2D_ARRAY,", 1)[0]
             guarded = block(settings, "if (terrain_anisotropy_supported)")
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
+
+class WorldVisualSweepWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        cls.capture = block(read(CLIENT / "core/ScenarioRunnerCapture.cpp"),
+                            "void ScenarioRunnerImpl::onPreRenderWorldSweep()")
+
+    def test_sweep_streams_at_camera_until_residency_with_water_initialization(self):
+        main = read(CLIENT / "main_client.cpp")
+        anchored = main.split("const bool cam_anchored =", 1)[1].split(";", 1)[0]
+        self.assertIn("scenario_config.world_visual_sweep()", anchored)
+        callback = block(self.capture, "deps.render_and_read =")
+        update = compact(block(callback, "if (stream_world)"))
+        self.assertIn("Luminumbra::Vec3(g_camera->Position)", update)
+        # The existing live update seeds newly streamed water; paused updates do not.
+        self.assertIn("gameSession->GetPhysicsSystem());", update)
+        self.assertNotIn("TickSimulation", callback)
+        self.assertNotIn("sweep_stream_frames", callback)
+        self.assertIn("deps.readiness_timeout_seconds = scenario_config.readiness_timeout_seconds;",
+                      self.capture)
+        self.assertIn("settle_uploads(", callback)
+        self.assertIn("UploadPresentation::Settled", callback)
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, false)", self.sweep)
+
+    def test_warmup_requires_complete_terrain_lod0_and_water(self):
+        terrain = re.search(r"const bool terrain_ready =\s*([^;]+);", self.sweep)
+        self.assertIsNotNone(terrain, "warmup must test measured terrain residency")
+        expression = terrain.group(1)
+        ready = {"warmup_frames": 28, "coverage.near_field_renderable": True,
+                 "coverage.ready_surface_chunks": 625, "coverage.expected_surface_chunks": 625,
+                 "coverage.pending_lod_chunks": 0, "near_coverage.expected_surface_chunks": 49,
+                 "near_coverage.lod_counts[0]": 49}
+        cases = [(None, None, True), ("warmup_frames", 27, False),
+                 ("coverage.near_field_renderable", False, False),
+                 ("coverage.ready_surface_chunks", 624, False),
+                 ("coverage.pending_lod_chunks", 1, False),
+                 ("near_coverage.lod_counts[0]", 0, False),
+                 ("near_coverage.lod_counts[0]", 48, False),
+                 ("near_coverage.expected_surface_chunks", 0, False)]
+        for field, value, expected in cases:
+            with self.subTest(field=field):
+                inputs = dict(ready)
+                if field is not None:
+                    inputs[field] = value
+                self.assertEqual(cpp_expression(expression, **inputs), expected)
+        loop = block(self.sweep, "while (!streaming_ready")
+        self.assertIn("get_camera_local_coverage_stats(anchor, 12)", loop)
+        self.assertIn("get_camera_local_coverage_stats(anchor, 3)", loop)
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, true)", loop)
+        self.assertIn("return false;", block(loop, "if (!deps.render_and_read("))
+        water = block(loop, "if (terrain_ready)")
+        self.assertIn("get_last_render_pass_stats()", water)
+        self.assertIn("water_indices_drawn = stats.water_indices_drawn;", water)
+        predicate = re.search(r"streaming_ready = ([^;]+);", water).group(1)
+        for draws in (0, 1):
+            for count in (0, 3, 47172):
+                self.assertEqual(cpp_expression(predicate, water_indices_drawn=count,
+                                                **{"stats.water_draws": draws}),
+                                 draws > 0 and count > 0)
+        self.assertIn("AimCameraAt(camera, water_target.focus);",
+                      self.sweep.split("const auto readiness_deadline", 1)[0])
+
+    def test_expired_or_invalid_warmup_cannot_capture_cells(self):
+        run = block(self.sweep, "bool RunWorldVisualSweep(")
+        guard = run.split("if (", 1)[1].split(") {", 1)[0]
+        self.assertIn("deps.readiness_timeout_seconds <= 0", guard)
+        self.assertIn("return false;", block(self.sweep, "if (deps.game_session"))
+        condition = re.search(r"while \(([^\n]+)\) \{", self.sweep).group(1)
+        condition = condition.replace("std::chrono::steady_clock::now()", "now")
+        for ready, now, expected in ((False, 119, True), (False, 120, False),
+                                     (False, 121, False), (True, 119, False)):
+            self.assertEqual(cpp_expression(condition, streaming_ready=ready, now=now,
+                                            readiness_deadline=120), expected)
+        refused = block(self.sweep, "if (!streaming_ready)")
+        self.assertIn("return false;", refused)
+        self.assertLess(self.sweep.index("if (!streaming_ready)"),
+                        self.sweep.index("for (const SeasonPin& season"))
+        self.assertIn("std::chrono::seconds(deps.readiness_timeout_seconds)", self.sweep)
+
+    def test_water_cells_require_drawn_geometry_even_with_blue_sky_pixels(self):
+        gate = re.search(r"if \((c.water_aimed && \(c.water_draws[^\n]+)\) \{", self.sweep)
+        self.assertIsNotNone(gate, "water presence must reject cells without submitted water")
+        predicate = gate.group(1)
+        for aimed in (False, True):
+            for draws, indices in ((0, 0), (1, 0), (0, 3), (1, 3)):
+                self.assertEqual(cpp_expression(predicate, **{
+                    "c.water_aimed": aimed, "c.water_draws": draws,
+                    "c.water_indices_drawn": indices}), aimed and (draws == 0 or indices == 0))
+        for field in ("water_draws", "water_indices_drawn"):
+            self.assertIn(f"cell.{field} = stats.{field};", self.sweep)
+            self.assertIn(f'{{"{field}", c.{field}}}', self.sweep)
+        # Retain the existing daytime pixel-presence check as well.
+        self.assertIn("c.water_aimed && c.daytime && c.water_like_pixels == 0", self.sweep)
+        self.assertIn('manifest["warmup_water_indices_drawn"] = water_indices_drawn;', self.sweep)
+
+    def test_water_target_is_local_and_absence_refuses_the_sweep(self):
+        self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
+        self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
+        search = block(self.sweep, "for (int dz = -96;")
+        self.assertIn("for (int dx = -96; dx <= 96; dx += 16)", search)
+        self.assertIn("anchor.x + static_cast<float>(dx)", search)
+        self.assertIn("anchor.z + static_cast<float>(dz)", search)
+        expression = re.search(r"if \((height <[^{}]+)\) \{", search).group(1)
+        expression = expression.replace("Luminumbra::SEA_LEVEL", "sea").replace("0.5f", "0.5")
+        for height, distance, nearest, expected in ((-1, 256, 1024, True),
+                                                   (-0.5, 256, 1024, False),
+                                                   (2, 256, 1024, False),
+                                                   (-1, 1024, 256, False),
+                                                   (-1, 256, 256, False)):
+            self.assertEqual(cpp_expression(expression, height=height, sea=0,
+                                            distance_sq=distance,
+                                            nearest_water_distance_sq=nearest), expected)
+        self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
+        self.assertLess(self.sweep.index("if (!water_target.found)"),
+                        self.sweep.index("// --- run the matrix"))
+
+    def test_rain_pool_is_reset_for_every_cell_not_just_clear_weather(self):
+        weather = block(self.sweep, "const auto apply_weather =")
+        prefix = weather.split("if (storm)", 1)[0]
+        self.assertIn("if (particles != nullptr)", prefix)
+        self.assertIn("particles->clear_emitters();", block(prefix, "if (particles != nullptr)"))
+        self.assertEqual(weather.count("clear_emitters();"), 1)
+        self.assertIn("particles->add_emitter(", block(weather, "if (storm)"))
+        self.assertNotIn("set_emitter_origin", weather)
+        self.assertNotIn("rain_emitter", weather)
+        self.assertIn("cell.particles_drawn = stats.particles_drawn;", self.sweep)
+        # This is a frame occupancy snapshot, not a monotonic counter to subtract.
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_last_render_pass_stats = {};", block(pipeline, "void RenderPipeline::prepare_frame("))
+        particle = block(read(CLIENT / "rendering/passes/ParticlePass.cpp"),
+                         "std::size_t ParticlePass::execute(")
+        self.assertIn("return m_frame_instance_count;", particle)
+
+    def test_capture_and_analysis_refuse_partial_or_unaddressable_rgb_buffers(self):
+        callback = block(self.capture, "deps.render_and_read =")
+        measure = block(self.sweep, "void MeasureSweepFrame(")
+        for source, width, height, size in ((callback, "w", "h", "out_pixels.max_size()"),
+                                           (measure, "width", "height", "pixels.size()")):
+            checked = re.search(r"if \(([^{}]+(?:max_size|pixels.size)[^{}]+)\) \{", source)
+            self.assertIsNotNone(checked, "RGB storage must be checked before multiplication")
+            guard = checked.group(1)
+            guard = guard.replace(f"static_cast<std::size_t>({width})", width)
+            guard = guard.replace(f"static_cast<std::size_t>({height})", height)
+            guard = guard.replace("3u", "3")
+            for w, h, n, refused in ((0, 2, 12, True), (2, 0, 12, True),
+                                      (-1, 2, 12, True), (2, -1, 12, True),
+                                      (2, 2, 0, True), (2, 2, 11, True),
+                                      (2, 2, 12, False), (2, 2, 13, False),
+                                      (2**31-1, 2**31-1, 2**64-1, False),
+                                      (2**31-1, 2**31-1, 2**63-1, True)):
+                self.assertEqual(cpp_expression(guard, **{width: w, height: h, size: n}), refused)
 
 
 if __name__ == "__main__":
