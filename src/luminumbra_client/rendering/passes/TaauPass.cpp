@@ -138,9 +138,12 @@ void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen)
     glBindTexture(GL_TEXTURE_2D, plan.read_texture);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     m_shader->setInt("u_current", 0);
     m_shader->setInt("u_history", 1);
     m_shader->setInt("u_motion", 2);
+    m_shader->setInt("u_sceneDepth", 3);
     m_shader->setVec2(
         "u_texel",
         glm::vec2(1.0f / (float)ctx.internal_w(),
@@ -167,8 +170,8 @@ void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen)
                       ctx.screen_height,
                       0,
                       0,
-                      ctx.screen_width,
-                      ctx.screen_height,
+                      ctx.internal_w(),
+                      ctx.internal_h(),
                       GL_COLOR_BUFFER_BIT,
                       GL_NEAREST);
 

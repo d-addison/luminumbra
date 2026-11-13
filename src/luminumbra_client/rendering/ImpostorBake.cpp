@@ -1,4 +1,5 @@
 #include "ImpostorBake.h"
+#include "ImpostorBakePath.h"
 #include "app/FrameAttribution.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
@@ -490,14 +491,7 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
     out.min_coverage = static_cast<float>(ra.alpha_coverage.min_cell);
     out.mean_coverage = static_cast<float>(ra.alpha_coverage.coverage);
 
-    std::string normalPath = outPpmPath;
-    {
-        const auto dot = normalPath.find_last_of('.');
-        if (dot != std::string::npos)
-            normalPath.insert(dot, "_normal");
-        else
-            normalPath += "_normal";
-    }
+    const std::string normalPath = ImpostorNormalAtlasPath(outPpmPath).string();
     const bool normal_written = WritePpm(normalPath, atlas, atlas, nrm);
     out.ok = WritePpm(outPpmPath, atlas, atlas, rgb) && normal_written;
     if (!out.ok)

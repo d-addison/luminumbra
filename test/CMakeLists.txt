@@ -2538,6 +2538,24 @@ else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
 endif()
 
+# Capture diagnostics need both image packages in the same interpreter.
+set(_vl_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -I -B -c "import PIL, numpy"
+        RESULT_VARIABLE _vl_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_vl_rc EQUAL 0)
+        set(_vl_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_vl_python)
+    add_test(NAME VisualLintCaptures
+        COMMAND "${_vl_python}" -I -B ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_lint.py)
+    set_tests_properties(VisualLintCaptures PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+else()
+    message(FATAL_ERROR "VisualLintCaptures requires a Python interpreter with Pillow and NumPy.")
+endif()
+
 # SDF-contract doc-lint. Assert docs/shield/sdf-contract.md
 # enumerates both producer tiers + the malformed-SDF regeneration rule, checked against
 # the contract strings quoted in test/features/sdf-contract.feature. Stdlib-only checker,
