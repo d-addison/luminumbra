@@ -802,10 +802,15 @@ TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
     EXPECT_EQ(refinement.find("u_caveThickness"), std::string::npos)
         << "intersection selection must not branch or stop at the thickness cutoff";
     ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition)");
-    ExpectContains(body, "depthGap > 0.05 && depthGap < u_caveThickness");
-    ExpectContains(body, "length(sampPos - ro) / u_caveSkyMaxDist");
-    ExpectContains(body, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
-    ExpectContains(body, "occluded = max(occluded, distanceWeight * thicknessWeight);");
+    const auto contribution = ExtractBlock(source, "float canopyOcclusion(");
+    ASSERT_FALSE(contribution.empty());
+    ExpectContains(contribution, "depthGap > 0.05 && depthGap < u_caveThickness");
+    ExpectContains(contribution, "length(sampPos - ro) / u_caveSkyMaxDist");
+    ExpectContains(contribution, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
+    ExpectContains(contribution, "return distanceWeight * thicknessWeight;");
+    ExpectContains(contribution, "return 0.0;");
+    ExpectContains(body, "occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));");
+    EXPECT_EQ(CountOccurrences(body, "canopyOcclusion("), 2u);
     EXPECT_EQ(body.find("float(s - 1)"), std::string::npos);
     // Legacy and Ladder G-buffers share this march; authored studio bypasses it.
     ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)");
@@ -825,14 +830,25 @@ struct CanopySample {
 struct CanopyProbe {
     double visibility;
     int taps;
+    double occlusion;
 };
+
+double CanopyOcclusion(const CanopySample& hit, double maxDistance, double thickness) {
+    if (hit.gap > 0.05 && hit.gap < thickness) {
+        const double distanceWeight = 1 - std::clamp(hit.surfaceDistance / maxDistance, 0.0, 1.0);
+        const double ramp = std::clamp((hit.gap - 0.5 * thickness) / (0.5 * thickness), 0.0, 1.0);
+        const double thicknessWeight = 1 - ramp * ramp * (3 - 2 * ramp);
+        return distanceWeight * thicknessWeight;
+    }
+    return 0;
+}
 
 // Scalar mirror of computeSkyVisibility; the source contract above pins the
 // origin, crossing predicate, bisection, read budget and both falloff factors.
 template<typename Sample>
 CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickness, int steps) {
     if (maxDistance <= 0 || thickness <= 0 || steps <= 0) {
-        return {1, 0};
+        return {1, 0, 0};
     }
     steps = std::min(steps, 32);
     const double stepLength = maxDistance / steps;
@@ -855,6 +871,9 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
             continue;
         }
         const bool emptyCrossing = !previousValid && hit.gap > 0.05 && hit.surfaceRise > 0;
+        if (emptyCrossing) {
+            occluded = std::max(occluded, CanopyOcclusion(hit, maxDistance, thickness));
+        }
         const bool crossing =
             (previousValid && previousGap <= 0.05 && hit.gap > 0.05) || emptyCrossing;
         double frontDistance = previousDistance;
@@ -898,16 +917,10 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
                 }
             }
         }
-        if (hit.gap > 0.05 && hit.gap < thickness) {
-            const double distanceWeight =
-                1 - std::clamp(hit.surfaceDistance / maxDistance, 0.0, 1.0);
-            const double ramp =
-                std::clamp((hit.gap - 0.5 * thickness) / (0.5 * thickness), 0.0, 1.0);
-            const double thicknessWeight = 1 - ramp * ramp * (3 - 2 * ramp);
-            occluded = std::max(occluded, distanceWeight * thicknessWeight);
-        }
+        occluded = std::max(occluded, CanopyOcclusion(hit, maxDistance, thickness));
     }
-    return {1 - 0.94 * std::clamp(occluded, 0.0, 1.0), taps};
+    const double occlusion = std::clamp(occluded, 0.0, 1.0);
+    return {1 - 0.94 * occlusion, taps, occlusion};
 }
 
 // Level perspective camera, fragment (0,-1.7,-12), upward normal, 60 degree
@@ -938,6 +951,10 @@ void ExpectCanopyMirrorContract() {
     ExpectContains(body, "originBracket = originBracket || emptyCrossing;");
     ExpectContains(body, "if (emptyCrossing && refinedGap > 0.05 &&");
     ExpectContains(body, "dot(refinedPosition - ro, skyDirView) <= 0.0) {");
+    const auto coarse = ExtractBlock(body, "if (emptyCrossing)");
+    ExpectContains(coarse, "occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));");
+    EXPECT_LT(body.find("if (emptyCrossing)"), body.find("if (crossing)"));
+    EXPECT_EQ(CountOccurrences(body, "canopyOcclusion("), 2u);
     const auto empty = ExtractBlock(body, "if (!valid || dot(sampPos, sampPos) < 1e-6)");
     ExpectContains(empty, "previousDistance = distanceAlongRay;");
 }
@@ -1080,6 +1097,83 @@ TEST(CanopyAmbientContract, EmptyCoarseRecoveryRequiresObservedOverheadBandHit) 
         } else {
             EXPECT_DOUBLE_EQ(result.visibility, 1)
                 << "below-origin refined foreground cannot become the ceiling";
+        }
+    }
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky) {
+    ExpectCanopyMirrorContract();
+    // Perspective ray from (0,-3,-12): empty at 3 m, an overhead band hit
+    // at 6 m, unrelated foreground at 4.5 m, then only empty refinements.
+    const auto samples = [](double distance) {
+        const double rayY = distance - 3;
+        const double gap = distance == 6 ? 0.8 : 8.0;
+        const double scale = 1 - gap / std::hypot(rayY, 12);
+        const double rise = rayY * scale + 3;
+        return CanopySample{gap,
+                            std::hypot(rise, 12 * (1 - scale)),
+                            distance == 6 || distance == 4.5,
+                            std::abs(rayY) <= 12 / std::sqrt(3.0),
+                            rise};
+    };
+    ASSERT_FALSE(samples(3).valid);
+    const auto coarse = samples(6);
+    ASSERT_TRUE(coarse.valid);
+    ASSERT_GT(coarse.surfaceRise, 0);
+    ASSERT_GT(coarse.gap, 0.05);
+    ASSERT_LT(coarse.gap, 1.5);
+    ASSERT_GT(samples(4.5).gap, 1.5);
+    ASSERT_GT(samples(4.5).surfaceRise, 0);
+    ASSERT_FALSE(samples(3.75).valid);
+    // Independent base contribution for the only in-band coarse sample.
+    const double ramp = (coarse.gap - 0.75) / 0.75;
+    const double baseOcclusion =
+        (1 - coarse.surfaceDistance / 24) * (1 - ramp * ramp * (3 - 2 * ramp));
+    ASSERT_GT(baseOcclusion, 0.7);
+    const auto result = ProbeCanopy(samples, 24, 1.5, 8);
+    EXPECT_GE(result.occlusion, baseOcclusion);
+    EXPECT_NEAR(result.visibility, 1 - 0.94 * baseOcclusion, 1e-12);
+    EXPECT_EQ(result.taps, 11) << "three coarse reads and eight shared refinement reads";
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryOnlyAddsToCoarseContribution) {
+    ExpectCanopyMirrorContract();
+    // All cases replace or interrupt the first midpoint, followed by a hole.
+    // Include weaker/stronger band hits, both band boundaries, below-origin
+    // geometry, missing data and projection exit. Storage is fixed at 9 cases.
+    for (const auto& midpoint : std::array<CanopySample, 9>{{
+             {8, 1, true, true, 5},
+             {1.4, 5, true, true, 5},
+             {0.5, 1, true, true, 5},
+             {0.05, 1, true, true, 5},
+             {1.5, 1, true, true, 5},
+             {0.5, 1, true, true, 0},
+             {0, 1, true, true, 5},
+             {0, 0, false, true, 0},
+             {0, 0, false, false, 0},
+         }}) {
+        SCOPED_TRACE(midpoint.gap);
+        SCOPED_TRACE(midpoint.valid);
+        SCOPED_TRACE(midpoint.onScreen);
+        const auto samples = [&](double distance) {
+            if (distance == 6) {
+                return CanopySample{0.8, 5, true, true, 5};
+            }
+            if (distance == 4.5) {
+                return midpoint;
+            }
+            return CanopySample{0, 0, false, true, 0};
+        };
+        const double ramp = (0.8 - 0.75) / 0.75;
+        const double baseOcclusion = (1 - 5.0 / 6) * (1 - ramp * ramp * (3 - 2 * ramp));
+        const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+        EXPECT_GE(result.occlusion, baseOcclusion);
+        EXPECT_LE(result.taps, 10);
+        if (midpoint.gap == 0.5 && midpoint.surfaceRise > 0) {
+            EXPECT_GT(result.occlusion, baseOcclusion)
+                << "refinement can still add a stronger observed contribution";
+        } else {
+            EXPECT_NEAR(result.visibility, 1 - 0.94 * baseOcclusion, 1e-12);
         }
     }
 }

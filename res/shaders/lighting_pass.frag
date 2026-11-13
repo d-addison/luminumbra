@@ -384,6 +384,20 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
+// The coarse and refined samples use the same depth band and falloff.
+float canopyOcclusion(vec3 sampPos, vec3 ro, float depthGap) {
+    if (depthGap > 0.05 && depthGap < u_caveThickness) {
+        // A foreground silhouette is not a ceiling along this ray. Limit
+        // hits to the configured depth band, not the entire march length.
+        // Use the observed distance instead of the discrete march index so
+        // foliage cannot stamp eight constant-strength bands on the ground.
+        float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
+        float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
+        return distanceWeight * thicknessWeight;
+    }
+    return 0.0;
+}
+
 // Long-range sky visibility via an upward view-space ray-march against the
 // G-buffer. Returns 1.0 = fully open to the sky, -> u_caveAmbientFloor when the
 // fragment is roofed over (cave/overhang). At most 32 march position taps plus
@@ -441,6 +455,11 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // cannot supply a ceiling. Recovery never depends on thickness.
         bool emptyCrossing = !previousValid && depthGap > 0.05 &&
             dot(sampPos - ro, skyDirView) > 0.0;
+        if (emptyCrossing) {
+            // Recovery may encounter unrelated foreground and then sky. Keep
+            // the observed coarse hit so refinement can only add occlusion.
+            occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));
+        }
         crossing = crossing || emptyCrossing;
         float frontDistance = previousDistance;
         float backDistance = distanceAlongRay;
@@ -499,15 +518,7 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
             // Missing data or an exhausted budget retains the last observed
             // back-side sample; neither condition changes selection at thickness.
         }
-        if (depthGap > 0.05 && depthGap < u_caveThickness) {
-            // A foreground silhouette is not a ceiling along this ray. Limit
-            // hits to the configured depth band, not the entire march length.
-            // Use the observed distance instead of the discrete march index so
-            // foliage cannot stamp eight constant-strength bands on the ground.
-            float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
-            float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
-            occluded = max(occluded, distanceWeight * thicknessWeight);
-        }
+        occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));
     }
     // occluded in [0,1]; map to a sky-visibility multiplier in [floor,1].
     return mix(1.0, u_caveAmbientFloor, clamp(occluded, 0.0, 1.0));
