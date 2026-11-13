@@ -93,10 +93,9 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
         return InGameDrive::kBreakCase;
     }
     if (driveLodGround() || driveWaterVisual() || driveMaterialVisual() || driveSkyboxVisual() ||
-        driveWeatherVisual() || driveCloudShadow() || driveParticleDeterminism() ||
-        driveFoliageVisual() || drivePrecipitation() || driveTimeOfDaySweep() ||
-        driveLodBoundaryOscillation() || driveLodSeamArrival() || drivePlayerView() ||
-        driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
+        driveAtmosphereCamera() || driveParticleDeterminism() || driveFoliageVisual() ||
+        driveTimeOfDaySweep() || driveLodBoundaryOscillation() || driveLodSeamArrival() ||
+        drivePlayerView() || driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
         driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
         return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
@@ -215,9 +214,22 @@ bool ScenarioRunnerImpl::driveSkyboxVisual() {
     return false;
 }
 
+bool ScenarioRunnerImpl::driveAtmosphereCamera() {
+    if (scenario_ready && g_camera &&
+        (scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() ||
+         scenario_config.precipitation_smoke())) {
+        // Streaming needs the capture camera before the live weather sample. Render
+        // pins are applied later, after that sample has supplied the frame defaults.
+        ApplySkyboxVisualCamera(gameSession.get(),
+                                g_camera.get(),
+                                scenario_config.precipitation_smoke() ? 0.30f : 0.04f);
+        return true;
+    }
+    return false;
+}
+
 bool ScenarioRunnerImpl::driveWeatherVisual() {
     if (scenario_config.weather_visual_smoke() && scenario_ready && g_camera) {
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
         // SIM-DRIVEN weather overlay (one-way, ). First
         // half of the run captures the CLEAR-SKY control (premise guard
         // this is the dedicated weather scenario with a clear-sky
@@ -250,7 +262,7 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
                                         : 0.0f;
             wstate.fog_density =
                 (sample.category == Luminumbra::Systems::WeatherCategory::Fog) ? 0.4f : 0.1f;
-            wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
+            wstate.storm_intensity = sample.storm_intensity;
             wstate.wetness = precip;
             const float wlen =
                 std::sqrt(sample.wind.x * sample.wind.x + sample.wind.y * sample.wind.y);
@@ -262,6 +274,18 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
         } else {
             // Clear-sky control: a driven CLEAR state (overlay off).
             renderPipeline.set_weather_state(wstate);
+        }
+
+        // Precipitation is rendered by the same world-space emitters as live play.
+        // Consume the final pin rather than the earlier live sample, including the
+        // clear control that stops emission before its baseline capture.
+        if (auto* particles = renderPipeline.particles()) {
+            const auto& frame_weather = renderPipeline.get_weather_state();
+            particles->set_precipitation(root_dir / "data/common/particles",
+                                         g_camera->Position,
+                                         frame_weather.rain_intensity,
+                                         frame_weather.snow_intensity);
+            particles->set_wind(frame_weather.wind_direction * frame_weather.wind_strength * 8.0f);
         }
 
         // LIGHTNING. The SIM strike schedule is a pure
@@ -282,87 +306,37 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
                                    (elapsed_play_seconds / duration) < 0.84;
         if (strike_window && g_camera) {
             lstate.active = true;
-            // The overlay adds to the already-tonemapped [0,1] scene, so
-            // a modest pulse is a clear full-scene flash without a total
-            // white-out (the gate needs a frame-mean spike >= 0.04).
-            //  a STORM/overcast strike.
-            // The pulse is the readable scene flash; the bolt is a
-            // THIN jagged forked filament (width/glow below, the
-            // overlay shader splits these into a hot core + glow halo
-            // so the bolt no longer reads as a fat opaque white worm).
-            lstate.pulse_intensity = 0.16f; // 1-to-few-frame flash lift
+            // The pulse is bounded around the world strike and scaled by the
+            // scene luminance; the bolt retains its hot core and narrow glow.
+            lstate.pulse_intensity = 0.42f; // same strike strength as the visual sweep
             lstate.bolt_width_ndc = 0.010f; // thin bright core ribbon
             lstate.bolt_glow_ndc = 0.034f;  // surrounding glow halo
-            // Deterministic strike terminus on the horizon ahead of the
-            // camera. The bolt descends from a cloud-base height down to
-            // this point; placing the terminus ~220 m ahead at the camera's
-            // EYE level (not far below) keeps the whole descending channel
-            // inside the upper-frame sky where the skybox-visual camera
-            // looks, so the bolt is on-screen. Seeded from a fixed salt so
-            // the captured bolt is byte-reproducible.
-            const glm::vec3 fwd =
-                glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-            const glm::vec3 strike_ground = g_camera->Position + fwd * 220.0f;
-            const Luminumbra::Rendering::LightningBoltGeometry bolt =
-                Luminumbra::Rendering::BuildLightningBolt(strike_ground.x,
-                                                          strike_ground.y,
-                                                          strike_ground.z,
-                                                          /*magnitude=*/0.9f,
-                                                          /*strike_seed=*/0x5A5A1357ull);
-            // SCREEN-ANCHORED bolt projection. The bolt's WORLD shape (the
-            // seeded midpoint-displacement channel + branches) is mapped
-            // into a guaranteed-on-screen NDC path: the channel's normalized
-            // HEIGHT drives NDC.y from the upper sky (+0.92) down to just
-            // above the horizon (-0.12), and its lateral displacement from
-            // the straight cloud->ground line drives NDC.x around a fixed
-            // screen column. This keeps the bolt a reproducible, clearly
-            // visible vertical streak regardless of the camera pitch (the
-            // skybox-visual framing) while preserving the seeded jaggedness.
-            // Render-only capture aid : pure function of the strike.
-            const glm::vec3 top = bolt.main_channel.front();
-            const glm::vec3 bottom = bolt.main_channel.back();
-            const float span_y = std::max(1e-3f, top.y - bottom.y);
-            const float kBoltColumnNdcX = 0.06f; // centred column
-            const float kBoltTopNdcY = 0.92f;
-            const float kBoltBotNdcY = -0.12f;
-            //  amplify the seeded lateral
-            // displacement into NDC so the descending channel reads as
-            // a JAGGED zig-zag instead of a near-straight thick bar --
-            // but keep it predominantly VERTICAL (the descent spans the
-            // full frame height while the jag stays a modest sideways
-            // wobble), so the bolt reads as a tall jagged filament, not
-            // a horizontal scribble. The shader keeps the stroke thin.
-            const float kLateralToNdc = 1.0f / 150.0f; // modest jagged wobble
-            const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
-                const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
-                const float ndc_y = kBoltBotNdcY + (kBoltTopNdcY - kBoltBotNdcY) * hf;
-                // Lateral offset from the straight descent line (interpolated
-                // X/Z between top and bottom at this height fraction).
-                const float base_x = bottom.x + (top.x - bottom.x) * hf;
-                const float base_z = bottom.z + (top.z - bottom.z) * hf;
-                const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                // Clamp the lateral excursion so the jag stays a modest
-                // sideways wobble around the fixed column -- the descent
-                // (full frame height) dominates, so the bolt reads as a
-                // TALL jagged filament rather than a horizontal scribble.
-                const float ndc_x =
-                    kBoltColumnNdcX + std::clamp(lateral * kLateralToNdc, -0.22f, 0.22f);
-                return glm::vec2(ndc_x, ndc_y);
-            };
-            const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
-                if (!lstate.bolt_points_ndc.empty()) {
-                    lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
-                }
-                for (const glm::vec3& wp : stroke) {
-                    lstate.bolt_points_ndc.push_back(map_point(wp));
-                }
-            };
-            push_stroke(bolt.main_channel);
-            for (const auto& br : bolt.branches) {
-                push_stroke(br);
-            }
-            // Strike point NDC for the radial flash centre (the terminus).
-            lstate.strike_ndc = glm::vec2(kBoltColumnNdcX, kBoltBotNdcY);
+            // The pinned scenario camera faces the sun azimuth. Place a real
+            // terrain strike along that fixed world direction, independent of view.
+            const auto spawn = gameSession->GetMetadata().spawnPoint;
+            const auto sun = TowardSunDirection(0.04f);
+            const glm::vec3 direction = glm::normalize(glm::vec3(sun.x, 0.0f, sun.z));
+            const glm::vec3 strike_xz = glm::vec3(spawn.x, spawn.y, spawn.z) + direction * 220.0f;
+            const auto* world = gameSession->GetWorldSystem();
+            const float ground_y =
+                world ? world->GetTerrainHeightAt(strike_xz.x, strike_xz.z) : spawn.y;
+            const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
+                strike_xz.x, ground_y, strike_xz.z, 0.9f, 0x5A5A1357ull);
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window, &width, &height);
+            const glm::mat4 viewproj =
+                g_camera->GetProjectionMatrix(std::max(1, width), std::max(1, height)) *
+                g_camera->GetViewMatrix();
+            const auto projected =
+                Luminumbra::Rendering::ProjectLightningBolt(bolt, viewproj, lstate.pulse_intensity);
+            const auto margin = Luminumbra::Rendering::LiveBoltViewMargin(
+                lstate.bolt_width_ndc,
+                lstate.bolt_glow_ndc,
+                static_cast<float>(std::max(1, width)) / std::max(1, height));
+            auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
+                std::span(&projected, 1), Luminumbra::Rendering::kMaxBoltSegmentPoints, margin);
+            lstate.bolt_points_ndc = std::move(composed.points);
+            lstate.flashes = composed.flashes;
         }
         renderPipeline.set_lightning_state(lstate);
         return true;
@@ -380,7 +354,6 @@ bool ScenarioRunnerImpl::driveCloudShadow() {
         // coverage field across the run so a shadow edge crawls over the
         // fixed terrain ROI between the two captures. Render-only :
         // the cloud state never feeds back into the sim.
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
         const double elapsed_play_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scenario_play_started_at)
@@ -539,7 +512,6 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         // phase (zero wind -> vertical fall) then a WINDY phase (strong
         // horizontal wind -> diagonal slant). ONE-WAY : we READ
         // weather/wind and write nothing back to sim/world_hash.
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
         const double elapsed_play_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scenario_play_started_at)
@@ -597,7 +569,7 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         if (weather != nullptr) {
             const auto sample = weather->SampleAt(cam);
             wstate.rain_intensity = std::max(sample.precip_intensity, 1.0f);
-            wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
+            wstate.storm_intensity = sample.storm_intensity;
             wstate.wetness = wstate.rain_intensity;
             wstate.fog_density = 0.1f;
             sampled_wind_len =
@@ -617,8 +589,7 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         // dome to overcast) so the rain reads as bright streaks over a
         // dark sky and the lightning has contrast. This override is
         // gated on the env flag so the dedicated Precipitation gate's
-        // calm/windy captures (which assert a specific overcast luma
-        // drop) keep their tuned storm_intensity unchanged.
+        // calm/windy captures keep the sampled storm contribution.
         if (atmos_motion_capture) {
             wstate.storm_intensity = 0.92f;
             wstate.fog_density = 0.18f;
@@ -694,112 +665,52 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
 
             // Periodic lightning: fire a deterministic forked bolt in a
             // short window roughly every ~1.6 s of wall-clock so the clip
-            // contains a few strikes. The bolt + full-scene flash use the
-            // same screen-anchored projection as the WeatherVisual gate.
+            // contains a few strikes. The bolt uses the world projection shared
+            // with the WeatherVisual gate.
             const double strike_cycle = std::fmod(elapsed_play_seconds, 1.6);
             const bool strike_now = strike_cycle < 0.16; // ~10% duty -> a few-frame flash
             Luminumbra::Rendering::LightningRenderState lstate;
             if (strike_now) {
                 lstate.active = true;
-                // Strong full-scene flash so the strike briefly LIGHTS
-                // the dark storm scene (the readable signature of a
-                // strike in motion), with a thin bright forked core +
-                // soft glow halo so the bolt is a filament, not a worm.
+                // Localized flash with a thin bright forked core and soft glow.
                 lstate.pulse_intensity = 0.38f; // brighter scene flash
                 lstate.bolt_width_ndc = 0.006f; // thin bright core
                 lstate.bolt_glow_ndc = 0.024f;  // tight glow halo
-                const glm::vec3 fwd =
-                    glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-                //  TOUCHDOWN. Strike a real ground
-                // point ahead of the camera: terrain height at (x,z) is the
-                // bolt's true bottom, so the channel spans cloud->terrain and
-                // ends ON the ground (no floating mid-air bolt).
-                const glm::vec3 strike_xz = g_camera->Position + fwd * 160.0f;
+                const auto spawn = gameSession->GetMetadata().spawnPoint;
+                const auto sun = TowardSunDirection(0.04f);
+                const glm::vec3 direction = glm::normalize(glm::vec3(sun.x, 0.0f, sun.z));
+                const glm::vec3 strike_xz =
+                    glm::vec3(spawn.x, spawn.y, spawn.z) + direction * 160.0f;
                 const float ground_y =
                     gameSession->GetWorldSystem()->GetTerrainHeightAt(strike_xz.x, strike_xz.z);
-                const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
-                // Vary the strike seed per cycle so successive bolts differ.
                 const uint64_t cycle_index = static_cast<uint64_t>(elapsed_play_seconds / 1.6);
-                const Luminumbra::Rendering::LightningBoltGeometry bolt =
-                    Luminumbra::Rendering::BuildLightningBolt(strike_ground.x,
-                                                              strike_ground.y,
-                                                              strike_ground.z,
-                                                              /*magnitude=*/0.9f,
-                                                              /*strike_seed=*/0x5A5A1357ull +
-                                                                  cycle_index * 0x9E3779B1ull);
-                // PROJECT the real bolt through the actual render camera so
-                // the bolt spans the frame from the cloud base down to the
-                // projected terrain terminus -- it visibly TOUCHES DOWN.
-                int mvw = 0, mvh = 0;
-                glfwGetFramebufferSize(window, &mvw, &mvh);
-                const glm::mat4 proj = glm::perspective(glm::radians(g_camera->Zoom),
-                                                        static_cast<float>(std::max(1, mvw)) /
-                                                            static_cast<float>(std::max(1, mvh)),
-                                                        g_camera->GetNearPlane(),
-                                                        g_camera->GetFarPlane());
-                const glm::mat4 viewproj = proj * g_camera->GetViewMatrix();
-                const glm::vec3 top = bolt.main_channel.front();
-                const glm::vec3 bottom = bolt.main_channel.back();
-                const float span_y = std::max(1e-3f, top.y - bottom.y);
-                // Project the straight cloud->ground baseline endpoints; the
-                // bolt's jagged points are laid along the screen line between
-                // these, with the seeded lateral wobble added as a MODEST
-                // sideways jag (kept small so the bolt stays a tall, thin,
-                // mostly-vertical filament -- not a horizontal scribble).
-                const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
-                    const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
-                    ok = clip.w > 1e-4f;
-                    if (!ok)
-                        return glm::vec2(0.0f);
-                    return glm::vec2(clip.x / clip.w, clip.y / clip.w);
-                };
-                bool top_ok = false, bot_ok = false;
-                glm::vec2 top_ndc = project(top, top_ok);
-                glm::vec2 bot_ndc = project(bottom, bot_ok);
-                // Anchor the bolt TOP just BELOW the top edge so the dark
-                // storm cloud deck (painted from this anchor upward) is
-                // visible ABOVE the bolt origin and the bolt clearly emerges
-                // from the cloud base. BOTTOM goes onto the projected ground
-                // point, clamped just inside the bottom edge so the touchdown
-                // is visible even when the upward-tilted camera projects the
-                // ground low.
-                top_ndc.y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
-                const float kGroundNdcY = bot_ok ? std::clamp(bot_ndc.y, -0.96f, -0.55f) : -0.92f;
-                const float kColumnNdcX = bot_ok ? std::clamp(bot_ndc.x, -0.6f, 0.6f) : 0.0f;
-                const float kLateralToNdc = 1.0f / 260.0f; // modest jag
-                const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
-                    const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
-                    const float ndc_y = kGroundNdcY + (top_ndc.y - kGroundNdcY) * hf;
-                    const float base_x = bottom.x + (top.x - bottom.x) * hf;
-                    const float base_z = bottom.z + (top.z - bottom.z) * hf;
-                    const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                    const float ndc_x =
-                        kColumnNdcX + std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
-                    return glm::vec2(ndc_x, ndc_y);
-                };
-                const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
-                    if (!lstate.bolt_points_ndc.empty()) {
-                        lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f);
-                    }
-                    for (const glm::vec3& wp : stroke) {
-                        lstate.bolt_points_ndc.push_back(map_point(wp));
-                    }
-                };
-                push_stroke(bolt.main_channel);
-                for (const auto& br : bolt.branches) {
-                    push_stroke(br);
-                }
-                lstate.strike_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
-                // Ground-impact bloom at the touchdown point.
-                lstate.ground_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
-                lstate.ground_flash = 0.55f;
-                //  anchor a DARK STORM CLOUD at the
-                // bolt TOP so the bolt visibly EMERGES from a cloud (not thin
-                // air). The cloud base sits at the bolt-top NDC and the
-                // overlay paints a billowing dark deck across the upper frame
-                // around this column; the flash lights it from within.
-                lstate.cloud_anchor_ndc = glm::vec2(kColumnNdcX, top_ndc.y);
-                lstate.cloud_darkness = 0.85f;
+                const auto bolt = Luminumbra::Rendering::BuildLightningBolt(
+                    strike_xz.x,
+                    ground_y,
+                    strike_xz.z,
+                    0.9f,
+                    0x5A5A1357ull + cycle_index * 0x9E3779B1ull);
+                int width = 0, height = 0;
+                glfwGetFramebufferSize(window, &width, &height);
+                const glm::mat4 viewproj =
+                    g_camera->GetProjectionMatrix(std::max(1, width), std::max(1, height)) *
+                    g_camera->GetViewMatrix();
+                const auto projected = Luminumbra::Rendering::ProjectLightningBolt(
+                    bolt, viewproj, lstate.pulse_intensity);
+                const auto margin = Luminumbra::Rendering::LiveBoltViewMargin(
+                    lstate.bolt_width_ndc,
+                    lstate.bolt_glow_ndc,
+                    static_cast<float>(std::max(1, width)) / std::max(1, height));
+                auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
+                    std::span(&projected, 1), Luminumbra::Rendering::kMaxBoltSegmentPoints, margin);
+                lstate.bolt_points_ndc = std::move(composed.points);
+                lstate.flashes = composed.flashes;
+                lstate.ground_ndc = projected.strike_ndc;
+                const bool ground_on_screen =
+                    !Luminumbra::Rendering::IsLiveBoltPenUp(projected.strike_ndc) &&
+                    std::abs(projected.strike_ndc.x) <= 1.0f &&
+                    std::abs(projected.strike_ndc.y) <= 1.0f;
+                lstate.ground_flash = ground_on_screen ? 0.55f : 0.0f;
             }
             renderPipeline.set_lightning_state(lstate);
         }

@@ -222,6 +222,7 @@ add_executable(common_tests
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
+    rendering/NearTerrainRefinement_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
@@ -251,6 +252,7 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
     ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
+    ../src/luminumbra_client/rendering/NearTerrainRefinement.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
@@ -361,6 +363,7 @@ add_executable(common_tests
     sim/ecology_pipeline_test.cpp
     sim/ecology_hash_test.cpp
     sim/crop_lifecycle_test.cpp
+    sim/PlantReproductionContinuation_test.cpp
     sim/foliage_drift_integration_test.cpp
     sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
@@ -2306,6 +2309,9 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionFixtureRegeneratorContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_regenerate_region_fixtures.py")
+
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
 set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)
@@ -2390,6 +2396,10 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(NAME FrozenTerrainPresetsContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B ${CMAKE_SOURCE_DIR}/tools/test_frozen_terrain_presets.py)
+endif()
 # File-only PowerShell checks are optional on hosts without PowerShell. The Lua
 # source mode only inspects source files; neither check runs the engine or graphics APIs.
 if(WIN32)
@@ -2713,6 +2723,8 @@ add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
+add_test(NAME ShaderCompilePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_compile_shaders.py)
 set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)
 add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)

@@ -12,6 +12,7 @@
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "GraphicsRuntimeConfig.h"
+#include "ImpostorCoverage.h"
 #include "Mesh.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
@@ -632,6 +633,9 @@ public:
     void set_terrain_coverage_diagnostics_enabled(bool enabled,
                                                   bool bypass_camera_region_guard = false);
     nlohmann::json terrain_coverage_diagnostics(bool include_live_chunks = false) const;
+    // Owner-thread, after rendering and before present. Reads one depth pixel;
+    // reports terrain ownership policy, not the identity of a prop at that pixel.
+    nlohmann::json terrain_peak_diagnostics(const glm::vec3& target) const;
     bool capture_terrain_coverage(const std::filesystem::path& out_dir) const;
 
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
@@ -1666,7 +1670,11 @@ public:
     // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
     // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
     bool tree_impostor_enabled() const {
-        return m_treeImpostorsEnabled;
+        return m_treeImpostorsEnabled && m_treeImpostorCoverage.usable();
+    }
+    // Last bake's immutable alpha diagnostic, including refused atlases.
+    const ImpostorCoverage& tree_impostor_coverage() const {
+        return m_treeImpostorCoverage;
     }
     u32 tree_impostor_albedo() const {
         return m_treeImpostorAlbedo;
@@ -1686,6 +1694,7 @@ public:
 
 private:
     bool m_treeImpostorsEnabled = false;
+    ImpostorCoverage m_treeImpostorCoverage;
     u32 m_treeImpostorAlbedo = 0;
     u32 m_treeImpostorNormal = 0;
     int m_treeImpostorGrid = 0;
