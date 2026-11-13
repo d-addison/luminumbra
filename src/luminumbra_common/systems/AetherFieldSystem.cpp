@@ -1,5 +1,7 @@
 #include "AetherFieldSystem.h"
 
+#include "../world/GameSession.h"
+
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -92,7 +94,7 @@ void AetherFieldSystem::Update(std::uint64_t tick,
                                const Vec3& region_anchor,
                                const WindFieldSystem* wind) {
     m_last_tick = tick;
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         // Rendering reads the same authoritative sampler through this derived texture grid.
         const double cell_x = std::floor(static_cast<double>(region_anchor.x) / kAetherCellSizeM);
         const double cell_z = std::floor(static_cast<double>(region_anchor.z) / kAetherCellSizeM);
@@ -113,7 +115,7 @@ void AetherFieldSystem::Update(std::uint64_t tick,
                                 kAetherCellSizeM * 0.5f;
                 const auto pz = static_cast<float>(m_grid.origin_cell_z() + z) * kAetherCellSizeM +
                                 kAetherCellSizeM * 0.5f;
-                m_grid.at(x, z) = m_regional_sample(Vec3(px, 0, pz));
+                m_grid.at(x, z) = SampleRegional(Vec3(px, 0, pz));
             }
         return;
     }
@@ -233,8 +235,8 @@ void AetherFieldSystem::Update(std::uint64_t tick,
 }
 
 float AetherFieldSystem::SampleAether(const Vec3& world_pos) const {
-    if (m_regional_sample)
-        return m_regional_sample(world_pos);
+    if (HasRegionalBackend())
+        return SampleRegional(world_pos);
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -246,6 +248,9 @@ float AetherFieldSystem::SampleAether(const Vec3& world_pos) const {
 }
 
 std::string AetherFieldSystem::ComputeAetherSubHash() const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->RegionalAmbientHash(16, false);
+    }
     if (m_regional_hash)
         return m_regional_hash();
     std::uint64_t hash = 14695981039346656037ull; // fnv offset basis
@@ -266,6 +271,19 @@ std::string AetherFieldSystem::ComputeAetherSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+void AetherFieldSystem::BindRegionalSession(const world::GameSession& session) {
+    m_regional_sample = {};
+    m_regional_hash = {};
+    m_sessionBinding.session = &session;
+}
+
+float AetherFieldSystem::SampleRegional(const Vec3& position) const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->SampleRegionalAether(position);
+    }
+    return m_regional_sample(position);
 }
 
 } // namespace Luminumbra::Systems

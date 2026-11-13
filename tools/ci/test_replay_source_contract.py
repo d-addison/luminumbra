@@ -711,6 +711,39 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.assert_concrete_ecology_admission(source.replace(before, after, 1))
 
+    def assert_concrete_regional_samplers(self, source):
+        binding = self.function(source, "BindRegionalFieldQueries")
+        self.assertNotIn("[this]", binding)
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalSession(*this);"), 1)
+            # Only the empty compatibility call is allowed, to clear legacy sessions.
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalBackend("), 1)
+            self.assertIn(f"m_{system}->BindRegionalBackend({{}}, {{}});", binding)
+
+    def test_shipping_regional_samplers_use_concrete_dispatch(self):
+        self.assert_concrete_regional_samplers(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        for system, sample in (("WindFieldSystem", "Wind"),
+                               ("WeatherSystem", "Weather"),
+                               ("AetherFieldSystem", "Aether")):
+            source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+            binding = self.function(source, "BindRegionalSession", system + "::")
+            self.assertIn("m_sessionBinding.session = &session;", binding)
+            self.assertIn("m_regional_sample = {};", binding)
+            sampler = self.function(source, "SampleRegional", system + "::")
+            self.assertRegex(sampler, r"if \(m_sessionBinding.session\)\s*\{\s*return "
+                             + rf"m_sessionBinding.session->SampleRegional{sample}\(")
+
+    def test_concrete_regional_guard_rejects_each_erased_binding(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            before = f"m_{system}->BindRegionalSession(*this);"
+            after = f"m_{system}->BindRegionalBackend([this](const auto& p) {{ return p; }}, {{}});"
+            with self.subTest(system=system):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_regional_samplers(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +

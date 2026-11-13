@@ -44,6 +44,10 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../fields/FieldGrid.h"
 
+namespace Luminumbra::world {
+class GameSession;
+}
+
 namespace Luminumbra::Systems {
 
 class WindFieldSystem; // advection source (optional, forward-declared)
@@ -65,10 +69,16 @@ public:
     // seed is the WORLD seed; the emission noise uses seed + 14 (append-only
     // seed-offset registry: +11 wind, +12 weather, +13 lightning, +14 aether).
     explicit AetherFieldSystem(int world_seed);
+    // Borrow the session until clear/rebind or destruction. The session must outlive this
+    // binding. Copies (including assignment and moves) drop the borrowed binding;
+    // callback compatibility bindings retain their existing copy semantics.
+    void BindRegionalSession(const world::GameSession& session);
+    // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<float(const Vec3&)> sample,
                              std::function<std::string()> hash) {
         if (static_cast<bool>(sample) != static_cast<bool>(hash))
             throw std::invalid_argument("regional backend needs both a sampler and a hash");
+        m_sessionBinding.session = nullptr;
         m_regional_sample = std::move(sample);
         m_regional_hash = std::move(hash);
     }
@@ -116,6 +126,20 @@ public:
     }
 
 private:
+    struct SessionBinding {
+        const world::GameSession* session = nullptr;
+        SessionBinding() = default;
+        SessionBinding(const SessionBinding&) noexcept {}
+        SessionBinding& operator=(const SessionBinding&) noexcept {
+            session = nullptr;
+            return *this;
+        }
+    };
+    SessionBinding m_sessionBinding;
+    [[nodiscard]] bool HasRegionalBackend() const {
+        return m_sessionBinding.session || static_cast<bool>(m_regional_sample);
+    }
+    [[nodiscard]] float SampleRegional(const Vec3& position) const;
     std::function<float(const Vec3&)> m_regional_sample;
     std::function<std::string()> m_regional_hash;
     // World-pos -> local cell indices for the current origin (clamped result

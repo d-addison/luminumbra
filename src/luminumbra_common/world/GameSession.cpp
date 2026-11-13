@@ -2505,6 +2505,39 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
     return Persistence::StableChecksum(bytes);
 }
 
+Vec2 GameSession::SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const {
+    // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+    const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                        : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                            : 4.0f;
+    return Vec2(
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+            (scale / 1024.0f),
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+            (scale / 1024.0f));
+}
+
+Systems::WeatherSample GameSession::SampleRegionalWeather(const Vec3& position) const {
+    Systems::WeatherSample sample;
+    const auto moisture = SampleRegionalChannel(2, position);
+    const auto front = SampleRegionalChannel(3, position);
+    sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                      : front < 26214 ? Systems::WeatherCategory::Overcast
+                      : front < 39321 ? Systems::WeatherCategory::Rain
+                      : front < 52428 ? Systems::WeatherCategory::Snow
+                                      : Systems::WeatherCategory::Fog;
+    sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                      sample.category == Systems::WeatherCategory::Snow
+                                  ? static_cast<float>(moisture) / 65535.0f
+                                  : 0.0f;
+    sample.wind = m_windFieldSystem ? m_windFieldSystem->SampleWind(position) : Vec2(0.0f);
+    return sample;
+}
+
+float GameSession::SampleRegionalAether(const Vec3& position) const {
+    return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+}
+
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
@@ -2522,43 +2555,9 @@ void GameSession::BindRegionalFieldQueries() {
         return;
     }
     m_regionalFieldsBound = true;
-    m_windFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position, Systems::WindLayer layer) {
-            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
-            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
-                                : layer == Systems::WindLayer::Mid  ? 2.0f
-                                                                    : 4.0f;
-            return Vec2(static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
-                            (scale / 1024.0f),
-                        static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
-                            (scale / 1024.0f));
-        },
-        [this] { return RegionalAmbientHash(3, false); });
-    m_weatherSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            Systems::WeatherSample sample;
-            const auto moisture = SampleRegionalChannel(2, position);
-            const auto front = SampleRegionalChannel(3, position);
-            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
-                              : front < 26214 ? Systems::WeatherCategory::Overcast
-                              : front < 39321 ? Systems::WeatherCategory::Rain
-                              : front < 52428 ? Systems::WeatherCategory::Snow
-                                              : Systems::WeatherCategory::Fog;
-            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
-                                              sample.category == Systems::WeatherCategory::Snow
-                                          ? static_cast<float>(moisture) / 65535.0f
-                                          : 0.0f;
-            sample.wind = m_windFieldSystem->SampleWind(position);
-            return sample;
-        },
-        [this] { return RegionalAmbientHash(12, true); });
-    m_aetherFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
-        },
-        [this] { return RegionalAmbientHash(16, false); });
+    m_windFieldSystem->BindRegionalSession(*this);
+    m_weatherSystem->BindRegionalSession(*this);
+    m_aetherFieldSystem->BindRegionalSession(*this);
 }
 
 namespace {

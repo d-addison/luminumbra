@@ -14387,3 +14387,228 @@ TEST(GameSessionHeadlessWorldTest, DueFoliageFailureRestoresExistingResourceGrid
         }
     }
 }
+
+namespace {
+
+std::vector<std::uint32_t> RegionalSamplerBits(const Luminumbra::Systems::WindFieldSystem& wind,
+                                               const Luminumbra::Systems::WeatherSystem& weather,
+                                               const Luminumbra::Systems::AetherFieldSystem& aether,
+                                               const Luminumbra::Vec3& anchor) {
+    using namespace Luminumbra::Systems;
+    std::vector<std::uint32_t> bits;
+    // Fixed 66 x 66 footprint includes the grid edge and neighbouring/missing owners.
+    bits.reserve(66u * 66u * 13u);
+    const auto add = [&bits](float value) {
+        bits.push_back(std::bit_cast<std::uint32_t>(value));
+    };
+    for (int z = -33; z <= 32; ++z) {
+        for (int x = -33; x <= 32; ++x) {
+            const auto position =
+                anchor +
+                Luminumbra::Vec3(static_cast<float>(x) * 24.0f, 0, static_cast<float>(z) * 24.0f);
+            for (const auto layer : {WindLayer::Ground, WindLayer::Mid, WindLayer::High}) {
+                const auto value = wind.SampleWind(position, layer);
+                add(value.x);
+                add(value.y);
+            }
+            const auto sample = weather.SampleAt(position);
+            bits.push_back(static_cast<std::uint32_t>(sample.category));
+            add(sample.precip_intensity);
+            add(sample.storm_intensity);
+            add(sample.wind.x);
+            add(sample.wind.y);
+            add(aether.SampleAether(position));
+            EXPECT_EQ(weather.CategoryAt(position), sample.category);
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(weather.PrecipitationAt(position)),
+                      std::bit_cast<std::uint32_t>(sample.precip_intensity));
+        }
+    }
+    for (const float value : aether.grid().cells()) {
+        add(value);
+    }
+    const auto direction = wind.BaseDirection();
+    add(direction.x);
+    add(direction.y);
+    return bits;
+}
+
+template<class System, class Hash>
+void CheckRegionalSamplerLifetime(const System& source, const GameSession& session, Hash hash) {
+    System bound(source);
+    bound.BindRegionalSession(session);
+    const auto regional_hash = hash(bound);
+    System copied(bound);
+    System assigned(source);
+    assigned.BindRegionalSession(session);
+    assigned = bound;
+    System moved(std::move(bound));
+    EXPECT_NE(hash(copied), regional_hash); // Copies must use the unbound fallback.
+    EXPECT_EQ(hash(copied), hash(assigned));
+    EXPECT_EQ(hash(copied), hash(moved));
+    copied.BindRegionalSession(session);
+    EXPECT_EQ(hash(copied), regional_hash);
+    EXPECT_THROW(copied.BindRegionalBackend({}, [] { return std::string("invalid pair"); }),
+                 std::invalid_argument);
+    EXPECT_EQ(hash(copied), regional_hash);
+    copied.BindRegionalBackend({}, {});
+    const auto cleared = hash(copied);
+    copied.BindRegionalSession(session);
+    EXPECT_EQ(hash(copied), regional_hash);
+    copied.BindRegionalBackend({}, {});
+    EXPECT_EQ(hash(copied), cleared);
+    // A copy may outlive its borrowed owner, even if that owner was destroyed while bound.
+    std::string detached_hash;
+    {
+        GameSession temporary;
+        System temporary_bound(source);
+        temporary_bound.BindRegionalSession(temporary);
+        EXPECT_NE(hash(temporary_bound), regional_hash);
+        assigned = temporary_bound;
+        detached_hash = hash(assigned);
+    }
+    EXPECT_EQ(hash(assigned), detached_hash);
+}
+
+void CheckConcreteRegionalSamplers(bool active_regions) {
+    using namespace Luminumbra::Systems;
+    SCOPED_TRACE(active_regions);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession concrete, erased;
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 44));
+    ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 24, 24, 0, 0, 31, 7)}, {}));
+    const auto ledger = ScheduledFieldLedger(31,
+                                             {{kFieldOwner, RegionState::Active},
+                                              {{-1, 0}, RegionState::Frozen},
+                                              {{0, -1}, RegionState::Reduced}});
+    for (auto* session : {&concrete, &erased}) {
+        if (active_regions) {
+            ASSERT_NO_FATAL_FAILURE(
+                LoadScheduledFieldFixture(*session, root, jobs, ledger, fields));
+        } else {
+            EnableSnapshotSession(*session, root, jobs);
+            session->SetActiveRegionsEnabled(false);
+            ASSERT_TRUE(session->CreateWorld("Legacy regional samplers", "1337", "default"));
+        }
+    }
+    for (int step = 0; step < 4; ++step) {
+        SCOPED_TRACE(step);
+        TickOnce(concrete);
+        TickOnce(erased);
+        ASSERT_FALSE(concrete.GetRegionSchedulerFault());
+        ASSERT_FALSE(erased.GetRegionSchedulerFault());
+        const auto anchor = concrete.GetMetadata().spawnPoint;
+        const auto tick = concrete.GetWorldClock().tick();
+        // Tick setup can rebind its systems. Install the reference after setup and before
+        // exercising Update/Restore and every public sampler, so it stays erased throughout.
+        EXPECT_EQ(SessionWorldSubHashes(concrete), SessionWorldSubHashes(erased));
+        if (!active_regions) {
+            // Legacy shipping remains unbound; also exercise both regional projections on
+            // a legacy session, where channel queries use their deterministic seed fallback.
+            concrete.GetWindFieldSystem()->BindRegionalSession(concrete);
+            concrete.GetWeatherSystem()->BindRegionalSession(concrete);
+            concrete.GetAetherFieldSystem()->BindRegionalSession(concrete);
+        }
+        {
+            erased.GetWindFieldSystem()->BindRegionalBackend(
+                [&erased](const auto& position, WindLayer layer) {
+                    return erased.SampleRegionalWind(position, layer);
+                },
+                [&erased] { return erased.RegionalAmbientHash(3, false); });
+            erased.GetWeatherSystem()->BindRegionalBackend(
+                [&erased](const auto& position) { return erased.SampleRegionalWeather(position); },
+                [&erased] { return erased.RegionalAmbientHash(12, true); });
+            erased.GetAetherFieldSystem()->BindRegionalBackend(
+                [&erased](const auto& position) { return erased.SampleRegionalAether(position); },
+                [&erased] { return erased.RegionalAmbientHash(16, false); });
+            for (auto* session : {&concrete, &erased}) {
+                session->GetWeatherSystem()->RestoreAtTick(
+                    tick, anchor, *session->GetWindFieldSystem());
+                session->GetWeatherSystem()->RefreshRegionalWeather(tick, anchor);
+                session->GetWeatherSystem()->Update(tick, anchor, session->GetWindFieldSystem());
+                session->GetAetherFieldSystem()->Update(
+                    tick, anchor, session->GetWindFieldSystem());
+            }
+        }
+        EXPECT_EQ(RegionalSamplerBits(*concrete.GetWindFieldSystem(),
+                                      *concrete.GetWeatherSystem(),
+                                      *concrete.GetAetherFieldSystem(),
+                                      anchor),
+                  RegionalSamplerBits(*erased.GetWindFieldSystem(),
+                                      *erased.GetWeatherSystem(),
+                                      *erased.GetAetherFieldSystem(),
+                                      anchor));
+        for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                    std::numeric_limits<float>::infinity(),
+                                    std::numeric_limits<float>::max()}) {
+            for (auto* session : {&concrete, &erased}) {
+                session->GetAetherFieldSystem()->Update(
+                    tick, Luminumbra::Vec3(invalid, 0, 0), session->GetWindFieldSystem());
+                for (const float value : session->GetAetherFieldSystem()->grid().cells()) {
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(value), 0u);
+                }
+                session->GetAetherFieldSystem()->Update(
+                    tick, anchor, session->GetWindFieldSystem());
+            }
+        }
+        EXPECT_EQ(SessionWorldSubHashes(concrete), SessionWorldSubHashes(erased));
+        EXPECT_EQ(concrete.GetFieldPages().serialize(), erased.GetFieldPages().serialize());
+        if (!active_regions) {
+            for (auto* session : {&concrete, &erased}) {
+                session->GetWindFieldSystem()->BindRegionalBackend({}, {});
+                session->GetWeatherSystem()->BindRegionalBackend({}, {});
+                session->GetAetherFieldSystem()->BindRegionalBackend({}, {});
+            }
+        }
+    }
+    ASSERT_TRUE(concrete.SaveWorld());
+    ASSERT_TRUE(erased.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(concrete.GetWorldSaveDir())),
+              ReadClockTestFile(P::WorldSaveService::field_pages_path(erased.GetWorldSaveDir())));
+    if (active_regions) {
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetWindFieldSystem(), concrete, [](const auto& system) {
+                return system.ComputeWindSubHash();
+            }));
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetWeatherSystem(), concrete, [](const auto& system) {
+                return system.ComputeWeatherSubHash();
+            }));
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetAetherFieldSystem(), concrete, [](const auto& system) {
+                return system.ComputeAetherSubHash();
+            }));
+    }
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, ConcreteRegionalSamplersMatchErasedBitsHashesAndBytes) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckConcreteRegionalSamplers(active_regions));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherBindingBeforeWorldCreationHasNoWind) {
+    using namespace Luminumbra::Systems;
+    GameSession session;
+    WeatherSystem concrete(1337), erased(1337);
+    concrete.BindRegionalSession(session);
+    erased.BindRegionalBackend(
+        [&session](const auto& position) { return session.SampleRegionalWeather(position); },
+        [&session] { return session.RegionalAmbientHash(12, true); });
+    for (const auto& position : {Luminumbra::Vec3(0), Luminumbra::Vec3(-24, 0, 24)}) {
+        const auto actual = concrete.SampleAt(position);
+        const auto reference = erased.SampleAt(position);
+        EXPECT_EQ(actual.wind, Luminumbra::Vec2(0));
+        EXPECT_EQ(actual.wind, reference.wind);
+        EXPECT_EQ(actual.category, reference.category);
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual.precip_intensity),
+                  std::bit_cast<std::uint32_t>(reference.precip_intensity));
+        EXPECT_EQ(actual.storm_intensity, 0.0f);
+    }
+    EXPECT_EQ(concrete.ComputeWeatherSubHash(), erased.ComputeWeatherSubHash());
+}

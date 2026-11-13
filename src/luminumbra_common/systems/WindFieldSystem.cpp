@@ -1,5 +1,7 @@
 #include "WindFieldSystem.h"
 
+#include "../world/GameSession.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -127,8 +129,8 @@ void WindFieldSystem::LocalCell(const Vec3& world_pos,
 
 void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     m_last_tick = tick;
-    if (m_regional_sample) {
-        const auto wind = m_regional_sample(region_anchor, WindLayer::Ground);
+    if (HasRegionalBackend()) {
+        const auto wind = SampleRegional(region_anchor, WindLayer::Ground);
         const float length = std::sqrt(wind.x * wind.x + wind.y * wind.y);
         m_base_direction = length > 0 ? wind / length : Vec2(0.0f);
         return;
@@ -277,8 +279,8 @@ void WindFieldSystem::ClearStormPerturbations() {
 }
 
 Vec2 WindFieldSystem::SampleWind(const Vec3& world_pos, WindLayer layer) const {
-    if (m_regional_sample)
-        return m_regional_sample(world_pos, layer);
+    if (HasRegionalBackend())
+        return SampleRegional(world_pos, layer);
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -299,6 +301,9 @@ Vec2 WindFieldSystem::SampleWind(const Vec3& world_pos) const {
 }
 
 std::string WindFieldSystem::ComputeWindSubHash() const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->RegionalAmbientHash(3, false);
+    }
     if (m_regional_hash)
         return m_regional_hash();
     // fnv1a-64 over: seed, tick, grid geometry, origin, then every cell's per-
@@ -326,6 +331,19 @@ std::string WindFieldSystem::ComputeWindSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+void WindFieldSystem::BindRegionalSession(const world::GameSession& session) {
+    m_regional_sample = {};
+    m_regional_hash = {};
+    m_sessionBinding.session = &session;
+}
+
+Vec2 WindFieldSystem::SampleRegional(const Vec3& position, WindLayer layer) const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->SampleRegionalWind(position, layer);
+    }
+    return m_regional_sample(position, layer);
 }
 
 } // namespace Luminumbra::Systems
