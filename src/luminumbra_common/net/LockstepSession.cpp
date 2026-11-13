@@ -1139,6 +1139,10 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 }
 
 bool LockstepSession::Handshake() {
+    if (m_config.system_config_identity.starts_with("weather-schedule-v1:")) {
+        m_status.handshake_error = "weather schedule requires versioned lockstep replay support";
+        return false;
+    }
     m_receive_work = {};
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
