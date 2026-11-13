@@ -1,8 +1,10 @@
 #include "FarLodSystem.h"
+#include "DiagnosticDrawTable.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
 #include "FarLodIntegrationBudget.h"
+#include "GBufferTargets.h"
 #include "Shader.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Crc32.h"
@@ -1716,10 +1718,20 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.vao);
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            capture->write(geometry_shader,
+                           {.mesh_path = {},
+                            .shader_variant = "legacy_far_terrain",
+                            .chunk = {},
+                            .lod = static_cast<std::uint32_t>(region.tier),
+                            .ownership = DiagnosticOwnership::LegacyFar,
+                            .pass = DiagnosticPass::GBuffer,
+                            .provenance = DiagnosticProvenance::Unsupported});
+        }
         Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
-                                                    GL_TRIANGLES,
+                                                    GLenum{GL_TRIANGLES},
                                                     static_cast<GLsizei>(region.element_count),
-                                                    GL_UNSIGNED_INT,
+                                                    GLenum{GL_UNSIGNED_INT},
                                                     nullptr);
         ++draws_out;
         indices_out += region.element_count;
@@ -1749,11 +1761,21 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.water_vao);
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            capture->write(geometry_shader,
+                           {.mesh_path = {},
+                            .shader_variant = "legacy_far_water",
+                            .chunk = {},
+                            .lod = static_cast<std::uint32_t>(region.tier),
+                            .ownership = DiagnosticOwnership::LegacyFar,
+                            .pass = DiagnosticPass::GBuffer,
+                            .provenance = DiagnosticProvenance::Unsupported});
+        }
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawElements,
-            GL_TRIANGLES,
+            GLenum{GL_TRIANGLES},
             static_cast<GLsizei>(region.water_element_count),
-            GL_UNSIGNED_INT,
+            GLenum{GL_UNSIGNED_INT},
             nullptr);
         ++draws_out;
         indices_out += region.water_element_count;
