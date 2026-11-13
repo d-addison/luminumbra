@@ -191,7 +191,8 @@ public:
                 using Identity = ::Luminumbra::Components::SimulationIdentityComponent;
                 const auto* previous = original.try_get<const Identity>(entity);
                 const auto* candidate = m_registry.try_get<const Identity>(entity);
-                if (previous && (!candidate || previous->id != candidate->id))
+                if (previous &&
+                    (!candidate || previous->id != candidate->id || previous->id >= initial_id()))
                     throw std::runtime_error("Foliage simulation identity changed");
             }
             stage_detail::Components([&]<typename T> {
@@ -210,6 +211,14 @@ public:
             }
         }
         if (m_simulationIdentity) {
+            // A consumed identity cannot become a birth, even if its former owner died.
+            // Retained identities were checked separately against the committed roster.
+            for (const auto entity : m_newPlants) {
+                ++m_publicationEntityVisits;
+                const auto id = RequirePlantSimulationId(m_registry, entity);
+                if (id < initial_id() || id >= next_id())
+                    throw std::runtime_error("Unissued foliage birth identity");
+            }
             // The candidate contains only participating residents and their births.
             // Validate every plant, including unowned plants, before live preparation.
             for (const auto entity : plants) {
