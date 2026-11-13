@@ -1027,6 +1027,222 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
         << dam_med.fill_at_probe << " mm*m^2)";
 }
 
+void FillActivityWater(Luminumbra::Chunk& chunk, int resolution, std::int32_t depth = 1000) {
+    const auto cells = static_cast<std::size_t>(resolution * resolution);
+    chunk.has_water_sim.store(true);
+    chunk.current_water_resolution.store(resolution);
+    chunk.water_depth_mm.assign(cells, depth);
+    chunk.water_bed_mm.assign(cells, 100000);
+    chunk.water_edge_flux.assign(2 * cells, 0);
+    chunk.water_level_data.assign(cells, 101.0f);
+    chunk.ticks_below_threshold = 119;
+    chunk.is_water_sleeping.store(true);
+    chunk.water_mesh_generated.store(true);
+    chunk.water_mesh_dirty_ticks = 14;
+}
+
+TEST(WaterDeterminism, SourceActivityIncludesRepeatedInjectionAndFinalizesCadenceOnce) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    SHIELD_WorldSystem shield(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (const int resolution : {2, 4, 8, 16, 32}) {
+        Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+        FillActivityWater(chunk, resolution);
+        Kernels::ActivityBaseline activity;
+        std::int64_t injected = 0;
+        for (std::size_t cell = 0; cell < chunk.water_depth_mm.size(); ++cell) {
+            for (const int amount : {3, 5}) {
+                const auto source = activity.Inject(chunk, cell, amount);
+                ASSERT_TRUE(source.applied);
+                injected += source.source_mm;
+            }
+        }
+        const auto cells = chunk.water_depth_mm.size();
+        EXPECT_EQ(activity.cells_captured(), cells);
+        const auto kernel = activity.StepInterior(chunk, shield, {});
+        ASSERT_TRUE(kernel.applied);
+        EXPECT_EQ(kernel.depth_before, static_cast<std::int64_t>(cells) * 1008);
+        EXPECT_EQ(kernel.source_mm, 0);
+        EXPECT_EQ(kernel.depth_after - static_cast<std::int64_t>(cells) * 1000, injected);
+        EXPECT_EQ(chunk.water_mesh_dirty_ticks, 14);
+        EXPECT_TRUE(chunk.water_mesh_generated.load());
+        const auto final = activity.Finalize(chunk, true);
+        ASSERT_TRUE(final.applied);
+        EXPECT_EQ(final.cells_visited, cells);
+        EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, 0.008f);
+        EXPECT_EQ(chunk.ticks_below_threshold, 0);
+        EXPECT_FALSE(chunk.is_water_sleeping.load());
+        EXPECT_TRUE(final.water_mesh_invalidated);
+        EXPECT_EQ(chunk.water_mesh_dirty_ticks, 0);
+        EXPECT_FALSE(activity.Finalize(chunk, true).applied);
+        EXPECT_FALSE(activity.Inject(chunk, 0, 8).applied);
+        EXPECT_EQ(chunk.water_mesh_dirty_ticks, 0);
+        activity.Reset();
+        ASSERT_TRUE(activity.Capture(chunk));
+        ASSERT_TRUE(activity.Finalize(chunk, true).applied);
+        EXPECT_EQ(chunk.ticks_below_threshold, 1);
+    }
+}
+
+TEST(WaterDeterminism, InjectionOnlyActivityAndSourceSinkCancellationUseFinalDepth) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    SHIELD_WorldSystem shield(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (const bool run_interior : {false, true}) {
+        Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+        FillActivityWater(chunk, 8);
+        Kernels::ActivityBaseline activity;
+        for (std::size_t cell = 0; cell < 64; ++cell) {
+            ASSERT_TRUE(activity.Inject(chunk, cell, 8).applied);
+        }
+        if (run_interior) {
+            const auto kernel = activity.StepInterior(chunk, shield, {.evap_mm = 8});
+            ASSERT_TRUE(kernel.applied);
+            EXPECT_EQ(kernel.sink_mm, 512);
+            EXPECT_EQ(kernel.source_mm, 0);
+        }
+        const auto final = activity.Finalize(chunk, true);
+        ASSERT_TRUE(final.applied);
+        EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, run_interior ? 0.0f : 0.008f);
+        EXPECT_EQ(chunk.ticks_below_threshold, run_interior ? 120 : 0);
+        EXPECT_EQ(chunk.is_water_sleeping.load(), run_interior);
+        EXPECT_EQ(final.water_mesh_invalidated, !run_interior);
+        EXPECT_EQ(chunk.water_mesh_dirty_ticks, run_interior ? 14 : 0);
+    }
+}
+
+TEST(WaterDeterminism, SourceActivityRefusalsAndSaturationPreserveTheFirstAcceptedOrigin) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+    FillActivityWater(chunk, 32, std::numeric_limits<std::int32_t>::max() - 2);
+    Kernels::ActivityBaseline activity;
+    const auto before = chunk.water_depth_mm;
+    EXPECT_FALSE(activity.Inject(chunk, 1024, 1).applied);
+    EXPECT_FALSE(activity.Inject(chunk, 0, -1).applied);
+    EXPECT_FALSE(activity.Inject(chunk, 0, 8).applied);
+    EXPECT_EQ(activity.cells_captured(), 0u);
+    EXPECT_EQ(chunk.water_depth_mm, before);
+    const auto accepted = activity.Inject(chunk, 0, 8, Kernels::OverflowPolicy::Saturate);
+    ASSERT_TRUE(accepted.applied);
+    EXPECT_TRUE(accepted.saturated);
+    EXPECT_EQ(accepted.source_mm, 2);
+    const auto full = activity.Inject(chunk, 0, 8, Kernels::OverflowPolicy::Saturate);
+    ASSERT_TRUE(full.applied);
+    EXPECT_EQ(full.source_mm, 0);
+    EXPECT_EQ(activity.cells_captured(), 1024u);
+    ASSERT_TRUE(activity.Capture(chunk));
+    Luminumbra::Chunk other(Luminumbra::IVec3(1, 0, 0));
+    FillActivityWater(other, 32);
+    EXPECT_FALSE(activity.Capture(other));
+    EXPECT_FALSE(activity.Inject(other, 0, 1).applied);
+    EXPECT_FALSE(activity.Finalize(other, true).applied);
+    chunk.current_water_resolution.store(16);
+    EXPECT_FALSE(activity.Finalize(chunk, true).applied);
+    chunk.current_water_resolution.store(32);
+    ASSERT_TRUE(activity.Finalize(chunk, true).applied);
+    EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, 0.002f);
+    EXPECT_EQ(chunk.water_mesh_dirty_ticks, 0);
+}
+
+TEST(WaterDeterminism, SourceActivityZeroAndNormalizedInputsAccountOnlyAcceptedDepth) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+    FillActivityWater(chunk, 8);
+    Kernels::ActivityBaseline activity;
+    ASSERT_TRUE(activity.Inject(chunk, 0, 0).applied);
+    EXPECT_EQ(activity.cells_captured(), 0u);
+    EXPECT_FALSE(activity.Finalize(chunk, true).applied);
+    chunk.water_depth_mm.front() = -9;
+    EXPECT_FALSE(activity.Inject(chunk, 0, 8).applied);
+    EXPECT_EQ(chunk.water_depth_mm.front(), -9);
+    const auto normalized = activity.Inject(chunk, 0, 8, Kernels::OverflowPolicy::Saturate);
+    ASSERT_TRUE(normalized.applied);
+    EXPECT_TRUE(normalized.saturated);
+    EXPECT_EQ(normalized.source_mm, 17);
+    EXPECT_EQ(normalized.depth_after - normalized.depth_before, normalized.source_mm);
+    ASSERT_TRUE(activity.Finalize(chunk, true).applied);
+    EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, 0.017f);
+}
+
+TEST(WaterDeterminism, SourceActivityRejectsMalformedShapesAndNegativeInputsBeforeCapture) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    SHIELD_WorldSystem shield(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (const int malformed : {0, 1, 2, 3, 4, 5, 6}) {
+        Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+        FillActivityWater(chunk, 8);
+        Kernels::InteriorInputs inputs;
+        if (malformed == 0) {
+            chunk.water_depth_mm.pop_back();
+        } else if (malformed == 1) {
+            chunk.water_bed_mm.clear();
+        } else if (malformed == 2) {
+            chunk.current_water_resolution.store(std::numeric_limits<int>::max());
+        } else if (malformed == 3) {
+            chunk.has_water_sim.store(false);
+        } else if (malformed == 4) {
+            inputs.rain_mm = -1;
+        } else if (malformed == 5) {
+            inputs.evap_mm = -1;
+        } else {
+            inputs.weather_scale_mm = -1;
+        }
+        const auto before = chunk.water_depth_mm;
+        Kernels::ActivityBaseline activity;
+        EXPECT_FALSE(activity.StepInterior(chunk, shield, inputs).applied);
+        EXPECT_FALSE(activity.Finalize(chunk, true).applied);
+        EXPECT_EQ(activity.cells_captured(), 0u);
+        EXPECT_EQ(chunk.water_depth_mm, before);
+        EXPECT_EQ(chunk.water_mesh_dirty_ticks, 14);
+    }
+}
+
+TEST(WaterDeterminism, IsolatedSourceActivitySeesEightMillimetresWithoutSolverTransport) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    SHIELD_WorldSystem shield(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    Luminumbra::Chunk chunk(Luminumbra::IVec3(0));
+    FillActivityWater(chunk, 8);
+    Kernels::ActivityBaseline activity;
+    ASSERT_TRUE(activity.Inject(chunk, 0, 8).applied);
+    const auto result = activity.StepInterior(chunk, shield, {});
+    ASSERT_TRUE(result.applied);
+    EXPECT_EQ(result.depth_before, 64008);
+    EXPECT_EQ(result.depth_after, 64008);
+    EXPECT_TRUE(std::all_of(chunk.water_edge_flux.begin(),
+                            chunk.water_edge_flux.end(),
+                            [](auto flux) { return flux == 0; }));
+    ASSERT_TRUE(activity.Finalize(chunk, true).applied);
+    EXPECT_FLOAT_EQ(chunk.max_water_delta_last_tick, 0.008f);
+    EXPECT_EQ(chunk.ticks_below_threshold, 0);
+    EXPECT_EQ(chunk.water_mesh_dirty_ticks, 0);
+}
+
+TEST(WaterDeterminism, SourceActivityRetainsSourceFreeIntegerTrajectory) {
+    namespace Kernels = Luminumbra::Systems::WaterKernels;
+    SHIELD_WorldSystem shield(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    for (const int resolution : {8, 16}) {
+        Luminumbra::Chunk legacy(Luminumbra::IVec3(0)), prepared(Luminumbra::IVec3(0));
+        FillActivityWater(legacy, resolution);
+        FillActivityWater(prepared, resolution);
+        const auto peak = static_cast<std::size_t>((resolution / 2) * resolution + resolution / 2);
+        legacy.water_depth_mm[peak] = 3000;
+        prepared.water_depth_mm[peak] = 3000;
+        Kernels::ActivityBaseline activity;
+        const auto expected = Kernels::StepInterior(legacy, shield, {});
+        const auto actual = activity.StepInterior(prepared, shield, {});
+        ASSERT_TRUE(expected.applied);
+        ASSERT_TRUE(actual.applied);
+        ASSERT_TRUE(activity.Finalize(prepared, true).applied);
+        EXPECT_EQ(prepared.water_depth_mm, legacy.water_depth_mm);
+        EXPECT_EQ(prepared.water_edge_flux, legacy.water_edge_flux);
+        EXPECT_EQ(prepared.water_level_data, legacy.water_level_data);
+        EXPECT_EQ(actual.depth_before, expected.depth_before);
+        EXPECT_EQ(actual.depth_after, expected.depth_after);
+        EXPECT_EQ(actual.source_mm, expected.source_mm);
+        EXPECT_EQ(actual.sink_mm, expected.sink_mm);
+        EXPECT_EQ(prepared.water_mesh_dirty_ticks, legacy.water_mesh_dirty_ticks);
+        EXPECT_FLOAT_EQ(prepared.max_water_delta_last_tick, legacy.max_water_delta_last_tick);
+        EXPECT_EQ(prepared.water_depth_mm[peak], resolution == 8 ? 2610 : 1438);
+    }
+}
+
 } // namespace
 
 // The common test target enumerates this translation unit explicitly. Keep the cadence regression

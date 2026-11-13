@@ -596,7 +596,8 @@ void Transaction::Begin(ActiveRegionLedger& ledger,
                                  .changed = false,
                                  .mesh_invalidated = false,
                                  .interior_stepped = false,
-                                 .face_cadence_advanced = false});
+                                 .face_cadence_advanced = false,
+                                 .source_accepted = false});
         }
         std::sort(m_entries.begin(), m_entries.end(), [](const auto& a, const auto& b) {
             return a.live->get_id() < b.live->get_id();
@@ -629,6 +630,29 @@ void Transaction::Begin(ActiveRegionLedger& ledger,
         Rollback();
         throw;
     }
+}
+
+void Transaction::BeginSourceActivity(ActiveRegionLedger& ledger,
+                                      std::uint64_t tick,
+                                      std::span<const std::shared_ptr<Chunk>> participants,
+                                      std::span<const RegionPlan> regions) {
+    Begin(ledger, tick, participants, regions);
+    try {
+        if (m_activity.size() < m_entries.size()) {
+            m_activity.resize(m_entries.size());
+        }
+        for (std::size_t index = 0; index < m_entries.size(); ++index) {
+            m_activity[index].Reset();
+        }
+        m_source_activity = true;
+    } catch (...) {
+        Rollback();
+        throw;
+    }
+}
+
+WaterKernels::ActivityBaseline& Transaction::Activity(Entry& entry) {
+    return m_activity[static_cast<std::size_t>(&entry - m_entries.data())];
 }
 
 const Chunk* Transaction::staged(ChunkID id) const noexcept {
@@ -687,7 +711,8 @@ WaterKernels::Result Transaction::StepInterior(ChunkID id,
         }
         auto& entry = FindEntry(id);
         auto& grid = *entry.grid;
-        const auto result = WaterKernels::StepInterior(grid, shield, inputs);
+        const auto result = m_source_activity ? Activity(entry).StepInterior(grid, shield, inputs)
+                                              : WaterKernels::StepInterior(grid, shield, inputs);
         Account(result, grid);
         entry.mesh_invalidated = entry.mesh_invalidated || result.water_mesh_invalidated;
         entry.interior_stepped = true;
@@ -704,6 +729,14 @@ WaterKernels::Result Transaction::StepFace(ChunkID positive, ChunkID other, bool
         auto& b_entry = FindEntry(other);
         auto& a = *a_entry.grid;
         auto& b = *b_entry.grid;
+        if (m_source_activity) {
+            if (!Activity(a_entry).Capture(a) || !Activity(b_entry).Capture(b)) {
+                Refuse();
+            }
+            const auto result = WaterKernels::StepSharedFace(a, b, is_x);
+            Account(result, a);
+            return result;
+        }
         const auto before_a = a.water_depth_mm, before_b = b.water_depth_mm;
         const auto result = WaterKernels::StepSharedFace(a, b, is_x);
         Account(result, a);
@@ -755,6 +788,9 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
         const int old_resolution = grid.current_water_resolution.load();
         if (initialized && old_resolution == resolution) {
             return;
+        }
+        if (m_source_activity && Activity(entry).cells_captured() != 0) {
+            Refuse();
         }
         const auto before = Volume(grid);
         auto old_depth = std::move(grid.water_depth_mm);
@@ -818,6 +854,14 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
 
 void Transaction::Inject(const Source& source) {
     try {
+        if (m_source_activity) {
+            auto& entry = FindEntry(source.target);
+            const auto result =
+                Activity(entry).Inject(*entry.grid, source.cell, source.millimetres);
+            Account(result, *entry.grid);
+            entry.source_accepted = entry.source_accepted || result.source_mm != 0;
+            return;
+        }
         auto& grid = Grid(source.target);
         if (source.millimetres < 0 || source.cell >= grid.water_depth_mm.size()) {
             Refuse();
@@ -837,6 +881,11 @@ void Transaction::Inject(const Source& source) {
 
 void Transaction::FinishInterior(ChunkID id) {
     try {
+        if (m_source_activity) {
+            // Finalization is deferred until every seam and injection is staged.
+            static_cast<void>(FindEntry(id));
+            return;
+        }
         auto& grid = Grid(id);
         // Only interior visits advance calm time. Later seam flux can wake either endpoint.
         if (grid.max_water_delta_last_tick < 0.0001f) {
@@ -866,6 +915,14 @@ void Transaction::Publish(SHIELD_WorldSystem* shield,
             if (entry.live->authority_hash_revision() != entry.authority_revision ||
                 entry.live->water_revision() != entry.water_revision) {
                 Refuse();
+            }
+            if (m_source_activity && Activity(entry).cells_captured() != 0) {
+                const auto result = Activity(entry).Finalize(
+                    *entry.grid, entry.interior_stepped || entry.source_accepted);
+                if (!result.applied) {
+                    Refuse();
+                }
+                entry.mesh_invalidated = entry.mesh_invalidated || result.water_mesh_invalidated;
             }
             ValidateStageGrid(*entry.grid);
             volume = AddVolume(volume, Volume(*entry.grid));
@@ -925,6 +982,7 @@ void Transaction::Publish(SHIELD_WorldSystem* shield,
 
 void Transaction::Rollback() noexcept {
     m_ledger = nullptr;
+    m_source_activity = false;
     m_entries.clear();
     m_patches.clear();
     m_debts.clear();
@@ -1000,7 +1058,11 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         participants.push_back(*found);
     }
     RegionalWater::Transaction stage;
-    stage.Begin(ledger, schedule.tick, participants, plan.regions);
+    if constexpr (WaterKernels::kSourceInclusiveActivity) {
+        stage.BeginSourceActivity(ledger, schedule.tick, participants, plan.regions);
+    } else {
+        stage.Begin(ledger, schedule.tick, participants, plan.regions);
+    }
     RegionalWork result;
     result.global_windows = plan.global_windows;
     result.border_windows = plan.border_windows;
